@@ -27,6 +27,8 @@ understand graph internals for normal harness usage.
   human-interrupt behavior.
 - Support streaming hooks for model deltas and tool progress so middleware can
   act during long-running calls.
+- Support steering hooks so parent orchestrators or humans can safely guide
+  agent loops and sub-agent runs without direct state mutation.
 - Support prompt/cache-layout hooks so middleware can compress context without
   accidentally invalidating provider prompt/KV-cache prefixes.
 - Allow middleware to modify model requests, tool calls, and responses.
@@ -45,6 +47,8 @@ understand graph internals for normal harness usage.
 pub trait Middleware<State, Ctx = ()>: Send + Sync {
     async fn before_agent(&self, state: &State, ctx: &mut RunContext<Ctx>) -> Result<()>;
     async fn after_agent(&self, state: &State, ctx: &mut RunContext<Ctx>, run: &mut AgentRun) -> Result<()>;
+    async fn before_steering(&self, state: &State, ctx: &mut RunContext<Ctx>, command: &mut SteeringCommand) -> Result<()>;
+    async fn after_steering(&self, state: &State, ctx: &mut RunContext<Ctx>, outcome: &mut SteeringOutcome) -> Result<()>;
 
     async fn before_model(&self, state: &State, ctx: &mut RunContext<Ctx>, request: &mut ModelRequest) -> Result<()>;
     async fn before_model_stream(&self, state: &State, ctx: &mut RunContext<Ctx>, request: &mut ModelRequest) -> Result<()>;
@@ -110,6 +114,7 @@ Middleware should be able to return:
 - emit state update
 - retry current call
 - fallback to another model or tool
+- accept, reject, transform, or defer a steering command
 - jump to `model`
 - jump to `tools`
 - jump to `end`
@@ -131,6 +136,8 @@ graph commands:
 - continue -> `Command::Continue`
 - jump to model/tools/end -> `Command::Goto(...)` or `Command::End`
 - human interrupt -> `Command::Interrupt`
+- accepted steering -> `Command::Update`, `Command::Goto`,
+  `Command::Interrupt`, or queued child-run delivery depending on target
 - branch/fan-out middleware -> `Command::Fork`
 - retry/fallback -> handled inside the node or wrap hook before command return
 

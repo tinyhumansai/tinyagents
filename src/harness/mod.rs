@@ -9,6 +9,7 @@ pub mod cache;
 pub mod context;
 pub mod cost;
 pub mod events;
+pub mod ids;
 pub mod limits;
 pub mod memory;
 pub mod message;
@@ -25,3 +26,13 @@ pub mod summarization;
 pub mod testkit;
 pub mod tool;
 pub mod usage;
+
+pub use cost::CostTotals;
+pub use ids::*;
+pub use message::{ContentBlock, Message};
+pub use model::{ModelRequest, ModelResponse, ResponseFormat, ToolChoice};
+pub use tool::{
+    Tool as HarnessTool, ToolCall as HarnessToolCall, ToolRegistry,
+    ToolResult as HarnessToolResult, ToolSchema,
+};
+pub use usage::Usage;

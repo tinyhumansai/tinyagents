@@ -54,6 +54,7 @@ contracts.
   - [Prompt](../modules/harness/prompt.md)
   - [Tool](../modules/harness/tool.md)
   - [Middleware](../modules/harness/middleware.md)
+  - [Sub-agent and orchestrator steering](../modules/harness/subagent-steering.md)
   - [Structured output](../modules/harness/structured-output.md)
   - [Limits, retry, fallback, and rate limiting](../modules/harness/limits-retry.md)
   - [Summarization](../modules/harness/summarization.md)
@@ -108,6 +109,8 @@ it.
   orchestration.
 - Allow agents to author, inspect, compile, and run graph blueprints through the
   same registry-bound compiler path used by human-authored `.rag` files.
+- Allow parent orchestrators and humans to steer orchestrator agents and
+  sub-agents through typed, policy-checked, observable commands.
 - Prefer deterministic state transitions around inherently nondeterministic LLM
   calls.
 - Keep every generated or hand-authored graph explainable as topology,
@@ -163,6 +166,8 @@ testing:
 - Maintain append-only event journals when durable listener replay is
   configured.
 - Enforce retry, timeout, model-call, tool-call, and recursion policies.
+- Accept sub-agent and orchestrator steering commands from humans, parent
+  agents, graph supervisors, middleware, and tests at safe loop boundaries.
 - Normalize model and tool errors into framework errors.
 - Provide test doubles for models, tools, stores, clocks, and ids.
 

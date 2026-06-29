@@ -25,6 +25,18 @@ pub enum RustAgentsError {
     #[error("tool error: {0}")]
     Tool(String),
 
+    #[error("tool `{0}` is not registered")]
+    ToolNotFound(String),
+
+    #[error("model `{0}` is not registered")]
+    ModelNotFound(String),
+
+    #[error("validation error: {0}")]
+    Validation(String),
+
+    #[error("structured output error: {0}")]
+    StructuredOutput(String),
+
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 }

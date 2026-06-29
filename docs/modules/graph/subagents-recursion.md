@@ -32,6 +32,86 @@ child agents inherit run identity, stores, stream sinks, and cache handles while
 receiving isolated mutable task scope. See
 [Parallel agents and context forking](parallel-agents-forking.md).
 
+## Steering Sub-Agents
+
+Graph-backed sub-agents can be steered by a parent orchestrator, a graph
+supervisor node, middleware, a human operator, or a test. Steering should use
+the harness steering command contract, then lower into graph commands,
+checkpoint updates, or child-run delivery depending on the target state. See
+[Sub-agent and orchestrator steering](../harness/subagent-steering.md).
+
+Supported graph-level steering cases:
+
+- parent orchestrator sends additional instructions to a running child
+  sub-agent
+- parent orchestrator narrows a child sub-agent's tool or model policy
+- parent orchestrator asks a child sub-agent for status before join
+- human pauses, resumes, redirects, approves, rejects, or cancels a specific
+  child sub-agent run
+- human steers the parent orchestrator while children continue or pause under
+  policy
+- graph supervisor node redirects a child task to a review, retry, or finalize
+  node
+
+Graph steering targets must be addressable by run-tree metadata:
+
+```rust
+pub enum GraphSteeringTarget {
+    ParentRun(RunId),
+    ChildRun { parent_run_id: RunId, child_run_id: RunId },
+    Task { run_id: RunId, task_id: TaskId },
+    Node { run_id: RunId, node_id: NodeId },
+    Namespace { run_id: RunId, namespace: Vec<String> },
+}
+```
+
+Rules:
+
+- parent runs can steer descendants by default, not unrelated runs
+- humans can steer any run or child task allowed by the control surface policy
+- steering a child must not mutate parent state directly
+- child steering is delivered as structured input with actor/provenance, not as
+  anonymous user text
+- accepted child steering produces child events and parent rollup events
+- rejected child steering includes a policy reason
+- graph reducers own any state change caused by steering
+- checkpoint metadata records pending, applied, and rejected steering commands
+
+When a sub-agent is paused on an interrupt, steering can target that exact
+interrupt or child namespace. Resuming a child interrupt should restart or
+continue only that child task unless the steering policy explicitly escalates to
+the parent graph.
+
+## Orchestrator Steering
+
+The parent orchestrator is itself steerable. Human or supervisor steering can:
+
+- add or replace orchestration instructions at the next safe boundary
+- narrow delegation policy before more sub-agents are spawned
+- cancel pending child fanout
+- redirect the graph to a review, retry, join, or finalize node
+- apply reducer-mediated state corrections
+
+The orchestrator must treat steering as external control with provenance. It
+should not silently merge human instructions into its own assistant messages or
+pretend parent-agent steering came from the original user.
+
+## Steering Events
+
+Graph event streams should include steering alongside sub-agent lifecycle:
+
+- `steering.requested`
+- `steering.accepted`
+- `steering.rejected`
+- `steering.delivered`
+- `steering.applied`
+- `subagent.steering_received`
+- `subagent.steering_rejected`
+
+Every steering event must include root run id, parent run id, child run id when
+available, task id when graph-backed, namespace, actor, command kind, policy id,
+correlation id, and checkpoint id when available.
+
 ## Recursion And Depth Tracking
 
 The graph should allow recursive execution, but only with explicit limits and

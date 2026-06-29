@@ -37,3 +37,49 @@ Rules:
 Compile-time `interrupt_before` and `interrupt_after` selectors are useful for
 debugging, approvals, and human review at arbitrary graph boundaries without
 editing node code.
+
+## Targeted Human Steering
+
+Human input during an interrupt is one form of steering. A control surface
+should be able to target:
+
+- the parent orchestrator run
+- a specific child sub-agent run
+- a graph task id
+- a node namespace inside a subgraph
+- a specific interrupt id
+
+Targeted resume shape:
+
+```rust
+pub struct ResumeTarget {
+    pub run_id: RunId,
+    pub task_id: Option<TaskId>,
+    pub interrupt_id: Option<InterruptId>,
+    pub namespace: Vec<String>,
+}
+
+compiled_graph
+    .resume_targeted(
+        ResumeTarget {
+            run_id,
+            task_id: Some(child_task),
+            interrupt_id: Some(approval_interrupt),
+            namespace: vec!["supervisor".into(), "research_agent".into()],
+        },
+        Command::resume(json!({ "approved": true })),
+    )
+    .await?;
+```
+
+Rules:
+
+- resuming a child interrupt resumes that child task, not all paused siblings
+- resuming the parent orchestrator may leave child interrupts pending unless
+  policy cancels or resolves them
+- a human can add steering instructions while resuming, but those instructions
+  must be recorded separately from the interrupt answer
+- stale resume targets are rejected with the latest run/checkpoint metadata
+- UI clients should present pending interrupts with run tree path, node id,
+  task id, sub-agent id, and checkpoint id so humans can steer the intended
+  target

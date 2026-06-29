@@ -111,7 +111,7 @@ LangGraph, LangChain agent graphs, OpenHuman's state-machine harness, and RLM
 style orchestration:
 
 - graph defaults: recursion limits, timeouts, checkpointing, durability,
-  streaming modes, cache policy, and concurrency
+  streaming modes, cache policy, steering policy, and concurrency
 - capabilities: allowed models, tools, agents, graphs, stores, middleware,
   retrievers, route functions, node templates, and REPL scripts
 - state channels: messages, scratch state, tool calls, artifacts, candidates,
@@ -226,6 +226,7 @@ node_item      = kind_decl
                | sends_decl
                | retry_decl
                | timeout_decl
+               | steering_decl
                | checkpoint_decl
                | metadata_decl
 
@@ -241,6 +242,7 @@ command_decl   = "command" object
 sends_decl     = "sends" "[" send_decl* "]"
 retry_decl     = "retry" object
 timeout_decl   = "timeout" duration
+steering_decl  = "steering" object
 checkpoint_decl = "checkpoint" ident
 
 node_ref       = ident | "END"
@@ -288,6 +290,7 @@ pub enum NodeItem {
     Sends(Vec<SendDecl>),
     Retry(ObjectLit),
     Timeout(DurationLit),
+    Steering(ObjectLit),
     Checkpoint(Ident),
     Metadata(ObjectLit),
 }
@@ -365,6 +368,8 @@ Required errors:
 - checkpoint policy incompatible with interrupts
 - state channel missing reducer
 - send target missing input mapping
+- steering target not allowed
+- steering policy references unknown actor or capability
 
 Example diagnostic:
 
@@ -451,6 +456,26 @@ Supported fields:
 - `routes`
 - `retry`
 - `timeout`
+- `steering`
+
+Example:
+
+```rustagents
+node research {
+  kind subagent
+  agent "researcher"
+  steering {
+    parent allow ["add_instruction", "request_status", "cancel"]
+    human allow ["add_instruction", "pause", "resume", "cancel"]
+    delivery "safe_boundary"
+  }
+  next synthesize
+}
+```
+
+Steering policies lower into harness steering policy and graph task policy. They
+can narrow a child agent's model/tool/runtime limits but cannot grant
+capabilities absent from the registry or parent run policy.
 
 ### `repl_agent`
 

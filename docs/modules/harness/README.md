@@ -3,7 +3,7 @@
 The harness is the orchestration layer around LLM calls. It owns model
 registration, tool registration, prompt assembly, middleware, memory, event
 streaming, tracing, retries, limits, summarization, caching, usage accounting,
-pricing, and test support.
+pricing, sub-agent/orchestrator steering, and test support.
 
 The harness should be usable in three modes:
 
@@ -112,6 +112,9 @@ tests for every adapter.
   exposing private state to model-visible schemas.
 - Support model fallback, tool retry, rate limiting, and human interruption as
   explicit policies rather than ad hoc callbacks.
+- Support parent-orchestrator and human steering of sub-agents, orchestrator
+  agents, graph tasks, and harness loops through typed commands delivered at
+  safe boundaries.
 - Support durable graph runs with pause/resume, checkpoint listing, and
   inspectable node transitions.
 - Support per-agent execution blueprints that describe how an agent runs
@@ -158,6 +161,7 @@ src/harness/
   providers.rs
   retry.rs
   runtime.rs
+  steering.rs
   stream.rs
   summarization.rs
   structured.rs
@@ -192,6 +196,8 @@ Feature ownership:
 - `providers`: feature-gated provider adapters.
 - `retry`: retry classification, backoff, attempt accounting.
 - `runtime`: high-level `AgentHarness` builder/facade.
+- `steering`: policy-checked parent/human steering of orchestrators,
+  sub-agents, graph tasks, and harness loops.
 - `stream`: token streams, tool progress streams, event streams, adapters.
 - `summarization`: context summaries, message compaction, summary provenance.
 - `structured`: typed response formats and validation.
@@ -209,6 +215,7 @@ Feature details:
 - [Prompt feature](prompt.md)
 - [Tool feature](tool.md)
 - [Middleware feature](middleware.md)
+- [Sub-agent and orchestrator steering](subagent-steering.md)
 - [Structured output feature](structured-output.md)
 - [Limits, retry, fallback, and rate limiting](limits-retry.md)
 - [Summarization feature](summarization.md)
@@ -239,6 +246,7 @@ surface area that RustAgents should intentionally support, adapt, or reject.
 | OpenHuman checkpointer | `openhuman#4261`, `src/openhuman/agent_graph/checkpoint/*` | Persist graph runs and checkpoints through a pluggable `Checkpointer`, with in-memory tests and durable SQLite-style production storage. |
 | OpenHuman graph blueprints | `openhuman#4261`, `src/openhuman/agent_graph/blueprint/*` | Keep per-agent execution topology in `graph.rs`-style blueprints next to prompts, so "what the agent says" and "how the agent runs" are inspectable separately. |
 | OpenHuman live turn graph | `openhuman#4261`, `src/openhuman/agent_graph/live/*` and `agent/harness/engine/core.rs` | Preserve the hot-path turn contract while making phases explicit: dispatch, parse, stop check, tools, compact, loop, finalize, max-iteration checkpoint. |
+| OpenHuman sub-agent steering | `spawn_subagent`, `spawn_async_subagent`, `steer_subagent`, `wait_subagent` product pattern | Generalize steering into typed commands so parent orchestrators, humans, middleware, UIs, and tests can guide sub-agents or orchestrators without prompt-injection side channels. |
 | Vector stores | `libs/core/langchain_core/vectorstores/base.py`, `in_memory.py` | Support add/update/delete/get-by-id, similarity search, score-threshold search, MMR search, metadata filters, async variants, and in-memory test stores. |
 | Retrievers and indexing | `libs/core/langchain_core/retrievers.py`, `indexing/*.py` | Treat retrievers as query-to-document components with events, tags, metadata, and record-manager-backed incremental indexing for dedupe and cleanup. |
 | Tool runtime injection | `langgraph.prebuilt.ToolRuntime` as re-exported by `libs/langchain_v1/langchain/tools/tool_node.py` | Tools should receive typed runtime context, state, store handles, stream writers, and cancellation handles through Rust parameters, not model-visible JSON schema fields. |
@@ -293,6 +301,12 @@ Nested model calls, tools, sub-agents, and graph nodes must inherit the root run
 id, selected tags, inherited metadata, event sink, cancellation token, stores,
 usage tracker, cost tracker, and configured budget policy. They may add local
 tags and metadata, but they must not mutate parent config in place.
+
+Nested runs may also receive steering commands. Steering is explicit runtime
+control from a parent orchestrator, human, graph supervisor, middleware, or
+test. A steered run must record actor, target, policy, payload summary, and the
+safe boundary where the command was applied. See
+[Sub-agent and orchestrator steering](subagent-steering.md).
 
 ## Messages
 

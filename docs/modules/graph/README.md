@@ -109,6 +109,8 @@ topology or executable code.
 - Support human-in-the-loop interrupts and resumable commands.
 - Support manual state inspection, state history, state update, forks, and time
   travel when checkpointing is enabled.
+- Support targeted steering of parent orchestrator runs, child sub-agent runs,
+  graph tasks, and pending interrupts through policy-checked commands.
 - Emit typed graph, task, checkpoint, interrupt, and streamed-output events.
 - Represent subgraphs as executable nodes with namespaced checkpoints and nested
   streams.
