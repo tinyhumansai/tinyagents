@@ -74,6 +74,8 @@ tests for every adapter.
 - Normalize user input into structured messages.
 - Build model requests from messages, prompts, tools, memory, and config.
 - Track context-window pressure and choose trimming or summarization policies.
+- Preserve provider prompt/KV-cache stability by making stable prompt prefixes
+  explicit and keeping volatile context out of those prefixes by default.
 - Dispatch model calls through provider-neutral traits.
 - Dispatch embedding calls through provider-neutral traits.
 - Dispatch tool calls through a registry with schema validation.
@@ -91,6 +93,9 @@ tests for every adapter.
 - Enforce optional token budgets and dollar budgets.
 - Cache reusable prompts, model responses, tool artifacts, and summaries when
   policy allows.
+- Distinguish local response caching from provider prompt/KV-cache reuse and
+  expose cache layout events when middleware changes model-visible prompt
+  segments.
 - Provide deterministic test utilities.
 - Describe provider capability profiles so middleware can choose safe defaults.
 - Translate between provider-native message formats and RustAgents messages.
@@ -155,7 +160,8 @@ settles.
 Feature ownership:
 
 - `agent_loop`: default model-tool-model loop.
-- `cache`: prompt, response, summary, and artifact cache policy.
+- `cache`: prompt, provider prompt/KV-cache, response, summary, and artifact
+  cache policy.
 - `context`: `RunConfig`, `RunContext`, inherited metadata, runtime values.
 - `cost`: model pricing, budget policy, and cost rollups.
 - `embeddings`: embedding providers, vector stores, retrievers, indexing, and
@@ -205,8 +211,8 @@ surface area that RustAgents should intentionally support, adapt, or reject.
 | LangChain area | Source | RustAgents harness implication |
 | --- | --- | --- |
 | `create_agent` factory | `libs/langchain_v1/langchain/agents/factory.py` | `AgentHarness` should compose model selection, tool execution, middleware, structured output, runtime context, and graph-node compatibility behind one builder while keeping traits reusable outside the facade. |
-| Agent middleware | `libs/langchain_v1/langchain/agents/middleware/types.py` | Middleware needs before/after hooks plus wrap hooks that can replace the model/tool call, inject commands, short-circuit, or jump to `model`, `tools`, or `end`. |
-| Built-in middleware | `libs/langchain_v1/langchain/agents/middleware/*.py` | Ship focused middleware for summarization, context editing, PII redaction, model/tool limits, retries, fallback, tool selection, human-in-the-loop, shell/file-search style privileged tools, and todo/task state. |
+| Agent middleware | `libs/langchain_v1/langchain/agents/middleware/types.py` | Middleware needs before/after hooks, streaming delta hooks, and wrap hooks that can replace the model/tool call, inject commands, short-circuit, or jump to `model`, `tools`, or `end`. |
+| Built-in middleware | `libs/langchain_v1/langchain/agents/middleware/*.py` | Ship focused middleware for summarization, context compression, transcript compression, retrieval compression, output compression, prompt cache layout guards, context editing, PII redaction, model/tool limits, retries, fallback, tool selection, human-in-the-loop, shell/file-search style privileged tools, and todo/task state. |
 | Structured output | `libs/langchain_v1/langchain/agents/structured_output.py` | Support provider-native schemas and artificial tool-call schemas, with typed validation, retryable validation errors, union/oneOf variants, and configurable error handling. |
 | Message model | `libs/core/langchain_core/messages/*.py` | Use typed content blocks for text, JSON, image, audio, file, tool call, tool result, reasoning, citations, refusal/safety, and provider extension data. |
 | Content translation | `libs/core/langchain_core/messages/block_translators/*.py` | Provider adapters must translate to/from the canonical RustAgents message model without losing ids, tool-call chunks, reasoning, usage, or provider metadata. |
@@ -218,7 +224,7 @@ surface area that RustAgents should intentionally support, adapt, or reject.
 | Callback/tracer events | `libs/core/langchain_core/callbacks` and `libs/core/langchain_core/tracers` | Emit typed events for every lifecycle boundary and expose sinks for tracing, streaming, logs, tests, and future UI replay. |
 | Runnables config | `libs/core/langchain_core/runnables/config.py` | `RunConfig` should carry tags, metadata, configurable values, concurrency, recursion, callbacks/events, and stable run identity through nested calls. |
 | Retry/fallback/rate limit | `libs/core/langchain_core/runnables/retry.py`, `fallbacks.py`, `rate_limiters.py` | Policies should distinguish retryable transport errors, provider errors, validation errors, tool errors, budget failures, and rate-limit waits. |
-| Cache | `libs/core/langchain_core/caches.py` | Separate local response cache from provider prompt caching and include all behavior-affecting request fields in keys. |
+| Cache | `libs/core/langchain_core/caches.py` | Separate local response cache from provider prompt/KV-cache reuse, preserve stable prefix layout, and include all behavior-affecting request fields in keys. |
 | Stores and chat history | `libs/core/langchain_core/stores.py`, `chat_history.py` | Keep generic stores separate from conversation memory and graph checkpoints. |
 | Standard tests | `libs/standard-tests` | Add reusable conformance tests so provider adapters prove tool calling, structured output, streaming, usage, callbacks/events, multimodal input, Unicode, and error behavior. |
 
@@ -493,19 +499,23 @@ Detailed lifecycle:
 4. Apply prompt templates and dynamic context.
 5. Select model.
 6. Select exposed tools.
-7. Run `before_model` middleware.
-8. Invoke or stream the model.
-9. Run `after_model` middleware.
-10. Emit model events and append assistant message.
-11. If tool calls exist, validate name, schema, and limits.
-12. Run `before_tool` middleware per call.
-13. Execute tools serially or concurrently according to policy.
-14. Run `after_tool` middleware per result.
-15. Append tool messages.
-16. Repeat until no tool calls remain.
-17. Validate structured output if configured.
-18. Persist short-term memory.
-19. Emit final event and return `AgentRun`.
+7. Run `before_model` middleware, including prompt/cache-layout guards and
+   pre-call compression.
+8. Invoke or stream the model through `wrap_model` middleware.
+9. Run `on_model_delta` middleware for streamed chunks.
+10. Run `after_model` middleware, including post-call compression and summary
+    persistence.
+11. Emit model events and append assistant message.
+12. If tool calls exist, validate name, schema, and limits.
+13. Run `before_tool` middleware per call.
+14. Execute tools serially or concurrently according to policy.
+15. Run `on_tool_delta` middleware for tool progress streams.
+16. Run `after_tool` middleware per result.
+17. Append tool messages.
+18. Repeat until no tool calls remain.
+19. Validate structured output if configured.
+20. Persist short-term memory.
+21. Emit final event and return `AgentRun`.
 
 Hard limits:
 
@@ -533,6 +543,13 @@ pub trait Middleware<State, Ctx = ()>: Send + Sync {
         request: &mut ModelRequest,
     ) -> Result<()>;
 
+    async fn on_model_delta(
+        &self,
+        state: &State,
+        ctx: &mut RunContext<Ctx>,
+        delta: &mut ModelDelta,
+    ) -> Result<()>;
+
     async fn after_model(
         &self,
         state: &State,
@@ -545,6 +562,13 @@ pub trait Middleware<State, Ctx = ()>: Send + Sync {
         state: &State,
         ctx: &mut RunContext<Ctx>,
         call: &mut ToolCall,
+    ) -> Result<()>;
+
+    async fn on_tool_delta(
+        &self,
+        state: &State,
+        ctx: &mut RunContext<Ctx>,
+        delta: &mut ToolDelta,
     ) -> Result<()>;
 
     async fn after_tool(
@@ -564,7 +588,10 @@ pub trait Middleware<State, Ctx = ()>: Send + Sync {
 ```
 
 Middleware ordering is stable and explicit. Middleware runs in registration
-order for `before_*` hooks and reverse order for `after_*` hooks.
+order for `before_*` hooks, registration order for streaming delta hooks, and
+reverse order for `after_*` hooks. Wrap hooks should surround the full model or
+tool operation when middleware needs setup, streaming inspection, and teardown
+as one unit.
 
 Built-in middleware candidates:
 
@@ -573,8 +600,14 @@ Built-in middleware candidates:
 - timeout middleware
 - model fallback middleware
 - token-bucket rate limiter middleware
+- prompt cache layout guard middleware
 - message trimming middleware
 - summarization middleware
+- context compression middleware
+- transcript compression middleware
+- retrieval compression middleware
+- streaming delta compression middleware
+- output compression middleware
 - context editing middleware
 - tool allowlist middleware
 - dynamic tool selection middleware

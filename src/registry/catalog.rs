@@ -3,8 +3,7 @@ use serde_json::Value;
 
 use crate::Result;
 
-const SEED_SNAPSHOT: &str =
-    include_str!("../../docs/modules/registry/model-catalog.snapshot.json");
+const SEED_SNAPSHOT: &str = include_str!("../../docs/modules/registry/model-catalog.snapshot.json");
 
 #[derive(Clone, Debug)]
 pub struct ModelCatalog {
@@ -36,15 +35,15 @@ impl ModelCatalog {
     pub fn get(&self, provider: &str, model_id: &str) -> Option<&ModelCatalogEntry> {
         self.snapshot.models.iter().find(|entry| {
             entry.provider == provider
-                && (entry.model_id == model_id || entry.aliases.iter().any(|alias| alias == model_id))
+                && (entry.model_id == model_id
+                    || entry.aliases.iter().any(|alias| alias == model_id))
         })
     }
 
     pub fn get_by_model_id(&self, model_id: &str) -> Option<&ModelCatalogEntry> {
-        self.snapshot
-            .models
-            .iter()
-            .find(|entry| entry.model_id == model_id || entry.aliases.iter().any(|alias| alias == model_id))
+        self.snapshot.models.iter().find(|entry| {
+            entry.model_id == model_id || entry.aliases.iter().any(|alias| alias == model_id)
+        })
     }
 }
 

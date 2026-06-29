@@ -17,10 +17,52 @@ reliable.
 ## Detailed Module Docs
 
 - [Harness module](../modules/harness/README.md)
+  - [Context](../modules/harness/context.md)
+  - [Model and providers](../modules/harness/model.md)
+  - [Embeddings and retrieval](../modules/harness/embeddings.md)
+  - [Prompt](../modules/harness/prompt.md)
+  - [Tool](../modules/harness/tool.md)
+  - [Middleware](../modules/harness/middleware.md)
+  - [Structured output](../modules/harness/structured-output.md)
+  - [Limits, retry, fallback, and rate limiting](../modules/harness/limits-retry.md)
+  - [Summarization](../modules/harness/summarization.md)
+  - [Usage](../modules/harness/usage.md)
+  - [Cost](../modules/harness/cost.md)
+  - [Cache](../modules/harness/cache.md)
+  - [Streaming](../modules/harness/streaming.md)
+  - [Store](../modules/harness/store.md)
+  - [Observability and events](../modules/harness/observability.md)
+  - [Testkit](../modules/harness/testkit.md)
 - [Graph module](../modules/graph/README.md)
+  - [Package and core types](../modules/graph/package.md)
+  - [Builder and compile contract](../modules/graph/builder.md)
+  - [Node model](../modules/graph/nodes.md)
+  - [State, channels, and updates](../modules/graph/state-channels.md)
+  - [Edges, routing, commands, and sends](../modules/graph/routing.md)
+  - [Execution model and parallelization](../modules/graph/execution.md)
+  - [Parallel agents and context forking](../modules/graph/parallel-agents-forking.md)
+  - [Checkpointing, durability, state inspection, and time travel](../modules/graph/checkpointing.md)
+  - [Interrupts and resume](../modules/graph/interrupts.md)
+  - [Streaming and events](../modules/graph/streaming.md)
+  - [Observability and tracing](../modules/graph/observability.md)
+  - [Runtime context and policies](../modules/graph/runtime-policy.md)
+  - [Fault tolerance](../modules/graph/fault-tolerance.md)
+  - [Subgraphs](../modules/graph/subgraphs.md)
+  - [Sub-agents and recursion](../modules/graph/subagents-recursion.md)
+  - [Memory and stores boundary](../modules/graph/memory-boundary.md)
+  - [Visualization, introspection, and testkit](../modules/graph/visualization-testkit.md)
+  - [Implementation milestones](../modules/graph/milestones.md)
 - [Registry module](../modules/registry/README.md)
+  - [Design](../modules/registry/design.md)
+  - [Model catalog and local snapshots](../modules/registry/model-catalog.md)
 - [Expressive language module](../modules/expressive-language/README.md)
 - [REPL language module](../modules/repl-language/README.md)
+  - [Design](../modules/repl-language/design.md)
+
+Docs should follow the module layout. Do not place standalone specification
+files directly in `docs/` or `docs/modules/`; each high-level topic should have
+its own directory with a `README.md` entrypoint and any supporting files beside
+it.
 
 ## Design Goals
 
@@ -70,11 +112,21 @@ testing:
 - Register tools and validate tool calls against schemas.
 - Build model requests from state, prompts, memory, and runtime context.
 - Apply prompt and message templates.
+- Preserve provider prompt/KV-cache stability by keeping cacheable prompt
+  prefixes deterministic and isolating volatile context near the tail of model
+  requests.
 - Manage per-run config such as run ids, thread ids, metadata, tags, deadlines,
   max concurrency, model limits, tool limits, and
   cancellation.
 - Provide middleware hooks before and after model calls, tool calls, and errors.
+- Provide middleware hooks during streaming model calls so compression,
+  redaction, observability, and adaptive context algorithms can inspect deltas
+  without replacing provider adapters.
 - Emit typed events for observability and streaming.
+- Write readable run status records for direct model calls, agent loops, and
+  graph-node child harness calls.
+- Maintain append-only event journals when durable listener replay is
+  configured.
 - Enforce retry, timeout, model-call, tool-call, and recursion policies.
 - Normalize model and tool errors into framework errors.
 - Provide test doubles for models, tools, stores, clocks, and ids.
@@ -146,7 +198,33 @@ pub trait ChatModel<State>: Send + Sync {
 - max tokens
 - timeout
 - retry policy
+- local response cache policy
+- provider prompt-cache policy
+- cacheable prompt prefix boundaries
+- ephemeral/non-cacheable context boundaries
+- prompt layout fingerprint
 - tags and metadata
+
+Provider prompt caching is different from local response caching. The harness
+must support extreme prompt caching for providers with KV-cache or
+prompt-prefix-cache behavior. That means request construction must be able to
+mark stable message and tool-schema prefixes, preserve their byte/token order
+across turns, and append volatile state, retrieved context, scratchpads, and
+per-run metadata after those stable prefixes. Middleware that compresses,
+trims, summarizes, or injects context must declare whether it changes the
+cacheable prefix, the volatile tail, or only non-model-visible metadata.
+
+The cache contract should prevent accidental KV-cache busting:
+
+- stable system prompts, policy text, tool declarations, schema text, and
+  reusable instruction blocks should have explicit prefix segment ids
+- volatile values such as timestamps, run ids, retrieved documents, current
+  tool results, and user-specific ephemeral context should stay out of the
+  cacheable prefix unless a policy explicitly opts in
+- request builders should preserve segment order and canonical serialization
+- middleware must emit a cache-layout event when it mutates prompt segments
+- tests should be able to assert whether a change preserves or invalidates the
+  provider prompt-cache prefix
 
 Initial provider implementations should be optional feature flags:
 
@@ -223,13 +301,19 @@ The default harness loop should be:
 1. Build `RunContext`.
 2. Load short-term memory for `thread_id` when configured.
 3. Build a `ModelRequest`.
-4. Run `before_model` middleware.
-5. Invoke or stream the model.
-6. Run `after_model` middleware.
-7. If the assistant produced tool calls, validate and execute them.
-8. Append tool result messages.
-9. Repeat until no tool calls remain or limits are reached.
-10. Persist updated short-term memory and return the final output.
+4. Run pre-request middleware that can edit prompts, context, cache layout,
+   compression state, and provider options.
+5. Run wrap middleware around the invoke or stream call for retry, fallback,
+   rate limiting, tracing, and replacement.
+6. Run streaming middleware while model deltas arrive, including compression,
+   redaction, tool-call reconstruction, usage accounting, and adaptive
+   cancellation.
+7. Run post-response middleware that can validate, compress, summarize,
+   persist, or transform the model response.
+8. If the assistant produced tool calls, validate and execute them.
+9. Append tool result messages.
+10. Repeat until no tool calls remain or limits are reached.
+11. Persist updated short-term memory and return the final output.
 
 Limits are not optional. The harness should enforce:
 
@@ -247,20 +331,36 @@ into the model or graph APIs.
 ```rust
 #[async_trait]
 pub trait Middleware<State, Ctx = ()>: Send + Sync {
+    async fn before_agent(&self, ctx: &mut RunContext<Ctx>, state: &State) -> Result<()>;
+    async fn after_agent(&self, ctx: &mut RunContext<Ctx>, state: &State, run: &mut AgentRun) -> Result<()>;
     async fn before_model(&self, ctx: &mut RunContext<Ctx>, state: &State, request: &mut ModelRequest) -> Result<()>;
+    async fn on_model_delta(&self, ctx: &mut RunContext<Ctx>, state: &State, delta: &mut ModelDelta) -> Result<()>;
     async fn after_model(&self, ctx: &mut RunContext<Ctx>, state: &State, response: &mut ModelResponse) -> Result<()>;
     async fn before_tool(&self, ctx: &mut RunContext<Ctx>, state: &State, call: &mut ToolCall) -> Result<()>;
+    async fn on_tool_delta(&self, ctx: &mut RunContext<Ctx>, state: &State, delta: &mut ToolDelta) -> Result<()>;
     async fn after_tool(&self, ctx: &mut RunContext<Ctx>, state: &State, result: &mut ToolResult) -> Result<()>;
     async fn on_error(&self, ctx: &mut RunContext<Ctx>, error: &RustAgentsError) -> Result<()>;
 }
 ```
 
+Wrap middleware should also exist around model calls and tool calls. A
+compression algorithm often needs to wrap the entire model operation so it can
+prepare context before the call, inspect streaming deltas during the call, and
+commit summaries or cache metadata after the final response.
+
 Expected middleware:
 
 - retry and timeout policy
 - prompt injection
+- prompt cache layout protection
+- provider prompt-cache/KV-cache hints
 - dynamic tool filtering
 - guardrails
+- context compression
+- transcript compression
+- retrieved-context compression
+- output compression
+- streaming delta compression
 - message trimming
 - summarization
 - structured output validation
@@ -286,6 +386,13 @@ Memory backends should start with:
 - trait boundary for external stores
 
 Trimming and summarization should be explicit policies, not hidden behavior.
+Compression is a broader middleware family than summarization. The harness
+should support pre-call compression of old messages and retrieved context,
+during-call compression or redaction of streaming deltas, and post-call
+compression of transcripts, tool artifacts, reasoning traces, and memory
+records. Compression middleware must preserve provenance: the original source
+ids, token estimates, cache segment ids, and enough metadata to explain why a
+message was removed, replaced, or summarized.
 
 ### Structured Output
 
@@ -309,8 +416,18 @@ can inspect both.
 
 ### Observability
 
-Every run should be traceable through typed events. At minimum, the harness
-should emit:
+Every run should be traceable through typed events and readable through a
+compact execution status store. The status store is the answer to "what is this
+run doing now?"; the event stream and journal are the answer to "what happened?"
+
+The canonical feature references are:
+
+- [Harness observability and events](../modules/harness/observability.md)
+- [Harness store](../modules/harness/store.md)
+- [Harness streaming](../modules/harness/streaming.md)
+- [Harness cache](../modules/harness/cache.md)
+
+At minimum, the harness should emit:
 
 - run started
 - model requested
@@ -327,8 +444,8 @@ should emit:
 - run completed
 - run failed
 
-The event stream should be structured data so it can later feed logs, OpenTelemetry,
-or a custom UI.
+The event stream should be structured data so it can feed logs,
+OpenTelemetry, test recorders, durable JSONL/MongoDB journals, or a custom UI.
 
 ```rust
 pub enum AgentEvent {
@@ -343,6 +460,38 @@ pub enum AgentEvent {
     RunFailed { run_id: String, error: String },
 }
 ```
+
+The harness should also expose a compact run-status record:
+
+```rust
+pub struct HarnessRunStatus {
+    pub run_id: RunId,
+    pub parent_run_id: Option<RunId>,
+    pub root_run_id: RunId,
+    pub thread_id: Option<ThreadId>,
+    pub component: ComponentId,
+    pub status: ExecutionStatus,
+    pub current_phase: HarnessPhase,
+    pub model_calls: usize,
+    pub tool_calls: usize,
+    pub active_model_call: Option<CallId>,
+    pub active_tool_calls: Vec<CallId>,
+    pub last_event_id: Option<EventId>,
+    pub usage: UsageTotals,
+    pub cost: CostTotals,
+    pub started_at: SystemTime,
+    pub updated_at: SystemTime,
+    pub ended_at: Option<SystemTime>,
+    pub error: Option<HarnessErrorSummary>,
+}
+```
+
+Status records are operational snapshots. They should not include full prompts,
+tool outputs, or raw provider payloads. Event journals are append-only and
+should support listener replay by stream offset. Derived observability
+projections such as latest status, usage rollups, cost rollups, and timing
+summaries may be cached, but every cached projection must include a source event
+offset and projection version.
 
 ### Testability
 
@@ -397,6 +546,10 @@ tolerance:
 - Persist checkpoints at safe boundaries.
 - Support interrupts and resume.
 - Stream typed execution events.
+- Write readable execution status records for graph runs.
+- Maintain append-only graph event journals for external listeners.
+- Cache derived graph observability projections without making them the source
+  of truth.
 - Return final state and execution history.
 - Support graph visualization and serialization later.
 
@@ -586,7 +739,14 @@ more durable than trying to suspend an async Rust stack.
 
 ### Streaming
 
-The graph should expose low-level runtime events and higher-level projections.
+The graph should expose low-level runtime events, higher-level projections, a
+status store, and optional durable replay for outside listeners. The canonical
+feature references are:
+
+- [Graph streaming and events](../modules/graph/streaming.md)
+- [Graph observability and tracing](../modules/graph/observability.md)
+- [Graph checkpointing and state inspection](../modules/graph/checkpointing.md)
+- [Graph memory and stores boundary](../modules/graph/memory-boundary.md)
 
 Low-level events:
 
@@ -607,6 +767,38 @@ High-level stream modes:
 - debug: verbose executor events
 - interrupts: interrupt payloads
 - custom: user events
+
+The graph should also expose a compact run-status record:
+
+```rust
+pub struct GraphRunStatus {
+    pub run_id: RunId,
+    pub root_run_id: RunId,
+    pub parent_run_id: Option<RunId>,
+    pub thread_id: Option<ThreadId>,
+    pub graph_id: GraphId,
+    pub checkpoint_id: Option<CheckpointId>,
+    pub checkpoint_namespace: Vec<String>,
+    pub status: ExecutionStatus,
+    pub current_step: usize,
+    pub active_nodes: Vec<NodeId>,
+    pub pending_interrupts: Vec<InterruptId>,
+    pub last_event_id: Option<EventId>,
+    pub started_at: SystemTime,
+    pub updated_at: SystemTime,
+    pub ended_at: Option<SystemTime>,
+    pub error: Option<GraphErrorSummary>,
+}
+```
+
+Graph status records are not checkpoints. Checkpoints preserve resumable graph
+state; status records summarize live and recent execution for observers. A
+graph event journal should let listeners subscribe live or replay from a stored
+offset by run id, root run id, thread id, graph id, node id, event kind, or
+namespace. Derived projections such as latest status by thread, task timing
+rollups, checkpoint summaries, and introspection snapshots may be cached when
+they include source coordinates: run id, checkpoint id, namespace, step, event
+offset, and projection version.
 
 ### Subgraphs
 
@@ -798,6 +990,9 @@ src/providers/
 - Tool registry.
 - Run context.
 - Callback events.
+- Run status store.
+- Durable event journal.
+- Cache-backed observability projections.
 - Mock model and mock tool utilities.
 
 ### Milestone 3: Expressive Language Preview
@@ -820,6 +1015,8 @@ src/providers/
 - Streaming events.
 - Checkpointing.
 - Resume support.
+- Graph run status store.
+- Graph event journal and listener replay.
 - Graph export.
 - Tracing integration.
 

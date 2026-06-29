@@ -17,7 +17,7 @@ system, recursion policy, or run limits.
 
 ## Detailed Module Docs
 
-- [Design](repl-language/design.md)
+- [Design](design.md)
 
 ## Responsibilities
 

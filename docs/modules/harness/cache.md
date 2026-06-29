@@ -14,6 +14,10 @@ allows it.
 - Record cache hits and misses.
 - Feed cached token counts into usage and cost accounting.
 - Distinguish local response caching from provider prompt caching.
+- Preserve provider prompt/KV-cache stability through explicit prompt segment
+  boundaries.
+- Track which middleware invalidated or preserved provider prompt-cache
+  prefixes.
 - Emit cache events with key fingerprints rather than full sensitive payloads.
 - Support in-memory, store-backed, and provider-specific cache metadata.
 
@@ -27,6 +31,73 @@ variants:
 Provider prompt caching is different. It usually affects provider billing and
 usage metadata, not whether RustAgents skips the provider call entirely.
 
+## Provider Prompt And KV Cache
+
+Provider prompt caching, prefix caching, and KV-cache reuse are first-class
+targets. The harness must make it hard to accidentally invalidate a large stable
+prefix by inserting volatile context near the front of a request.
+
+Prompt assembly should support explicit segments:
+
+```rust
+pub struct PromptSegment {
+    pub id: PromptSegmentId,
+    pub cache_role: CacheRole,
+    pub content: Vec<Message>,
+    pub fingerprint: PromptFingerprint,
+}
+
+pub enum CacheRole {
+    StablePrefix,
+    StableButProviderSpecific,
+    VolatileTail,
+    NeverCache,
+}
+```
+
+Stable prefix segments are for content that should remain byte/token stable
+across many turns:
+
+- system prompts
+- policy and safety text
+- reusable developer instructions
+- tool declarations and schemas
+- structured output schemas
+- long-lived examples
+- durable project or tenant context
+
+Volatile tail segments are for content likely to change every turn:
+
+- latest user message
+- current retrieved documents
+- timestamps and run ids
+- tool results
+- scratchpads and temporary reasoning traces
+- per-run configurable metadata
+
+Middleware that edits prompts must report whether it changed the stable prefix
+or only the volatile tail. This lets tests, traces, and cost accounting explain
+why provider prompt-cache hits were preserved or lost.
+
+## KV-Cache-Safe Layout Rules
+
+Request builders and middleware should follow these rules:
+
+- never insert timestamps, run ids, random ids, or dynamic retrieval output into
+  a stable prefix by default
+- append volatile context after stable instructions and schemas
+- keep stable tool/schema serialization canonical and deterministic
+- preserve segment ordering unless a middleware explicitly declares a cache
+  layout migration
+- fingerprint prompt segments separately from the full request
+- include middleware policy fingerprints when a middleware can affect
+  model-visible bytes
+- emit `cache.layout_preserved`, `cache.layout_changed`, and
+  `cache.prefix_invalidated` events for observability
+
+Regression tests should be able to assert that a prompt edit preserves the
+stable prefix fingerprint even if the full request changes.
+
 ## Cache Policy
 
 ```rust
@@ -36,6 +107,8 @@ pub struct CachePolicy {
     pub scope: CacheScope,
     pub include_tools: bool,
     pub include_model_responses: bool,
+    pub preserve_provider_prefix: bool,
+    pub stable_prefix_min_tokens: Option<usize>,
 }
 ```
 
@@ -57,6 +130,8 @@ Model response cache keys should include:
 - provider options
 - relevant metadata/configurable values
 - prompt template version
+- prompt segment ids and segment fingerprints
+- provider prompt-cache options
 - middleware version or policy fingerprint when middleware changes requests
 
 Cache keys should store fingerprints, not raw prompts, where the backing store
@@ -76,6 +151,8 @@ Every lookup should produce a decision:
 - miss
 - hit
 - stale
+- provider prefix preserved
+- provider prefix invalidated
 - write skipped
 - write completed
 

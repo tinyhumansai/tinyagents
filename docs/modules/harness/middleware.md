@@ -25,6 +25,10 @@ understand graph internals for normal harness usage.
 - Support before/after hooks for observation and simple mutation.
 - Support wrap hooks for replacement, retry, fallback, short-circuit, and
   human-interrupt behavior.
+- Support streaming hooks for model deltas and tool progress so middleware can
+  act during long-running calls.
+- Support prompt/cache-layout hooks so middleware can compress context without
+  accidentally invalidating provider prompt/KV-cache prefixes.
 - Allow middleware to modify model requests, tool calls, and responses.
 - Allow middleware to emit events.
 - Allow middleware to add local state updates without mutating unrelated state.
@@ -41,9 +45,12 @@ pub trait Middleware<State, Ctx = ()>: Send + Sync {
     async fn after_agent(&self, state: &State, ctx: &mut RunContext<Ctx>, run: &mut AgentRun) -> Result<()>;
 
     async fn before_model(&self, state: &State, ctx: &mut RunContext<Ctx>, request: &mut ModelRequest) -> Result<()>;
+    async fn before_model_stream(&self, state: &State, ctx: &mut RunContext<Ctx>, request: &mut ModelRequest) -> Result<()>;
+    async fn on_model_delta(&self, state: &State, ctx: &mut RunContext<Ctx>, delta: &mut ModelDelta) -> Result<()>;
     async fn after_model(&self, state: &State, ctx: &mut RunContext<Ctx>, response: &mut ModelResponse) -> Result<()>;
 
     async fn before_tool(&self, state: &State, ctx: &mut RunContext<Ctx>, call: &mut ToolCall) -> Result<()>;
+    async fn on_tool_delta(&self, state: &State, ctx: &mut RunContext<Ctx>, delta: &mut ToolDelta) -> Result<()>;
     async fn after_tool(&self, state: &State, ctx: &mut RunContext<Ctx>, result: &mut ToolResult) -> Result<()>;
 
     async fn on_error(&self, state: &State, ctx: &mut RunContext<Ctx>, error: &RustAgentsError) -> Result<()>;
@@ -82,12 +89,22 @@ Before hooks run in registration order. After hooks run in reverse registration
 order. Wrap hooks compose so the first registered middleware is the outermost
 layer. This mirrors common web middleware stacks and keeps cleanup symmetrical.
 
+Streaming hooks run in registration order for each delta before the delta is
+forwarded to subscribers or accumulated into the final response. Middleware that
+needs symmetrical setup and teardown for a stream should use `wrap_model`; delta
+hooks are for per-chunk inspection or transformation.
+
+Prompt/cache-layout middleware should run after static prompt rendering and
+before model dispatch. It must declare whether it changed stable prefix segments
+or only volatile tail segments so provider prompt-cache behavior is observable.
+
 ## Control Outcomes
 
 Middleware should be able to return:
 
 - continue with modified request
 - replace model/tool response
+- replace or suppress a streaming delta
 - emit state update
 - retry current call
 - fallback to another model or tool
@@ -113,7 +130,13 @@ Initial built-ins should include:
 - tool-call limit middleware
 - rate limiter middleware
 - dynamic prompt middleware
+- prompt cache layout guard middleware
 - context editing middleware
+- context compression middleware
+- transcript compression middleware
+- retrieval compression middleware
+- streaming delta compression middleware
+- output compression middleware
 - message trimming middleware
 - summarization middleware
 - structured output validation middleware
@@ -130,6 +153,7 @@ Each built-in must document:
 - emitted events
 - failure mode
 - interaction with streaming
+- interaction with provider prompt/KV-cache layout
 - interaction with retries and fallbacks
 
 ## State And Request Mutation
@@ -138,3 +162,27 @@ Middleware should prefer immutable request replacement for large changes and
 small explicit mutation for local fields. It must not mutate shared registries or
 global config during a run. Runtime state updates should be explicit and
 observable.
+
+## Compression Middleware
+
+Compression is not one hook. A useful compression implementation may need to run
+at several boundaries:
+
+- `before_agent`: load previous compression state and policy.
+- `before_model`: compress old messages, retrieved context, examples, or tool
+  artifacts before the request is sent.
+- `wrap_model`: measure full call timing, retry behavior, cache layout, and
+  provider usage while preserving setup/teardown symmetry.
+- `on_model_delta`: compact, redact, sample, or classify streaming output before
+  it is persisted or forwarded.
+- `after_model`: commit response summaries, update transcript compression state,
+  and attach provenance to the final response.
+- `before_tool` and `after_tool`: compress large tool arguments/results and
+  decide what enters model-visible context.
+- `after_agent`: persist durable summaries, compression indexes, and audit
+  events.
+
+Compression middleware must preserve enough provenance for debugging and replay:
+source message ids, source artifact ids, original token estimates, compressed
+token estimates, prompt segment ids, cache prefix fingerprints, policy version,
+and whether the stable provider prompt-cache prefix was preserved.

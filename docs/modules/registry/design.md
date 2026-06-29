@@ -65,6 +65,7 @@ Target layout:
 src/registry/
   mod.rs
   agent.rs
+  catalog.rs
   component.rs
   discovery.rs
   events.rs
@@ -72,7 +73,9 @@ src/registry/
   listener.rs
   model.rs
   names.rs
+  pricing.rs
   scope.rs
+  snapshot.rs
   store.rs
   testkit.rs
   tool.rs
