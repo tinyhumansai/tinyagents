@@ -15,5 +15,40 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
+# Optional HTTP client, pulled in only by hosted-provider features.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+], optional = true }
+
+[features]
+default = []
+# Hosted OpenAI Chat Completions provider (`harness::providers::openai`).
+openai = ["dep:reqwest"]
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# `.env` loading for the runnable examples.
+dotenvy = "0.15"
+
+# --- OpenAI-backed examples (require a network call + OPENAI_API_KEY) ---
+# Gated behind the `openai` feature so the default build/test stays offline.
+[[example]]
+name = "openai_chat"
+required-features = ["openai"]
+
+[[example]]
+name = "openai_tools"
+required-features = ["openai"]
+
+[[example]]
+name = "openai_structured"
+required-features = ["openai"]
+
+[[example]]
+name = "openai_graph_agent"
+required-features = ["openai"]
+
+[[example]]
+name = "openai_self_blueprint"
+required-features = ["openai"]

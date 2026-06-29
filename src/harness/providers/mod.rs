@@ -24,8 +24,9 @@
 
 mod types;
 
-// --- real provider placeholders (uncomment + add Cargo feature to activate) ---
-// #[cfg(feature = "openai")]    pub mod openai;
+// --- real provider integrations (gated behind Cargo features) ---
+#[cfg(feature = "openai")]
+pub mod openai;
 // #[cfg(feature = "anthropic")] pub mod anthropic;
 // #[cfg(feature = "ollama")]    pub mod ollama;
 
