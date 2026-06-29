@@ -1,7 +1,7 @@
 <h1 align="center">TinyAgents</h1>
 
 <p align="center">
- <img src="./docs/readme.png" alt="The Tet" />
+ <img src="https://github.com/tinyhumansai/tinyagents/raw/main/docs/readme.png" alt="The Tet" />
 </p>
 
 [![CI](https://github.com/tinyhumansai/tinyagents/actions/workflows/ci.yml/badge.svg)](https://github.com/tinyhumansai/tinyagents/actions/workflows/ci.yml)
