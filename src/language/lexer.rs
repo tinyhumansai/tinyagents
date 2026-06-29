@@ -11,54 +11,64 @@
 //! - punctuation: `{ } [ ] ,` and the arrow `->`
 //! - `//` line comments (skipped)
 //!
-//! Lexical errors surface as [`TinyAgentsError::Parse`] with the offending
-//! line and column.
+//! Each [`SpannedToken`] carries a real byte range plus a 1-based line/column
+//! anchor. Lexical errors are built as a structured
+//! [`crate::language::diagnostic::Diagnostic`] and surfaced as
+//! [`TinyAgentsError::Parse`] with the rendered caret and the offending line and
+//! column.
 
 use crate::error::{Result, TinyAgentsError};
-use crate::language::types::{Span, SpannedToken, Token};
+use crate::language::diagnostic::Diagnostic;
+use crate::language::source::SourceFile;
+use crate::language::span::Span;
+use crate::language::types::{SpannedToken, Token};
 
 /// Tokenises `source` into a vector of [`SpannedToken`]s terminated by a
 /// single [`Token::Eof`].
 ///
-/// Line and column numbers are 1-based. Each returned span points at the first
-/// character of its token.
+/// Line and column numbers are 1-based. Each returned span covers the token's
+/// byte range, anchored at its first character.
 ///
 /// # Errors
 ///
 /// Returns [`TinyAgentsError::Parse`] for an unterminated string, an invalid
 /// escape sequence, a malformed number, a lone `-` not forming `->` or a
-/// number, or any otherwise unrecognised character.
+/// number, or any otherwise unrecognised character. The error message carries a
+/// rendered caret pointing at the offending source.
 pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>> {
     Lexer::new(source).run()
 }
 
-struct Lexer {
+struct Lexer<'a> {
+    src: &'a str,
     chars: Vec<char>,
+    /// Index into `chars`.
     pos: usize,
+    /// Byte offset into `src`.
+    byte: usize,
     line: usize,
     column: usize,
 }
 
-impl Lexer {
-    fn new(src: &str) -> Self {
+impl<'a> Lexer<'a> {
+    fn new(src: &'a str) -> Self {
         Self {
+            src,
             chars: src.chars().collect(),
             pos: 0,
+            byte: 0,
             line: 1,
             column: 1,
         }
     }
 
-    fn span(&self) -> Span {
-        Span::new(self.line, self.column)
-    }
-
+    /// Builds a [`TinyAgentsError::Parse`] from a lexical [`Diagnostic`],
+    /// rendered against the source.
     fn error(&self, message: impl Into<String>, span: Span) -> TinyAgentsError {
-        TinyAgentsError::Parse {
-            message: message.into(),
-            line: span.line,
-            column: span.column,
-        }
+        let file = SourceFile::anonymous(self.src);
+        Diagnostic::error(message, span)
+            .with_primary_label("here")
+            .into_parse_error(Some(&file))
     }
 
     fn peek(&self) -> Option<char> {
@@ -69,10 +79,11 @@ impl Lexer {
         self.chars.get(self.pos + offset).copied()
     }
 
-    /// Advances one character, maintaining line/column counters.
+    /// Advances one character, maintaining byte/line/column counters.
     fn bump(&mut self) -> Option<char> {
         let c = self.chars.get(self.pos).copied()?;
         self.pos += 1;
+        self.byte += c.len_utf8();
         if c == '\n' {
             self.line += 1;
             self.column = 1;
@@ -86,11 +97,15 @@ impl Lexer {
         let mut tokens = Vec::new();
         loop {
             self.skip_trivia();
-            let span = self.span();
+            let start_byte = self.byte;
+            let start_line = self.line;
+            let start_column = self.column;
+            let start = Span::at(start_byte, start_byte, start_line, start_column);
+
             let Some(c) = self.peek() else {
                 tokens.push(SpannedToken {
                     token: Token::Eof,
-                    span,
+                    span: start,
                 });
                 return Ok(tokens);
             };
@@ -121,17 +136,20 @@ impl Lexer {
                     self.bump();
                     Token::Arrow
                 }
-                '"' => self.lex_string(span)?,
-                c if c.is_ascii_digit() => self.lex_number(span)?,
+                '"' => self.lex_string(start)?,
+                c if c.is_ascii_digit() => self.lex_number(start)?,
                 '-' if self.peek_at(1).is_some_and(|n| n.is_ascii_digit()) => {
-                    self.lex_number(span)?
+                    self.lex_number(start)?
                 }
                 c if is_ident_start(c) => self.lex_ident(),
                 other => {
+                    self.bump();
+                    let span = Span::at(start_byte, self.byte, start_line, start_column);
                     return Err(self.error(format!("unexpected character `{other}`"), span));
                 }
             };
 
+            let span = Span::at(start_byte, self.byte, start_line, start_column);
             tokens.push(SpannedToken { token, span });
         }
     }
@@ -169,7 +187,7 @@ impl Lexer {
         Token::Ident(s)
     }
 
-    fn lex_number(&mut self, span: Span) -> Result<Token> {
+    fn lex_number(&mut self, start: Span) -> Result<Token> {
         let mut s = String::new();
         if self.peek() == Some('-') {
             s.push('-');
@@ -188,24 +206,30 @@ impl Lexer {
                 break;
             }
         }
+        let span = Span::at(start.start, self.byte, start.line, start.column);
         s.parse::<f64>()
             .map(Token::Num)
             .map_err(|_| self.error(format!("invalid number `{s}`"), span))
     }
 
-    fn lex_string(&mut self, span: Span) -> Result<Token> {
+    fn lex_string(&mut self, start: Span) -> Result<Token> {
         // Consume the opening quote.
         self.bump();
         let mut s = String::new();
         loop {
             match self.peek() {
-                None => return Err(self.error("unterminated string", span)),
+                None => {
+                    let span = Span::at(start.start, self.byte, start.line, start.column);
+                    return Err(self.error("unterminated string", span));
+                }
                 Some('"') => {
                     self.bump();
                     return Ok(Token::Str(s));
                 }
                 Some('\\') => {
-                    let esc_span = self.span();
+                    let esc_start = self.byte;
+                    let esc_line = self.line;
+                    let esc_column = self.column;
                     self.bump();
                     match self.bump() {
                         Some('n') => s.push('\n'),
@@ -214,12 +238,19 @@ impl Lexer {
                         Some('\\') => s.push('\\'),
                         Some('"') => s.push('"'),
                         Some(other) => {
-                            return Err(self.error(format!("invalid escape `\\{other}`"), esc_span));
+                            let span = Span::at(esc_start, self.byte, esc_line, esc_column);
+                            return Err(self.error(format!("invalid escape `\\{other}`"), span));
                         }
-                        None => return Err(self.error("unterminated string", span)),
+                        None => {
+                            let span = Span::at(start.start, self.byte, start.line, start.column);
+                            return Err(self.error("unterminated string", span));
+                        }
                     }
                 }
-                Some('\n') => return Err(self.error("unterminated string", span)),
+                Some('\n') => {
+                    let span = Span::at(start.start, self.byte, start.line, start.column);
+                    return Err(self.error("unterminated string", span));
+                }
                 Some(c) => {
                     s.push(c);
                     self.bump();

@@ -30,7 +30,10 @@ use std::sync::Arc;
 use crate::error::{Result, TinyAgentsError};
 use crate::graph::{CompiledGraph, GraphBuilder, NodeHandler};
 use crate::language::parser::parse_str;
-use crate::language::types::{Blueprint, ChannelSpec, END, EdgeSpec, NodeSpec, Program, Routing};
+use crate::language::types::{
+    Blueprint, BlueprintProvenance, ChannelSpec, CommandSpec, END, EdgeSpan, EdgeSpec, IoFieldSpec,
+    JoinSpec, NamedSpan, NodeSpec, Origin, Program, Routing, SendSpec,
+};
 use crate::registry::CapabilityRegistry;
 
 // ===========================================================================
@@ -149,8 +152,39 @@ fn compile_graph(graph: &crate::language::types::GraphDecl) -> Result<Blueprint>
             )));
         }
 
-        // Determine routing. Precedence: explicit `routes` > `next` >
-        // top-level edge > terminal.
+        // Validate a `command`'s goto target.
+        if let Some(cmd) = &node.command
+            && let Some(goto) = &cmd.goto
+            && !target_ok(goto)
+        {
+            return Err(compile_err(format!(
+                "command goto target `{goto}` on node `{}` does not exist",
+                node.name
+            )));
+        }
+
+        // Validate fanout `send` targets.
+        for send in &node.sends {
+            if !target_ok(&send.target) {
+                return Err(compile_err(format!(
+                    "send target `{}` on node `{}` does not exist",
+                    send.target, node.name
+                )));
+            }
+        }
+
+        // Validate `join` node sources.
+        for source in &node.sources {
+            if !node_names.contains(source.as_str()) {
+                return Err(compile_err(format!(
+                    "join source `{source}` on node `{}` does not exist",
+                    node.name
+                )));
+            }
+        }
+
+        // Determine routing. Precedence: explicit `routes` > `next` > command
+        // `goto` > top-level edge > terminal.
         let routing = if has_routes {
             Routing::Conditional(
                 node.routes
@@ -164,6 +198,12 @@ fn compile_graph(graph: &crate::language::types::GraphDecl) -> Result<Blueprint>
             } else {
                 Routing::Next(next.clone())
             }
+        } else if let Some(goto) = node.command.as_ref().and_then(|c| c.goto.as_ref()) {
+            if goto == END {
+                Routing::Terminal
+            } else {
+                Routing::Next(goto.clone())
+            }
         } else if let Some(edge) = graph.edges.iter().find(|e| e.from == node.name) {
             if edge.to == END {
                 Routing::Terminal
@@ -174,6 +214,19 @@ fn compile_graph(graph: &crate::language::types::GraphDecl) -> Result<Blueprint>
             Routing::Terminal
         };
 
+        let command = node.command.as_ref().map(|c| CommandSpec {
+            goto: c.goto.clone(),
+            update: c.update.clone(),
+        });
+        let sends = node
+            .sends
+            .iter()
+            .map(|s| SendSpec {
+                target: s.target.clone(),
+                input: s.input.clone(),
+            })
+            .collect();
+
         nodes.push(NodeSpec {
             name: node.name.clone(),
             kind: node.kind.clone().unwrap_or_else(|| "model".to_string()),
@@ -181,6 +234,41 @@ fn compile_graph(graph: &crate::language::types::GraphDecl) -> Result<Blueprint>
             prompt: node.prompt.clone(),
             tools: node.tools.clone(),
             routing,
+            agent: node.agent.clone(),
+            subgraph: node.graph.clone(),
+            script: node.script.clone(),
+            input: node.input.clone(),
+            command,
+            sends,
+            join_sources: node.sources.clone(),
+            options: node.options.clone(),
+            checkpoint: node.checkpoint.clone(),
+            timeout: node.timeout.as_ref().map(|t| t.as_display()),
+            retry: node.retry.clone(),
+            metadata: node.metadata.clone(),
+        });
+    }
+
+    // Validate top-level join declarations.
+    let mut joins = Vec::new();
+    for join in &graph.joins {
+        for source in &join.sources {
+            if !node_names.contains(source.as_str()) {
+                return Err(compile_err(format!(
+                    "join source `{source}` does not exist in graph `{}`",
+                    graph.name
+                )));
+            }
+        }
+        if !target_ok(&join.target) {
+            return Err(compile_err(format!(
+                "join target `{}` does not exist in graph `{}`",
+                join.target, graph.name
+            )));
+        }
+        joins.push(JoinSpec {
+            sources: join.sources.clone(),
+            target: join.target.clone(),
         });
     }
 
@@ -190,6 +278,24 @@ fn compile_graph(graph: &crate::language::types::GraphDecl) -> Result<Blueprint>
         .map(|c| ChannelSpec {
             name: c.name.clone(),
             reducer: c.reducer.clone(),
+            args: c.args.clone(),
+        })
+        .collect();
+
+    let input = graph
+        .input
+        .iter()
+        .map(|f| IoFieldSpec {
+            name: f.name.clone(),
+            ty: f.ty.clone(),
+        })
+        .collect();
+    let output = graph
+        .output
+        .iter()
+        .map(|f| IoFieldSpec {
+            name: f.name.clone(),
+            ty: f.ty.clone(),
         })
         .collect();
 
@@ -200,7 +306,78 @@ fn compile_graph(graph: &crate::language::types::GraphDecl) -> Result<Blueprint>
         nodes,
         edges,
         defaults: graph.defaults.clone(),
+        input,
+        output,
+        checkpoint: graph.checkpoint.clone(),
+        interrupt: graph.interrupt.clone(),
+        joins,
+        provenance: None,
     })
+}
+
+/// Compiles a parsed [`Program`] into one [`Blueprint`] per graph, attaching
+/// source [`BlueprintProvenance`] tagged with `origin`.
+///
+/// This runs the same semantic validation and lowering as [`compile`], then
+/// records the source [`Span`](crate::language::span::Span) of every node,
+/// channel, and edge plus the blueprint's [`Origin`] so a UI, test, or review
+/// tool can trace each compiled piece back to the source it came from. Surface
+/// the result through [`Blueprint::provenance`].
+///
+/// Provenance is the difference from [`compile`]: pass [`Origin::file`] for
+/// file-backed source and [`Origin::generated`] / [`Origin::generated_by`] for a
+/// model-authored plan. Both still flow through the same gate.
+///
+/// # Errors
+///
+/// Returns [`TinyAgentsError::Compile`] for the same semantic failures as
+/// [`compile`].
+pub fn compile_with_provenance(program: &Program, origin: Origin) -> Result<Vec<Blueprint>> {
+    program
+        .graphs
+        .iter()
+        .map(|graph| {
+            let mut blueprint = compile_graph(graph)?;
+            blueprint.provenance = Some(provenance_of(graph, &origin));
+            Ok(blueprint)
+        })
+        .collect()
+}
+
+/// Builds the [`BlueprintProvenance`] for one graph declaration.
+fn provenance_of(
+    graph: &crate::language::types::GraphDecl,
+    origin: &Origin,
+) -> BlueprintProvenance {
+    BlueprintProvenance {
+        origin: origin.clone(),
+        graph: graph.span,
+        nodes: graph
+            .nodes
+            .iter()
+            .map(|n| NamedSpan {
+                name: n.name.clone(),
+                span: n.span,
+            })
+            .collect(),
+        channels: graph
+            .channels
+            .iter()
+            .map(|c| NamedSpan {
+                name: c.name.clone(),
+                span: c.span,
+            })
+            .collect(),
+        edges: graph
+            .edges
+            .iter()
+            .map(|e| EdgeSpan {
+                from: e.from.clone(),
+                to: e.to.clone(),
+                span: e.span,
+            })
+            .collect(),
+    }
 }
 
 // ===========================================================================
@@ -229,7 +406,11 @@ pub const DEFAULT_NODE_KINDS: &[&str] = &[
     "tool_executor",
     "subgraph",
     "graph",
+    "subagent",
+    "repl_agent",
     "router",
+    "interrupt",
+    "join",
     "human",
 ];
 
@@ -408,7 +589,9 @@ impl CapabilityResolver {
 
             match node.kind.as_str() {
                 "subgraph" | "graph" => {
-                    if let Some(target) = &node.model
+                    // Prefer the dedicated `graph "name"` reference, falling
+                    // back to the legacy `model` field for back-compatibility.
+                    if let Some(target) = node.subgraph.as_ref().or(node.model.as_ref())
                         && !self.subgraph_allowed(target)
                     {
                         return Err(TinyAgentsError::Capability(format!(

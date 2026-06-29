@@ -107,6 +107,131 @@ fn invalid_escape_is_a_parse_error() {
 }
 
 // ---------------------------------------------------------------------------
+// Spans, source map, and diagnostics
+// ---------------------------------------------------------------------------
+
+use crate::language::diagnostic::{Diagnostic, Severity};
+use crate::language::source::{SourceFile, SourceMap};
+use crate::language::span::Span;
+
+#[test]
+fn span_merge_covers_both_inputs() {
+    let a = Span::at(2, 5, 1, 3);
+    let b = Span::at(10, 14, 2, 1);
+    let merged = a.merge(b);
+    assert_eq!(merged.start, 2);
+    assert_eq!(merged.end, 14);
+    // Anchor comes from the earlier-starting span.
+    assert_eq!((merged.line, merged.column), (1, 3));
+    // Merge is commutative over the covered range.
+    assert_eq!(b.merge(a).start, 2);
+    assert_eq!(b.merge(a).end, 14);
+}
+
+#[test]
+fn span_len_and_is_empty() {
+    assert!(Span::new(1, 1).is_empty());
+    let s = Span::at(4, 9, 1, 5);
+    assert_eq!(s.len(), 5);
+    assert!(!s.is_empty());
+}
+
+#[test]
+fn source_file_maps_offsets_to_line_and_column() {
+    let file = SourceFile::new("demo.rag", "graph g\n  node a\n");
+    // `g` is on line 1.
+    assert_eq!(file.location(6), (1, 7));
+    // The `node` keyword starts at byte 10 on line 2, column 3.
+    let node_byte = file.text().find("node").unwrap();
+    assert_eq!(file.location(node_byte), (2, 3));
+    assert_eq!(file.line_text(2), Some("  node a"));
+    assert_eq!(
+        file.snippet(Span::at(node_byte, node_byte + 4, 2, 3)),
+        "node"
+    );
+}
+
+#[test]
+fn source_map_assigns_ids_and_resolves_files() {
+    let mut map = SourceMap::new();
+    assert!(map.is_empty());
+    let a = map.add("a.rag", "graph a {}");
+    let b = map.add("b.rag", "graph b {}");
+    assert_eq!(map.len(), 2);
+    assert_ne!(a, b);
+    assert_eq!(map.get(a).unwrap().name(), "a.rag");
+    assert_eq!(map.get(b).unwrap().text(), "graph b {}");
+}
+
+#[test]
+fn diagnostic_renders_caret_under_primary_span() {
+    let source = "graph g {\n  tool_call -> toolz\n}\n";
+    let file = SourceFile::new("support.rag", source);
+    let target = source.find("toolz").unwrap();
+    let span = Span::at(target, target + "toolz".len(), 2, 16);
+    let rendered = Diagnostic::error("route target `toolz` does not exist", span)
+        .with_code("E-rag-unknown-node")
+        .with_primary_label("unknown node")
+        .with_help("did you mean `tools`?")
+        .render(&file);
+
+    assert!(
+        rendered.contains("error[E-rag-unknown-node]: route target `toolz` does not exist"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("--> support.rag:2:16"), "{rendered}");
+    assert!(rendered.contains("tool_call -> toolz"), "{rendered}");
+    // Five carets under the five characters of `toolz`, plus the label.
+    assert!(rendered.contains("^^^^^ unknown node"), "{rendered}");
+    assert!(
+        rendered.contains("help: did you mean `tools`?"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn severity_labels_are_lowercase() {
+    assert_eq!(Severity::Error.label(), "error");
+    assert_eq!(Severity::Warning.label(), "warning");
+    assert_eq!(Severity::Note.label(), "note");
+}
+
+#[test]
+fn parse_error_carries_rendered_caret_for_source() {
+    // `bogus` is not a valid node item; `parse_str` has the source so the error
+    // message should render a caret beneath the offending token.
+    let err = parse_str("graph g {\n  node a { bogus x }\n}\n").unwrap_err();
+    match err {
+        crate::error::TinyAgentsError::Parse {
+            message,
+            line,
+            column,
+        } => {
+            assert!(message.contains("unknown node item `bogus`"), "{message}");
+            assert!(message.contains('^'), "{message}");
+            assert!(message.contains("--> <source>:2:12"), "{message}");
+            assert_eq!((line, column), (2, 12));
+        }
+        other => panic!("expected parse error, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_error_without_source_renders_plain() {
+    // The token-only `parse` entry point has no source text, so the rendered
+    // message falls back to the source-free presentation (no caret).
+    let tokens = tokenize("graph { }").unwrap();
+    let err = parse(&tokens).unwrap_err();
+    match err {
+        crate::error::TinyAgentsError::Parse { message, .. } => {
+            assert!(message.contains("expected identifier"), "{message}");
+            assert!(!message.contains('^'), "{message}");
+        }
+        other => panic!("expected parse error, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
 
@@ -286,6 +411,234 @@ fn duplicate_route_label_is_a_compile_error() {
     let src = "graph g { start a node a { routes { x -> b\n x -> b } } node b { } }";
     let err = compile(&parse_str(src).unwrap()).unwrap_err();
     assert!(err.to_string().contains("duplicate route label"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// Extended grammar (H2): channels+policy, command, send/join, subgraph,
+// subagent, repl_agent, interrupt, io shape, checkpoint/interrupt policy.
+// ---------------------------------------------------------------------------
+
+/// A graph exercising every H2 primitive in one declarative blueprint.
+const EXTENDED: &str = r#"
+graph orchestrator {
+  start planner
+
+  input {
+    request string
+    customer_id string
+  }
+  output {
+    answer string
+  }
+
+  checkpoint inherit
+  interrupt manual
+
+  channel messages messages
+  channel usage aggregate "usage_delta"
+  channel arrivals barrier 2
+
+  node planner {
+    kind agent
+    model "default"
+    command {
+      goto fanout
+      update {
+        status "planned"
+      }
+    }
+  }
+
+  node fanout {
+    kind model
+    sends [
+      send worker_a "split_a"
+      send worker_b "split_b"
+    ]
+    next worker_a
+  }
+
+  node worker_a {
+    kind model
+    next gather
+  }
+
+  node worker_b {
+    kind model
+    next gather
+  }
+
+  node gather {
+    kind join
+    sources [worker_a, worker_b]
+    next research
+  }
+
+  node research {
+    kind subagent
+    agent "researcher"
+    input "topic"
+    timeout 30
+    retry {
+      max_attempts 3
+      backoff "exponential"
+    }
+    next sub
+  }
+
+  node sub {
+    kind subgraph
+    graph "summarize"
+    next triage
+  }
+
+  node triage {
+    kind repl_agent
+    model "default"
+    script "triage_script"
+    next review
+  }
+
+  node review {
+    kind interrupt
+    prompt "Approve?"
+    options ["approve", "reject"]
+    routes {
+      approve -> END
+      reject -> planner
+    }
+  }
+
+  join [worker_a, worker_b] -> gather
+}
+"#;
+
+#[test]
+fn extended_grammar_parses_and_compiles_blueprint_shape() {
+    let program = parse_str(EXTENDED).unwrap();
+    let bp = compile(&program).unwrap().remove(0);
+
+    assert_eq!(bp.graph_id, "orchestrator");
+    assert_eq!(bp.start, "planner");
+    assert_eq!(bp.checkpoint.as_deref(), Some("inherit"));
+    assert_eq!(bp.interrupt.as_deref(), Some("manual"));
+
+    // Input/output shape.
+    assert_eq!(bp.input.len(), 2);
+    assert_eq!(bp.input[0].name, "request");
+    assert_eq!(bp.input[0].ty, "string");
+    assert_eq!(bp.output.len(), 1);
+    assert_eq!(bp.output[0].name, "answer");
+
+    // Channels carry reducer + policy args.
+    assert_eq!(bp.channels.len(), 3);
+    let usage = bp.channels.iter().find(|c| c.name == "usage").unwrap();
+    assert_eq!(usage.reducer, "aggregate");
+    assert_eq!(usage.args, vec![Literal::Str("usage_delta".into())]);
+    let arrivals = bp.channels.iter().find(|c| c.name == "arrivals").unwrap();
+    assert_eq!(arrivals.reducer, "barrier");
+    assert_eq!(arrivals.args, vec![Literal::Num(2.0)]);
+
+    // Command lowering + routing precedence (goto becomes a static next).
+    let planner = bp.nodes.iter().find(|n| n.name == "planner").unwrap();
+    let cmd = planner.command.as_ref().unwrap();
+    assert_eq!(cmd.goto.as_deref(), Some("fanout"));
+    assert_eq!(
+        cmd.update,
+        vec![("status".into(), Literal::Str("planned".into()))]
+    );
+    assert_eq!(planner.routing, Routing::Next("fanout".into()));
+
+    // Fanout sends.
+    let fanout = bp.nodes.iter().find(|n| n.name == "fanout").unwrap();
+    assert_eq!(fanout.sends.len(), 2);
+    assert_eq!(fanout.sends[0].target, "worker_a");
+    assert_eq!(fanout.sends[0].input.as_deref(), Some("split_a"));
+
+    // Join node.
+    let gather = bp.nodes.iter().find(|n| n.name == "gather").unwrap();
+    assert_eq!(gather.kind, "join");
+    assert_eq!(gather.join_sources, vec!["worker_a", "worker_b"]);
+
+    // Sub-agent node with input mapping + policies.
+    let research = bp.nodes.iter().find(|n| n.name == "research").unwrap();
+    assert_eq!(research.kind, "subagent");
+    assert_eq!(research.agent.as_deref(), Some("researcher"));
+    assert_eq!(research.input.as_deref(), Some("topic"));
+    assert_eq!(research.timeout.as_deref(), Some("30"));
+    assert_eq!(
+        research.retry,
+        vec![
+            ("max_attempts".into(), Literal::Num(3.0)),
+            ("backoff".into(), Literal::Str("exponential".into())),
+        ]
+    );
+
+    // Subgraph node references a registered graph by name.
+    let sub = bp.nodes.iter().find(|n| n.name == "sub").unwrap();
+    assert_eq!(sub.kind, "subgraph");
+    assert_eq!(sub.subgraph.as_deref(), Some("summarize"));
+
+    // REPL-backed node names a script capability (declaration only).
+    let triage = bp.nodes.iter().find(|n| n.name == "triage").unwrap();
+    assert_eq!(triage.kind, "repl_agent");
+    assert_eq!(triage.script.as_deref(), Some("triage_script"));
+
+    // Interrupt node with options + conditional routing.
+    let review = bp.nodes.iter().find(|n| n.name == "review").unwrap();
+    assert_eq!(review.kind, "interrupt");
+    assert_eq!(review.options, vec!["approve", "reject"]);
+    assert!(matches!(review.routing, Routing::Conditional(_)));
+
+    // Top-level join declaration.
+    assert_eq!(bp.joins.len(), 1);
+    assert_eq!(bp.joins[0].target, "gather");
+    assert_eq!(bp.joins[0].sources, vec!["worker_a", "worker_b"]);
+}
+
+#[test]
+fn extended_blueprint_round_trips_through_serde() {
+    let bp = compile(&parse_str(EXTENDED).unwrap()).unwrap().remove(0);
+    let json = serde_json::to_string(&bp).unwrap();
+    let back: crate::language::types::Blueprint = serde_json::from_str(&json).unwrap();
+    assert_eq!(bp, back);
+}
+
+#[test]
+fn command_goto_unknown_target_is_a_compile_error() {
+    let src = "graph g { start a node a { command { goto ghost } } }";
+    let err = compile(&parse_str(src).unwrap()).unwrap_err();
+    assert!(err.to_string().contains("command goto target"), "{err}");
+}
+
+#[test]
+fn send_unknown_target_is_a_compile_error() {
+    let src = "graph g { start a node a { sends [ send ghost ] } }";
+    let err = compile(&parse_str(src).unwrap()).unwrap_err();
+    assert!(err.to_string().contains("send target"), "{err}");
+}
+
+#[test]
+fn join_unknown_source_is_a_compile_error() {
+    let src = "graph g { start a node a { } join [ghost] -> a }";
+    let err = compile(&parse_str(src).unwrap()).unwrap_err();
+    assert!(err.to_string().contains("join source"), "{err}");
+}
+
+#[test]
+fn extended_kinds_bind_against_a_resolver() {
+    let bp = compile(&parse_str(EXTENDED).unwrap()).unwrap().remove(0);
+    let resolver = CapabilityResolver::from_lists(["default".to_string()], std::iter::empty())
+        .allow_subgraph("summarize")
+        .allow_reducer("messages")
+        .allow_reducer("aggregate")
+        .allow_reducer("barrier")
+        .with_node_kinds(
+            crate::language::compiler::DEFAULT_NODE_KINDS
+                .iter()
+                .map(|k| k.to_string()),
+        );
+    resolver.bind_blueprint(&bp).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -609,6 +962,319 @@ fn bind_capabilities_with_registry_matches_compile_source() {
     let reg = full_registry();
     let bp = compile(&parse_str(FULL_SOURCE).unwrap()).unwrap().remove(0);
     bind_capabilities_with_registry(&bp, &reg).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Registry-backed Resolver (H3): spanned diagnostics, single binding gate
+// ---------------------------------------------------------------------------
+
+use crate::language::resolver::{Resolver, resolve_source};
+
+#[test]
+fn resolver_accepts_fully_registered_blueprint() {
+    let reg = full_registry();
+    let program = parse_str(FULL_SOURCE).unwrap();
+    let resolver = Resolver::from_registry(&reg);
+    // No diagnostics: every model/tool/subgraph/router/reducer is registered.
+    assert!(resolver.resolve_program(&program).is_empty());
+    // And the convenience façade lowers it to a blueprint.
+    let blueprints = resolve_source(FULL_SOURCE, &reg).unwrap();
+    assert_eq!(blueprints[0].graph_id, "main");
+}
+
+#[test]
+fn resolver_reports_unregistered_tool_with_spanned_diagnostic() {
+    // `missing` is not a registered tool.
+    let src = r#"
+graph g {
+  start a
+  channel m append
+  node a {
+    kind agent
+    model "default"
+    tools ["missing"]
+    next END
+  }
+}
+"#;
+    let reg = full_registry();
+    let program = parse_str(src).unwrap();
+    let file = SourceFile::new("plan.rag", src);
+    let resolver = Resolver::from_registry(&reg);
+
+    let diagnostics = resolver.resolve_program(&program);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    let diag = &diagnostics[0];
+    assert_eq!(diag.code.as_deref(), Some("E-rag-unknown-tool"));
+    let rendered = diag.render(&file);
+    assert!(
+        rendered.contains("node `a` references unknown tool `missing`"),
+        "{rendered}"
+    );
+    // The diagnostic carries a caret pointing at the offending node span.
+    assert!(rendered.contains('^'), "{rendered}");
+    assert!(rendered.contains("--> plan.rag:"), "{rendered}");
+
+    // `check_program` folds it into a Capability error with the rendered caret.
+    let err = resolver.check_program(&program, Some(&file)).unwrap_err();
+    assert!(matches!(err, crate::error::TinyAgentsError::Capability(_)));
+    assert!(err.to_string().contains("unknown tool"), "{err}");
+    assert!(err.to_string().contains('^'), "{err}");
+}
+
+#[test]
+fn resolve_source_rejects_unregistered_tool() {
+    let src = r#"graph g { start a channel m append node a { kind agent model "default" tools ["missing"] next END } }"#;
+    let reg = full_registry();
+    let err = resolve_source(src, &reg).unwrap_err();
+    assert!(matches!(err, crate::error::TinyAgentsError::Capability(_)));
+    assert!(err.to_string().contains("unknown tool"), "{err}");
+}
+
+#[test]
+fn resolver_reports_unknown_node_kind_as_compile_error() {
+    let src = r#"graph g { start a node a { kind wizard next END } }"#;
+    let reg = full_registry();
+    let err = resolve_source(src, &reg).unwrap_err();
+    assert!(matches!(err, crate::error::TinyAgentsError::Compile(_)));
+    assert!(err.to_string().contains("unknown kind"), "{err}");
+}
+
+#[test]
+fn resolver_reports_unregistered_agent() {
+    // A `subagent` node binds its `agent "…"` reference through the registry's
+    // Agent allowlist.
+    let src = r#"graph g { start a node a { kind subagent agent "ghost" next END } }"#;
+    let reg = full_registry();
+    let program = parse_str(src).unwrap();
+    let diagnostics = Resolver::from_registry(&reg).resolve_program(&program);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0].code.as_deref(), Some("E-rag-unknown-agent"));
+    assert!(
+        diagnostics[0].message.contains("unknown agent `ghost`"),
+        "{:?}",
+        diagnostics[0]
+    );
+}
+
+#[test]
+fn resolver_collects_multiple_diagnostics() {
+    // Two independent problems: an unregistered model and an unregistered
+    // reducer. `resolve_program` reports both.
+    let src = r#"graph g { start a channel m ghost node a { kind model model "nope" next END } }"#;
+    let reg = full_registry();
+    let program = parse_str(src).unwrap();
+    let diagnostics = Resolver::from_registry(&reg).resolve_program(&program);
+    let codes: Vec<_> = diagnostics
+        .iter()
+        .filter_map(|d| d.code.as_deref())
+        .collect();
+    assert!(codes.contains(&"E-rag-unknown-model"), "{codes:?}");
+    assert!(codes.contains(&"E-rag-unknown-reducer"), "{codes:?}");
+}
+
+#[test]
+fn resolver_blueprint_path_matches_registry_binding() {
+    // The span-less blueprint path mirrors the legacy gate's variants/messages.
+    let reg = full_registry();
+    let bp = compile(&parse_str(FULL_SOURCE).unwrap()).unwrap().remove(0);
+    Resolver::from_registry(&reg)
+        .resolve_blueprint(&bp)
+        .unwrap();
+
+    let bad = compile(
+        &parse_str(r#"graph g { start a channel m append node a { kind subgraph model "ghost" next END } }"#)
+            .unwrap(),
+    )
+    .unwrap()
+    .remove(0);
+    let err = Resolver::from_registry(&reg)
+        .resolve_blueprint(&bad)
+        .unwrap_err();
+    assert!(matches!(err, crate::error::TinyAgentsError::Capability(_)));
+    assert!(err.to_string().contains("unknown subgraph"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// Provenance, diff, and language testkit (H4)
+// ---------------------------------------------------------------------------
+
+use crate::language::compiler::compile_with_provenance;
+use crate::language::diff::{FieldChange, blueprint_diff};
+use crate::language::testkit as lang_testkit;
+use crate::language::types::Origin;
+
+const DIFF_BASE: &str = r#"
+graph flow {
+  start plan
+
+  channel messages append
+
+  node plan {
+    kind model
+    model "default"
+    routes {
+      research -> work
+      done -> END
+    }
+  }
+
+  node work {
+    kind tool_executor
+    tools ["lookup_user"]
+    next END
+  }
+}
+"#;
+
+/// Adds a node (`review`) and changes a route target on `plan`
+/// (`research -> review` instead of `research -> work`).
+const DIFF_NEW: &str = r#"
+graph flow {
+  start plan
+
+  channel messages append
+
+  node plan {
+    kind model
+    model "default"
+    routes {
+      research -> review
+      done -> END
+    }
+  }
+
+  node review {
+    kind interrupt
+    prompt "ok?"
+    next work
+  }
+
+  node work {
+    kind tool_executor
+    tools ["lookup_user"]
+    next END
+  }
+}
+"#;
+
+#[test]
+fn blueprint_diff_reports_added_node_and_changed_route() {
+    let old = lang_testkit::blueprint(DIFF_BASE);
+    let new = lang_testkit::blueprint(DIFF_NEW);
+
+    let diff = blueprint_diff(&old, &new);
+    assert!(!diff.is_empty());
+
+    // One node added: `review`.
+    assert_eq!(diff.nodes_added, vec!["review".to_string()]);
+    assert!(diff.nodes_removed.is_empty());
+
+    // `plan`'s routing changed (research target work -> review).
+    assert_eq!(diff.nodes_changed.len(), 1, "{diff:?}");
+    let plan_change = &diff.nodes_changed[0];
+    assert_eq!(plan_change.name, "plan");
+    assert_eq!(
+        plan_change.fields,
+        vec![FieldChange {
+            field: "routing".to_string(),
+            old: "{ research -> work, done -> END }".to_string(),
+            new: "{ research -> review, done -> END }".to_string(),
+        }]
+    );
+
+    // The rendered summary names both the added node and the changed route.
+    let rendered = diff.to_string();
+    assert!(rendered.contains("+ node review"), "{rendered}");
+    assert!(rendered.contains("~ node plan"), "{rendered}");
+    assert!(rendered.contains("routing:"), "{rendered}");
+}
+
+#[test]
+fn blueprint_diff_of_identical_blueprints_is_empty() {
+    let a = lang_testkit::blueprint(DIFF_BASE);
+    let b = lang_testkit::blueprint(DIFF_BASE);
+    let diff = blueprint_diff(&a, &b);
+    assert!(diff.is_empty(), "{diff:?}");
+    assert_eq!(diff.to_string(), "no changes");
+}
+
+#[test]
+fn blueprint_diff_serializes_round_trip() {
+    let old = lang_testkit::blueprint(DIFF_BASE);
+    let new = lang_testkit::blueprint(DIFF_NEW);
+    let diff = blueprint_diff(&old, &new);
+    let json = serde_json::to_string(&diff).unwrap();
+    let back: crate::language::diff::BlueprintDiff = serde_json::from_str(&json).unwrap();
+    assert_eq!(diff, back);
+}
+
+#[test]
+fn provenance_points_each_node_at_its_span() {
+    let program = parse_str(DIFF_NEW).unwrap();
+    let bp = compile_with_provenance(&program, Origin::file("flow.rag"))
+        .unwrap()
+        .remove(0);
+
+    let prov = bp.provenance().expect("provenance attached");
+    assert_eq!(prov.origin, Origin::File("flow.rag".to_string()));
+
+    // Every node in the blueprint has a recorded span anchored at the line of
+    // its `node <name>` declaration, and the byte range slices back to the
+    // `node` keyword that opens it.
+    let file = SourceFile::new("flow.rag", DIFF_NEW);
+    for node in &bp.nodes {
+        let span = prov
+            .node_span(&node.name)
+            .unwrap_or_else(|| panic!("no span for node `{}`", node.name));
+        // The span's byte range covers the opening `node` keyword.
+        assert_eq!(&DIFF_NEW[span.start..span.end], "node");
+        // The line the span anchors at is the node's declaration line.
+        let line = file
+            .line_text(span.line)
+            .unwrap_or_else(|| panic!("no source line {}", span.line));
+        assert!(
+            line.contains(&format!("node {}", node.name)),
+            "node `{}` span anchors at line `{line}`, not its declaration",
+            node.name
+        );
+    }
+
+    // The channel span is recorded too.
+    assert!(prov.channel_span("messages").is_some());
+}
+
+#[test]
+fn plain_compile_leaves_provenance_none() {
+    let bp = lang_testkit::blueprint(DIFF_BASE);
+    assert!(bp.provenance().is_none());
+}
+
+#[test]
+fn generated_origin_renders_label() {
+    let program = parse_str(DIFF_BASE).unwrap();
+    let bp = compile_with_provenance(&program, Origin::generated_by("repl-7"))
+        .unwrap()
+        .remove(0);
+    let prov = bp.provenance().unwrap();
+    assert_eq!(prov.origin.as_display(), "generated by repl-7");
+}
+
+#[test]
+fn testkit_assertions_inspect_lowered_topology() {
+    let bp = lang_testkit::blueprint(DIFF_NEW);
+    lang_testkit::assert_kind(&bp, "review", "interrupt");
+    lang_testkit::assert_next(&bp, "review", "work");
+    lang_testkit::assert_terminal(&bp, "work");
+    lang_testkit::assert_route(&bp, "plan", "research", "review");
+}
+
+#[test]
+fn testkit_try_compile_surfaces_errors() {
+    // `start` references an undefined node, so compilation fails.
+    let err = lang_testkit::try_compile("graph g { start missing node a { kind model next END } }")
+        .unwrap_err();
+    assert!(matches!(err, crate::error::TinyAgentsError::Compile(_)));
 }
 
 /// Minimal fake model/tool used to populate a [`CapabilityRegistry`] in tests.

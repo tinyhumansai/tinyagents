@@ -15,8 +15,15 @@
 //! - [`crate::language::parser`] turns tokens into a [`Program`] AST.
 //! - [`crate::language::compiler`] lowers a [`Program`] into one [`Blueprint`]
 //!   per graph and wires blueprints into the runtime graph.
+//!
+//! The source AST node types (`Program`, `GraphDecl`, `NodeDecl`, …) live in
+//! [`crate::language::ast`] and are re-exported here for back-compatibility.
 
 use serde::{Deserialize, Serialize};
+
+// Re-export the source AST so existing `crate::language::types::{Program, …}`
+// paths keep resolving after the AST moved to its own module.
+pub use crate::language::ast::*;
 
 // ===========================================================================
 // Lexical tokens
@@ -71,21 +78,9 @@ impl Token {
     }
 }
 
-/// A 1-based line/column source position.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Span {
-    /// 1-based line number.
-    pub line: usize,
-    /// 1-based column number.
-    pub column: usize,
-}
-
-impl Span {
-    /// Creates a new span at the given line and column.
-    pub fn new(line: usize, column: usize) -> Self {
-        Self { line, column }
-    }
-}
+// The source [`Span`] type lives in [`crate::language::span`] and is re-exported
+// here so existing `crate::language::types::Span` paths keep resolving.
+pub use crate::language::span::Span;
 
 /// A [`Token`] paired with the [`Span`] where it begins.
 #[derive(Clone, Debug, PartialEq)]
@@ -93,103 +88,6 @@ pub struct SpannedToken {
     /// The token value.
     pub token: Token,
     /// The source position of the token's first character.
-    pub span: Span,
-}
-
-// ===========================================================================
-// AST
-// ===========================================================================
-
-/// A literal value used in `defaults` entries and similar key/value positions.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-pub enum Literal {
-    /// A string literal (`"foo"`).
-    Str(String),
-    /// A numeric literal (`50`, `1.5`).
-    Num(f64),
-    /// A bare identifier literal (`inherit`, `exponential`).
-    Ident(String),
-}
-
-/// The root of a parsed program: one or more graph declarations.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Program {
-    /// The graphs declared at the top level, in source order.
-    pub graphs: Vec<GraphDecl>,
-}
-
-/// A `graph <name> { … }` declaration.
-#[derive(Clone, Debug, PartialEq)]
-pub struct GraphDecl {
-    /// The graph identifier.
-    pub name: String,
-    /// The position of the `graph` keyword.
-    pub span: Span,
-    /// The declared start node, if any (`start <ident>`).
-    pub start: Option<String>,
-    /// `defaults { key value … }` entries, in source order.
-    pub defaults: Vec<(String, Literal)>,
-    /// `channel <name> <reducer>` declarations.
-    pub channels: Vec<ChannelDecl>,
-    /// `node <name> { … }` declarations.
-    pub nodes: Vec<NodeDecl>,
-    /// Top-level `from -> to` edge declarations.
-    pub edges: Vec<EdgeDecl>,
-}
-
-/// A `channel <name> <reducer>` declaration binding a state channel to a
-/// named reducer.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ChannelDecl {
-    /// The channel name (e.g. `messages`).
-    pub name: String,
-    /// The reducer reference (e.g. `append`, `overwrite`, `set_union`).
-    pub reducer: String,
-    /// Source position of the `channel` keyword.
-    pub span: Span,
-}
-
-/// A `node <name> { … }` declaration.
-#[derive(Clone, Debug, PartialEq)]
-pub struct NodeDecl {
-    /// The node name.
-    pub name: String,
-    /// The declared `kind`, if any (e.g. `agent`, `tool_executor`).
-    pub kind: Option<String>,
-    /// The bound model name, if any.
-    pub model: Option<String>,
-    /// The system/user prompt string, if any.
-    pub prompt: Option<String>,
-    /// Tool capability names referenced by this node.
-    pub tools: Vec<String>,
-    /// A static `next` successor, if declared.
-    pub next: Option<String>,
-    /// Conditional `routes { label -> target … }`.
-    pub routes: Vec<RouteDecl>,
-    /// Source position of the `node` keyword.
-    pub span: Span,
-}
-
-/// A single `label -> target` route inside a node's `routes` block.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RouteDecl {
-    /// The route label (a named outcome, e.g. `tool_call`).
-    pub label: String,
-    /// The target node name, or `END`.
-    pub target: String,
-    /// Source position of the route label.
-    pub span: Span,
-}
-
-/// A top-level `from -> to` edge declaration.
-#[derive(Clone, Debug, PartialEq)]
-pub struct EdgeDecl {
-    /// The source node name.
-    pub from: String,
-    /// The target node name, or `END`.
-    pub to: String,
-    /// Source position of the source identifier.
     pub span: Span,
 }
 
@@ -207,7 +105,7 @@ pub const END: &str = "END";
 /// independently of the source text. Runnable node *behaviour* is not part of
 /// the blueprint — it is supplied later by a Rust-side
 /// [`crate::language::compiler::NodeFactory`].
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Blueprint {
     /// The graph identifier.
     pub graph_id: String,
@@ -221,6 +119,145 @@ pub struct Blueprint {
     pub edges: Vec<EdgeSpec>,
     /// Graph default key/value entries.
     pub defaults: Vec<(String, Literal)>,
+    /// The declared graph input shape (empty when unspecified).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input: Vec<IoFieldSpec>,
+    /// The declared graph output shape (empty when unspecified).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output: Vec<IoFieldSpec>,
+    /// Graph-level checkpoint policy (`inherit`, `always`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
+    /// Graph-level interrupt policy (`manual`, `auto`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupt: Option<String>,
+    /// Compiled join/barrier declarations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joins: Vec<JoinSpec>,
+    /// Source provenance: where each piece of this blueprint came from.
+    ///
+    /// Populated by [`crate::language::compiler::compile_with_provenance`] (and
+    /// the [`crate::language::testkit`] helpers). The plain [`compile`] path
+    /// leaves this `None` so its output is unchanged. Surface it through
+    /// [`Blueprint::provenance`].
+    ///
+    /// [`compile`]: crate::language::compiler::compile
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<BlueprintProvenance>,
+}
+
+impl Blueprint {
+    /// Returns this blueprint's source provenance, if it was compiled through a
+    /// provenance-aware path.
+    ///
+    /// Provenance lets a UI, test, or review tool trace every node, channel, and
+    /// edge back to the exact source span and origin (a file path or a
+    /// generated plan) it came from.
+    pub fn provenance(&self) -> Option<&BlueprintProvenance> {
+        self.provenance.as_ref()
+    }
+}
+
+// ===========================================================================
+// Provenance (source traceability for a compiled Blueprint)
+// ===========================================================================
+
+/// Where a [`Blueprint`] (or one of its pieces) originated.
+///
+/// Origin is the trust-relevant half of provenance: a `File` blueprint was
+/// authored by a human at a path, while a `Generated` blueprint was emitted by a
+/// model running inside the harness. Review tooling treats the two differently
+/// even though they compile through the same gate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum Origin {
+    /// Authored in a file at the given path.
+    File(String),
+    /// Emitted by a model/REPL session (self-authored), with an optional label
+    /// identifying the producer.
+    Generated(Option<String>),
+}
+
+impl Origin {
+    /// A file origin at `path`.
+    pub fn file(path: impl Into<String>) -> Self {
+        Origin::File(path.into())
+    }
+
+    /// A generated origin with no producer label.
+    pub fn generated() -> Self {
+        Origin::Generated(None)
+    }
+
+    /// A generated origin labelled with the producer (e.g. a REPL session id).
+    pub fn generated_by(label: impl Into<String>) -> Self {
+        Origin::Generated(Some(label.into()))
+    }
+
+    /// A short human-readable description (`"plan.rag"`, `"generated"`,
+    /// `"generated by repl-7"`).
+    pub fn as_display(&self) -> String {
+        match self {
+            Origin::File(path) => path.clone(),
+            Origin::Generated(None) => "generated".to_string(),
+            Origin::Generated(Some(label)) => format!("generated by {label}"),
+        }
+    }
+}
+
+/// The source span of a single named piece (node, channel) of a blueprint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedSpan {
+    /// The piece's name.
+    pub name: String,
+    /// The source span the piece was declared at.
+    pub span: Span,
+}
+
+/// The source span of a single static edge of a blueprint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EdgeSpan {
+    /// The edge source node name.
+    pub from: String,
+    /// The edge target node name, or `END`.
+    pub to: String,
+    /// The source span the edge was declared at.
+    pub span: Span,
+}
+
+/// Source traceability for a compiled [`Blueprint`].
+///
+/// Every node, channel, and edge is paired with the [`Span`] it was declared at,
+/// and the whole blueprint records its [`Origin`]. This is the view returned by
+/// [`Blueprint::provenance`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlueprintProvenance {
+    /// Where this blueprint came from.
+    pub origin: Origin,
+    /// The span of the `graph` declaration.
+    pub graph: Span,
+    /// The span of each node, keyed by node name, in source order.
+    pub nodes: Vec<NamedSpan>,
+    /// The span of each channel, keyed by channel name, in source order.
+    pub channels: Vec<NamedSpan>,
+    /// The span of each static edge, in source order.
+    pub edges: Vec<EdgeSpan>,
+}
+
+impl BlueprintProvenance {
+    /// Returns the source span the node named `name` was declared at, if known.
+    pub fn node_span(&self, name: &str) -> Option<Span> {
+        self.nodes.iter().find(|n| n.name == name).map(|n| n.span)
+    }
+
+    /// Returns the source span the channel named `name` was declared at, if
+    /// known.
+    pub fn channel_span(&self, name: &str) -> Option<Span> {
+        self.channels
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.span)
+    }
 }
 
 /// A compiled state-channel binding.
@@ -230,6 +267,50 @@ pub struct ChannelSpec {
     pub name: String,
     /// The reducer reference bound to the channel.
     pub reducer: String,
+    /// Reducer policy arguments (e.g. a named aggregate reducer or barrier
+    /// count). Empty for plain reducers like `append`/`overwrite`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<Literal>,
+}
+
+/// A compiled `name: type` field in a graph input/output shape.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IoFieldSpec {
+    /// The field name.
+    pub name: String,
+    /// The declared field type.
+    pub ty: String,
+}
+
+/// A compiled join/barrier: `target` resumes once every `source` has arrived.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct JoinSpec {
+    /// The upstream node names that must all arrive.
+    pub sources: Vec<String>,
+    /// The node to continue to once the barrier is satisfied.
+    pub target: String,
+}
+
+/// A compiled `command`: a typed graph command that hands control to `goto`
+/// while applying `update` writes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommandSpec {
+    /// The `goto` target node name, or `END`, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goto: Option<String>,
+    /// Channel/state updates the command applies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub update: Vec<(String, Literal)>,
+}
+
+/// A compiled fanout `send`: deliver `input` to a fresh `target` branch.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SendSpec {
+    /// The fanned-out target node name.
+    pub target: String,
+    /// An optional input-mapping name delivered to the target branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
 }
 
 /// A compiled node specification with its resolved routing.
@@ -247,6 +328,43 @@ pub struct NodeSpec {
     pub tools: Vec<String>,
     /// How control leaves this node.
     pub routing: Routing,
+    /// A registered agent name for a `subagent` node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// A registered subgraph name for a `subgraph` node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subgraph: Option<String>,
+    /// A registered REPL script name for a `repl_agent` node (declaration only;
+    /// never inline code).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<String>,
+    /// An input-mapping name for sub-agent / subgraph nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+    /// A typed `command` declaration, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<CommandSpec>,
+    /// Fanout `send` declarations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sends: Vec<SendSpec>,
+    /// Upstream node names a `join` node waits on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub join_sources: Vec<String>,
+    /// Choices presented by an `interrupt` node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// Node-level checkpoint policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
+    /// Node-level timeout policy (rendered literal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+    /// Node-level `retry { … }` policy entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retry: Vec<(String, Literal)>,
+    /// Node-level `metadata { … }` entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata: Vec<(String, Literal)>,
 }
 
 /// How control flows out of a [`NodeSpec`].

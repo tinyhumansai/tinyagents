@@ -20,6 +20,9 @@ CodeAct-style recursive execution belong to the
 and bindings; a `.ragsh` session inspects, scripts, and orchestrates harness or
 graph calls through capability-bound functions.
 
+For what the parser/compiler implement today versus what is still aspirational,
+see [Implementation status](implementation-status.md).
+
 ## Responsibilities
 
 - Parse workflow source into an AST.

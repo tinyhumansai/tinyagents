@@ -13,34 +13,54 @@
 //! job of [`crate::language::compiler`].
 
 use crate::error::{Result, TinyAgentsError};
+use crate::language::diagnostic::Diagnostic;
+use crate::language::source::SourceFile;
 use crate::language::types::{
-    ChannelDecl, EdgeDecl, GraphDecl, Literal, NodeDecl, Program, RouteDecl, Span, SpannedToken,
-    Token,
+    ChannelDecl, CommandDecl, EdgeDecl, GraphDecl, IoFieldDecl, JoinDecl, Literal, NodeDecl,
+    Program, RouteDecl, SendDecl, Span, SpannedToken, Token,
 };
 
 /// Tokenises and parses `source` in one step.
+///
+/// Parse errors carry a caret-underline rendering of the offending source.
 ///
 /// # Errors
 ///
 /// Returns [`TinyAgentsError::Parse`] for any lexical or structural error.
 pub fn parse_str(source: &str) -> Result<Program> {
+    let file = SourceFile::anonymous(source);
     let tokens = crate::language::lexer::tokenize(source)?;
-    parse(&tokens)
+    Parser {
+        tokens: &tokens,
+        pos: 0,
+        source: Some(&file),
+    }
+    .parse_program()
 }
 
 /// Parses a token slice produced by [`crate::language::lexer::tokenize`].
+///
+/// Without the original source text, parse errors render a source-free
+/// presentation (headline plus `line:column` anchor). Use [`parse_str`] to get
+/// caret-underlined diagnostics.
 ///
 /// # Errors
 ///
 /// Returns [`TinyAgentsError::Parse`] when the token stream does not match the
 /// grammar, with the span of the offending token.
 pub fn parse(tokens: &[SpannedToken]) -> Result<Program> {
-    Parser { tokens, pos: 0 }.parse_program()
+    Parser {
+        tokens,
+        pos: 0,
+        source: None,
+    }
+    .parse_program()
 }
 
 struct Parser<'a> {
     tokens: &'a [SpannedToken],
     pos: usize,
+    source: Option<&'a SourceFile>,
 }
 
 impl Parser<'_> {
@@ -69,11 +89,9 @@ impl Parser<'_> {
     }
 
     fn error(&self, message: impl Into<String>, span: Span) -> TinyAgentsError {
-        TinyAgentsError::Parse {
-            message: message.into(),
-            line: span.line,
-            column: span.column,
-        }
+        Diagnostic::error(message, span)
+            .with_primary_label("here")
+            .into_parse_error(self.source)
     }
 
     /// Expects an exact punctuation/structural token.
@@ -163,9 +181,14 @@ impl Parser<'_> {
             span,
             start: None,
             defaults: Vec::new(),
+            input: Vec::new(),
+            output: Vec::new(),
+            checkpoint: None,
+            interrupt: None,
             channels: Vec::new(),
             nodes: Vec::new(),
             edges: Vec::new(),
+            joins: Vec::new(),
         };
 
         while !matches!(self.current().token, Token::RBrace) {
@@ -186,8 +209,24 @@ impl Parser<'_> {
         } else if self.is_keyword("defaults") {
             self.advance();
             graph.defaults = self.parse_defaults_block()?;
+        } else if self.is_keyword("input") {
+            self.advance();
+            graph.input = self.parse_io_shape_block()?;
+        } else if self.is_keyword("output") {
+            self.advance();
+            graph.output = self.parse_io_shape_block()?;
+        } else if self.is_keyword("checkpoint") {
+            self.advance();
+            let (policy, _) = self.expect_ident()?;
+            graph.checkpoint = Some(policy);
+        } else if self.is_keyword("interrupt") {
+            self.advance();
+            let (policy, _) = self.expect_ident()?;
+            graph.interrupt = Some(policy);
         } else if self.is_keyword("channel") {
             graph.channels.push(self.parse_channel()?);
+        } else if self.is_keyword("join") {
+            graph.joins.push(self.parse_join()?);
         } else if self.is_keyword("node") {
             graph.nodes.push(self.parse_node()?);
         } else {
@@ -238,11 +277,80 @@ impl Parser<'_> {
         let span = self.expect_keyword("channel")?;
         let (name, _) = self.expect_ident()?;
         let (reducer, _) = self.expect_ident()?;
+        // Optional reducer policy arguments. Restricted to string/number
+        // literals so they cannot be confused with the next declaration's
+        // leading keyword (e.g. `node`, `channel`).
+        let mut args = Vec::new();
+        loop {
+            match &self.current().token {
+                Token::Str(s) => {
+                    let s = s.clone();
+                    self.advance();
+                    args.push(Literal::Str(s));
+                }
+                Token::Num(n) => {
+                    let n = *n;
+                    self.advance();
+                    args.push(Literal::Num(n));
+                }
+                _ => break,
+            }
+        }
         Ok(ChannelDecl {
             name,
             reducer,
+            args,
             span,
         })
+    }
+
+    /// Parses a graph `input`/`output` shape block: `{ name type … }`.
+    fn parse_io_shape_block(&mut self) -> Result<Vec<IoFieldDecl>> {
+        self.expect(&Token::LBrace)?;
+        let mut fields = Vec::new();
+        while !matches!(self.current().token, Token::RBrace) {
+            if self.at_eof() {
+                return Err(self.error("unexpected end of input inside shape block", self.span()));
+            }
+            let (name, span) = self.expect_ident()?;
+            let (ty, _) = self.expect_ident()?;
+            fields.push(IoFieldDecl { name, ty, span });
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(fields)
+    }
+
+    /// Parses a top-level `join [a, b] -> c` declaration.
+    fn parse_join(&mut self) -> Result<JoinDecl> {
+        let span = self.expect_keyword("join")?;
+        let sources = self.parse_ident_list()?;
+        self.expect(&Token::Arrow)?;
+        let target = self.parse_node_ref()?;
+        Ok(JoinDecl {
+            sources,
+            target,
+            span,
+        })
+    }
+
+    /// Parses a bracketed, comma-separated identifier list: `[a, b, c]`.
+    fn parse_ident_list(&mut self) -> Result<Vec<String>> {
+        self.expect(&Token::LBracket)?;
+        let mut items = Vec::new();
+        while !matches!(self.current().token, Token::RBracket) {
+            if self.at_eof() {
+                return Err(self.error("unexpected end of input inside list", self.span()));
+            }
+            let (name, _) = self.expect_ident()?;
+            items.push(name);
+            if matches!(self.current().token, Token::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(&Token::RBracket)?;
+        Ok(items)
     }
 
     fn parse_edge(&mut self) -> Result<EdgeDecl> {
@@ -263,16 +371,7 @@ impl Parser<'_> {
         let (name, _) = self.expect_ident()?;
         self.expect(&Token::LBrace)?;
 
-        let mut node = NodeDecl {
-            name,
-            kind: None,
-            model: None,
-            prompt: None,
-            tools: Vec::new(),
-            next: None,
-            routes: Vec::new(),
-            span,
-        };
+        let mut node = NodeDecl::empty(name, span);
 
         while !matches!(self.current().token, Token::RBrace) {
             if self.at_eof() {
@@ -324,6 +423,55 @@ impl Parser<'_> {
                 self.advance();
                 node.routes = self.parse_routes_block()?;
             }
+            "agent" => {
+                self.advance();
+                node.agent = Some(self.expect_string()?);
+            }
+            "graph" => {
+                self.advance();
+                node.graph = Some(self.expect_string()?);
+            }
+            "script" => {
+                self.advance();
+                node.script = Some(self.expect_string()?);
+            }
+            "input" => {
+                self.advance();
+                node.input = Some(self.expect_string()?);
+            }
+            "command" => {
+                self.advance();
+                node.command = Some(self.parse_command_block()?);
+            }
+            "sends" => {
+                self.advance();
+                node.sends = self.parse_sends_block()?;
+            }
+            "sources" => {
+                self.advance();
+                node.sources = self.parse_ident_list()?;
+            }
+            "options" => {
+                self.advance();
+                node.options = self.parse_string_list()?;
+            }
+            "checkpoint" => {
+                self.advance();
+                let (policy, _) = self.expect_ident()?;
+                node.checkpoint = Some(policy);
+            }
+            "timeout" => {
+                self.advance();
+                node.timeout = Some(self.parse_literal()?);
+            }
+            "retry" => {
+                self.advance();
+                node.retry = self.parse_defaults_block()?;
+            }
+            "metadata" => {
+                self.advance();
+                node.metadata = self.parse_defaults_block()?;
+            }
             other => {
                 return Err(self.error(format!("unknown node item `{other}`"), tok.span));
             }
@@ -348,6 +496,60 @@ impl Parser<'_> {
         }
         self.expect(&Token::RBracket)?;
         Ok(items)
+    }
+
+    /// Parses a `command { goto <target> update { … } }` block. The `command`
+    /// keyword has already been consumed.
+    fn parse_command_block(&mut self) -> Result<CommandDecl> {
+        let span = self.span();
+        self.expect(&Token::LBrace)?;
+        let mut goto = None;
+        let mut update = Vec::new();
+        while !matches!(self.current().token, Token::RBrace) {
+            if self.at_eof() {
+                return Err(self.error("unexpected end of input inside `command`", self.span()));
+            }
+            if self.is_keyword("goto") {
+                self.advance();
+                goto = Some(self.parse_node_ref()?);
+            } else if self.is_keyword("update") {
+                self.advance();
+                update = self.parse_defaults_block()?;
+            } else {
+                return Err(self.error("expected `goto` or `update` inside `command`", self.span()));
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(CommandDecl { goto, update, span })
+    }
+
+    /// Parses a `sends [ send <node> ["input"] … ]` block. The `sends` keyword
+    /// has already been consumed.
+    fn parse_sends_block(&mut self) -> Result<Vec<SendDecl>> {
+        self.expect(&Token::LBracket)?;
+        let mut sends = Vec::new();
+        while !matches!(self.current().token, Token::RBracket) {
+            if self.at_eof() {
+                return Err(self.error("unexpected end of input inside `sends`", self.span()));
+            }
+            let span = self.expect_keyword("send")?;
+            let target = self.parse_node_ref()?;
+            let input = if matches!(self.current().token, Token::Str(_)) {
+                Some(self.expect_string()?)
+            } else {
+                None
+            };
+            sends.push(SendDecl {
+                target,
+                input,
+                span,
+            });
+            if matches!(self.current().token, Token::Comma) {
+                self.advance();
+            }
+        }
+        self.expect(&Token::RBracket)?;
+        Ok(sends)
     }
 
     fn parse_routes_block(&mut self) -> Result<Vec<RouteDecl>> {

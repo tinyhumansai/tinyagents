@@ -50,6 +50,7 @@ fn blueprint(id: &str) -> Blueprint {
         nodes: Vec::new(),
         edges: Vec::new(),
         defaults: Vec::new(),
+        ..Blueprint::default()
     }
 }
 

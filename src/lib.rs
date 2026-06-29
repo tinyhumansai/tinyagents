@@ -80,9 +80,31 @@ pub use registry::{CapabilityRegistry, ComponentId, ComponentKind, ComponentMeta
 // turn `.rag`/`.ragsh` source into validated blueprints. `compile_source` runs
 // parse -> compile -> registry-bind in one call.
 pub use language::compiler::{
-    CapabilityResolver, bind_capabilities, bind_capabilities_with_registry, compile, compile_source,
+    CapabilityResolver, bind_capabilities, bind_capabilities_with_registry, compile,
+    compile_source, compile_with_provenance,
 };
-pub use language::types::Blueprint;
+// `Resolver` is the registry-backed binding gate: it resolves every reference in
+// a `.rag` plan (file-backed or model-generated) against the registry, producing
+// spanned diagnostics for unknown/disallowed capabilities. `resolve_source` is
+// the recommended parse -> resolve -> lower façade.
+pub use language::resolver::{Resolver, resolve_source};
+pub use language::types::{
+    Blueprint, BlueprintProvenance, ChannelSpec, CommandSpec, EdgeSpan, EdgeSpec, IoFieldSpec,
+    JoinSpec, NamedSpan, NodeSpec, Origin, Routing, SendSpec,
+};
+// `blueprint_diff` produces a structured, human-readable `BlueprintDiff` of two
+// compiled blueprints — the basis for generated-workflow review and the REPL
+// `graph_diff` builtin. `testkit` holds deterministic compile/assert helpers.
+pub use language::diff::{BlueprintDiff, ChannelDiff, FieldChange, NodeDiff, blueprint_diff};
+pub use language::testkit;
+
+// --- Language: diagnostics, spans, and the source map ---
+// Structured, source-aware errors for `.rag`: a `Diagnostic` (with `Severity`
+// and labelled spans) rendered against a `SourceFile`/`SourceMap` with caret
+// underlines.
+pub use language::diagnostic::{Diagnostic, Label, Severity};
+pub use language::source::{SourceFile, SourceId, SourceMap};
+pub use language::span::Span;
 
 // --- Harness: embeddings + retrieval ---
 pub use harness::embeddings::{
