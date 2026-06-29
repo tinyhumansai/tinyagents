@@ -4,10 +4,9 @@
 //! clean implementations without mixing type definitions and method bodies.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 
 use crate::harness::message::Message;
-use crate::harness::model::{ModelRequest, PromptSegment, ResponseFormat};
+use crate::harness::model::{PromptSegment, ResponseFormat};
 use crate::harness::tool::ToolSchema;
 
 /// The role a rendered message will take in the conversation.

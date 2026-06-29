@@ -1,7 +1,6 @@
 //! Tests added in a later pass.
 
 use super::*;
-use crate::harness::message::AssistantMessage;
 use crate::harness::model::{ModelResponse, ResponseFormat};
 use crate::harness::tool::ToolCall;
 use serde_json::json;
@@ -41,26 +40,20 @@ fn tool_call_strategy_reads_matching_call() {
 
 #[test]
 fn tool_call_strategy_errors_when_no_match() {
-    let extractor =
-        StructuredExtractor::new(StructuredStrategy::ToolCall, "my_tool", json!({}));
+    let extractor = StructuredExtractor::new(StructuredStrategy::ToolCall, "my_tool", json!({}));
     let response = ModelResponse::assistant("");
     assert!(extractor.extract(&response).is_err());
 }
 
 #[test]
 fn response_format_for_provider_schema_is_json_schema() {
-    let fmt = response_format_for_strategy(
-        StructuredStrategy::ProviderSchema,
-        "foo",
-        json!({}),
-    );
+    let fmt = response_format_for_strategy(StructuredStrategy::ProviderSchema, "foo", json!({}));
     assert!(matches!(fmt, ResponseFormat::JsonSchema { .. }));
 }
 
 #[test]
 fn response_format_for_tool_call_is_text() {
-    let fmt =
-        response_format_for_strategy(StructuredStrategy::ToolCall, "foo", json!({}));
+    let fmt = response_format_for_strategy(StructuredStrategy::ToolCall, "foo", json!({}));
     assert_eq!(fmt, ResponseFormat::Text);
 }
 

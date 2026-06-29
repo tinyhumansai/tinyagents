@@ -389,9 +389,7 @@ mod serde_system_time_opt {
         }
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<Option<SystemTime>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SystemTime>, D::Error> {
         let secs = Option::<u64>::deserialize(d)?;
         Ok(secs.map(|s| UNIX_EPOCH + Duration::from_secs(s)))
     }

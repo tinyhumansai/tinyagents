@@ -3,6 +3,8 @@
 //! Smoke test confirming that [`super::InMemoryStore`] round-trips a single
 //! key and that [`super::StoreRegistry`] provides a working default store.
 
+use std::sync::Arc;
+
 use super::*;
 use serde_json::json;
 
@@ -37,10 +39,7 @@ async fn store_registry_default_store_is_usable() {
     let reg = StoreRegistry::new();
     let store = reg.default_store();
     store.put("ns", "key", json!("value")).await.unwrap();
-    assert_eq!(
-        store.get("ns", "key").await.unwrap(),
-        Some(json!("value"))
-    );
+    assert_eq!(store.get("ns", "key").await.unwrap(), Some(json!("value")));
 }
 
 #[tokio::test]

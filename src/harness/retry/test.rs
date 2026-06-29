@@ -10,5 +10,7 @@ fn smoke_retry_policy_compiles() {
     assert!(!policy.should_retry(3));
 
     assert!(is_retryable(&RustAgentsError::Model("timeout".into())));
-    assert!(!is_retryable(&RustAgentsError::Validation("bad input".into())));
+    assert!(!is_retryable(&RustAgentsError::Validation(
+        "bad input".into()
+    )));
 }

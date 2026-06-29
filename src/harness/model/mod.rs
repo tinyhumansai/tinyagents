@@ -207,32 +207,31 @@ impl<State: Send + Sync> ModelRegistry<State> {
     /// Resolves a model using request override, previous state, hints,
     /// agent default, and finally registry default.
     pub fn resolve(&self, selection: ModelSelection) -> Option<ResolvedModelBinding<State>> {
-        if let Some(requested) = selection.requested {
-            if let Some(model) = self.get(&requested) {
-                return Some(ResolvedModelBinding {
-                    resolved: ResolvedModel {
-                        name: requested.clone(),
-                        requested: Some(requested),
-                        source: ModelResolutionSource::RequestOverride,
-                    },
-                    model,
-                });
-            }
+        if let Some(requested) = selection.requested
+            && let Some(model) = self.get(&requested)
+        {
+            return Some(ResolvedModelBinding {
+                resolved: ResolvedModel {
+                    name: requested.clone(),
+                    requested: Some(requested),
+                    source: ModelResolutionSource::RequestOverride,
+                },
+                model,
+            });
         }
 
-        if selection.reuse_previous {
-            if let Some(previous) = selection.previous {
-                if let Some(model) = self.get(&previous.name) {
-                    return Some(ResolvedModelBinding {
-                        resolved: ResolvedModel {
-                            name: previous.name,
-                            requested: previous.requested,
-                            source: ModelResolutionSource::StateReuse,
-                        },
-                        model,
-                    });
-                }
-            }
+        if selection.reuse_previous
+            && let Some(previous) = selection.previous
+            && let Some(model) = self.get(&previous.name)
+        {
+            return Some(ResolvedModelBinding {
+                resolved: ResolvedModel {
+                    name: previous.name,
+                    requested: previous.requested,
+                    source: ModelResolutionSource::StateReuse,
+                },
+                model,
+            });
         }
 
         let mut hints: Vec<(usize, ModelHint)> = selection.hints.into_iter().enumerate().collect();
@@ -256,17 +255,17 @@ impl<State: Send + Sync> ModelRegistry<State> {
             }
         }
 
-        if let Some(agent_default) = selection.agent_default {
-            if let Some(model) = self.get(&agent_default) {
-                return Some(ResolvedModelBinding {
-                    resolved: ResolvedModel {
-                        name: agent_default.clone(),
-                        requested: Some(agent_default),
-                        source: ModelResolutionSource::AgentDefault,
-                    },
-                    model,
-                });
-            }
+        if let Some(agent_default) = selection.agent_default
+            && let Some(model) = self.get(&agent_default)
+        {
+            return Some(ResolvedModelBinding {
+                resolved: ResolvedModel {
+                    name: agent_default.clone(),
+                    requested: Some(agent_default),
+                    source: ModelResolutionSource::AgentDefault,
+                },
+                model,
+            });
         }
 
         let name = self.default_name()?.to_string();

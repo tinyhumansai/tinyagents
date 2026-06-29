@@ -99,5 +99,8 @@ fn cache_layout_event_volatile_only_when_no_cacheable_segments() {
     let event = CacheLayoutEvent::new(&before, &after);
 
     assert!(event.changed_prefix);
-    assert!(event.volatile_only, "all segments are volatile after the change");
+    assert!(
+        event.volatile_only,
+        "all segments are volatile after the change"
+    );
 }

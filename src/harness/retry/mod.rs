@@ -91,8 +91,7 @@ impl RetryPolicy {
     /// result is fully deterministic. When jitter is enabled, the backoff is
     /// uniformly distributed over `[0, base_backoff]`.
     pub fn backoff_for_attempt_with(&self, attempt: usize, rand01: f64) -> Duration {
-        let base = (self.initial_backoff_ms as f64)
-            * self.multiplier.powi(attempt as i32);
+        let base = (self.initial_backoff_ms as f64) * self.multiplier.powi(attempt as i32);
         let capped = base.min(self.max_backoff_ms as f64);
         let effective = if self.jitter {
             capped * rand01.clamp(0.0, 1.0)
@@ -195,12 +194,9 @@ impl RateLimiter {
 
     /// Adds tokens to the bucket based on time elapsed since the last refill.
     fn refill(&self, state: &mut types::RateLimiterState, now: Instant) {
-        let elapsed = now
-            .duration_since(state.last_refill)
-            .as_secs_f64();
+        let elapsed = now.duration_since(state.last_refill).as_secs_f64();
         if elapsed > 0.0 {
-            state.tokens =
-                (state.tokens + elapsed * state.refill_per_sec).min(state.capacity);
+            state.tokens = (state.tokens + elapsed * state.refill_per_sec).min(state.capacity);
             state.last_refill = now;
         }
     }

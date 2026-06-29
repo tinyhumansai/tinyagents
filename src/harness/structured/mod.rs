@@ -62,9 +62,8 @@ impl StructuredOutput {
     /// Returns [`RustAgentsError::StructuredOutput`] when the value cannot be
     /// deserialised into `T`.
     pub fn parse<T: DeserializeOwned>(&self) -> Result<T> {
-        serde_json::from_value(self.value.clone()).map_err(|e| {
-            RustAgentsError::StructuredOutput(format!("deserialisation failed: {e}"))
-        })
+        serde_json::from_value(self.value.clone())
+            .map_err(|e| RustAgentsError::StructuredOutput(format!("deserialisation failed: {e}")))
     }
 }
 
@@ -90,6 +89,14 @@ impl StructuredExtractor {
             schema_name: schema_name.into(),
             schema,
         }
+    }
+
+    /// Returns the JSON Schema document this extractor was configured with.
+    ///
+    /// Retained for local validation and for echoing the schema back into a
+    /// [`ResponseFormat`] when re-requesting structured output.
+    pub fn schema(&self) -> &Value {
+        &self.schema
     }
 
     /// Extracts a [`StructuredOutput`] from `response` using the configured

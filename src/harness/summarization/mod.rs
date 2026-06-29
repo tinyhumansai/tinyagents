@@ -128,8 +128,7 @@ pub fn trim_messages(messages: &[Message], strategy: &TrimStrategy) -> Vec<Messa
             // the front as a last resort.
             let mut sys_candidate = system;
             while !sys_candidate.is_empty() {
-                let total =
-                    slice_token_estimate(&sys_candidate) + slice_token_estimate(&candidate);
+                let total = slice_token_estimate(&sys_candidate) + slice_token_estimate(&candidate);
                 if total <= limit {
                     break;
                 }
@@ -199,7 +198,10 @@ impl Summarizer for ConcatSummarizer {
             reason: "ConcatSummarizer: messages concatenated verbatim (no LLM call)".to_string(),
         };
 
-        Ok(SummaryRecord { summary, provenance })
+        Ok(SummaryRecord {
+            summary,
+            provenance,
+        })
     }
 }
 

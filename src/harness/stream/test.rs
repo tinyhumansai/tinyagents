@@ -8,7 +8,7 @@
 use serde_json::json;
 
 use crate::harness::message::MessageDelta;
-use crate::harness::stream::{stream, StreamChunk, StreamMode, StreamSink};
+use crate::harness::stream::{StreamChunk, StreamMode, StreamSink, stream};
 
 #[test]
 fn smoke_sink_filters_by_mode() {
@@ -68,10 +68,7 @@ fn smoke_stream_helper_filters() {
 
 #[test]
 fn smoke_chunk_mode_matches_variant() {
-    assert_eq!(
-        StreamChunk::Values(json!(null)).mode(),
-        StreamMode::Values
-    );
+    assert_eq!(StreamChunk::Values(json!(null)).mode(), StreamMode::Values);
     assert_eq!(
         StreamChunk::Updates(json!(null)).mode(),
         StreamMode::Updates
@@ -80,16 +77,10 @@ fn smoke_chunk_mode_matches_variant() {
         StreamChunk::Message(MessageDelta::default()).mode(),
         StreamMode::Messages
     );
-    assert_eq!(
-        StreamChunk::Debug("x".into()).mode(),
-        StreamMode::Debug
-    );
+    assert_eq!(StreamChunk::Debug("x".into()).mode(), StreamMode::Debug);
     assert_eq!(
         StreamChunk::Interrupt(json!(null)).mode(),
         StreamMode::Interrupts
     );
-    assert_eq!(
-        StreamChunk::Custom(json!(null)).mode(),
-        StreamMode::Custom
-    );
+    assert_eq!(StreamChunk::Custom(json!(null)).mode(), StreamMode::Custom);
 }

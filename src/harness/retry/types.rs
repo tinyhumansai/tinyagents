@@ -1,7 +1,5 @@
 //! Types for retry, fallback, and rate-limiting policies.
 
-use std::time::Duration;
-
 /// Configures how a harness call is retried on transient failure.
 ///
 /// Backoff grows exponentially: `initial_backoff_ms * multiplier^attempt`, then
@@ -38,7 +36,7 @@ pub struct RetryPolicy {
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
-            max_attempts: 4,        // 1 try + 3 retries
+            max_attempts: 4, // 1 try + 3 retries
             initial_backoff_ms: 200,
             max_backoff_ms: 30_000,
             multiplier: 2.0,

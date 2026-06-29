@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::harness::model::{ModelRequest, ModelResponse};
+use crate::harness::model::ModelResponse;
 
 // ── ResponseCache ─────────────────────────────────────────────────────────────
 

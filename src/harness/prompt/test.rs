@@ -1,7 +1,7 @@
 //! Tests added in a later pass.
 
 use super::*;
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 
 #[test]
 fn renders_simple_placeholder() {

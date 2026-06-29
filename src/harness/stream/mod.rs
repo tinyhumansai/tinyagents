@@ -137,4 +137,5 @@ pub fn stream(chunks: &[StreamChunk], modes: &[StreamMode]) -> Vec<StreamChunk> 
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod test;
