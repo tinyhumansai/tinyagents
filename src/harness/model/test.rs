@@ -17,6 +17,12 @@ impl ChatModel<()> for StaticModel {
 fn request_builder_sets_fields() {
     let req = ModelRequest::new(vec![Message::user("hi")])
         .with_model("gpt")
+        .with_model_hint(ModelHint {
+            model: "fast".into(),
+            priority: 10,
+            reason: Some("latency".into()),
+        })
+        .with_reuse_previous_model(true)
         .with_temperature(0.5)
         .with_max_tokens(128)
         .with_timeout_ms(1000)
@@ -28,6 +34,8 @@ fn request_builder_sets_fields() {
     assert_eq!(req.timeout_ms, Some(1000));
     assert_eq!(req.tool_choice, ToolChoice::Required);
     assert_eq!(req.tags, vec!["t".to_string()]);
+    assert_eq!(req.model_hints[0].model, "fast");
+    assert!(req.reuse_previous_model);
 }
 
 #[test]
@@ -68,10 +76,17 @@ fn response_format_json_schema() {
 
 #[test]
 fn response_helpers() {
-    let resp = ModelResponse::assistant("hi").with_finish_reason("stop");
+    let resp = ModelResponse::assistant("hi")
+        .with_finish_reason("stop")
+        .with_resolved_model(ResolvedModel {
+            name: "fast".into(),
+            requested: Some("fast".into()),
+            source: ModelResolutionSource::Hint,
+        });
     assert_eq!(resp.text(), "hi");
     assert!(resp.tool_calls().is_empty());
     assert_eq!(resp.finish_reason.as_deref(), Some("stop"));
+    assert_eq!(resp.resolved_model.unwrap().name, "fast");
 }
 
 #[tokio::test]
@@ -90,4 +105,104 @@ async fn registry_register_get_default_and_stream() {
     let deltas = model.stream(&(), ModelRequest::default()).await.unwrap();
     assert_eq!(deltas.len(), 1);
     assert_eq!(deltas[0].content, "hello");
+}
+
+#[tokio::test]
+async fn registry_resolves_request_override_first() {
+    let mut registry: ModelRegistry<()> = ModelRegistry::new();
+    registry
+        .register("default", Arc::new(StaticModel))
+        .register("explicit", Arc::new(StaticModel));
+
+    let request = ModelRequest::default()
+        .with_model("explicit")
+        .with_model_hint(ModelHint {
+            model: "default".into(),
+            priority: 100,
+            reason: None,
+        });
+
+    let resolved = registry
+        .resolve_request(&request, Some("default"), None)
+        .unwrap()
+        .resolved;
+
+    assert_eq!(resolved.name, "explicit");
+    assert_eq!(resolved.source, ModelResolutionSource::RequestOverride);
+}
+
+#[tokio::test]
+async fn registry_reuses_previous_before_hints() {
+    let mut registry: ModelRegistry<()> = ModelRegistry::new();
+    registry
+        .register("default", Arc::new(StaticModel))
+        .register("previous", Arc::new(StaticModel))
+        .register("hint", Arc::new(StaticModel));
+
+    let request = ModelRequest::default()
+        .with_reuse_previous_model(true)
+        .with_model_hint(ModelHint {
+            model: "hint".into(),
+            priority: 100,
+            reason: None,
+        });
+
+    let previous = ResolvedModel {
+        name: "previous".into(),
+        requested: Some("previous".into()),
+        source: ModelResolutionSource::AgentDefault,
+    };
+
+    let resolved = registry
+        .resolve_request(&request, Some("default"), Some(previous))
+        .unwrap()
+        .resolved;
+
+    assert_eq!(resolved.name, "previous");
+    assert_eq!(resolved.source, ModelResolutionSource::StateReuse);
+}
+
+#[tokio::test]
+async fn registry_tries_hints_by_priority_then_agent_default_then_registry_default() {
+    let mut registry: ModelRegistry<()> = ModelRegistry::new();
+    registry
+        .register("registry_default", Arc::new(StaticModel))
+        .register("agent_default", Arc::new(StaticModel))
+        .register("strong_hint", Arc::new(StaticModel));
+
+    let request = ModelRequest::default()
+        .with_model_hint(ModelHint {
+            model: "missing".into(),
+            priority: 100,
+            reason: None,
+        })
+        .with_model_hint(ModelHint {
+            model: "strong_hint".into(),
+            priority: 10,
+            reason: None,
+        });
+
+    let resolved = registry
+        .resolve_request(&request, Some("agent_default"), None)
+        .unwrap()
+        .resolved;
+
+    assert_eq!(resolved.name, "strong_hint");
+    assert_eq!(resolved.source, ModelResolutionSource::Hint);
+
+    let resolved = registry
+        .resolve_request(&ModelRequest::default(), Some("agent_default"), None)
+        .unwrap()
+        .resolved;
+
+    assert_eq!(resolved.name, "agent_default");
+    assert_eq!(resolved.source, ModelResolutionSource::AgentDefault);
+
+    let resolved = registry
+        .resolve_request(&ModelRequest::default(), Some("missing"), None)
+        .unwrap()
+        .resolved;
+
+    assert_eq!(resolved.name, "registry_default");
+    assert_eq!(resolved.source, ModelResolutionSource::RegistryDefault);
 }

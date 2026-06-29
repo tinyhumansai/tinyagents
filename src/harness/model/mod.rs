@@ -59,6 +59,18 @@ impl ModelRequest {
         self
     }
 
+    /// Adds a model resolution hint.
+    pub fn with_model_hint(mut self, hint: ModelHint) -> Self {
+        self.model_hints.push(hint);
+        self
+    }
+
+    /// Enables or disables previous model reuse from run/agent state.
+    pub fn with_reuse_previous_model(mut self, reuse: bool) -> Self {
+        self.reuse_previous_model = reuse;
+        self
+    }
+
     /// Sets the sampling temperature.
     pub fn with_temperature(mut self, temperature: f64) -> Self {
         self.temperature = Some(temperature);
@@ -113,6 +125,7 @@ impl ModelResponse {
             usage: None,
             finish_reason: None,
             raw: None,
+            resolved_model: None,
         }
     }
 
@@ -126,6 +139,12 @@ impl ModelResponse {
     /// Sets the provider finish reason.
     pub fn with_finish_reason(mut self, reason: impl Into<String>) -> Self {
         self.finish_reason = Some(reason.into());
+        self
+    }
+
+    /// Attaches model resolution metadata.
+    pub fn with_resolved_model(mut self, resolved: ResolvedModel) -> Self {
+        self.resolved_model = Some(resolved);
         self
     }
 
@@ -183,6 +202,99 @@ impl<State: Send + Sync> ModelRegistry<State> {
     /// Returns the configured default model name.
     pub fn default_name(&self) -> Option<&str> {
         self.default.as_deref()
+    }
+
+    /// Resolves a model using request override, previous state, hints,
+    /// agent default, and finally registry default.
+    pub fn resolve(&self, selection: ModelSelection) -> Option<ResolvedModelBinding<State>> {
+        if let Some(requested) = selection.requested {
+            if let Some(model) = self.get(&requested) {
+                return Some(ResolvedModelBinding {
+                    resolved: ResolvedModel {
+                        name: requested.clone(),
+                        requested: Some(requested),
+                        source: ModelResolutionSource::RequestOverride,
+                    },
+                    model,
+                });
+            }
+        }
+
+        if selection.reuse_previous {
+            if let Some(previous) = selection.previous {
+                if let Some(model) = self.get(&previous.name) {
+                    return Some(ResolvedModelBinding {
+                        resolved: ResolvedModel {
+                            name: previous.name,
+                            requested: previous.requested,
+                            source: ModelResolutionSource::StateReuse,
+                        },
+                        model,
+                    });
+                }
+            }
+        }
+
+        let mut hints: Vec<(usize, ModelHint)> = selection.hints.into_iter().enumerate().collect();
+        hints.sort_by(|(left_index, left), (right_index, right)| {
+            right
+                .priority
+                .cmp(&left.priority)
+                .then_with(|| left_index.cmp(right_index))
+        });
+
+        for (_, hint) in hints {
+            if let Some(model) = self.get(&hint.model) {
+                return Some(ResolvedModelBinding {
+                    resolved: ResolvedModel {
+                        name: hint.model.clone(),
+                        requested: Some(hint.model),
+                        source: ModelResolutionSource::Hint,
+                    },
+                    model,
+                });
+            }
+        }
+
+        if let Some(agent_default) = selection.agent_default {
+            if let Some(model) = self.get(&agent_default) {
+                return Some(ResolvedModelBinding {
+                    resolved: ResolvedModel {
+                        name: agent_default.clone(),
+                        requested: Some(agent_default),
+                        source: ModelResolutionSource::AgentDefault,
+                    },
+                    model,
+                });
+            }
+        }
+
+        let name = self.default_name()?.to_string();
+        self.default_model().map(|model| ResolvedModelBinding {
+            resolved: ResolvedModel {
+                name,
+                requested: None,
+                source: ModelResolutionSource::RegistryDefault,
+            },
+            model,
+        })
+    }
+
+    /// Resolves a model for one request with optional agent and previous-state
+    /// context.
+    pub fn resolve_request(
+        &self,
+        request: &ModelRequest,
+        agent_default: Option<&str>,
+        previous: Option<ResolvedModel>,
+    ) -> Option<ResolvedModelBinding<State>> {
+        self.resolve(ModelSelection {
+            requested: request.model.clone(),
+            previous,
+            reuse_previous: request.reuse_previous_model,
+            hints: request.model_hints.clone(),
+            agent_default: agent_default.map(ToOwned::to_owned),
+        })
     }
 
     /// Returns registered model names in sorted order.

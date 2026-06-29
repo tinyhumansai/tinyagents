@@ -78,6 +78,67 @@ pub struct PromptSegment {
     pub cacheable: bool,
 }
 
+/// A model candidate supplied by an agent, request, state, or orchestrator.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelHint {
+    /// Registry alias or provider model id to try.
+    pub model: String,
+    /// Higher priority hints are tried first.
+    #[serde(default)]
+    pub priority: i32,
+    /// Optional human-readable reason for observability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Where the final model choice came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelResolutionSource {
+    /// Explicit request-level model override.
+    RequestOverride,
+    /// Reused from prior run or state.
+    StateReuse,
+    /// Chosen from request/agent/orchestrator hints.
+    Hint,
+    /// Default declared by the agent configuration.
+    AgentDefault,
+    /// Registry-level default.
+    RegistryDefault,
+}
+
+/// Durable record of the model selected for a call or run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedModel {
+    /// Registry name used to obtain the executable model.
+    pub name: String,
+    /// User/agent requested value, when different from the final name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested: Option<String>,
+    /// Source that selected this model.
+    pub source: ModelResolutionSource,
+}
+
+/// Input policy for resolving a model.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelSelection {
+    /// Explicit model override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested: Option<String>,
+    /// Optional previous model to reuse from state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<ResolvedModel>,
+    /// Whether previous state should be considered before hints/defaults.
+    #[serde(default)]
+    pub reuse_previous: bool,
+    /// Ordered model hints. Higher priority wins; ties preserve insertion order.
+    #[serde(default)]
+    pub hints: Vec<ModelHint>,
+    /// Agent-level default model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_default: Option<String>,
+}
+
 /// A provider-neutral chat model request.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ModelRequest {
@@ -95,6 +156,12 @@ pub struct ModelRequest {
     /// Model id or registry alias override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Ordered model resolution hints.
+    #[serde(default)]
+    pub model_hints: Vec<ModelHint>,
+    /// Reuse the model recorded in state when available.
+    #[serde(default)]
+    pub reuse_previous_model: bool,
     /// Sampling temperature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
@@ -132,6 +199,9 @@ pub struct ModelResponse {
     /// Raw provider metadata preserved for callers who need it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<Value>,
+    /// Model selected by the harness/registry for this response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<ResolvedModel>,
 }
 
 /// An incremental streamed chunk of a model response.
@@ -172,6 +242,14 @@ pub trait ChatModel<State: Send + Sync>: Send + Sync {
 pub struct ModelRegistry<State: Send + Sync> {
     pub(crate) models: HashMap<String, Arc<dyn ChatModel<State>>>,
     pub(crate) default: Option<String>,
+}
+
+/// Executable model plus durable resolution metadata.
+pub struct ResolvedModelBinding<State: Send + Sync> {
+    /// Durable selected-model record.
+    pub resolved: ResolvedModel,
+    /// Executable model handle.
+    pub model: Arc<dyn ChatModel<State>>,
 }
 
 use crate::Result;
