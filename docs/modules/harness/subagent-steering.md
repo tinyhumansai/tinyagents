@@ -1,7 +1,7 @@
 # Sub-Agent And Orchestrator Steering
 
 Steering is runtime control sent to an already-created agent run. It is broader
-than a prompt edit and narrower than mutating arbitrary state. RustAgents should
+than a prompt edit and narrower than mutating arbitrary state. TinyAgents should
 support steering at both the harness level and graph level so parent
 orchestrators, humans, tests, and UIs can guide long-running work without
 breaking run hierarchy, checkpoints, or observability.

@@ -8,10 +8,10 @@
 //! REPL's plan corresponds to a real, compilable blueprint rather than an
 //! arbitrary string.
 
-use rustagents::RustAgentsError;
-use rustagents::language::compiler::compile;
-use rustagents::language::parser::parse_str;
-use rustagents::repl::{CapabilityPolicy, ReplCommand, ReplOutcome, ReplSession, parse_command};
+use tinyagents::RustAgentsError;
+use tinyagents::language::compiler::compile;
+use tinyagents::language::parser::parse_str;
+use tinyagents::repl::{CapabilityPolicy, ReplCommand, ReplOutcome, ReplSession, parse_command};
 
 const SUPPORT_AGENT: &str = r#"
 graph support_agent {

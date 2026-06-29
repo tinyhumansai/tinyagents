@@ -115,6 +115,14 @@ pub enum RustAgentsError {
     #[error("capability error: {0}")]
     Capability(String),
 
+    /// A named capability with the same [`crate::registry::ComponentKind`] and
+    /// name is already registered in a
+    /// [`crate::registry::CapabilityRegistry`]. The payload names the offending
+    /// kind and name. Use an explicit `replace_*` method to overwrite an
+    /// existing registration instead.
+    #[error("duplicate component: {0}")]
+    DuplicateComponent(String),
+
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 }

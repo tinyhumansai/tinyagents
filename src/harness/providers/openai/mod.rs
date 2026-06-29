@@ -14,9 +14,9 @@
 //! # Example
 //!
 //! ```no_run
-//! use rustagents::harness::providers::openai::OpenAiModel;
+//! use tinyagents::harness::providers::openai::OpenAiModel;
 //!
-//! # fn main() -> rustagents::Result<()> {
+//! # fn main() -> tinyagents::Result<()> {
 //! // Reads OPENAI_API_KEY (and optional OPENAI_MODEL / OPENAI_BASE_URL).
 //! let model = OpenAiModel::from_env()?;
 //! # let _ = model;

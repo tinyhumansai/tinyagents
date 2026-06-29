@@ -12,8 +12,8 @@
 //! # Example
 //!
 //! ```
-//! use rustagents::harness::context::{RunConfig, RunContext};
-//! use rustagents::harness::events::AgentEvent;
+//! use tinyagents::harness::context::{RunConfig, RunContext};
+//! use tinyagents::harness::events::AgentEvent;
 //!
 //! let config = RunConfig::new("run-1").with_max_model_calls(2);
 //! let mut ctx: RunContext = RunContext::new(config, ());

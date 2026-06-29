@@ -23,7 +23,7 @@
 //! # Example
 //! ```
 //! use std::sync::Arc;
-//! use rustagents::harness::embeddings::{InMemoryVectorStore, MockEmbeddingModel, Retriever};
+//! use tinyagents::harness::embeddings::{InMemoryVectorStore, MockEmbeddingModel, Retriever};
 //! use serde_json::json;
 //!
 //! # tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -67,7 +67,7 @@ use crate::error::Result;
 ///
 /// # Example
 /// ```
-/// use rustagents::harness::embeddings::cosine_similarity;
+/// use tinyagents::harness::embeddings::cosine_similarity;
 ///
 /// assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]), 1.0);
 /// assert_eq!(cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]), 0.0);
@@ -234,9 +234,9 @@ mod openai {
     ///
     /// # Example
     /// ```no_run
-    /// use rustagents::harness::embeddings::OpenAiEmbeddingModel;
+    /// use tinyagents::harness::embeddings::OpenAiEmbeddingModel;
     ///
-    /// # fn main() -> rustagents::Result<()> {
+    /// # fn main() -> tinyagents::Result<()> {
     /// let model = OpenAiEmbeddingModel::from_env()?;
     /// # let _ = model;
     /// # Ok(())

@@ -1,6 +1,6 @@
-# Contributing To RustAgents
+# Contributing To TinyAgents
 
-Thanks for helping build RustAgents. This project is early, so the best
+Thanks for helping build TinyAgents. This project is early, so the best
 contributions are small, explicit, tested, and easy to review.
 
 ## Development Setup
@@ -22,7 +22,7 @@ cargo run --example basic_graph
 
 ## Project Philosophy
 
-RustAgents should make agent systems explicit and inspectable. Prefer:
+TinyAgents should make agent systems explicit and inspectable. Prefer:
 
 - small modules with narrow responsibilities
 - typed state and typed errors
@@ -62,7 +62,7 @@ inseparable.
 
 Good issues include:
 
-- the RustAgents version or commit
+- the TinyAgents version or commit
 - the relevant module or API
 - a minimal code example when behavior is surprising
 - expected behavior

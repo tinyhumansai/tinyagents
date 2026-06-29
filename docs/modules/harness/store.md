@@ -25,11 +25,11 @@ LangChain separates generic stores from chat history:
 - local file store:
   <https://github.com/langchain-ai/langchain/blob/master/libs/langchain/langchain_classic/storage/file_system.py>
 
-RustAgents should follow the separation, but make event-friendly storage a
+TinyAgents should follow the separation, but make event-friendly storage a
 first-class harness feature.
 
 LangChain v1 agents can also receive graph/store runtime objects through tool
-runtime injection. RustAgents should expose stores through `RunContext` and
+runtime injection. TinyAgents should expose stores through `RunContext` and
 `ToolRuntime`, while still hiding store handles from model-visible tool schemas.
 
 ## Responsibilities
@@ -169,7 +169,12 @@ Properties:
 Record shape:
 
 ```json
-{"stream":"runs/support-123/events","offset":42,"time":"2026-06-29T00:00:00Z","value":{"kind":"tool.completed"}}
+{
+  "stream": "runs/support-123/events",
+  "offset": 42,
+  "time": "2026-06-29T00:00:00Z",
+  "value": { "kind": "tool.completed" }
+}
 ```
 
 JSONL is not ideal for high-concurrency writes unless guarded by a writer task or

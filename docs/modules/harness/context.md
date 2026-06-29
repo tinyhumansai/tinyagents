@@ -27,7 +27,7 @@ calls:
 - <https://github.com/langchain-ai/langchain/blob/master/libs/langchain_v1/langchain/agents/middleware/types.py>
 - <https://github.com/langchain-ai/langchain/blob/master/libs/langchain_v1/langchain/tools/tool_node.py>
 
-RustAgents should use typed Rust context values instead of dynamic Python
+TinyAgents should use typed Rust context values instead of dynamic Python
 dictionaries where possible, while preserving a JSON metadata/configurable
 escape hatch for app-level data.
 

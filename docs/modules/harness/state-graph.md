@@ -12,7 +12,7 @@ agent work.
 ## Source Inspiration
 
 OpenHuman PR #4261 implements a LangGraph-style runtime that is directly
-relevant to RustAgents:
+relevant to TinyAgents:
 
 - PR: <https://github.com/tinyhumansai/openhuman/pull/4261>
 - generic engine: `src/openhuman/agent_graph/graph/`
@@ -279,7 +279,7 @@ Per-agent convention:
 Reusable blueprint shapes:
 
 - `canonical_turn`: `dispatch -> parse -> stop_check -> tools -> compact ->
-  dispatch`, or `finalize`
+dispatch`, or `finalize`
 - `single_shot`: `dispatch -> finalize`
 - `plan_execute_review`: `plan -> execute -> review -> finalize`, with reject
   looping back to execute
@@ -368,7 +368,7 @@ Graph runtime tests should cover:
 ## Implementation Notes
 
 OpenHuman PR #4261 intentionally keeps the generic graph engine independent from
-the agent harness. RustAgents should keep the same boundary:
+the agent harness. TinyAgents should keep the same boundary:
 
 - graph core depends only on graph traits, ids, commands, state, cancellation,
   and progress sinks

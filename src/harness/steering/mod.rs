@@ -22,9 +22,9 @@
 //! # Example
 //!
 //! ```
-//! use rustagents::harness::context::{RunConfig, RunContext};
-//! use rustagents::harness::message::Message;
-//! use rustagents::harness::steering::{
+//! use tinyagents::harness::context::{RunConfig, RunContext};
+//! use tinyagents::harness::message::Message;
+//! use tinyagents::harness::steering::{
 //!     apply_pending_steering, SteeringCommand, SteeringCommandKind, SteeringHandle,
 //!     SteeringOutcome, SteeringPolicy,
 //! };

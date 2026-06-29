@@ -14,18 +14,18 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
-use rustagents::RustAgentsError;
-use rustagents::harness::context::RunContext;
-use rustagents::harness::events::RecordingListener;
-use rustagents::harness::limits::RunLimits;
-use rustagents::harness::message::{AssistantMessage, ContentBlock, Message};
-use rustagents::harness::middleware::Middleware;
-use rustagents::harness::model::ModelResponse;
-use rustagents::harness::providers::MockModel;
-use rustagents::harness::runtime::{AgentHarness, RunPolicy};
-use rustagents::harness::testkit::{FakeTool, Trajectory};
-use rustagents::harness::tool::ToolCall;
-use rustagents::harness::usage::Usage;
+use tinyagents::RustAgentsError;
+use tinyagents::harness::context::RunContext;
+use tinyagents::harness::events::RecordingListener;
+use tinyagents::harness::limits::RunLimits;
+use tinyagents::harness::message::{AssistantMessage, ContentBlock, Message};
+use tinyagents::harness::middleware::Middleware;
+use tinyagents::harness::model::ModelResponse;
+use tinyagents::harness::providers::MockModel;
+use tinyagents::harness::runtime::{AgentHarness, RunPolicy};
+use tinyagents::harness::testkit::{FakeTool, Trajectory};
+use tinyagents::harness::tool::ToolCall;
+use tinyagents::harness::usage::Usage;
 
 /// Middleware that subscribes a shared [`RecordingListener`] to the run's event
 /// sink so the test can reconstruct a [`Trajectory`] afterwards.
@@ -39,7 +39,7 @@ impl Middleware<(), ()> for CaptureMiddleware {
         "capture"
     }
 
-    async fn before_agent(&self, ctx: &mut RunContext<()>, _state: &()) -> rustagents::Result<()> {
+    async fn before_agent(&self, ctx: &mut RunContext<()>, _state: &()) -> tinyagents::Result<()> {
         ctx.events.subscribe(self.listener.clone());
         Ok(())
     }

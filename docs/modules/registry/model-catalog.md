@@ -4,7 +4,7 @@ Parent module: [Registry](README.md).
 
 The model catalog is a registry-owned data layer for provider model metadata. It
 keeps a local snapshot of model ids, providers, context windows, output limits,
-prices, modalities, and capabilities so RustAgents can validate and estimate
+prices, modalities, and capabilities so TinyAgents can validate and estimate
 runs without hitting provider docs or APIs on every request.
 
 The snapshot is deliberately local and timestamped. Provider pricing and model
@@ -40,7 +40,7 @@ Preferred source order:
 
 1. provider official docs or provider machine-readable APIs when available
 2. LiteLLM `model_prices_and_context_window.json`
-3. curated RustAgents overrides
+3. curated TinyAgents overrides
 4. user application overrides
 
 LiteLLM is useful because it already normalizes many provider price and context
@@ -218,7 +218,7 @@ model even if aliases or catalog snapshots have changed.
 Refresh should be explicit and auditable:
 
 1. Fetch upstream source catalogs.
-2. Normalize into RustAgents schema.
+2. Normalize into TinyAgents schema.
 3. Merge curated overrides.
 4. Preserve raw provider fields.
 5. Write a new snapshot with `created_at`, source URLs, and source checksums.

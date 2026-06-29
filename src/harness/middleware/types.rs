@@ -35,7 +35,7 @@ use crate::harness::usage::UsageTotals;
 /// # Example
 ///
 /// ```
-/// use rustagents::harness::middleware::AgentRun;
+/// use tinyagents::harness::middleware::AgentRun;
 ///
 /// let mut run = AgentRun::new();
 /// run.model_calls += 1;
@@ -200,7 +200,7 @@ pub trait Middleware<State: Send + Sync, Ctx: Send + Sync = ()>: Send + Sync {
 ///
 /// ```
 /// use std::sync::Arc;
-/// use rustagents::harness::middleware::{LoggingMiddleware, MiddlewareStack};
+/// use tinyagents::harness::middleware::{LoggingMiddleware, MiddlewareStack};
 ///
 /// let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
 /// stack.push(Arc::new(LoggingMiddleware::new()));

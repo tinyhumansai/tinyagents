@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-RustAgents is a Rust 2024 library crate rooted at `Cargo.toml`. Public API
+TinyAgents is a Rust 2024 library crate rooted at `Cargo.toml`. Public API
 exports live in `src/lib.rs`, with core modules split across `src/chat.rs`,
 `src/model.rs`, `src/tool.rs`, `src/graph.rs`, and `src/error.rs`. Additional
 architecture work is staged under module directories such as `src/harness/`,

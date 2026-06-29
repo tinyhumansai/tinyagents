@@ -20,10 +20,10 @@
 //! # Example
 //!
 //! ```rust
-//! use rustagents::harness::structured::{
+//! use tinyagents::harness::structured::{
 //!     StructuredExtractor, StructuredStrategy, response_format_for_strategy,
 //! };
-//! use rustagents::harness::model::ModelResponse;
+//! use tinyagents::harness::model::ModelResponse;
 //! use serde_json::json;
 //!
 //! let schema = json!({ "type": "object", "properties": { "score": { "type": "number" } } });

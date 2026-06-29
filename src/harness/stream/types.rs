@@ -114,8 +114,8 @@ impl StreamChunk {
 /// # Example
 ///
 /// ```
-/// use rustagents::harness::stream::{StreamChunk, StreamMode, StreamSink};
-/// use rustagents::harness::message::MessageDelta;
+/// use tinyagents::harness::stream::{StreamChunk, StreamMode, StreamSink};
+/// use tinyagents::harness::message::MessageDelta;
 ///
 /// let sink = StreamSink::new(vec![StreamMode::Messages]);
 /// sink.push(StreamChunk::Message(MessageDelta { text: "hello".into(), tool_call: None }));

@@ -16,17 +16,17 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use rustagents::error::RustAgentsError;
-use rustagents::harness::context::{RunConfig, RunContext};
-use rustagents::harness::limits::RunLimits;
-use rustagents::harness::message::{AssistantMessage, ContentBlock, Message};
-use rustagents::harness::model::ModelResponse;
-use rustagents::harness::providers::MockModel;
-use rustagents::harness::runtime::{AgentHarness, RunPolicy};
-use rustagents::harness::testkit::{EventRecorder, Trajectory};
-use rustagents::harness::tool::{Tool, ToolCall};
-use rustagents::harness::usage::Usage;
-use rustagents::{SubAgent, SubAgentTool};
+use tinyagents::error::RustAgentsError;
+use tinyagents::harness::context::{RunConfig, RunContext};
+use tinyagents::harness::limits::RunLimits;
+use tinyagents::harness::message::{AssistantMessage, ContentBlock, Message};
+use tinyagents::harness::model::ModelResponse;
+use tinyagents::harness::providers::MockModel;
+use tinyagents::harness::runtime::{AgentHarness, RunPolicy};
+use tinyagents::harness::testkit::{EventRecorder, Trajectory};
+use tinyagents::harness::tool::{Tool, ToolCall};
+use tinyagents::harness::usage::Usage;
+use tinyagents::{SubAgent, SubAgentTool};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

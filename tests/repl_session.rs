@@ -1,12 +1,12 @@
 //! End-to-end coverage for the REPL command parser and session runtime.
 //!
 //! These tests exercise the public surface re-exported from
-//! `rustagents::repl`: parsing representative command lines, running a
+//! `tinyagents::repl`: parsing representative command lines, running a
 //! [`ReplSession`] through `set`/`get`/`show`, and enforcing the
 //! [`CapabilityPolicy`] allowlist on `call`.
 
-use rustagents::RustAgentsError;
-use rustagents::repl::{CapabilityPolicy, ReplCommand, ReplOutcome, ReplSession, parse_command};
+use tinyagents::RustAgentsError;
+use tinyagents::repl::{CapabilityPolicy, ReplCommand, ReplOutcome, ReplSession, parse_command};
 
 #[test]
 fn parses_representative_commands() {

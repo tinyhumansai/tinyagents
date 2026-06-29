@@ -16,7 +16,7 @@ LangChain and LangChain v1 provide related behavior in several places:
 - model and tool retry/fallback middleware:
   <https://github.com/langchain-ai/langchain/tree/master/libs/langchain_v1/langchain/agents/middleware>
 
-RustAgents should centralize these policies so every model call, tool call,
+TinyAgents should centralize these policies so every model call, tool call,
 agent loop, and graph node can share predictable behavior.
 
 ## Responsibilities

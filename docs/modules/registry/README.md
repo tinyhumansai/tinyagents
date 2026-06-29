@@ -1,6 +1,6 @@
 # Registry Module Specification
 
-The registry module is the coordination and discovery layer for RustAgents. It
+The registry module is the coordination and discovery layer for TinyAgents. It
 registers agents, graphs, tools, models, stores, middleware, listeners, and
 runtime data catalogs, then provides an event-friendly surface for web UIs,
 CLIs, tests, and distributed supervisors.
@@ -107,7 +107,7 @@ answers questions such as:
 ## Local Model Catalog
 
 The local model catalog is a snapshot, not a source of truth. It gives
-RustAgents deterministic offline behavior for:
+TinyAgents deterministic offline behavior for:
 
 - cost estimates
 - context-window checks

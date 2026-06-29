@@ -28,10 +28,10 @@ async fn live_durable_graph_checkpoints_then_resumes_across_model_call() {
 
     use serde_json::json;
 
-    use rustagents::harness::message::Message;
-    use rustagents::harness::providers::openai::OpenAiModel;
-    use rustagents::harness::runtime::AgentHarness;
-    use rustagents::{
+    use tinyagents::harness::message::Message;
+    use tinyagents::harness::providers::openai::OpenAiModel;
+    use tinyagents::harness::runtime::AgentHarness;
+    use tinyagents::{
         Checkpointer, Command, GraphBuilder, InMemoryCheckpointer, Interrupt, NodeContext,
         NodeResult,
     };

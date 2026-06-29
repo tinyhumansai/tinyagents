@@ -29,7 +29,7 @@ variants:
 - <https://github.com/langchain-ai/langchain/blob/master/libs/core/langchain_core/caches.py>
 
 Provider prompt caching is different. It usually affects provider billing and
-usage metadata, not whether RustAgents skips the provider call entirely.
+usage metadata, not whether TinyAgents skips the provider call entirely.
 
 ## Provider Prompt And KV Cache
 

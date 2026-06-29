@@ -6,7 +6,7 @@
 //! # Quick start
 //!
 //! ```rust
-//! use rustagents::harness::prompt::{PromptTemplate, PromptBuilder};
+//! use tinyagents::harness::prompt::{PromptTemplate, PromptBuilder};
 //! use serde_json::{json, Map};
 //!
 //! let mut vars = Map::new();
@@ -14,7 +14,7 @@
 //!
 //! let system_tpl = PromptTemplate::new("You are a helpful assistant. Task: {task}");
 //! let system_msg = system_tpl.render_message(
-//!     rustagents::harness::prompt::TemplateRole::System,
+//!     tinyagents::harness::prompt::TemplateRole::System,
 //!     &vars,
 //! ).unwrap();
 //!

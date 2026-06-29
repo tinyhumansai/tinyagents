@@ -82,7 +82,7 @@ impl TempDir {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("rustagents-store-test-{tag}-{nanos}"));
+        let path = std::env::temp_dir().join(format!("tinyagents-store-test-{tag}-{nanos}"));
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
     }

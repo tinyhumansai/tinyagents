@@ -1,5 +1,5 @@
 name: Feature Request
-description: Propose a RustAgents capability, API, module, or workflow.
+description: Propose a TinyAgents capability, API, module, or workflow.
 title: "Feature: "
 labels: ["enhancement"]
 body:
@@ -32,4 +32,4 @@ body:
     id: docs
     attributes:
       label: Related docs
-      description: Link relevant RustAgents docs or external references.
+      description: Link relevant TinyAgents docs or external references.

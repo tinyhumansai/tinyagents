@@ -19,15 +19,15 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use rustagents::harness::context::{RunConfig, RunContext};
-use rustagents::harness::message::{AssistantMessage, ContentBlock, Message};
-use rustagents::harness::middleware::UsageAccountingMiddleware;
-use rustagents::harness::model::ModelResponse;
-use rustagents::harness::runtime::AgentHarness;
-use rustagents::harness::testkit::{EventRecorder, FakeTool, ScriptedModel, Trajectory};
-use rustagents::harness::tool::ToolCall;
-use rustagents::harness::usage::Usage;
-use rustagents::{Node, NodeOutput};
+use tinyagents::harness::context::{RunConfig, RunContext};
+use tinyagents::harness::message::{AssistantMessage, ContentBlock, Message};
+use tinyagents::harness::middleware::UsageAccountingMiddleware;
+use tinyagents::harness::model::ModelResponse;
+use tinyagents::harness::runtime::AgentHarness;
+use tinyagents::harness::testkit::{EventRecorder, FakeTool, ScriptedModel, Trajectory};
+use tinyagents::harness::tool::ToolCall;
+use tinyagents::harness::usage::Usage;
+use tinyagents::{Node, NodeOutput};
 
 /// State threaded through the graph: the question to answer and the agent's
 /// final text once the `agent` node has run.
@@ -116,7 +116,7 @@ async fn graph_node_drives_harness_agent_with_tool_loop() {
         }
     });
 
-    let graph = rustagents::StateGraph::new()
+    let graph = tinyagents::StateGraph::new()
         .add_node(agent_node)
         .set_start("agent")
         .add_end("agent");

@@ -11,7 +11,7 @@
 /// # Examples
 ///
 /// ```
-/// use rustagents::harness::limits::RunLimits;
+/// use tinyagents::harness::limits::RunLimits;
 ///
 /// let limits = RunLimits::default()
 ///     .with_max_model_calls(10)

@@ -58,8 +58,8 @@ pub struct StructuredOutput {
 /// # Example
 ///
 /// ```rust
-/// use rustagents::harness::structured::{StructuredExtractor, StructuredStrategy};
-/// use rustagents::harness::model::ModelResponse;
+/// use tinyagents::harness::structured::{StructuredExtractor, StructuredStrategy};
+/// use tinyagents::harness::model::ModelResponse;
 /// use serde_json::json;
 ///
 /// let extractor = StructuredExtractor::new(

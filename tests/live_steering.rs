@@ -12,11 +12,11 @@
 
 use std::sync::Arc;
 
-use rustagents::harness::context::{RunConfig, RunContext};
-use rustagents::harness::message::Message;
-use rustagents::harness::providers::openai::OpenAiModel;
-use rustagents::harness::runtime::AgentHarness;
-use rustagents::{SteeringCommand, SteeringHandle};
+use tinyagents::harness::context::{RunConfig, RunContext};
+use tinyagents::harness::message::Message;
+use tinyagents::harness::providers::openai::OpenAiModel;
+use tinyagents::harness::runtime::AgentHarness;
+use tinyagents::{SteeringCommand, SteeringHandle};
 
 #[tokio::test]
 async fn orchestrator_steers_a_real_openai_run() {

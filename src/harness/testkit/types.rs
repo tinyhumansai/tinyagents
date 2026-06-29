@@ -26,8 +26,8 @@ use crate::harness::tool::ToolCall;
 /// # Example
 ///
 /// ```rust
-/// # use rustagents::harness::testkit::ScriptedModel;
-/// # use rustagents::harness::model::ModelResponse;
+/// # use tinyagents::harness::testkit::ScriptedModel;
+/// # use tinyagents::harness::model::ModelResponse;
 /// let model = ScriptedModel::replies(vec!["Hello", "World"]);
 /// // Use in tests as a ChatModel<()>.
 /// ```
@@ -64,7 +64,7 @@ pub(crate) enum FakeToolBehavior {
 /// # Example
 ///
 /// ```rust
-/// # use rustagents::harness::testkit::FakeTool;
+/// # use tinyagents::harness::testkit::FakeTool;
 /// let tool = FakeTool::returning("search", "42");
 /// // Use as Tool<()> in tests.
 /// ```
@@ -93,7 +93,7 @@ pub struct FakeTool {
 /// # Example
 ///
 /// ```rust
-/// # use rustagents::harness::testkit::DeterministicClock;
+/// # use tinyagents::harness::testkit::DeterministicClock;
 /// let clock = DeterministicClock::new(1_000);
 /// assert_eq!(clock.now_millis(), 1_000);
 /// clock.advance(500);
@@ -116,7 +116,7 @@ pub struct DeterministicClock {
 /// # Example
 ///
 /// ```rust
-/// # use rustagents::harness::testkit::DeterministicIds;
+/// # use tinyagents::harness::testkit::DeterministicIds;
 /// let ids = DeterministicIds::new("call");
 /// assert_eq!(ids.next(), "call-0");
 /// assert_eq!(ids.next(), "call-1");
@@ -143,9 +143,9 @@ pub struct DeterministicIds {
 /// # Example
 ///
 /// ```rust
-/// # use rustagents::harness::testkit::EventRecorder;
-/// # use rustagents::harness::events::AgentEvent;
-/// # use rustagents::harness::ids::RunId;
+/// # use tinyagents::harness::testkit::EventRecorder;
+/// # use tinyagents::harness::events::AgentEvent;
+/// # use tinyagents::harness::ids::RunId;
 /// let recorder = EventRecorder::new();
 /// let sink = recorder.sink();
 /// sink.emit(AgentEvent::RunStarted { run_id: RunId::new("r1"), thread_id: None });
@@ -183,9 +183,9 @@ pub struct EventRecorder {
 /// # Example
 ///
 /// ```rust
-/// # use rustagents::harness::testkit::Trajectory;
-/// # use rustagents::harness::events::AgentEvent;
-/// # use rustagents::harness::ids::{RunId, CallId};
+/// # use tinyagents::harness::testkit::Trajectory;
+/// # use tinyagents::harness::events::AgentEvent;
+/// # use tinyagents::harness::ids::{RunId, CallId};
 /// let events = vec![
 ///     AgentEvent::RunStarted { run_id: RunId::new("r1"), thread_id: None },
 ///     AgentEvent::ModelStarted { call_id: CallId::new("c1"), model: "gpt".into() },

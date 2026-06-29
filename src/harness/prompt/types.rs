@@ -39,7 +39,7 @@ pub enum TemplateRole {
 /// # Examples
 ///
 /// ```rust
-/// use rustagents::harness::prompt::PromptTemplate;
+/// use tinyagents::harness::prompt::PromptTemplate;
 /// use serde_json::{json, Map};
 ///
 /// let t = PromptTemplate::new("Hello, {name}!");

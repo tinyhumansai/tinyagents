@@ -241,8 +241,8 @@ pub trait EventListener: Send + Sync {
 ///
 /// ```
 /// use std::sync::Arc;
-/// use rustagents::harness::events::{AgentEvent, EventSink, RecordingListener};
-/// use rustagents::harness::ids::RunId;
+/// use tinyagents::harness::events::{AgentEvent, EventSink, RecordingListener};
+/// use tinyagents::harness::ids::RunId;
 ///
 /// let sink = EventSink::new();
 /// let recorder = Arc::new(RecordingListener::new());

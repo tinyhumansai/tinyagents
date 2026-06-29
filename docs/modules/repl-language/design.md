@@ -2,7 +2,7 @@
 
 Parent module: [REPL language](README.md).
 
-The REPL language is an interactive orchestration layer for RustAgents. It is
+The REPL language is an interactive orchestration layer for TinyAgents. It is
 inspired by Recursive Language Models (`rlm`) and CodeAct-style agents, where a
 model can write small programs, inspect their output, call sub-models, and
 iterate until it has a final answer.
@@ -33,7 +33,7 @@ and intermediate state live in a persistent REPL namespace, while language-model
 calls, recursive sub-calls, and tools are exposed as functions inside that
 namespace.
 
-RustAgents should preserve that programming model while making every capability
+TinyAgents should preserve that programming model while making every capability
 explicit and typed at the Rust boundary.
 
 ## Responsibilities
@@ -70,15 +70,15 @@ explicit and typed at the Rust boundary.
 
 The `rlm` repository uses Python as its default local REPL. Python is effective
 for long-context programming because models already know it well, but embedding
-Python in Rust would make RustAgents depend on a large runtime, a separate
+Python in Rust would make TinyAgents depend on a large runtime, a separate
 sandbox story, and a weaker capability boundary.
 
-Rhai is a better first fit for RustAgents because it is an embedded scripting
-language for Rust with a small host API. It lets RustAgents register exactly the
+Rhai is a better first fit for TinyAgents because it is an embedded scripting
+language for Rust with a small host API. It lets TinyAgents register exactly the
 functions and values a script may use. The Rhai book describes Rhai as
 sandboxed from the host environment by default, with external access provided by
 registered functions. It also supports operation limits through
-`Engine::set_max_operations`, which gives RustAgents a direct way to fail closed
+`Engine::set_max_operations`, which gives TinyAgents a direct way to fail closed
 on runaway scripts.
 
 Rhai tradeoffs:
@@ -92,7 +92,7 @@ Rhai tradeoffs:
   - Suitable for WASM and other Rust deployment targets.
 - Cons:
   - Models know Python better than Rhai.
-  - Rhai is dynamically typed, so RustAgents must validate values at capability
+  - Rhai is dynamically typed, so TinyAgents must validate values at capability
     boundaries.
   - Async host functions require an adapter design.
   - The default `Engine` is not `Send + Sync` unless configured with the Rhai
@@ -108,7 +108,7 @@ Recommended extension: `.ragsh`.
 Reasoning:
 
 - pairs naturally with `.rag`
-- reads like "RustAgents shell"
+- reads like "TinyAgents shell"
 - avoids implying that the syntax is Rust
 - leaves room for future non-Rhai backends
 
@@ -463,28 +463,28 @@ partially mutate.
 
 ## RLM Feature Map
 
-The goal is to port the useful `rlm` behavior into RustAgents without porting
+The goal is to port the useful `rlm` behavior into TinyAgents without porting
 Python's unsafe local execution model.
 
-| `rlm` feature | RustAgents REPL equivalent |
-| --- | --- |
-| Python `context` variable | Rhai `context` variable |
-| Python persistent locals | `ReplSession::variables` |
-| fenced `repl` blocks | fenced `ragsh` blocks |
-| `llm_query` | `model_query` |
-| `llm_query_batched` | `model_query_batched` |
-| `rlm_query` | `agent_query` or `repl_query` |
-| `rlm_query_batched` | `agent_query_batched` or `repl_query_batched` |
-| custom Python tools | registered Rust tool capabilities |
-| generated Python programs | `.ragsh` cells plus generated `.rag` graph blueprints |
-| `SHOW_VARS()` | `show_vars()` |
-| `answer["ready"] = True` | `answer(...)` |
-| max iterations | `ReplPolicy::max_iterations` for CodeAct loops |
-| max depth | graph/harness recursion policy |
-| max budget | harness cost policy |
-| token compaction | harness summarization feature |
-| JSONL trajectory logger | typed event stream plus store backend |
-| Docker/cloud REPL isolation | future `PythonSandboxRepl` backend |
+| `rlm` feature               | TinyAgents REPL equivalent                            |
+| --------------------------- | ----------------------------------------------------- |
+| Python `context` variable   | Rhai `context` variable                               |
+| Python persistent locals    | `ReplSession::variables`                              |
+| fenced `repl` blocks        | fenced `ragsh` blocks                                 |
+| `llm_query`                 | `model_query`                                         |
+| `llm_query_batched`         | `model_query_batched`                                 |
+| `rlm_query`                 | `agent_query` or `repl_query`                         |
+| `rlm_query_batched`         | `agent_query_batched` or `repl_query_batched`         |
+| custom Python tools         | registered Rust tool capabilities                     |
+| generated Python programs   | `.ragsh` cells plus generated `.rag` graph blueprints |
+| `SHOW_VARS()`               | `show_vars()`                                         |
+| `answer["ready"] = True`    | `answer(...)`                                         |
+| max iterations              | `ReplPolicy::max_iterations` for CodeAct loops        |
+| max depth                   | graph/harness recursion policy                        |
+| max budget                  | harness cost policy                                   |
+| token compaction            | harness summarization feature                         |
+| JSONL trajectory logger     | typed event stream plus store backend                 |
+| Docker/cloud REPL isolation | future `PythonSandboxRepl` backend                    |
 
 ## CodeAct Loop
 
@@ -535,7 +535,7 @@ answer(result);
 
 ## Example Graph Node
 
-```rustagents
+```tinyagents
 graph support_repl {
   start investigate
 
@@ -568,7 +568,7 @@ sets up variables before the model starts writing cells.
 ## Rhai Embedding Plan
 
 The Rhai runtime should be isolated behind an interface so future Python or WASM
-backends can reuse the same RustAgents semantics.
+backends can reuse the same TinyAgents semantics.
 
 ```rust
 #[async_trait]
@@ -590,7 +590,7 @@ Rhai-specific requirements:
 
 - configure `Engine::set_max_operations`
 - disable or avoid unneeded packages
-- register only RustAgents capability functions
+- register only TinyAgents capability functions
 - expose data through `Dynamic`, maps, and arrays with explicit conversion
 - compile and cache ASTs for repeated scripts
 - keep each session's `Scope` separate
@@ -600,7 +600,7 @@ Rhai-specific requirements:
 
 Async adapter requirement:
 
-Rhai host functions are easiest to expose as synchronous functions. RustAgents
+Rhai host functions are easiest to expose as synchronous functions. TinyAgents
 model, tool, and graph calls are async. The backend should not hide blocking in
 unbounded threads. Use one of these designs:
 
@@ -637,11 +637,11 @@ Requirements:
 - must run out of process
 - must have no direct host filesystem access by default
 - must communicate through a framed JSON protocol
-- must expose the same RustAgents capability functions
+- must expose the same TinyAgents capability functions
 - must enforce the same `ReplPolicy`
 - must emit the same `ReplEvent` stream
 
-This lets RustAgents support Python-like RLM ergonomics without making Python a
+This lets TinyAgents support Python-like RLM ergonomics without making Python a
 trusted in-process extension language.
 
 ## Safety

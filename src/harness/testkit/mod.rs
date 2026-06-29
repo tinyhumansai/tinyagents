@@ -288,9 +288,9 @@ impl EventRecorder {
     /// Useful for quick assertions like:
     ///
     /// ```rust
-    /// # use rustagents::harness::testkit::EventRecorder;
-    /// # use rustagents::harness::events::AgentEvent;
-    /// # use rustagents::harness::ids::RunId;
+    /// # use tinyagents::harness::testkit::EventRecorder;
+    /// # use tinyagents::harness::events::AgentEvent;
+    /// # use tinyagents::harness::ids::RunId;
     /// let recorder = EventRecorder::new();
     /// recorder.sink().emit(AgentEvent::RunStarted {
     ///     run_id: RunId::new("r1"),
@@ -336,9 +336,9 @@ impl Trajectory {
     /// Use in tests for ergonomic assertions:
     ///
     /// ```rust
-    /// # use rustagents::harness::testkit::Trajectory;
-    /// # use rustagents::harness::events::AgentEvent;
-    /// # use rustagents::harness::ids::CallId;
+    /// # use tinyagents::harness::testkit::Trajectory;
+    /// # use tinyagents::harness::events::AgentEvent;
+    /// # use tinyagents::harness::ids::CallId;
     /// let events = vec![
     ///     AgentEvent::ToolStarted {
     ///         call_id: CallId::new("c1"),

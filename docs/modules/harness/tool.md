@@ -20,7 +20,7 @@ agent middleware, and standard tests:
 
 LangChain and LangGraph also distinguish model-visible tool arguments from
 runtime-injected values such as state, store, context, and stream writers.
-RustAgents should make that distinction explicit in Rust types.
+TinyAgents should make that distinction explicit in Rust types.
 
 ## Responsibilities
 
@@ -86,7 +86,7 @@ Tool names should default to ASCII `snake_case`. The registry should reject:
 - names requiring provider-specific escaping
 
 The registry may support provider-specific aliases, but canonical events and
-stores should use the RustAgents tool name.
+stores should use the TinyAgents tool name.
 
 ## Schema Rules
 

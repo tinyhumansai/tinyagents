@@ -1,6 +1,6 @@
 # Roadmap
 
-RustAgents is pre-1.0. The roadmap favors small, well-tested modules that build
+TinyAgents is pre-1.0. The roadmap favors small, well-tested modules that build
 toward a production-grade Rust agent runtime.
 
 ## Current Foundation
@@ -43,7 +43,7 @@ Planned capabilities:
 
 ## Parallel Agents And Sub-Agents
 
-RustAgents should support workflow-native parallelism:
+TinyAgents should support workflow-native parallelism:
 
 - forked child contexts
 - shared caches with explicit isolation policy

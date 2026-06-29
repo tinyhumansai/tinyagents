@@ -27,8 +27,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use rustagents::graph::ClosureStateReducer;
-use rustagents::{Command, CompiledGraph, GraphBuilder, NodeContext, NodeResult};
+use tinyagents::graph::ClosureStateReducer;
+use tinyagents::{Command, CompiledGraph, GraphBuilder, NodeContext, NodeResult};
 
 /// Committed graph state. Every field is filled by branches merging through the
 /// reducer; `total` is derived downstream from the merged `values`.

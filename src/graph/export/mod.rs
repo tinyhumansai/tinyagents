@@ -18,8 +18,8 @@
 //! only structure is captured.
 //!
 //! ```
-//! use rustagents::graph::{GraphBuilder, NodeResult, START, END};
-//! use rustagents::graph::export::{to_json, to_mermaid};
+//! use tinyagents::graph::{GraphBuilder, NodeResult, START, END};
+//! use tinyagents::graph::export::{to_json, to_mermaid};
 //!
 //! let graph = GraphBuilder::<i64, i64>::overwrite()
 //!     .add_node("a", |s, _| async move { Ok(NodeResult::Update(s + 1)) })

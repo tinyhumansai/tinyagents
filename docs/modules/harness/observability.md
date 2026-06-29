@@ -18,7 +18,7 @@ integration:
 - runnable event stream tests:
   <https://github.com/langchain-ai/langchain/tree/master/libs/core/tests/unit_tests/runnables>
 
-RustAgents should use typed Rust events rather than stringly callback names.
+TinyAgents should use typed Rust events rather than stringly callback names.
 
 ## Responsibilities
 

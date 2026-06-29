@@ -1,6 +1,6 @@
 # Support
 
-RustAgents is an open source project. Use the public GitHub repository for
+TinyAgents is an open source project. Use the public GitHub repository for
 normal support and project discussion.
 
 ## Questions
@@ -16,7 +16,7 @@ Open a GitHub discussion or issue for:
 
 Open a bug report with:
 
-- the RustAgents commit or version
+- the TinyAgents commit or version
 - the Rust toolchain version
 - the command that failed
 - a minimal reproduction

@@ -6,11 +6,11 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a RustAgents bug. Please include a minimal reproduction when possible.
+        Thanks for reporting a TinyAgents bug. Please include a minimal reproduction when possible.
   - type: input
     id: version
     attributes:
-      label: RustAgents version or commit
+      label: TinyAgents version or commit
       placeholder: "0.1.0 or commit SHA"
     validations:
       required: true

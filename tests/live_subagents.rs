@@ -19,12 +19,12 @@
 async fn live_openai_parent_composes_child_subagent() {
     use std::sync::Arc;
 
-    use rustagents::harness::context::{RunConfig, RunContext};
-    use rustagents::harness::message::Message;
-    use rustagents::harness::providers::openai::OpenAiModel;
-    use rustagents::harness::runtime::AgentHarness;
-    use rustagents::harness::testkit::{EventRecorder, Trajectory};
-    use rustagents::{SubAgent, SubAgentTool};
+    use tinyagents::harness::context::{RunConfig, RunContext};
+    use tinyagents::harness::message::Message;
+    use tinyagents::harness::providers::openai::OpenAiModel;
+    use tinyagents::harness::runtime::AgentHarness;
+    use tinyagents::harness::testkit::{EventRecorder, Trajectory};
+    use tinyagents::{SubAgent, SubAgentTool};
 
     // Load .env so `cargo test` picks up local credentials.
     let _ = dotenvy::dotenv();

@@ -1,6 +1,6 @@
 # REPL Language Module Specification
 
-The REPL language is an interactive orchestration layer for RustAgents. It is
+The REPL language is an interactive orchestration layer for TinyAgents. It is
 inspired by Recursive Language Models (`rlm`) and CodeAct-style agents, where a
 model can write small programs, inspect their output, call sub-models, and
 iterate until it has a final answer.
@@ -52,7 +52,7 @@ system, recursion policy, or run limits.
 ## Recommended Direction
 
 Use Rhai for the first in-process REPL runtime and document Python as a future
-out-of-process compatibility sandbox. Rhai gives RustAgents a Rust-native,
+out-of-process compatibility sandbox. Rhai gives TinyAgents a Rust-native,
 capability-bound embedding surface, while Python remains useful for training and
 RLM-compatible workflows where the sandbox boundary is explicit.
 

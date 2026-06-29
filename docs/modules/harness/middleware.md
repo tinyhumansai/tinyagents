@@ -16,7 +16,7 @@ redaction, retry/fallback, summarization, context editing, and tool selection:
 - agent factory composition:
   <https://github.com/langchain-ai/langchain/blob/master/libs/langchain_v1/langchain/agents/factory.py>
 
-RustAgents should provide equivalent extension power without requiring users to
+TinyAgents should provide equivalent extension power without requiring users to
 understand graph internals for normal harness usage.
 
 ## Responsibilities

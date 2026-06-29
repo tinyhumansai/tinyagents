@@ -1,6 +1,6 @@
-# RustAgents System Specification
+# TinyAgents System Specification
 
-RustAgents is a Rust-native LLM application framework inspired by LangChain,
+TinyAgents is a Rust-native LLM application framework inspired by LangChain,
 LangGraph, and CodeAct-style recursive language-model runtimes. The system is
 organized around five modules:
 
@@ -16,7 +16,7 @@ reliable.
 
 ## Reference Positioning
 
-RustAgents should synthesize the reference systems rather than clone any one of
+TinyAgents should synthesize the reference systems rather than clone any one of
 them:
 
 - LangGraph contributes the durable execution model: explicit state graphs,
@@ -28,7 +28,7 @@ them:
   usage, cost, and conformance tests for integrations.
 - `rust-langgraph` shows the Rust-facing precedent for a stateful graph runtime
   with nodes, conditional edges, checkpoints, streaming, optional model
-  adapters, and ReAct/tool helpers. RustAgents should go deeper on typed state,
+  adapters, and ReAct/tool helpers. TinyAgents should go deeper on typed state,
   harness composition, registries, and language-backed graph definitions.
 - OpenHuman PR #4261 contributes the closest product-shaped precedent: a
   harness-decoupled graph engine, persistent checkpoints, HITL, graph
@@ -605,7 +605,7 @@ tolerance:
 
 ### Core Concepts
 
-`State` is user-owned application state. RustAgents should never require a
+`State` is user-owned application state. TinyAgents should never require a
 specific state shape for hand-written Rust graphs.
 
 `Node<State>` is an async unit of work.
@@ -648,7 +648,7 @@ let graph = GraphBuilder::new()
 
 ### State Updates And Reducers
 
-LangGraph nodes return partial state updates. RustAgents should adopt the same
+LangGraph nodes return partial state updates. TinyAgents should adopt the same
 direction because it enables parallel execution, replay, checkpointing, and
 clearer node contracts.
 
@@ -914,7 +914,7 @@ compiler as human-authored source before it can run.
 
 - Make common agent graphs readable at a glance.
 - Keep syntax close to graph intent.
-- Compile into explicit RustAgents structures.
+- Compile into explicit TinyAgents structures.
 - Preserve source locations for helpful errors.
 - Avoid embedding arbitrary code in the first version.
 - Describe state channels, reducers, policies, subgraphs, sub-agents,
@@ -933,7 +933,7 @@ compiler as human-authored source before it can run.
 
 ### Initial Syntax Sketch
 
-```rustagents
+```tinyagents
 graph support_agent {
   defaults {
     recursion_limit 50
@@ -1090,7 +1090,7 @@ src/providers/
 - Parser for a small graph definition language.
 - Compiler into `StateGraph`.
 - Helpful parse and validation errors.
-- Example `.rag` or `.rustagents` workflow file.
+- Example `.rag` or `.tinyagents` workflow file.
 
 ### Milestone 4: Provider Integrations
 
@@ -1111,7 +1111,7 @@ src/providers/
 
 ## Open Questions
 
-- Should the expressive language file extension be `.rag`, `.rustagents`, or
+- Should the expressive language file extension be `.rag`, `.tinyagents`, or
   something shorter?
 - Should state schemas be declared in the language, or should state remain purely
   Rust-owned?

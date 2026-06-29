@@ -1,6 +1,6 @@
 # Graph Module Specification
 
-The graph module is RustAgents' workflow runtime. It owns topology, state
+The graph module is TinyAgents' workflow runtime. It owns topology, state
 transition semantics, routing, execution history, checkpointing, interrupts,
 streaming, parallel execution, subgraph invocation, sub-agent nodes, recursive
 calls, and graph-level observability.
@@ -68,7 +68,7 @@ Rust-specific precedent:
 - OpenHuman PR #4261 is useful as a product reference for keeping a generic
   graph engine independent from the agent harness while exposing checkpoints,
   HITL, observability events, blueprints, and RPC run control.
-- RustAgents should preserve the ergonomic Rust builder surface from these
+- TinyAgents should preserve the ergonomic Rust builder surface from these
   precedents, but the target graph runtime must also be rich enough to be
   generated from `.rag`, inspected by UIs, driven from `.ragsh`, and tested with
   deterministic state/channel snapshots.

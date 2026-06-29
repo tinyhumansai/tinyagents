@@ -206,7 +206,7 @@ impl CapabilityPolicy {
 /// ## Example
 ///
 /// ```rust
-/// use rustagents::repl::{ReplSession, CapabilityPolicy, ReplOutcome};
+/// use tinyagents::repl::{ReplSession, CapabilityPolicy, ReplOutcome};
 ///
 /// let policy = CapabilityPolicy::from_list(["my_tool"]);
 /// let mut session = ReplSession::new().with_policy(policy);

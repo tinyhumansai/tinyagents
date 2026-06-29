@@ -5,12 +5,12 @@
 //! legacy [`StateGraph`] via a trivial [`NodeFactory`] before running it to
 //! `END`.
 
-use rustagents::language::compiler::{
+use tinyagents::language::compiler::{
     CapabilityResolver, NodeFactory, bind_capabilities, build_graph, compile,
 };
-use rustagents::language::parser::parse_str;
-use rustagents::language::types::{NodeSpec, Routing};
-use rustagents::{Node, NodeOutput, Result, RustAgentsError};
+use tinyagents::language::parser::parse_str;
+use tinyagents::language::types::{NodeSpec, Routing};
+use tinyagents::{Node, NodeOutput, Result, RustAgentsError};
 
 const SUPPORT_AGENT: &str = r#"
 // A support workflow with a tool loop.

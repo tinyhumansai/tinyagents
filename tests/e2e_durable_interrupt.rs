@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use rustagents::graph::ClosureStateReducer;
-use rustagents::{
+use tinyagents::graph::ClosureStateReducer;
+use tinyagents::{
     Checkpointer, Command, GraphBuilder, InMemoryCheckpointer, Interrupt, NodeContext, NodeResult,
 };
 

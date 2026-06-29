@@ -21,7 +21,7 @@ and model capability metadata:
 - standard chat model tests:
   <https://github.com/langchain-ai/langchain/tree/master/libs/standard-tests>
 
-RustAgents should adapt this into a strongly typed Rust surface with
+TinyAgents should adapt this into a strongly typed Rust surface with
 feature-gated provider crates/modules and a shared conformance suite.
 
 ## Responsibilities
@@ -307,8 +307,8 @@ fields they honor and which provider options they pass through.
 
 Provider adapters must:
 
-- map RustAgents messages to provider request payloads
-- map provider response payloads back to RustAgents messages
+- map TinyAgents messages to provider request payloads
+- map provider response payloads back to TinyAgents messages
 - preserve provider message ids and response ids
 - preserve tool call ids and arguments
 - produce `invalid_tool_call` data when tool calls cannot be parsed

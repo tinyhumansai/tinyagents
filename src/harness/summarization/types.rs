@@ -152,8 +152,8 @@ pub struct ConcatSummarizer;
 /// # Example
 ///
 /// ```
-/// use rustagents::harness::message::Message;
-/// use rustagents::harness::summarization::SummarizationPolicy;
+/// use tinyagents::harness::message::Message;
+/// use tinyagents::harness::summarization::SummarizationPolicy;
 ///
 /// let policy = SummarizationPolicy { trigger_tokens: 2000, keep_last: 4 };
 /// let msgs = vec![Message::user("hello"), Message::assistant("world")];

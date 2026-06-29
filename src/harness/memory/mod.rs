@@ -13,8 +13,8 @@
 //! # Example
 //!
 //! ```
-//! use rustagents::harness::memory::{ChatHistory, InMemoryChatHistory};
-//! use rustagents::harness::message::Message;
+//! use tinyagents::harness::memory::{ChatHistory, InMemoryChatHistory};
+//! use tinyagents::harness::message::Message;
 //!
 //! # tokio::runtime::Runtime::new().unwrap().block_on(async {
 //! let history = InMemoryChatHistory::new();

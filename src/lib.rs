@@ -1,4 +1,4 @@
-//! RustAgents is a small foundation for LLM applications built around
+//! TinyAgents is a small foundation for LLM applications built around
 //! composable chat models, tools, and executable state graphs.
 
 pub mod chat;

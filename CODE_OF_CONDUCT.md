@@ -1,13 +1,13 @@
 # Code Of Conduct
 
-RustAgents should be a focused, respectful technical space.
+TinyAgents should be a focused, respectful technical space.
 
 ## Expected Behavior
 
 - Be direct, constructive, and specific.
 - Assume contributors are acting in good faith.
 - Critique code, APIs, docs, and designs rather than people.
-- Keep discussions relevant to RustAgents and its ecosystem.
+- Keep discussions relevant to TinyAgents and its ecosystem.
 - Help make tradeoffs explicit when you disagree.
 
 ## Unacceptable Behavior

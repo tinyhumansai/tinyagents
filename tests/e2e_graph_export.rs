@@ -8,12 +8,12 @@
 //! assertion targets structure (nodes, edges, conditional labels, finish nodes)
 //! and serialization fidelity — never any runnable behavior or model prose.
 
-use rustagents::graph::export::{
+use tinyagents::graph::export::{
     blueprint_to_mermaid, blueprint_to_topology, from_json, to_json, to_mermaid,
 };
-use rustagents::language::compiler::compile;
-use rustagents::language::parser::parse_str;
-use rustagents::{GraphBuilder, GraphTopology, NodeContext, NodeResult};
+use tinyagents::language::compiler::compile;
+use tinyagents::language::parser::parse_str;
+use tinyagents::{GraphBuilder, GraphTopology, NodeContext, NodeResult};
 
 /// A `.rag` source describing a two-node support agent with one conditional
 /// (router-driven) edge and one static edge back to the agent.
@@ -48,7 +48,7 @@ graph support_agent {
 
 /// Builds a small linear durable graph: START -> a -> b -> END. The handler
 /// bodies are irrelevant to topology export; only the declared structure is.
-fn linear_graph() -> rustagents::CompiledGraph<i64, i64> {
+fn linear_graph() -> tinyagents::CompiledGraph<i64, i64> {
     GraphBuilder::<i64, i64>::overwrite()
         .with_graph_id("linear")
         .with_recursion_limit(10)
@@ -67,7 +67,7 @@ fn linear_graph() -> rustagents::CompiledGraph<i64, i64> {
 
 /// Builds a graph with a conditional edge so we can assert labeled routes
 /// survive both topology extraction and Mermaid rendering.
-fn branching_graph() -> rustagents::CompiledGraph<i64, i64> {
+fn branching_graph() -> tinyagents::CompiledGraph<i64, i64> {
     GraphBuilder::<i64, i64>::overwrite()
         .with_graph_id("branching")
         .add_node("router", |s: i64, _c: NodeContext| async move {

@@ -13,7 +13,7 @@ LangGraph has several observability surfaces:
 - thread-level stream modes for run lifecycle and state updates
 - nested namespace propagation for subgraph streams
 
-RustAgents should expose observability as a graph feature, not only as a side
+TinyAgents should expose observability as a graph feature, not only as a side
 effect of streaming. Streaming is the transport; observability is the semantic
 contract for what every run, step, task, checkpoint, interrupt, subgraph, and
 child agent must report.

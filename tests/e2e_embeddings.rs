@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use rustagents::{InMemoryVectorStore, MockEmbeddingModel, Retriever};
+use tinyagents::{InMemoryVectorStore, MockEmbeddingModel, Retriever};
 use serde_json::json;
 
 /// Builds a retriever over a small, topically-distinct corpus.

@@ -63,8 +63,8 @@ pub struct RunPolicy {
 ///
 /// ```
 /// use std::sync::Arc;
-/// use rustagents::harness::providers::MockModel;
-/// use rustagents::harness::runtime::AgentHarness;
+/// use tinyagents::harness::providers::MockModel;
+/// use tinyagents::harness::runtime::AgentHarness;
 ///
 /// let mut harness: AgentHarness<()> = AgentHarness::new();
 /// harness.register_model("mock", Arc::new(MockModel::constant("hello")));

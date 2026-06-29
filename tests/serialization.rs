@@ -1,4 +1,4 @@
-use rustagents::{ChatMessage, ChatRole, ModelRequest};
+use tinyagents::{ChatMessage, ChatRole, ModelRequest};
 
 #[test]
 fn serializes_chat_messages() {

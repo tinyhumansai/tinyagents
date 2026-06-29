@@ -74,7 +74,7 @@ src/language/
 
 Candidate extensions:
 
-- `.rustagents`
+- `.tinyagents`
 - `.rag`
 - `.agent`
 
@@ -83,11 +83,11 @@ Recommended default: `.rag`.
 Reasoning:
 
 - short
-- specific to RustAgents Graphs
+- specific to TinyAgents Graphs
 - easier to use in examples
 - does not imply general Rust syntax
 
-The docs can still describe the language as RustAgents source.
+The docs can still describe the language as TinyAgents source.
 
 ## Design Principles
 
@@ -133,7 +133,7 @@ runtime into a callback-only design.
 
 ## Initial Syntax
 
-```rustagents
+```tinyagents
 graph support_agent {
   metadata {
     description: "Support workflow with tool loop and optional review."
@@ -460,7 +460,7 @@ Supported fields:
 
 Example:
 
-```rustagents
+```tinyagents
 node research {
   kind subagent
   agent "researcher"
@@ -561,7 +561,7 @@ channels by convention and bind them to registered reducers:
 
 Example:
 
-```rustagents
+```tinyagents
 channel messages messages
 channel candidates append
 channel usage aggregate "usage_delta"
@@ -570,7 +570,7 @@ channel review overwrite
 
 Future versions may add state schema declarations:
 
-```rustagents
+```tinyagents
 state SupportState {
   messages: messages append
   customer_id: string overwrite
@@ -584,7 +584,7 @@ State schemas should be delayed until reducer-based graph execution exists.
 
 Routes are named outcomes.
 
-```rustagents
+```tinyagents
 routes {
   tool_call -> tools
   final -> END
@@ -606,7 +606,7 @@ Future typed route support can generate Rust enums from route declarations.
 
 Node-level policies:
 
-```rustagents
+```tinyagents
 node agent {
   timeout 30s
   retry {
@@ -618,7 +618,7 @@ node agent {
 
 Graph-level defaults:
 
-```rustagents
+```tinyagents
 graph support_agent {
   defaults {
     timeout 60s
@@ -633,13 +633,13 @@ Policies lower into graph node policies and harness request policies.
 
 Comments:
 
-```rustagents
+```tinyagents
 // line comment
 ```
 
 Strings:
 
-```rustagents
+```tinyagents
 system "single line"
 
 prompt """
@@ -668,7 +668,7 @@ Safety rules:
 
 ### Minimal Model Graph
 
-```rustagents
+```tinyagents
 graph summarize {
   start model
 
@@ -683,7 +683,7 @@ graph summarize {
 
 ### Agent With Tools
 
-```rustagents
+```tinyagents
 graph support_agent {
   start agent
 
@@ -707,7 +707,7 @@ graph support_agent {
 
 ### Human Review
 
-```rustagents
+```tinyagents
 graph approval_flow {
   start draft
 

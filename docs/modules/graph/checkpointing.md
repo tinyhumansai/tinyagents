@@ -113,7 +113,7 @@ checkpointing. Stores provide long-term memory that can persist across threads
 and conversations. They support hierarchical namespaces, key-value items,
 metadata, and optional vector search.
 
-RustAgents should mirror this separation:
+TinyAgents should mirror this separation:
 
 - checkpointers store execution state needed to resume a graph exactly
 - stores hold application memory, records, artifacts, and searchable data that

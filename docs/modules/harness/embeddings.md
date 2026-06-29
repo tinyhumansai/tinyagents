@@ -29,7 +29,7 @@ embedding them inside the chat model abstraction:
   Ollama, and others:
   <https://github.com/langchain-ai/langchain/tree/master/libs/partners>
 
-RustAgents should follow the separation: chat models generate messages,
+TinyAgents should follow the separation: chat models generate messages,
 embedding models generate vectors, vector stores search vectors, retrievers
 return documents, and prompt/middleware code decides what retrieved context
 enters a model request.
@@ -214,7 +214,7 @@ Search types:
 - `hybrid`: combine dense and sparse retrieval where supported
 
 The store must document score semantics. Some backends return distance where
-lower is better; others return similarity where higher is better. RustAgents
+lower is better; others return similarity where higher is better. TinyAgents
 should normalize relevance scores when possible and preserve raw backend scores
 for auditability.
 
@@ -271,7 +271,7 @@ prefer deterministic ids derived from source identity or content hashes.
 ## Indexing And Record Managers
 
 LangChain's indexing layer hashes document content and metadata, stores record
-manager entries, and avoids re-indexing unchanged documents. RustAgents should
+manager entries, and avoids re-indexing unchanged documents. TinyAgents should
 make that pattern explicit.
 
 ```rust
@@ -305,13 +305,13 @@ Indexing should support:
 - failure handling when vector-store writes and record-manager writes diverge
 
 SHA-1-style defaults should be documented as compatibility-oriented rather than
-collision-resistant. New RustAgents implementations should prefer `sha256`,
+collision-resistant. New TinyAgents implementations should prefer `sha256`,
 `sha512`, `blake3`, or caller-provided encoders.
 
 ## Sparse And Hybrid Retrieval
 
 Qdrant and other backends support sparse vectors and hybrid dense+sparse
-retrieval. RustAgents should not force sparse support into the dense embedding
+retrieval. TinyAgents should not force sparse support into the dense embedding
 trait. Use separate types:
 
 ```rust

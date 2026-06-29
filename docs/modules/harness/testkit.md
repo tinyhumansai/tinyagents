@@ -17,7 +17,7 @@ tests, event-stream tests, cache tests, and callback tests:
 - v1 agent tests:
   <https://github.com/langchain-ai/langchain/tree/master/libs/langchain_v1/tests>
 
-RustAgents should ship a reusable testkit so application code and provider
+TinyAgents should ship a reusable testkit so application code and provider
 adapters can assert behavior without live providers.
 
 ## Responsibilities

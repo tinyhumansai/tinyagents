@@ -59,7 +59,7 @@ pub trait EmbeddingModel: Send + Sync {
 ///
 /// # Example
 /// ```
-/// use rustagents::harness::embeddings::{EmbeddingModel, MockEmbeddingModel};
+/// use tinyagents::harness::embeddings::{EmbeddingModel, MockEmbeddingModel};
 ///
 /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
 /// let model = MockEmbeddingModel::new(16);
@@ -185,7 +185,7 @@ pub(crate) struct VectorEntry {
 ///
 /// # Example
 /// ```
-/// use rustagents::harness::embeddings::{InMemoryVectorStore, VectorStore};
+/// use tinyagents::harness::embeddings::{InMemoryVectorStore, VectorStore};
 /// use serde_json::json;
 ///
 /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -214,7 +214,7 @@ pub struct InMemoryVectorStore {
 /// # Example
 /// ```
 /// use std::sync::Arc;
-/// use rustagents::harness::embeddings::{InMemoryVectorStore, MockEmbeddingModel, Retriever};
+/// use tinyagents::harness::embeddings::{InMemoryVectorStore, MockEmbeddingModel, Retriever};
 /// use serde_json::json;
 ///
 /// # tokio::runtime::Runtime::new().unwrap().block_on(async {

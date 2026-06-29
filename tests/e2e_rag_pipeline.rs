@@ -8,12 +8,12 @@
 //! whose behaviour distinguishes `agent` from `tool_executor` kinds and records
 //! the path taken, proving source text drives a real running graph.
 
-use rustagents::language::compiler::{
+use tinyagents::language::compiler::{
     CapabilityResolver, NodeFactory, bind_capabilities, build_graph, compile,
 };
-use rustagents::language::parser::parse_str;
-use rustagents::language::types::{NodeSpec, Routing};
-use rustagents::{Node, NodeOutput, Result};
+use tinyagents::language::parser::parse_str;
+use tinyagents::language::types::{NodeSpec, Routing};
+use tinyagents::{Node, NodeOutput, Result};
 
 const SUPPORT_AGENT: &str = r#"
 graph support_agent {

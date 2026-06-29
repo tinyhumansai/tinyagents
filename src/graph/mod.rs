@@ -1,6 +1,6 @@
-//! RustAgents graph runtime.
+//! TinyAgents graph runtime.
 //!
-//! The graph module is RustAgents' workflow runtime. It hosts two layers that
+//! The graph module is TinyAgents' workflow runtime. It hosts two layers that
 //! share the crate error type but are otherwise independent:
 //!
 //! - The **legacy** sequential, whole-state [`StateGraph`] (milestone-1). It is

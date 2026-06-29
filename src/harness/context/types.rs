@@ -31,7 +31,7 @@ use crate::harness::store::StoreRegistry;
 /// # Example
 ///
 /// ```
-/// use rustagents::harness::context::RunConfig;
+/// use tinyagents::harness::context::RunConfig;
 ///
 /// let config = RunConfig::new("run-1")
 ///     .with_thread("thread-7")

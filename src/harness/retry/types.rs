@@ -11,7 +11,7 @@
 /// # Examples
 ///
 /// ```
-/// use rustagents::harness::retry::RetryPolicy;
+/// use tinyagents::harness::retry::RetryPolicy;
 ///
 /// let policy = RetryPolicy::default();
 /// assert!(policy.should_retry(0));
@@ -54,7 +54,7 @@ impl Default for RetryPolicy {
 /// # Examples
 ///
 /// ```
-/// use rustagents::harness::retry::FallbackPolicy;
+/// use tinyagents::harness::retry::FallbackPolicy;
 ///
 /// let policy = FallbackPolicy { models: vec!["claude-3-5-sonnet".into(), "claude-3-haiku".into()] };
 /// assert_eq!(policy.next_after("claude-3-5-sonnet"), Some("claude-3-haiku"));
@@ -80,7 +80,7 @@ pub struct FallbackPolicy {
 ///
 /// ```
 /// use std::time::Instant;
-/// use rustagents::harness::retry::RateLimiter;
+/// use tinyagents::harness::retry::RateLimiter;
 ///
 /// let mut limiter = RateLimiter::new(10, 5.0);
 /// let now = Instant::now();

@@ -7,11 +7,11 @@
 
 use std::sync::Arc;
 
-use rustagents::harness::context::{RunConfig, RunContext};
-use rustagents::harness::message::Message;
-use rustagents::harness::runtime::AgentHarness;
-use rustagents::harness::testkit::{EventRecorder, ScriptedModel, Trajectory};
-use rustagents::{
+use tinyagents::harness::context::{RunConfig, RunContext};
+use tinyagents::harness::message::Message;
+use tinyagents::harness::runtime::AgentHarness;
+use tinyagents::harness::testkit::{EventRecorder, ScriptedModel, Trajectory};
+use tinyagents::{
     RustAgentsError, SteeringCommand, SteeringCommandKind, SteeringHandle, SteeringPolicy,
 };
 

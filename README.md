@@ -1,9 +1,9 @@
 # TinyAgents
 
-[![CI](https://github.com/tinyhumansai/rustagents/actions/workflows/ci.yml/badge.svg)](https://github.com/tinyhumansai/rustagents/actions/workflows/ci.yml)
+[![CI](https://github.com/tinyhumansai/tinyagents/actions/workflows/ci.yml/badge.svg)](https://github.com/tinyhumansai/tinyagents/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-RustAgents is a Rust-native framework for building LLM agents as typed,
+TinyAgents is a Rust-native framework for building LLM agents as typed,
 inspectable workflows.
 
 The project starts from a simple belief: agent systems should not be piles of
@@ -11,7 +11,7 @@ callbacks and hidden loops. They should be explicit programs with state, edges,
 policies, tools, model calls, checkpoints, and events that you can read, test,
 debug, serialize, and run again.
 
-RustAgents brings that shape to Rust. It combines strongly typed application
+TinyAgents brings that shape to Rust. It combines strongly typed application
 state, async model and tool traits, executable graph primitives, and a roadmap
 for declarative agent workflow languages that LLMs can safely author, inspect,
 compile, and run.
@@ -22,7 +22,7 @@ Python and TypeScript have mature agent frameworks. Rust developers deserve the
 same level of orchestration power without giving up Rust's clarity, type system,
 performance, and production discipline.
 
-RustAgents is designed for teams that want to build real agent products:
+TinyAgents is designed for teams that want to build real agent products:
 
 - typed state instead of unstructured runtime bags
 - explicit graph execution instead of implicit control flow
@@ -39,7 +39,7 @@ Rust a serious home for durable agent runtimes.
 ## The Big Idea: Declarative Workflows For LLMs
 
 LLMs are good at proposing plans, but raw generated code is a dangerous
-execution boundary. RustAgents is moving toward a safer path: an expressive,
+execution boundary. TinyAgents is moving toward a safer path: an expressive,
 declarative workflow language for graph blueprints.
 
 A `.rag` workflow should describe what an agent system is allowed to do:
@@ -59,7 +59,7 @@ compile into the same graph runtime that hand-written Rust uses.
 
 Conceptually:
 
-```rustagents
+```tinyagents
 graph research_review {
   start supervisor
 
@@ -89,14 +89,14 @@ graph research_review {
 }
 ```
 
-This is the power RustAgents is built around: agents can author workflows that
+This is the power TinyAgents is built around: agents can author workflows that
 spawn other agents, run branches in parallel, call blocking reviewers, fork
 context safely, and merge outputs through typed reducers while the runtime keeps
 policy and observability intact.
 
 ## Current Status
 
-RustAgents is early. The crate currently provides the foundation:
+TinyAgents is early. The crate currently provides the foundation:
 
 - chat message primitives
 - async chat model and tool traits
@@ -115,20 +115,20 @@ Until the crate is published, use the repository directly:
 
 ```toml
 [dependencies]
-rustagents = { git = "https://github.com/tinyhumansai/rustagents" }
+tinyagents = { git = "https://github.com/tinyhumansai/tinyagents" }
 ```
 
 For local development:
 
 ```toml
 [dependencies]
-rustagents = { path = "." }
+tinyagents = { path = "." }
 ```
 
 ## Quick Example
 
 ```rust
-use rustagents::{ChatMessage, Node, NodeOutput, Result, StateGraph};
+use tinyagents::{ChatMessage, Node, NodeOutput, Result, StateGraph};
 
 #[derive(Clone, Debug)]
 struct AgentState {
@@ -177,7 +177,7 @@ cargo run --example basic_graph
 
 ## Architecture
 
-RustAgents is organized around five major surfaces:
+TinyAgents is organized around five major surfaces:
 
 - **Harness**: provider-neutral models, tools, middleware, prompts, context,
   memory, streaming, observability, retries, caching, and test doubles.
@@ -218,7 +218,7 @@ cargo run --example basic_graph
 
 ## Contributing
 
-RustAgents is open source and welcomes focused contributions. The highest-value
+TinyAgents is open source and welcomes focused contributions. The highest-value
 work right now is small, well-tested improvements to the core graph API,
 harness traits, docs, examples, and the declarative language design.
 
@@ -226,6 +226,6 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## License
 
-RustAgents is licensed under [GPL-3.0-only](LICENSE).
+TinyAgents is licensed under [GPL-3.0-only](LICENSE).
 
 Built by TinyHumans for the Rust agent ecosystem.

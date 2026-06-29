@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```
-//! use rustagents::harness::limits::{RunLimits, LimitTracker};
+//! use tinyagents::harness::limits::{RunLimits, LimitTracker};
 //!
 //! let limits = RunLimits::default();
 //! let mut tracker = LimitTracker::new(limits);
