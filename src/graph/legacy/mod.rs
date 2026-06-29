@@ -1,20 +1,22 @@
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+//! Legacy sequential state-graph implementation.
+//!
+//! See [`types`] for the data definitions. This module provides the original
+//! builder, validation, and sequential executor preserved unchanged from the
+//! milestone-1 `src/graph.rs`.
+
+mod types;
+
+pub use types::{BoxNodeFuture, Edge, GraphRun, Node, NodeFn, NodeOutput, StateGraph};
+
+use std::{collections::HashMap, future::Future, sync::Arc};
 
 use crate::{Result, RustAgentsError};
-
-pub type BoxNodeFuture<State> = Pin<Box<dyn Future<Output = Result<NodeOutput<State>>> + Send>>;
-pub type NodeFn<State> = dyn Fn(State) -> BoxNodeFuture<State> + Send + Sync;
-
-#[derive(Clone)]
-pub struct Node<State> {
-    name: String,
-    handler: Arc<NodeFn<State>>,
-}
 
 impl<State> Node<State>
 where
     State: Send + 'static,
 {
+    /// Creates a node from an async handler.
     pub fn new<F, Fut>(name: impl Into<String>, handler: F) -> Self
     where
         F: Fn(State) -> Fut + Send + Sync + 'static,
@@ -26,6 +28,7 @@ where
         }
     }
 
+    /// Returns the node name.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -35,18 +38,13 @@ where
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum NodeOutput<State> {
-    Continue(State),
-    Route { state: State, route: String },
-    End(State),
-}
-
 impl<State> NodeOutput<State> {
+    /// Continues to the direct successor with `state`.
     pub fn continue_with(state: State) -> Self {
         Self::Continue(state)
     }
 
+    /// Takes the named conditional route with `state`.
     pub fn route(state: State, route: impl Into<String>) -> Self {
         Self::Route {
             state,
@@ -54,29 +52,10 @@ impl<State> NodeOutput<State> {
         }
     }
 
+    /// Ends the run with `state`.
     pub fn end(state: State) -> Self {
         Self::End(state)
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Edge {
-    Direct(String),
-    Conditional(HashMap<String, String>),
-    End,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GraphRun<State> {
-    pub state: State,
-    pub visited: Vec<String>,
-}
-
-pub struct StateGraph<State> {
-    nodes: HashMap<String, Node<State>>,
-    edges: HashMap<String, Edge>,
-    start: Option<String>,
-    recursion_limit: usize,
 }
 
 impl<State> Default for StateGraph<State>
@@ -92,6 +71,7 @@ impl<State> StateGraph<State>
 where
     State: Send + 'static,
 {
+    /// Creates an empty graph with a default recursion limit of 50.
     pub fn new() -> Self {
         Self {
             nodes: HashMap::new(),
@@ -101,26 +81,31 @@ where
         }
     }
 
+    /// Overrides the recursion limit.
     pub fn with_recursion_limit(mut self, limit: usize) -> Self {
         self.recursion_limit = limit;
         self
     }
 
+    /// Adds a node.
     pub fn add_node(mut self, node: Node<State>) -> Self {
         self.nodes.insert(node.name().to_string(), node);
         self
     }
 
+    /// Sets the start node.
     pub fn set_start(mut self, name: impl Into<String>) -> Self {
         self.start = Some(name.into());
         self
     }
 
+    /// Adds a direct edge.
     pub fn add_edge(mut self, from: impl Into<String>, to: impl Into<String>) -> Self {
         self.edges.insert(from.into(), Edge::Direct(to.into()));
         self
     }
 
+    /// Adds conditional edges from `from` keyed by route label.
     pub fn add_conditional_edges<I, K, V>(mut self, from: impl Into<String>, routes: I) -> Self
     where
         I: IntoIterator<Item = (K, V)>,
@@ -135,11 +120,13 @@ where
         self
     }
 
+    /// Marks `from` as a terminal node.
     pub fn add_end(mut self, from: impl Into<String>) -> Self {
         self.edges.insert(from.into(), Edge::End);
         self
     }
 
+    /// Validates the topology before execution.
     pub fn validate(&self) -> Result<()> {
         let start = self.start.as_ref().ok_or(RustAgentsError::MissingStart)?;
         self.require_node(start)?;
@@ -162,6 +149,7 @@ where
         Ok(())
     }
 
+    /// Runs the graph sequentially from the start node.
     pub async fn run(&self, initial_state: State) -> Result<GraphRun<State>> {
         self.validate()?;
 
@@ -237,53 +225,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    struct TestState {
-        count: usize,
-    }
-
-    #[tokio::test]
-    async fn runs_direct_graph() {
-        let graph = StateGraph::new()
-            .add_node(Node::new("increment", |mut state: TestState| async move {
-                state.count += 1;
-                Ok(NodeOutput::continue_with(state))
-            }))
-            .add_node(Node::new("finish", |state| async move {
-                Ok(NodeOutput::end(state))
-            }))
-            .set_start("increment")
-            .add_edge("increment", "finish");
-
-        let run = graph.run(TestState { count: 0 }).await.unwrap();
-
-        assert_eq!(run.state.count, 1);
-        assert_eq!(run.visited, vec!["increment", "finish"]);
-    }
-
-    #[tokio::test]
-    async fn runs_conditional_graph() {
-        let graph = StateGraph::new()
-            .add_node(Node::new("router", |state: TestState| async move {
-                let route = if state.count == 0 { "empty" } else { "ready" };
-                Ok(NodeOutput::route(state, route))
-            }))
-            .add_node(Node::new("empty", |mut state: TestState| async move {
-                state.count = 1;
-                Ok(NodeOutput::end(state))
-            }))
-            .add_node(Node::new("ready", |state| async move {
-                Ok(NodeOutput::end(state))
-            }))
-            .set_start("router")
-            .add_conditional_edges("router", [("empty", "empty"), ("ready", "ready")]);
-
-        let run = graph.run(TestState { count: 0 }).await.unwrap();
-
-        assert_eq!(run.state.count, 1);
-        assert_eq!(run.visited, vec!["router", "empty"]);
-    }
-}
+mod test;

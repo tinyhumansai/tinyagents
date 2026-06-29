@@ -1,0 +1,177 @@
+//! Run configuration and runtime context.
+//!
+//! This module owns the authoritative run-context contract that downstream
+//! middleware, the agent loop, and graph nodes code against:
+//!
+//! - [`RunConfig`] is the declarative, serializable description of a run.
+//! - [`RunContext`] is the live handle bundling that config with the run's
+//!   stores, event sink, limit tracker, and arbitrary user data.
+//!
+//! See [`types`] for the field-level definitions.
+//!
+//! # Example
+//!
+//! ```
+//! use rustagents::harness::context::{RunConfig, RunContext};
+//! use rustagents::harness::events::AgentEvent;
+//!
+//! let config = RunConfig::new("run-1").with_max_model_calls(2);
+//! let mut ctx: RunContext = RunContext::new(config, ());
+//!
+//! ctx.emit(AgentEvent::RunStarted {
+//!     run_id: ctx.run_id().clone(),
+//!     thread_id: None,
+//! });
+//! ctx.record_model_call().expect("within limit");
+//! assert_eq!(ctx.limits.model_calls(), 1);
+//! ```
+
+mod types;
+
+pub use types::*;
+
+use crate::error::Result;
+use crate::harness::events::{AgentEvent, EventRecord, EventSink};
+use crate::harness::ids::{RunId, ThreadId};
+use crate::harness::limits::{LimitTracker, RunLimits};
+use crate::harness::store::StoreRegistry;
+
+// ── RunConfig ─────────────────────────────────────────────────────────────────
+
+impl RunConfig {
+    /// Creates a run configuration with sensible defaults.
+    ///
+    /// Defaults: no thread, no tags, `null` metadata, no timeout,
+    /// `max_model_calls = 25`, and `max_tool_calls = 50`. These mirror the
+    /// crate-wide [`RunLimits`] defaults.
+    pub fn new(run_id: impl Into<String>) -> Self {
+        Self {
+            run_id: RunId::new(run_id),
+            thread_id: None,
+            tags: Vec::new(),
+            metadata: serde_json::Value::Null,
+            timeout_ms: None,
+            max_model_calls: 25,
+            max_tool_calls: 50,
+        }
+    }
+
+    /// Associates this run with a conversation thread.
+    pub fn with_thread(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = Some(ThreadId::new(thread_id));
+        self
+    }
+
+    /// Appends a classification tag.
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+        self.tags.push(tag.into());
+        self
+    }
+
+    /// Replaces the metadata blob.
+    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Sets a wall-clock timeout in milliseconds.
+    pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = Some(timeout_ms);
+        self
+    }
+
+    /// Sets the maximum number of model calls permitted for this run.
+    pub fn with_max_model_calls(mut self, n: usize) -> Self {
+        self.max_model_calls = n;
+        self
+    }
+
+    /// Sets the maximum number of tool invocations permitted for this run.
+    pub fn with_max_tool_calls(mut self, n: usize) -> Self {
+        self.max_tool_calls = n;
+        self
+    }
+
+    /// Builds the [`RunLimits`] policy implied by this config.
+    ///
+    /// Carries `max_model_calls`, `max_tool_calls`, and the timeout (as the
+    /// wall-clock cap) across; other limit fields use their defaults.
+    fn to_run_limits(&self) -> RunLimits {
+        RunLimits::default()
+            .with_max_model_calls(self.max_model_calls)
+            .with_max_tool_calls(self.max_tool_calls)
+            .with_max_wall_clock_ms(self.timeout_ms)
+    }
+}
+
+// ── RunContext ────────────────────────────────────────────────────────────────
+
+impl<Ctx> RunContext<Ctx> {
+    /// Builds a live run context from `config` and user `data`.
+    ///
+    /// A default [`StoreRegistry`] and [`EventSink`] are created, and a
+    /// [`LimitTracker`] is derived from the config's limits (model-call cap,
+    /// tool-call cap, and timeout). Use [`Self::with_stores`] /
+    /// [`Self::with_events`] to inject shared instances instead.
+    pub fn new(config: RunConfig, data: Ctx) -> Self {
+        let limits = LimitTracker::new(config.to_run_limits());
+        Self {
+            config,
+            data,
+            stores: StoreRegistry::new(),
+            events: EventSink::new(),
+            limits,
+        }
+    }
+
+    /// Replaces the store registry with a (possibly shared) `stores`.
+    pub fn with_stores(mut self, stores: StoreRegistry) -> Self {
+        self.stores = stores;
+        self
+    }
+
+    /// Replaces the event sink with a (possibly shared) `events`.
+    pub fn with_events(mut self, events: EventSink) -> Self {
+        self.events = events;
+        self
+    }
+
+    /// Emits `event` on this run's event sink, returning the recorded entry.
+    pub fn emit(&self, event: AgentEvent) -> EventRecord {
+        self.events.emit(event)
+    }
+
+    /// Returns this run's identifier.
+    pub fn run_id(&self) -> &RunId {
+        &self.config.run_id
+    }
+
+    /// Returns this run's thread id, if it is threaded.
+    pub fn thread_id(&self) -> Option<&ThreadId> {
+        self.config.thread_id.as_ref()
+    }
+
+    /// Records one model call against the run's limits.
+    ///
+    /// Returns an error if the configured model-call cap is exceeded.
+    pub fn record_model_call(&mut self) -> Result<()> {
+        self.limits.record_model_call()
+    }
+
+    /// Records one tool call against the run's limits.
+    ///
+    /// Returns an error if the configured tool-call cap is exceeded.
+    pub fn record_tool_call(&mut self) -> Result<()> {
+        self.limits.record_tool_call()
+    }
+
+    /// Checks whether the run has exceeded its wall-clock deadline.
+    ///
+    /// Returns `Ok(())` when no timeout is configured or it has not elapsed.
+    pub fn check_deadline(&mut self) -> Result<()> {
+        self.limits.check_wall_clock()
+    }
+}
+
+#[cfg(test)]
+mod test;
