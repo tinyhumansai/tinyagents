@@ -4,14 +4,57 @@
 //! verifying that all public API contracts are met without hitting live
 //! providers.
 
+use futures::StreamExt;
+
 use crate::harness::events::AgentEvent;
 use crate::harness::ids::{CallId, RunId};
-use crate::harness::model::{ChatModel, ModelRequest, ModelResponse};
+use crate::harness::model::{
+    ChatModel, ModelRequest, ModelResponse, ModelStreamItem, collect_model_stream,
+};
 use crate::harness::testkit::{
-    DeterministicClock, DeterministicIds, EventRecorder, FakeTool, ScriptedModel, Trajectory,
+    DeterministicClock, DeterministicIds, EventRecorder, FakeTool, ScriptedModel, StreamingMock,
+    Trajectory,
 };
 use crate::harness::tool::{Tool, ToolCall};
 use crate::harness::usage::Usage;
+
+// ---------------------------------------------------------------------------
+// StreamingMock
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn streaming_mock_yields_started_deltas_and_completed() {
+    let model = StreamingMock::from_text_chunks(["Hello", ", ", "world"]);
+    let stream = ChatModel::<()>::stream(&model, &(), ModelRequest::default())
+        .await
+        .unwrap();
+    let items: Vec<ModelStreamItem> = stream.collect().await;
+
+    assert!(matches!(items.first(), Some(ModelStreamItem::Started)));
+    assert!(matches!(items.last(), Some(ModelStreamItem::Completed(_))));
+    let delta_count = items
+        .iter()
+        .filter(|item| matches!(item, ModelStreamItem::MessageDelta(_)))
+        .count();
+    assert_eq!(delta_count, 3, "one message delta per text chunk");
+}
+
+#[tokio::test]
+async fn streaming_mock_accumulates_to_full_text() {
+    let model = StreamingMock::from_text_chunks(["foo", "bar", "baz"]);
+    let stream = ChatModel::<()>::stream(&model, &(), ModelRequest::default())
+        .await
+        .unwrap();
+    let merged = collect_model_stream(stream).await.unwrap();
+    assert_eq!(merged.text(), "foobarbaz");
+
+    // The unary path returns the same merged response.
+    let invoked = ChatModel::<()>::invoke(&model, &(), ModelRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(invoked.text(), "foobarbaz");
+    assert_eq!(model.call_count(), 2);
+}
 
 // ---------------------------------------------------------------------------
 // ScriptedModel

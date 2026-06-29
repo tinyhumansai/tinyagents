@@ -72,7 +72,10 @@ impl StreamingMock {
 
     /// Returns the number of `stream`/`invoke` calls made so far.
     pub fn call_count(&self) -> u64 {
-        *self.calls.lock().expect("StreamingMock calls lock poisoned")
+        *self
+            .calls
+            .lock()
+            .expect("StreamingMock calls lock poisoned")
     }
 
     /// Folds the scripted items into the response they merge to.
@@ -89,13 +92,19 @@ impl StreamingMock {
 impl<State: Send + Sync> ChatModel<State> for StreamingMock {
     /// Returns the merged response the scripted stream folds into.
     async fn invoke(&self, _state: &State, _request: ModelRequest) -> Result<ModelResponse> {
-        *self.calls.lock().expect("StreamingMock calls lock poisoned") += 1;
+        *self
+            .calls
+            .lock()
+            .expect("StreamingMock calls lock poisoned") += 1;
         self.merged_response()
     }
 
     /// Replays the scripted items as a real [`ModelStream`].
     async fn stream(&self, _state: &State, _request: ModelRequest) -> Result<ModelStream> {
-        *self.calls.lock().expect("StreamingMock calls lock poisoned") += 1;
+        *self
+            .calls
+            .lock()
+            .expect("StreamingMock calls lock poisoned") += 1;
         let items = self.items.clone();
         Ok(Box::pin(futures::stream::iter(items)))
     }

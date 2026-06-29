@@ -481,3 +481,90 @@ fn agent_run_default_is_empty() {
     let run = AgentRun::new();
     assert_eq!(run.model_calls, 0);
 }
+
+// ── Streaming path ────────────────────────────────────────────────────────────
+
+/// Middleware that records every `on_model_delta` invocation and the text of
+/// each delta it observes.
+struct DeltaRecorder {
+    count: Arc<Mutex<usize>>,
+    texts: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Middleware<(), ()> for DeltaRecorder {
+    fn name(&self) -> &str {
+        "delta-recorder"
+    }
+    async fn on_model_delta(
+        &self,
+        _ctx: &mut RunContext<()>,
+        _state: &(),
+        delta: &mut crate::harness::model::ModelDelta,
+    ) -> Result<()> {
+        *self.count.lock().unwrap() += 1;
+        self.texts.lock().unwrap().push(delta.content.clone());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn invoke_streaming_fires_on_model_delta_per_delta_and_accumulates() {
+    use crate::harness::testkit::StreamingMock;
+
+    let count = Arc::new(Mutex::new(0usize));
+    let texts = Arc::new(Mutex::new(Vec::new()));
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "stream",
+        Arc::new(StreamingMock::from_text_chunks(["Hel", "lo, ", "world"])),
+    );
+    harness.push_middleware(Arc::new(DeltaRecorder {
+        count: count.clone(),
+        texts: texts.clone(),
+    }));
+
+    let run = harness
+        .invoke_streaming(&(), (), RunConfig::new("stream-run"), vec![Message::user("hi")])
+        .await
+        .expect("streaming run succeeds");
+
+    // The merged response equals the concatenated chunks.
+    assert_eq!(run.model_calls, 1);
+    assert_eq!(run.text(), Some("Hello, world".to_string()));
+
+    // on_model_delta fired exactly once per streamed message delta.
+    assert_eq!(*count.lock().unwrap(), 3);
+    assert_eq!(
+        *texts.lock().unwrap(),
+        vec!["Hel".to_string(), "lo, ".to_string(), "world".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn invoke_streaming_emits_model_delta_events() {
+    use crate::harness::testkit::{EventRecorder, StreamingMock};
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "stream",
+        Arc::new(StreamingMock::from_text_chunks(["a", "b"])),
+    );
+
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(RunConfig::new("stream-run"), ()).with_events(recorder.sink());
+
+    let run = harness
+        .invoke_streaming_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("streaming run succeeds");
+
+    assert_eq!(run.text(), Some("ab".to_string()));
+    let delta_events = recorder
+        .kinds()
+        .into_iter()
+        .filter(|k| k == "model.delta")
+        .count();
+    assert_eq!(delta_events, 2, "one model.delta event per streamed delta");
+}

@@ -31,6 +31,7 @@ use crate::harness::tool::ToolCall;
 /// // Streams "Hello, world" as three message deltas plus a merged completion.
 /// let model = StreamingMock::from_text_chunks(["Hello", ", ", "world"]);
 /// ```
+#[allow(dead_code)]
 pub struct StreamingMock {
     /// The scripted items replayed on every `stream` call.
     pub(crate) items: Vec<ModelStreamItem>,
