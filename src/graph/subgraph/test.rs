@@ -176,6 +176,12 @@ async fn namespaced_children_persist_under_isolated_namespaces() {
     assert_eq!(ids.len(), 2);
 
     // Each embedding's checkpoint carries its own namespace.
-    assert!(list.iter().any(|m| m.namespace == vec!["branch_a".to_string()]));
-    assert!(list.iter().any(|m| m.namespace == vec!["branch_b".to_string()]));
+    assert!(
+        list.iter()
+            .any(|m| m.namespace == vec!["branch_a".to_string()])
+    );
+    assert!(
+        list.iter()
+            .any(|m| m.namespace == vec!["branch_b".to_string()])
+    );
 }

@@ -223,8 +223,8 @@ struct Patch {
     inc_round: bool,
 }
 
-fn pipe_reducer() -> ClosureStateReducer<Pipe, Patch, impl Fn(Pipe, Patch) -> tinyagents::Result<Pipe>>
-{
+fn pipe_reducer()
+-> ClosureStateReducer<Pipe, Patch, impl Fn(Pipe, Patch) -> tinyagents::Result<Pipe>> {
     ClosureStateReducer::new(|mut s: Pipe, p: Patch| {
         s.log.extend(p.log);
         s.a += p.add_a;
