@@ -103,5 +103,8 @@ async fn durable_graph_interrupts_then_resumes_with_full_state() {
             "finalize".to_string(),
         ]
     );
-    assert!(resumed.steps >= 1, "the resumed pass advanced at least once");
+    assert!(
+        resumed.steps >= 1,
+        "the resumed pass advanced at least once"
+    );
 }

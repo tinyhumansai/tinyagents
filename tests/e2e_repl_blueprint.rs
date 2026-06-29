@@ -8,10 +8,10 @@
 //! REPL's plan corresponds to a real, compilable blueprint rather than an
 //! arbitrary string.
 
+use rustagents::RustAgentsError;
 use rustagents::language::compiler::compile;
 use rustagents::language::parser::parse_str;
 use rustagents::repl::{CapabilityPolicy, ReplCommand, ReplOutcome, ReplSession, parse_command};
-use rustagents::RustAgentsError;
 
 const SUPPORT_AGENT: &str = r#"
 graph support_agent {
@@ -124,7 +124,10 @@ fn disallowed_capability_is_rejected_by_the_session() {
 
     match err {
         RustAgentsError::Capability(msg) => {
-            assert!(msg.contains("run"), "error should name the capability: {msg}");
+            assert!(
+                msg.contains("run"),
+                "error should name the capability: {msg}"
+            );
         }
         other => panic!("expected Capability error, got {other:?}"),
     }
