@@ -1,8 +1,17 @@
 //! Harness model layer.
 //!
+//! The model layer is the innermost rung of the recursive ladder: every level
+//! of the RLM-style harness — a top-level agent, a sub-agent exposed as a tool,
+//! or a node inside a subgraph — ultimately bottoms out in a [`ChatModel`] call
+//! routed through this provider-neutral request/response shape. Because the
+//! shapes are uniform, "a model calling a model" is the same typed surface at
+//! every depth, with the [`ModelRegistry`] resolving *which* model answers each
+//! nested call.
+//!
 //! See [`types`] for definitions. This module provides builder methods on
-//! [`ModelRequest`], accessors on [`ModelResponse`], and the [`ModelRegistry`]
-//! logic.
+//! [`ModelRequest`], accessors on [`ModelResponse`], the [`ModelRegistry`]
+//! resolution logic, and the [`StreamAccumulator`] that folds a real
+//! [`ModelStream`] back into a single [`ModelResponse`].
 
 mod types;
 

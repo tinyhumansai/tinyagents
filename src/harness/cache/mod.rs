@@ -1,5 +1,14 @@
 //! Harness cache module — prompt, response, and layout caches.
 //!
+//! In the recursive runtime the same request can recur many times — a
+//! sub-agent re-asked an identical sub-question, a graph node replayed during
+//! recovery, or a deterministic test driving the loop twice. This module makes
+//! that recursion cheap and deterministic: the local response cache short-
+//! circuits an identical model call entirely (the agent loop emits
+//! [`crate::harness::events::AgentEvent::CacheHit`] /
+//! [`crate::harness::events::AgentEvent::CacheMiss`]), while the prompt-cache
+//! layout tooling protects the stable prefix the *provider* itself caches.
+//!
 //! # Two distinct caching concerns
 //!
 //! ## 1. Local response cache

@@ -1,5 +1,11 @@
 //! Parser: turns a [`SpannedToken`] stream into a [`Program`] AST.
 //!
+//! Middle stage of the `.rag` pipeline. It gives a declarative (possibly
+//! self-authored) plan its tree shape without granting it any power: the grammar
+//! admits only graph/node/route/capability *declarations*, so there is no place
+//! for arbitrary code to hide — the structural counterpart to the registry
+//! binding that [`crate::language::compiler`] enforces later.
+//!
 //! The parser is a small hand-written recursive-descent parser over the
 //! grammar described in `docs/modules/expressive-language/README.md`. It
 //! performs *structural* validation only (expected-token checks, well-formed

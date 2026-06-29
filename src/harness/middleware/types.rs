@@ -1,5 +1,10 @@
 //! Type definitions for the harness middleware module.
 //!
+//! These are the typed extension points that wrap each level of the recursive
+//! harness: the [`Middleware`] trait's hooks fire identically around the parent
+//! agent loop and around every nested model/tool/agent call beneath it, so
+//! observation and policy compose the same way at any recursion depth.
+//!
 //! This file holds every public type in `crate::harness::middleware`: the
 //! [`AgentRun`] result record, the core [`Middleware`] trait, the
 //! [`MiddlewareStack`] composer, and the built-in middleware implementations.

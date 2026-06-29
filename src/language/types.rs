@@ -1,6 +1,13 @@
 //! Token and AST types for the expressive language, plus the compiled
 //! [`Blueprint`] artifact.
 //!
+//! These types are the intermediate representations along the `.rag` pipeline
+//! that turns a declarative (possibly self-authored) plan into runnable
+//! topology: [`Token`]s from the lexer, the [`Program`] AST from the parser, and
+//! the fully serializable [`Blueprint`] from the compiler. The `Blueprint` is the
+//! inspectable, diffable, checkpointable artifact at the heart of the recursive
+//! architecture — the same shape whether a human or a model wrote the source.
+//!
 //! This module holds *only* type definitions. The processing logic lives in the
 //! sibling modules:
 //!

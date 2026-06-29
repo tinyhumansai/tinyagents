@@ -1,5 +1,12 @@
 //! Type definitions for the harness observability and events layer.
 //!
+//! These types are the vocabulary for observing a recursive run tree: the
+//! [`AgentEvent`] enum names every lifecycle transition (including the
+//! sub-agent boundaries that mark one level of recursion), [`EventRecord`]
+//! gives each event a replayable offset, and [`HarnessRunStatus`] threads the
+//! `root_run_id` / `parent_run_id` lineage that ties a child run back to its
+//! parent.
+//!
 //! All structs, enums, and traits in this module form the public surface of
 //! `crate::harness::events`. Implementations, free functions, and tests live in
 //! the sibling `mod.rs` and `test.rs` files.

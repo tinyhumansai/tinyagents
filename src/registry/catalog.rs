@@ -1,3 +1,20 @@
+//! Deterministic, offline model catalog.
+//!
+//! Where [`CapabilityRegistry`](crate::registry::CapabilityRegistry) resolves
+//! *executable* capabilities by name, this module resolves *facts about
+//! models* by name: a checked-in snapshot of provider model prices, context
+//! windows, and capability flags. Recursive runs lean on it for the decisions
+//! that surround a model call — estimating roll-up cost across parent/child
+//! runs, choosing a cheaper sub-model for a delegated step, or gating a feature
+//! (tool calling, JSON schema, vision) before a sub-agent is dispatched — all
+//! without a network round-trip, so the default offline build stays
+//! deterministic.
+//!
+//! The snapshot is embedded at compile time from
+//! `docs/modules/registry/model-catalog.snapshot.json` and loaded via
+//! [`ModelCatalog::seed`]; alternative snapshots can be supplied with
+//! [`ModelCatalog::from_json`] or [`ModelCatalog::from_snapshot`].
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -5,33 +22,56 @@ use crate::Result;
 
 const SEED_SNAPSHOT: &str = include_str!("../../docs/modules/registry/model-catalog.snapshot.json");
 
+/// An in-memory, immutable view over a [`ModelCatalogSnapshot`].
+///
+/// Construct it from the embedded seed ([`ModelCatalog::seed`]) or from custom
+/// JSON, then look entries up by `(provider, model_id)` or by model id alone.
+/// Lookups also match an entry's [`aliases`](ModelCatalogEntry::aliases).
 #[derive(Clone, Debug)]
 pub struct ModelCatalog {
     snapshot: ModelCatalogSnapshot,
 }
 
 impl ModelCatalog {
+    /// Wraps an already-parsed [`ModelCatalogSnapshot`].
     pub fn from_snapshot(snapshot: ModelCatalogSnapshot) -> Self {
         Self { snapshot }
     }
 
+    /// Parses a catalog from a JSON snapshot string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `source` is not a valid [`ModelCatalogSnapshot`].
     pub fn from_json(source: &str) -> Result<Self> {
         let snapshot = serde_json::from_str(source)?;
         Ok(Self::from_snapshot(snapshot))
     }
 
+    /// Loads the catalog from the snapshot embedded in the crate at build time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the embedded snapshot fails to parse (which would
+    /// indicate a corrupted checked-in file).
     pub fn seed() -> Result<Self> {
         Self::from_json(SEED_SNAPSHOT)
     }
 
+    /// Returns the underlying snapshot, including its metadata and sources.
     pub fn snapshot(&self) -> &ModelCatalogSnapshot {
         &self.snapshot
     }
 
+    /// Returns all catalog entries.
     pub fn models(&self) -> &[ModelCatalogEntry] {
         &self.snapshot.models
     }
 
+    /// Looks up an entry by `provider` and `model_id`, matching either the
+    /// canonical [`model_id`](ModelCatalogEntry::model_id) or any of its
+    /// [`aliases`](ModelCatalogEntry::aliases). Returns `None` if no entry for
+    /// that provider matches.
     pub fn get(&self, provider: &str, model_id: &str) -> Option<&ModelCatalogEntry> {
         self.snapshot.models.iter().find(|entry| {
             entry.provider == provider
@@ -40,6 +80,9 @@ impl ModelCatalog {
         })
     }
 
+    /// Looks up an entry by model id (or alias) across all providers, returning
+    /// the first match. Use [`get`](Self::get) when the provider is known and
+    /// the same id might appear under more than one provider.
     pub fn get_by_model_id(&self, model_id: &str) -> Option<&ModelCatalogEntry> {
         self.snapshot.models.iter().find(|entry| {
             entry.model_id == model_id || entry.aliases.iter().any(|alias| alias == model_id)
@@ -47,13 +90,24 @@ impl ModelCatalog {
     }
 }
 
+/// The deserialized form of a model-catalog snapshot file.
+///
+/// Carries provenance metadata (schema version, snapshot id, creation time,
+/// pricing currency/unit, and the [`sources`](Self::sources) it was derived
+/// from) alongside the list of [`models`](Self::models).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelCatalogSnapshot {
+    /// Version of the snapshot schema this file conforms to.
     pub schema_version: u32,
+    /// Unique identifier for this snapshot revision.
     pub snapshot_id: String,
+    /// ISO-8601 timestamp recording when the snapshot was generated.
     pub created_at: String,
+    /// Currency that all pricing fields are denominated in (e.g. `"USD"`).
     pub currency: String,
+    /// The unit prices are quoted per (e.g. `"token"`).
     pub unit: String,
+    /// Optional human-readable description of the snapshot.
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]

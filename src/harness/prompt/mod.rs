@@ -1,5 +1,12 @@
 //! Prompt assembly.
 //!
+//! In the recursive harness a prompt is data that is built, not a hard-coded
+//! string: templates and the [`PromptBuilder`] turn runtime values into the
+//! [`ModelRequest`] that drives a model call, which is exactly what lets a model
+//! (via the REPL or a self-authored blueprint) shape the prompt of a nested
+//! sub-model call. Segment-aware assembly also keeps the cacheable prefix stable
+//! across the repeated calls a deep recursion makes.
+//!
 //! Owns prompt templates, system message construction, dynamic context
 //! injection, message rendering, prompt variables, and prompt validation.
 //!

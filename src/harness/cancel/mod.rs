@@ -1,5 +1,11 @@
 //! Cooperative, runtime-agnostic run cancellation.
 //!
+//! In the recursive runtime a single [`CancellationToken`] can be shared down a
+//! tree of nested runs (a parent agent, its sub-agents, and their sub-graphs),
+//! so an orchestrator cancels an entire recursion with one `cancel()` and every
+//! level unwinds at its next safe checkpoint with
+//! [`crate::error::TinyAgentsError::Cancelled`].
+//!
 //! This module provides [`CancellationToken`], a lightweight, self-contained
 //! cancellation primitive (an `Arc<AtomicBool>` paired with a [`tokio::sync::Notify`])
 //! used to request that an in-flight harness run stop at its next safe

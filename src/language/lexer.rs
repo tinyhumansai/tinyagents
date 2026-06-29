@@ -1,6 +1,9 @@
 //! Lexer: turns `.rag` source text into a stream of [`SpannedToken`]s.
 //!
-//! The lexer is deliberately tiny and side-effect free. It recognises:
+//! First stage of the pipeline that lets the runtime ingest declarative plans —
+//! including ones a model authored about itself. The lexer is deliberately tiny
+//! and side-effect free: a small, auditable surface is part of what keeps
+//! agent-authored source a safe input. It recognises:
 //!
 //! - identifiers / keywords: `[A-Za-z_][A-Za-z0-9_]*`
 //! - numbers: integer or decimal, optionally signed (`50`, `1.5`, `-3`)

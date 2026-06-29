@@ -1,5 +1,10 @@
 //! Cache types for the harness cache module.
 //!
+//! These types let the recursive runtime answer a recurring request without
+//! re-contacting the provider (response cache) and keep a provider's own
+//! KV-cache prefix stable across the many requests a nested run produces
+//! (layout protection).
+//!
 //! Two distinct caching concerns are modelled here:
 //!
 //! 1. **Local response cache** ([`ResponseCache`], [`InMemoryResponseCache`]):

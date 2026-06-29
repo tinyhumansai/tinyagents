@@ -1,3 +1,7 @@
+//! Unit tests for [`GraphRunStatus`]: the constructor's defaults (root run id
+//! mirrors the run id, zeroed progress) and terminal-state detection across the
+//! lifecycle.
+
 use super::*;
 use crate::harness::ids::{ExecutionStatus, GraphId, RunId};
 

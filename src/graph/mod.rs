@@ -1,11 +1,19 @@
 //! TinyAgents graph runtime.
 //!
-//! The graph module is TinyAgents' durable workflow runtime (LangGraph-style):
-//! partial updates and reducers ([`reducer`]), commands and interrupts
-//! ([`command`]), a builder/compile contract ([`builder`]), a superstep executor
-//! ([`compiled`]), checkpointing ([`checkpoint`]), streaming/events
-//! ([`stream`]), run-status snapshots ([`status`]), graph export/visualization
-//! ([`export`]), and subgraph embedding ([`subgraph`]).
+//! The graph module is TinyAgents' durable workflow runtime (LangGraph-style)
+//! and one of the load-bearing surfaces of the crate's recursive language-model
+//! (RLM) architecture: because a node can embed another compiled graph
+//! ([`subgraph`]) or invoke a sub-agent, **graphs run graphs** and orchestration
+//! recurses while every step stays typed, checkpointed, and observable. A
+//! workflow authored from a `.rag` blueprint or driven from the `.ragsh` REPL
+//! lowers into exactly these same types, so a model can describe, compile, and
+//! re-enter the very runtime it is executing inside.
+//!
+//! The pieces: partial updates and reducers ([`reducer`]), commands and
+//! interrupts ([`command`]), a builder/compile contract ([`builder`]), a
+//! superstep executor ([`compiled`]), checkpointing ([`checkpoint`]),
+//! streaming/events ([`stream`]), run-status snapshots ([`status`]), graph
+//! export/visualization ([`export`]), and subgraph embedding ([`subgraph`]).
 //!
 //! Each concern lives in its own submodule with `types.rs` (definitions),
 //! `mod.rs` (implementations), and `test.rs` (unit tests).

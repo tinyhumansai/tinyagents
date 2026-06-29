@@ -1,5 +1,15 @@
 //! Typed observability layer for the harness.
 //!
+//! Because TinyAgents is recursive — agents call agents, graphs run graphs — a
+//! single user request fans out into a *tree* of runs. This module makes that
+//! tree observable: every model call, tool call, and (crucially) sub-agent
+//! boundary is a typed [`AgentEvent`], and child runs surface through dedicated
+//! variants ([`AgentEvent::SubAgentStarted`], [`AgentEvent::SubAgentReused`],
+//! [`AgentEvent::SubAgentCompleted`]) carrying recursion `depth`, so an
+//! orchestrator can watch the whole recursion fold and unfold in one event
+//! stream. [`HarnessRunStatus`] then summarizes a run with its `root_run_id` /
+//! `parent_run_id` lineage so usage and cost roll up from leaf runs to the root.
+//!
 //! This module provides:
 //!
 //! - [`AgentEvent`] — a typed enum covering every significant harness lifecycle

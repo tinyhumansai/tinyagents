@@ -1,5 +1,9 @@
 //! Type definitions for cooperative run cancellation.
 //!
+//! Because the token is a cheap clonable handle over shared state, one token
+//! threaded through a recursive run tree lets a parent stop all of its nested
+//! sub-runs at once.
+//!
 //! A [`CancellationToken`] is a cheap, clonable handle that an orchestrator (a
 //! parent agent, a human UI, a graph supervisor, a tool, a middleware, or a
 //! test) uses to request that an in-flight run stop at its next safe

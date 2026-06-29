@@ -69,7 +69,10 @@ async fn subagent_tool_call_surfaces_failure_as_err() {
     let tool = SubAgentTool::new(subagent);
 
     let err = tool
-        .call(&(), ToolCall::new("c1", "broken_worker", json!({ "input": "x" })))
+        .call(
+            &(),
+            ToolCall::new("c1", "broken_worker", json!({ "input": "x" })),
+        )
         .await
         .expect_err("SubAgentTool::call must surface the child failure as an Err");
 

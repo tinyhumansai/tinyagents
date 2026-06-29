@@ -1,7 +1,17 @@
-//! Checkpointer trait and in-memory backend.
+//! Checkpointer trait and in-memory backend — the durability layer that makes
+//! the recursive graph runtime resumable and time-travelable.
+//!
+//! In a recursive-language-model harness, runs nest: a graph node can run
+//! another compiled graph, which can run another, each producing its own state.
+//! Checkpointing snapshots every level of that tree at superstep boundaries and
+//! keys them by `thread_id`/`namespace` so a parent and its embedded subgraphs
+//! never collide (see [`crate::graph::subgraph`]). Persisting committed state at
+//! each boundary is what lets a run be paused on an interrupt, resumed later,
+//! forked, or replayed for time-travel debugging.
 //!
 //! See [`types`] for the checkpoint record definitions. Checkpoints are written
-//! at superstep boundaries only.
+//! at superstep boundaries only — never mid-node — so resuming always reruns a
+//! node from its start.
 
 mod types;
 

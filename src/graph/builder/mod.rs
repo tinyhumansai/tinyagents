@@ -1,5 +1,13 @@
 //! Durable graph builder and compile contract.
 //!
+//! This is the authoring entry point for the recursive graph runtime: a
+//! [`GraphBuilder`] accumulates nodes, edges, conditional routing, and a reducer,
+//! and [`GraphBuilder::compile`] validates that topology and freezes it into an
+//! immutable [`crate::graph::CompiledGraph`]. Because a node handler can itself
+//! drive another compiled graph or a sub-agent, the same builder API is what
+//! both hand-written Rust and model-authored `.rag`/`.ragsh` programs lower into
+//! when they assemble a workflow that may recurse into sub-workflows.
+//!
 //! See [`types`] for the builder data types. `compile` validates the topology
 //! and freezes it into an immutable [`crate::graph::CompiledGraph`].
 

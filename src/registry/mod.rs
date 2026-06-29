@@ -1,9 +1,25 @@
-//! Registry coordination and discovery primitives.
+//! Registry coordination and discovery primitives — the **named capability
+//! catalog** that makes TinyAgents recursive.
 //!
-//! The registry owns named runtime components and local metadata catalogs. The
-//! first concrete piece is the model catalog, which keeps a checked-in snapshot
-//! of provider model prices, context windows, and capabilities for deterministic
-//! local lookup.
+//! In the recursive (RLM-style) architecture, a model, agent, or graph can
+//! reach for capabilities it never hardcoded: a `.rag` blueprint or `.ragsh`
+//! REPL line references a model/tool/agent/graph *by name*, and the registry is
+//! what resolves that name to a real, Rust-registered handle. By owning the set
+//! of legal names, the registry is also the boundary that makes agent-authored
+//! plans safe to compile — a self-authored workflow can only bind to
+//! capabilities a human explicitly registered and allowed.
+//!
+//! The registry owns named runtime components and local metadata catalogs, in
+//! two complementary pieces:
+//!
+//! - [`CapabilityRegistry`] ([`capability`]) — the name-addressable catalog of
+//!   models, tools, graph blueprints, routers, and reducers that `.rag`/`.ragsh`
+//!   sources bind against, plus the discovery [`component`] types
+//!   ([`ComponentKind`]/[`ComponentId`]/[`ComponentMetadata`]) that describe
+//!   what is registered.
+//! - [`ModelCatalog`] ([`catalog`]) — a checked-in snapshot of provider model
+//!   prices, context windows, and capabilities for deterministic, offline
+//!   lookup (cost estimation, model selection, capability gating).
 
 pub mod capability;
 pub mod catalog;

@@ -1,4 +1,12 @@
-//! Graph run status snapshots.
+//! Graph run status snapshots — the lightweight observability surface for the
+//! tree of recursive runs.
+//!
+//! Where checkpoints persist *resumable state*, a [`GraphRunStatus`] is a
+//! cheap, readable summary an observer can poll to answer "is this run active?",
+//! "which node is executing?", and "which interrupt is waiting?". Because each
+//! status carries `root_run_id` / `parent_run_id`, the records form the run
+//! tree that links a parent graph to the subgraphs and sub-agents it recurses
+//! into, so progress, interrupts, and errors can be rolled up across levels.
 //!
 //! See [`types`] for the [`GraphRunStatus`] definition.
 

@@ -1,10 +1,16 @@
-//! Checkpoint records and metadata.
+//! Checkpoint records and metadata — the persisted snapshots that make every
+//! level of a recursive graph run resumable and forkable.
 //!
 //! Checkpoints are graph-runtime persistence, separate from harness memory and
 //! long-term stores. They are written at superstep boundaries only — never
 //! mid-node — because rerunning a node from its start is far easier to reason
 //! about than suspending an async Rust stack, and it matches interrupt/resume
 //! semantics exactly.
+//!
+//! Each record carries a `thread_id` lineage key, a `parent_checkpoint_id`
+//! chain (the spine that time-travel and forking walk), and a `namespace` that
+//! scopes nested subgraph checkpoints so a parent run and the child graphs it
+//! embeds never overwrite each other.
 
 use crate::graph::command::Interrupt;
 use crate::harness::ids::NodeId;

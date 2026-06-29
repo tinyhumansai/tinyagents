@@ -1,5 +1,12 @@
 //! Middleware stack.
 //!
+//! In the recursive (RLM-style) harness, middleware is the layer that wraps
+//! *every* level of the recursion identically: because a sub-agent or sub-graph
+//! is just another agent loop, the same before/after hooks bracket the parent
+//! run and each nested model/tool/agent call beneath it. That uniform wrapping
+//! is what lets cross-cutting concerns — tracing, usage/cost roll-up, guardrails
+//! — compose consistently as models call models and graphs run graphs.
+//!
 //! Owns the before/after hooks that wrap agent, model, and tool execution.
 //! Cross-cutting behavior such as tracing, guardrails, message trimming,
 //! prompt-cache protection, and usage accounting lives here as [`Middleware`]

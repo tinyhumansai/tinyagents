@@ -1,4 +1,9 @@
 //! Compact, observable graph run status records.
+//!
+//! These records are the nodes of the recursive run tree: `root_run_id` and
+//! `parent_run_id` connect a top-level run to every subgraph/sub-agent run it
+//! spawns, while the remaining fields capture live execution (current step,
+//! active nodes, pending interrupts) without deserializing full graph state.
 
 use std::time::SystemTime;
 

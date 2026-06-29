@@ -1,5 +1,10 @@
 //! Type definitions for the harness embeddings + retrieval module.
 //!
+//! These are the building blocks of retrieval-augmented context — the
+//! [`EmbeddingModel`] / [`VectorStore`] / [`Retriever`] triad that lets a
+//! recursive agent fetch external knowledge on demand rather than carrying it
+//! all in-context.
+//!
 //! All public types declared here are re-exported through [`super`] so callers
 //! import them from `crate::harness::embeddings` directly.
 

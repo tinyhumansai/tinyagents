@@ -1,4 +1,13 @@
-//! Expressive language (`.rag`) for declarative agent-graph blueprints.
+//! Expressive language (`.rag`) — the declarative blueprint surface of the
+//! recursive runtime.
+//!
+//! In TinyAgents' recursive (RLM-style) architecture, a model can author the
+//! very workflow it is standing inside. `.rag` is the *safe boundary* for that
+//! self-authoring: a capability-by-name blueprint format that lowers into the
+//! exact same [`crate::graph`] and [`crate::harness`] runtime as hand-written
+//! Rust, yet can only *reference* capabilities — never define or execute code —
+//! so an agent-emitted plan is parsed, validated, and bound against a registry
+//! before it ever runs.
 //!
 //! The expressive language is a compact, side-effect-free way to describe an
 //! agent graph: its state channels, nodes, routes, and capability references.

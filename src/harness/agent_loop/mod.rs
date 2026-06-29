@@ -1,5 +1,15 @@
 //! Default model-tool-model agent loop.
 //!
+//! This loop is the innermost turn of the recursive-language-model (RLM)
+//! runtime: it is where one model call is driven to completion, and because a
+//! whole harness can be exposed as a tool
+//! ([`crate::harness::subagent::SubAgentTool`]), the very tools this loop
+//! executes may themselves be other agents — so "a model calling a model" is
+//! just this loop nested inside one of its own tool calls. Each invocation runs
+//! inside a [`RunContext`] that tracks recursion depth, fans usage/cost up to a
+//! parent run, and observes cooperative cancellation and steering at safe
+//! checkpoints.
+//!
 //! This module implements the harness's standard execution loop as inherent
 //! methods on [`crate::harness::runtime::AgentHarness`]: build a model request,
 //! invoke the model (with retry and fallback), execute any requested tools,

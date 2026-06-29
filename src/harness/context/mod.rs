@@ -1,5 +1,12 @@
 //! Run configuration and runtime context.
 //!
+//! [`RunContext`] is the unit of recursion in the runtime: every nested layer —
+//! a sub-agent, a sub-graph, a REPL-driven sub-call — runs inside its own
+//! context, and [`RunConfig::depth`]/[`RunConfig::max_depth`] plus
+//! [`RunConfig::child`] track and bound how deep that recursion may go while a
+//! shared [`CancellationToken`] and event sink let signals and observability
+//! flow across the whole tree.
+//!
 //! This module owns the authoritative run-context contract that downstream
 //! middleware, the agent loop, and graph nodes code against:
 //!

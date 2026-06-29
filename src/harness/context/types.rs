@@ -1,5 +1,9 @@
 //! Type definitions for the harness run-context module.
 //!
+//! These types carry the recursion bookkeeping (depth / max-depth) and the
+//! shared signals (cancellation, steering, events) that let a parent run and
+//! its nested sub-runs behave as one coordinated tree.
+//!
 //! [`RunConfig`] is the serializable, declarative description of a run (its
 //! identity, limits, and metadata). [`RunContext`] is the live, in-process
 //! handle threaded through model calls, tool calls, middleware, and graph

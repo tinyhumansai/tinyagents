@@ -1,5 +1,66 @@
-//! TinyAgents is a small foundation for LLM applications built around
-//! composable chat models, tools, and durable executable state graphs.
+//! # TinyAgents — a recursive language-model (RLM) harness for Rust
+//!
+//! TinyAgents is a typed, durable runtime where **language models call models,
+//! agents call agents, and graphs run graphs** — and where a model can author,
+//! compile, and run the very workflow it is standing inside, all as inspectable,
+//! checkpointed, policy-checked Rust.
+//!
+//! The "recursive" framing is the through-line of the whole crate, not a
+//! footnote. It is architected around the execution model described in
+//! "Recursive Language Models" (Alex L. Zhang, Tim Kraska, Omar Khattab, MIT
+//! CSAIL, 2025; <https://arxiv.org/abs/2512.24601>): rather than stuffing
+//! everything into one context window, a model treats long context as an
+//! external *environment* it interacts with through a REPL — examining,
+//! decomposing, and recursively calling sub-models over snippets. TinyAgents
+//! brings that idea to Rust as a production-shaped harness (sub-model /
+//! sub-agent / sub-graph calls as functions, persistent session values, depth
+//! tracking, and trajectory/event logging). It is *inspired by and architected
+//! around* the RLM execution model, not a reimplementation of the paper's
+//! benchmarks.
+//!
+//! ## The five surfaces
+//!
+//! 1. **Harness** ([`harness`]) — provider-neutral model calls, typed tools,
+//!    middleware, structured output, streaming, usage/cost, retry/limits, cache,
+//!    memory/embeddings, sub-agents, steering, and a testkit.
+//! 2. **Graph runtime** ([`graph`]) — LangGraph-style durable typed state
+//!    graphs: [`START`]/[`END`], nodes, conditional routing, [`Command`]s,
+//!    fan-out, reducers/channels, [`Checkpoint`]s, [`Interrupt`]s, subgraphs,
+//!    streaming, and topology export.
+//! 3. **Registry** ([`registry`]) — a named capability catalog (models, tools,
+//!    agents, graphs, stores, middleware, policy) that `.rag`/`.ragsh` bind by
+//!    name.
+//! 4. **Expressive language `.rag`** ([`language`]) — a declarative,
+//!    side-effect-free blueprint format that compiles (lexer → parser →
+//!    compiler) into the same graph/harness runtime; the safe boundary for
+//!    agent-authored plans.
+//! 5. **REPL language `.ragsh`** ([`repl`]) — imperative, capability-bound
+//!    interactive orchestration; the RLM/CodeAct loop surface.
+//!
+//! ## The recursion story
+//!
+//! Both `.rag` and `.ragsh` lower into the *same* [`graph`] + [`harness`] types
+//! as hand-written Rust — a language whose programs are the runtime that
+//! interprets them. A harness agent can be exposed *as a tool* to another agent
+//! ([`SubAgent`], [`SubAgentTool`], [`SubAgentSession`]), so orchestration is
+//! just a model calling a model; the runtime tracks parent/child run lineage and
+//! enforces a recursion cap ([`TinyAgentsError::SubAgentDepth`]). At the deepest
+//! level a model can emit a `.rag` blueprint that compiles through the same
+//! registry-bound path as a human-authored file and runs on the same runtime the
+//! model is already executing in (see `examples/openai_self_blueprint.rs`).
+//!
+//! ## Provider features
+//!
+//! The default build is offline and deterministic ([`harness::providers::MockModel`]).
+//! Hosted and local providers (OpenAI plus the OpenAI-compatible endpoints for
+//! Anthropic, Ollama, DeepSeek, Groq, xAI, OpenRouter, Together, and Mistral)
+//! live behind the `openai` Cargo feature.
+//!
+//! ## Crate-root re-exports
+//!
+//! For discoverability the most-used types from each surface are re-exported at
+//! the crate root, grouped below by surface ([`error`], [`registry`],
+//! [`language`], [`harness`], and [`graph`]).
 
 pub mod error;
 pub mod graph;
@@ -8,6 +69,7 @@ pub mod language;
 pub mod registry;
 pub mod repl;
 
+// --- Error: the crate-wide error type and `Result` alias ---
 pub use error::{Result, TinyAgentsError};
 
 // --- Registry: named capability catalog (.rag/.ragsh binding by name) ---

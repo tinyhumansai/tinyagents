@@ -1,5 +1,13 @@
 //! Command, interrupt, and node-result constructors.
 //!
+//! Commands are how a node steers the recursive runtime from the inside: a
+//! [`Command`] couples a partial state update with explicit `goto` routing
+//! (one or many targets — the fanout primitive), so a node — including one that
+//! has just run a sub-agent or a subgraph — can dynamically decide which nodes
+//! execute next instead of relying only on static edges. [`Interrupt`] pauses a
+//! run for human-in-the-loop input, which the durable executor checkpoints and
+//! later resumes.
+//!
 //! See [`types`] for the definitions.
 
 mod types;

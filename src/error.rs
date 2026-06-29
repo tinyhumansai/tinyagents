@@ -1,21 +1,48 @@
+//! Crate-wide error type and `Result` alias.
+//!
+//! Every fallible surface of the recursive runtime — graph execution, the
+//! harness agent loop, sub-agent recursion, `.rag`/`.ragsh` compilation, and
+//! registry binding — funnels through [`TinyAgentsError`] so failures from a
+//! deeply nested child run roll up to the caller through one uniform type.
+//! Downstream code should prefer the [`Result`] alias exported here.
+
 use thiserror::Error;
 
+/// Convenience alias for `std::result::Result<T, TinyAgentsError>` used
+/// throughout the crate's public API.
 pub type Result<T> = std::result::Result<T, TinyAgentsError>;
 
+/// The single error type returned by every fallible TinyAgents operation.
+///
+/// Variants are grouped by the surface that raises them: graph construction and
+/// execution, model/tool invocation, run limits and policy, graph durability,
+/// and `.rag`/`.ragsh` language processing.
 #[derive(Debug, Error)]
 pub enum TinyAgentsError {
+    /// A graph was compiled or run without a configured `START` edge, so there
+    /// is no entry node to begin execution from.
     #[error("graph start node is not configured")]
     MissingStart,
 
+    /// An edge, route, or run referenced a node name that is not present in the
+    /// graph. The payload is the missing node name.
     #[error("node `{0}` does not exist")]
     MissingNode(String),
 
+    /// An edge declares a destination node that does not exist. The payload is
+    /// the missing target name.
     #[error("edge points to missing node `{0}`")]
     MissingEdgeTarget(String),
 
+    /// A conditional router returned a `route` label that is not wired to any
+    /// destination from `node`.
     #[error("conditional route `{route}` from node `{node}` does not exist")]
     MissingRoute { node: String, route: String },
 
+    /// Graph execution performed more super-steps than the configured recursion
+    /// limit allows (typically an unintended cycle). The payload is the limit
+    /// that was hit. Contrast with [`TinyAgentsError::SubAgentDepth`], which
+    /// counts nested run-tree levels rather than super-steps.
     #[error("graph exceeded the recursion limit of {0} steps")]
     RecursionLimit(usize),
 
@@ -29,21 +56,32 @@ pub enum TinyAgentsError {
     #[error("sub-agent recursion exceeded the maximum depth of {0}")]
     SubAgentDepth(usize),
 
+    /// A model provider call failed (transport error, non-2xx status, or a
+    /// malformed response). The payload is a human-readable, provider-normalized
+    /// description.
     #[error("model error: {0}")]
     Model(String),
 
+    /// A tool invocation returned an error. The payload describes the failure.
     #[error("tool error: {0}")]
     Tool(String),
 
+    /// A run referenced a tool name that is not present in the
+    /// [`crate::harness::tool::ToolRegistry`]. The payload is the tool name.
     #[error("tool `{0}` is not registered")]
     ToolNotFound(String),
 
+    /// A run referenced a model name that is not registered. The payload is the
+    /// model name.
     #[error("model `{0}` is not registered")]
     ModelNotFound(String),
 
+    /// Input failed validation before a call was made (for example a missing
+    /// API key or an empty required field). The payload describes the problem.
     #[error("validation error: {0}")]
     Validation(String),
 
+    /// Parsing or validating a model's structured (JSON-schema) output failed.
     #[error("structured output error: {0}")]
     StructuredOutput(String),
 

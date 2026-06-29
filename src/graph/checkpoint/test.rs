@@ -1,3 +1,7 @@
+//! Unit tests for the in-memory checkpointer: `put`/`get`/`list` roundtrips
+//! (including latest-vs-specific lookup and missing threads) and the shared
+//! storage guarantee across cheap clones.
+
 use super::*;
 use crate::harness::ids::NodeId;
 use serde_json::json;

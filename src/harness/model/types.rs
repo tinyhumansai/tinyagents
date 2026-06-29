@@ -1,7 +1,14 @@
 //! Harness model layer types.
 //!
+//! These provider-neutral shapes are the common currency of the recursive
+//! harness: the same [`ModelRequest`] / [`ModelResponse`] / [`ModelStream`]
+//! types describe a call whether it originates from a top-level agent, a nested
+//! sub-agent, or a graph node, so model-calls-model recursion is expressed in
+//! one uniform vocabulary regardless of depth or provider.
+//!
 //! These are the rich, harness-internal request/response shapes. They carry
-//! tool declarations, tool-choice policy, structured-output formats, and
+//! tool declarations, tool-choice policy, structured-output formats, capability
+//! profiles ([`ModelProfile`]/[`CapabilitySet`]), model-resolution inputs, and
 //! prompt-cache layout metadata.
 
 use std::collections::HashMap;
