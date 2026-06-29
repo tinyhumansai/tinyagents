@@ -49,20 +49,23 @@ mod types;
 
 pub use types::*;
 
+use std::sync::Arc;
+
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::events::{AgentEvent, HarnessRunStatus};
 use crate::harness::ids::{CallId, ComponentId, HarnessPhase};
-use crate::harness::message::Message;
+use crate::harness::message::{Message, MessageDelta};
 use crate::harness::middleware::AgentRun;
 use crate::harness::model::{
-    ModelRequest, ModelResolutionSource, ModelResponse, ResolvedModel, ResolvedModelBinding,
-    ResponseFormat, ToolChoice,
+    ChatModel, ModelDelta, ModelRequest, ModelResolutionSource, ModelResponse, ModelStreamItem,
+    ResolvedModel, ResolvedModelBinding, ResponseFormat, StreamAccumulator, ToolChoice,
 };
 use crate::harness::retry::is_retryable;
 use crate::harness::runtime::AgentHarness;
 use crate::harness::structured::{StructuredExtractor, StructuredStrategy};
 use crate::harness::tool::ToolSchema;
+use futures::StreamExt;
 use serde_json::Value;
 
 impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
@@ -122,7 +125,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         input: Vec<Message>,
     ) -> Result<AgentLoopResult> {
         let ctx = RunContext::new(config, ctx_data);
-        self.drive(state, ctx, input).await
+        self.drive(state, ctx, input, false).await
     }
 
     /// Runs the default agent loop inside a caller-supplied [`RunContext`],
@@ -144,7 +147,9 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         ctx: RunContext<Ctx>,
         input: Vec<Message>,
     ) -> Result<AgentRun> {
-        self.drive(state, ctx, input).await.map(|result| result.run)
+        self.drive(state, ctx, input, false)
+            .await
+            .map(|result| result.run)
     }
 
     /// Like [`AgentHarness::invoke_in_context`] but also returns the compact
@@ -155,16 +160,82 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         ctx: RunContext<Ctx>,
         input: Vec<Message>,
     ) -> Result<AgentLoopResult> {
-        self.drive(state, ctx, input).await
+        self.drive(state, ctx, input, false).await
+    }
+
+    /// Streaming counterpart of [`AgentHarness::invoke`].
+    ///
+    /// Behaves exactly like [`AgentHarness::invoke`] except each model call is
+    /// driven through [`crate::harness::model::ChatModel::stream`] rather than
+    /// [`crate::harness::model::ChatModel::invoke`]: incremental message deltas
+    /// are emitted as [`AgentEvent::ModelDelta`] events and threaded through
+    /// every middleware's
+    /// [`on_model_delta`][crate::harness::middleware::Middleware::on_model_delta]
+    /// hook before the chunks are merged back into the final
+    /// [`crate::harness::model::ModelResponse`]. Tool execution, limits, retry,
+    /// fallback, structured output, and all other lifecycle behavior are
+    /// identical to the non-streaming path.
+    pub async fn invoke_streaming(
+        &self,
+        state: &State,
+        ctx_data: Ctx,
+        config: RunConfig,
+        input: Vec<Message>,
+    ) -> Result<AgentRun> {
+        let ctx = RunContext::new(config, ctx_data);
+        self.drive(state, ctx, input, true)
+            .await
+            .map(|result| result.run)
+    }
+
+    /// Streaming counterpart of [`AgentHarness::invoke_default`].
+    pub async fn invoke_streaming_default(
+        &self,
+        state: &State,
+        input: Vec<Message>,
+    ) -> Result<AgentRun>
+    where
+        Ctx: Default,
+    {
+        self.invoke_streaming(state, Ctx::default(), RunConfig::new("run"), input)
+            .await
+    }
+
+    /// Streaming counterpart of [`AgentHarness::invoke_in_context`].
+    pub async fn invoke_streaming_in_context(
+        &self,
+        state: &State,
+        ctx: RunContext<Ctx>,
+        input: Vec<Message>,
+    ) -> Result<AgentRun> {
+        self.drive(state, ctx, input, true)
+            .await
+            .map(|result| result.run)
+    }
+
+    /// Streaming counterpart of [`AgentHarness::invoke_in_context_with_status`].
+    pub async fn invoke_streaming_in_context_with_status(
+        &self,
+        state: &State,
+        ctx: RunContext<Ctx>,
+        input: Vec<Message>,
+    ) -> Result<AgentLoopResult> {
+        self.drive(state, ctx, input, true).await
     }
 
     /// Shared driver: runs the loop inside `ctx` and owns lifecycle
     /// bookkeeping (status transitions plus `RunFailed`/`on_error` on error).
+    ///
+    /// `streaming` selects whether each model call is driven through
+    /// [`crate::harness::model::ChatModel::stream`] (firing `on_model_delta`
+    /// middleware per delta) or the unary
+    /// [`crate::harness::model::ChatModel::invoke`] path.
     async fn drive(
         &self,
         state: &State,
         mut ctx: RunContext<Ctx>,
         input: Vec<Message>,
+        streaming: bool,
     ) -> Result<AgentLoopResult> {
         let run_id = ctx.config.run_id.clone();
         let thread_id = ctx.config.thread_id.clone();
@@ -177,7 +248,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         let mut run = AgentRun::new();
 
         match self
-            .run_loop(state, &mut ctx, &mut run, &mut status, input)
+            .run_loop(state, &mut ctx, &mut run, &mut status, input, streaming)
             .await
         {
             Ok(()) => {
@@ -209,6 +280,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         run: &mut AgentRun,
         status: &mut HarnessRunStatus,
         input: Vec<Message>,
+        streaming: bool,
     ) -> Result<()> {
         let record = ctx.emit(AgentEvent::RunStarted {
             run_id: ctx.run_id().clone(),
@@ -326,7 +398,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             status.set_last_event(record.id);
 
             let mut response = self
-                .invoke_model_with_retry(state, ctx, &request, &call_id, binding)
+                .invoke_model_with_retry(state, ctx, &request, &call_id, binding, streaming)
                 .await?;
 
             status.mark_running(HarnessPhase::Middleware);
@@ -465,6 +537,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         request: &ModelRequest,
         call_id: &CallId,
         binding: ResolvedModelBinding<State>,
+        streaming: bool,
     ) -> Result<ModelResponse> {
         let mut current_name = binding.resolved.name.clone();
         let mut model = binding.model;
@@ -474,7 +547,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // Retry loop for the current model.
             let mut attempt = 0usize;
             let outcome = loop {
-                match model.invoke(state, request.clone()).await {
+                let attempt_result = if streaming {
+                    self.invoke_model_streaming_once(state, ctx, &model, request, call_id)
+                        .await
+                } else {
+                    model.invoke(state, request.clone()).await
+                };
+                match attempt_result {
                     Ok(response) => break Ok(response),
                     Err(error) => {
                         if is_retryable(&error) && self.policy.retry.should_retry(attempt) {
@@ -525,6 +604,62 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 }
             }
         }
+    }
+
+    /// Drives one streaming model call to completion.
+    ///
+    /// Consumes [`crate::harness::model::ChatModel::stream`], emitting an
+    /// [`AgentEvent::ModelDelta`] and running every middleware's
+    /// [`on_model_delta`][crate::harness::middleware::Middleware::on_model_delta]
+    /// hook for each [`ModelStreamItem::MessageDelta`] (and standalone
+    /// [`ModelStreamItem::ToolCallDelta`]), then folds the items into the final
+    /// [`ModelResponse`] via [`StreamAccumulator`]. The merged response is
+    /// equivalent to what the unary [`crate::harness::model::ChatModel::invoke`]
+    /// path would have produced, so the rest of the loop is unaffected.
+    async fn invoke_model_streaming_once(
+        &self,
+        state: &State,
+        ctx: &mut RunContext<Ctx>,
+        model: &Arc<dyn ChatModel<State>>,
+        request: &ModelRequest,
+        call_id: &CallId,
+    ) -> Result<ModelResponse> {
+        let mut stream = model.stream(state, request.clone()).await?;
+        let mut accumulator = StreamAccumulator::new();
+
+        while let Some(item) = stream.next().await {
+            // Surface incremental message/tool-call fragments through events and
+            // the `on_model_delta` middleware hook before merging them.
+            let message_delta = match &item {
+                ModelStreamItem::MessageDelta(delta) => Some(delta.clone()),
+                ModelStreamItem::ToolCallDelta(tool_delta) => Some(MessageDelta {
+                    text: String::new(),
+                    tool_call: Some(tool_delta.clone()),
+                }),
+                _ => None,
+            };
+
+            if let Some(message_delta) = message_delta {
+                let record = ctx.emit(AgentEvent::ModelDelta {
+                    call_id: call_id.clone(),
+                    delta: message_delta.clone(),
+                });
+                let _ = record;
+
+                let mut model_delta = ModelDelta {
+                    call_id: call_id.as_str().to_string(),
+                    content: message_delta.text.clone(),
+                    tool_call: message_delta.tool_call.clone(),
+                };
+                self.middleware
+                    .run_on_model_delta(ctx, state, &mut model_delta)
+                    .await?;
+            }
+
+            accumulator.push(&item);
+        }
+
+        accumulator.finish()
     }
 }
 

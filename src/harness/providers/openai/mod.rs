@@ -39,10 +39,12 @@ use crate::error::{Result, TinyAgentsError};
 use crate::harness::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
 use crate::harness::model::{
     ChatModel, Modalities, ModelProfile, ModelRequest, ModelResponse, ModelStatus, ModelStream,
-    ModelStreamItem, ResponseFormat, ToolChoice,
+    ModelStreamItem, ProviderError, ResponseFormat, ToolChoice,
 };
 use crate::harness::tool::{ToolCall, ToolDelta};
 use crate::harness::usage::Usage;
+
+use super::ProviderSpec;
 
 /// Default model id used when neither the request nor the builder override it.
 const DEFAULT_MODEL: &str = "gpt-4.1-mini";
@@ -61,6 +63,8 @@ pub struct OpenAiModel {
     api_key: String,
     /// Default model id used when a request does not override it.
     model: String,
+    /// Provider family identifier used in profiles and normalized errors.
+    provider: String,
     /// API base URL (no trailing slash); `/chat/completions` is appended.
     base_url: String,
     /// Capability profile derived from the default model id.
@@ -72,7 +76,7 @@ pub struct OpenAiModel {
 /// All targets support tool calling, streaming (including tool-call chunks),
 /// and JSON Schema response formats. Modern OpenAI-family models additionally
 /// advertise native structured output and (for the o-series) reasoning output.
-fn derive_profile(model: &str) -> ModelProfile {
+fn derive_profile(provider: &str, model: &str) -> ModelProfile {
     let lower = model.to_ascii_lowercase();
     let native_structured = lower.contains("gpt-4o")
         || lower.contains("gpt-4.1")
@@ -81,7 +85,7 @@ fn derive_profile(model: &str) -> ModelProfile {
         || lower.starts_with("o4");
     let reasoning = lower.starts_with("o1") || lower.starts_with("o3") || lower.starts_with("o4");
     ModelProfile {
-        provider: Some("openai".to_string()),
+        provider: Some(provider.to_string()),
         model: Some(model.to_string()),
         status: ModelStatus::Stable,
         modalities: Modalities {
@@ -107,15 +111,23 @@ impl OpenAiModel {
             client: reqwest::Client::new(),
             api_key: api_key.into(),
             model: DEFAULT_MODEL.to_string(),
+            provider: "openai".to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
-            profile: derive_profile(DEFAULT_MODEL),
+            profile: derive_profile("openai", DEFAULT_MODEL),
         }
     }
 
     /// Overrides the default model id.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
-        self.profile = derive_profile(&self.model);
+        self.profile = derive_profile(&self.provider, &self.model);
+        self
+    }
+
+    /// Overrides the provider family id used in profiles and normalized errors.
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = provider.into();
+        self.profile = derive_profile(&self.provider, &self.model);
         self
     }
 
@@ -160,6 +172,51 @@ impl OpenAiModel {
         Ok(model)
     }
 
+    /// Builds an OpenAI-compatible model from a provider spec and explicit API
+    /// key.
+    pub fn from_spec(spec: ProviderSpec, api_key: impl Into<String>) -> Result<Self> {
+        if spec.model.trim().is_empty() {
+            return Err(TinyAgentsError::Validation(
+                "provider spec model must not be empty".to_string(),
+            ));
+        }
+        if spec.base_url.trim().is_empty() {
+            return Err(TinyAgentsError::Validation(
+                "provider spec base_url must not be empty".to_string(),
+            ));
+        }
+        Ok(Self::compatible_provider(
+            spec.provider,
+            api_key,
+            spec.base_url,
+            spec.model,
+        ))
+    }
+
+    /// Builds an OpenAI-compatible model from a provider spec, reading the API
+    /// key from the spec's environment variable when required.
+    pub fn from_spec_env(spec: ProviderSpec) -> Result<Self> {
+        let api_key = if spec.requires_api_key {
+            let env = spec.api_key_env.as_deref().ok_or_else(|| {
+                TinyAgentsError::Validation(format!(
+                    "{} requires an api_key_env in ProviderSpec",
+                    spec.provider
+                ))
+            })?;
+            std::env::var(env)
+                .ok()
+                .filter(|k| !k.trim().is_empty())
+                .ok_or_else(|| {
+                    TinyAgentsError::Validation(format!(
+                        "{env} is not set; export it or provide an explicit API key"
+                    ))
+                })?
+        } else {
+            "local".to_string()
+        };
+        Self::from_spec(spec, api_key)
+    }
+
     // -----------------------------------------------------------------------
     // OpenAI-compatible provider presets
     //
@@ -184,15 +241,35 @@ impl OpenAiModel {
         Self::new(api_key).with_base_url(base_url).with_model(model)
     }
 
+    /// Points at an arbitrary OpenAI-compatible endpoint with an explicit
+    /// provider id, base URL, and default model.
+    pub fn compatible_provider(
+        provider: impl Into<String>,
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self::new(api_key)
+            .with_provider(provider)
+            .with_base_url(base_url)
+            .with_model(model)
+    }
+
     /// DeepSeek (`https://api.deepseek.com/v1`), default model `deepseek-chat`.
     pub fn deepseek(api_key: impl Into<String>) -> Self {
-        Self::compatible(api_key, "https://api.deepseek.com/v1", "deepseek-chat")
+        Self::compatible_provider(
+            "deepseek",
+            api_key,
+            "https://api.deepseek.com/v1",
+            "deepseek-chat",
+        )
     }
 
     /// Anthropic's OpenAI-compatible endpoint (`https://api.anthropic.com/v1`),
     /// default model `claude-3-5-sonnet-latest`.
     pub fn anthropic(api_key: impl Into<String>) -> Self {
-        Self::compatible(
+        Self::compatible_provider(
+            "anthropic",
             api_key,
             "https://api.anthropic.com/v1",
             "claude-3-5-sonnet-latest",
@@ -202,7 +279,8 @@ impl OpenAiModel {
     /// Groq (`https://api.groq.com/openai/v1`), default model
     /// `llama-3.3-70b-versatile`.
     pub fn groq(api_key: impl Into<String>) -> Self {
-        Self::compatible(
+        Self::compatible_provider(
+            "groq",
             api_key,
             "https://api.groq.com/openai/v1",
             "llama-3.3-70b-versatile",
@@ -211,13 +289,14 @@ impl OpenAiModel {
 
     /// xAI (`https://api.x.ai/v1`), default model `grok-2-latest`.
     pub fn xai(api_key: impl Into<String>) -> Self {
-        Self::compatible(api_key, "https://api.x.ai/v1", "grok-2-latest")
+        Self::compatible_provider("xai", api_key, "https://api.x.ai/v1", "grok-2-latest")
     }
 
     /// OpenRouter (`https://openrouter.ai/api/v1`), default model
     /// `openai/gpt-4o-mini`.
     pub fn openrouter(api_key: impl Into<String>) -> Self {
-        Self::compatible(
+        Self::compatible_provider(
+            "openrouter",
             api_key,
             "https://openrouter.ai/api/v1",
             "openai/gpt-4o-mini",
@@ -227,7 +306,8 @@ impl OpenAiModel {
     /// Together AI (`https://api.together.xyz/v1`), default model
     /// `meta-llama/Llama-3.3-70B-Instruct-Turbo`.
     pub fn together(api_key: impl Into<String>) -> Self {
-        Self::compatible(
+        Self::compatible_provider(
+            "together",
             api_key,
             "https://api.together.xyz/v1",
             "meta-llama/Llama-3.3-70B-Instruct-Turbo",
@@ -237,18 +317,28 @@ impl OpenAiModel {
     /// Mistral (`https://api.mistral.ai/v1`), default model
     /// `mistral-small-latest`.
     pub fn mistral(api_key: impl Into<String>) -> Self {
-        Self::compatible(api_key, "https://api.mistral.ai/v1", "mistral-small-latest")
+        Self::compatible_provider(
+            "mistral",
+            api_key,
+            "https://api.mistral.ai/v1",
+            "mistral-small-latest",
+        )
     }
 
     /// A local Ollama server (`http://localhost:11434/v1`), default model
     /// `llama3.2`. Ollama ignores the API key, so a placeholder is used.
     pub fn ollama() -> Self {
-        Self::compatible("ollama", "http://localhost:11434/v1", "llama3.2")
+        Self::compatible_provider("ollama", "ollama", "http://localhost:11434/v1", "llama3.2")
     }
 
     /// Returns the default model id this instance will request.
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Returns the configured provider family id.
+    pub fn provider(&self) -> &str {
+        &self.provider
     }
 
     /// Returns the configured API base URL.
@@ -302,6 +392,63 @@ impl OpenAiModel {
             stream: false,
             stream_options: None,
         })
+    }
+
+    fn provider_error(
+        &self,
+        message: impl Into<String>,
+        status: Option<u16>,
+        code: Option<String>,
+        raw: Option<Value>,
+    ) -> ProviderError {
+        let retryable = status.is_some_and(|s| s == 408 || s == 409 || s == 429 || s >= 500);
+        ProviderError {
+            provider: self.provider.clone(),
+            model: Some(self.model.clone()),
+            status,
+            code,
+            message: message.into(),
+            retryable,
+            raw,
+        }
+    }
+
+    fn provider_failure_message(&self, error: &ProviderError) -> String {
+        format!(
+            "{} returned{}{}: {}",
+            error.provider,
+            error
+                .status
+                .map(|status| format!(" HTTP {status}"))
+                .unwrap_or_default(),
+            error
+                .code
+                .as_deref()
+                .map(|code| format!(" ({code})"))
+                .unwrap_or_default(),
+            error.message
+        )
+    }
+
+    fn parse_error_body(&self, status: u16, text: &str) -> ProviderError {
+        let raw = serde_json::from_str::<Value>(text).ok();
+        let error_obj = raw.as_ref().and_then(|value| value.get("error"));
+        let message = error_obj
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .or_else(|| {
+                raw.as_ref()
+                    .and_then(|value| value.get("message"))
+                    .and_then(Value::as_str)
+            })
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or(text)
+            .to_string();
+        let code = error_obj
+            .and_then(|error| error.get("code").or_else(|| error.get("type")))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        self.provider_error(message, Some(status), code, raw)
     }
 }
 
@@ -596,6 +743,10 @@ struct SseState {
     pending: VecDeque<ModelStreamItem>,
     /// Provider-side response reconstruction.
     acc: OpenAiStreamAcc,
+    /// Provider family id used in normalized stream failures.
+    provider: String,
+    /// Provider model id used in normalized stream failures.
+    model: String,
     /// Whether the leading [`ModelStreamItem::Started`] has been emitted.
     started: bool,
     /// Whether the byte stream ended or `[DONE]` was seen.
@@ -660,7 +811,14 @@ async fn sse_next(mut state: SseState) -> Option<(ModelStreamItem, SseState)> {
             Some(Err(error)) => {
                 state.finished = true;
                 state.terminal_emitted = true;
-                return Some((ModelStreamItem::Failed(error.to_string()), state));
+                let provider_error = ProviderError {
+                    provider: state.provider.clone(),
+                    model: Some(state.model.clone()),
+                    message: error.to_string(),
+                    retryable: true,
+                    ..ProviderError::default()
+                };
+                return Some((ModelStreamItem::ProviderFailed(provider_error), state));
             }
             None => {
                 state.finished = true;
@@ -695,7 +853,11 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             .json(&body)
             .send()
             .await
-            .map_err(|e| TinyAgentsError::Model(format!("openai request to {url} failed: {e}")))?;
+            .map_err(|e| {
+                let error =
+                    self.provider_error(format!("request to {url} failed: {e}"), None, None, None);
+                TinyAgentsError::Model(self.provider_failure_message(&error))
+            })?;
 
         let status = response.status();
         let text = response.text().await.map_err(|e| {
@@ -703,9 +865,10 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         })?;
 
         if !status.is_success() {
-            return Err(TinyAgentsError::Model(format!(
-                "openai returned HTTP {status}: {text}"
-            )));
+            let error = self.parse_error_body(status.as_u16(), &text);
+            return Err(TinyAgentsError::Model(
+                self.provider_failure_message(&error),
+            ));
         }
 
         let value: Value = serde_json::from_str(&text)?;
@@ -723,13 +886,14 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
     /// fragment, a [`ModelStreamItem::UsageDelta`] when usage arrives, and a
     /// terminal [`ModelStreamItem::Completed`] carrying the fully merged
     /// response (with reassembled tool-call names and ids). Transport errors
-    /// surface as a terminal [`ModelStreamItem::Failed`].
+    /// surface as a terminal [`ModelStreamItem::ProviderFailed`].
     ///
     /// # Errors
     ///
     /// Returns [`TinyAgentsError::Model`] when the initial request fails or the
     /// endpoint returns a non-2xx status (per-chunk transport errors are
-    /// surfaced as [`ModelStreamItem::Failed`] inside the stream instead).
+    /// surfaced as [`ModelStreamItem::ProviderFailed`] inside the stream
+    /// instead).
     async fn stream(&self, _state: &State, request: ModelRequest) -> Result<ModelStream> {
         let mut body = self.translate_request(&request)?;
         body.stream = true;
@@ -744,15 +908,22 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             .send()
             .await
             .map_err(|e| {
-                TinyAgentsError::Model(format!("openai stream request to {url} failed: {e}"))
+                let error = self.provider_error(
+                    format!("stream request to {url} failed: {e}"),
+                    None,
+                    None,
+                    None,
+                );
+                TinyAgentsError::Model(self.provider_failure_message(&error))
             })?;
 
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
-            return Err(TinyAgentsError::Model(format!(
-                "openai returned HTTP {status}: {text}"
-            )));
+            let error = self.parse_error_body(status.as_u16(), &text);
+            return Err(TinyAgentsError::Model(
+                self.provider_failure_message(&error),
+            ));
         }
 
         // Map each raw byte chunk onto an owned `Vec<u8>` so the boxed stream's
@@ -760,7 +931,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         let bytes = response.bytes_stream().map(|chunk| {
             chunk
                 .map(|b| b.to_vec())
-                .map_err(|e| TinyAgentsError::Model(format!("openai stream chunk failed: {e}")))
+                .map_err(|e| TinyAgentsError::Model(format!("stream chunk failed: {e}")))
         });
 
         let state = SseState {
@@ -768,6 +939,8 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             buf: String::new(),
             pending: VecDeque::new(),
             acc: OpenAiStreamAcc::default(),
+            provider: self.provider.clone(),
+            model: self.model.clone(),
             started: false,
             finished: false,
             terminal_emitted: false,

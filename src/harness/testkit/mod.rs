@@ -24,10 +24,82 @@ use serde_json::json;
 
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::events::{AgentEvent, EventSink, RecordingListener};
-use crate::harness::model::{ChatModel, ModelRequest, ModelResponse};
+use crate::harness::message::MessageDelta;
+use crate::harness::model::{
+    ChatModel, ModelRequest, ModelResponse, ModelStream, ModelStreamItem, StreamAccumulator,
+};
 use crate::harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
 
 pub use types::*;
+
+// ---------------------------------------------------------------------------
+// StreamingMock
+// ---------------------------------------------------------------------------
+
+impl StreamingMock {
+    /// Creates a streaming mock that replays the given scripted items verbatim.
+    ///
+    /// The items should follow the streaming contract: a leading
+    /// [`ModelStreamItem::Started`], any number of delta items, and a terminal
+    /// [`ModelStreamItem::Completed`] or [`ModelStreamItem::Failed`].
+    pub fn new(items: Vec<ModelStreamItem>) -> Self {
+        Self {
+            items,
+            calls: Mutex::new(0),
+        }
+    }
+
+    /// Builds a streaming mock from text chunks.
+    ///
+    /// Produces a [`ModelStreamItem::Started`], one
+    /// [`ModelStreamItem::MessageDelta`] per chunk, and a terminal
+    /// [`ModelStreamItem::Completed`] carrying the concatenated text as the
+    /// merged assistant response.
+    pub fn from_text_chunks<S: AsRef<str>>(chunks: impl IntoIterator<Item = S>) -> Self {
+        let mut items = vec![ModelStreamItem::Started];
+        let mut full = String::new();
+        for chunk in chunks {
+            let text = chunk.as_ref().to_string();
+            full.push_str(&text);
+            items.push(ModelStreamItem::MessageDelta(MessageDelta {
+                text,
+                tool_call: None,
+            }));
+        }
+        items.push(ModelStreamItem::Completed(ModelResponse::assistant(full)));
+        Self::new(items)
+    }
+
+    /// Returns the number of `stream`/`invoke` calls made so far.
+    pub fn call_count(&self) -> u64 {
+        *self.calls.lock().expect("StreamingMock calls lock poisoned")
+    }
+
+    /// Folds the scripted items into the response they merge to.
+    fn merged_response(&self) -> Result<ModelResponse> {
+        let mut accumulator = StreamAccumulator::new();
+        for item in &self.items {
+            accumulator.push(item);
+        }
+        accumulator.finish()
+    }
+}
+
+#[async_trait]
+impl<State: Send + Sync> ChatModel<State> for StreamingMock {
+    /// Returns the merged response the scripted stream folds into.
+    async fn invoke(&self, _state: &State, _request: ModelRequest) -> Result<ModelResponse> {
+        *self.calls.lock().expect("StreamingMock calls lock poisoned") += 1;
+        self.merged_response()
+    }
+
+    /// Replays the scripted items as a real [`ModelStream`].
+    async fn stream(&self, _state: &State, _request: ModelRequest) -> Result<ModelStream> {
+        *self.calls.lock().expect("StreamingMock calls lock poisoned") += 1;
+        let items = self.items.clone();
+        Ok(Box::pin(futures::stream::iter(items)))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ScriptedModel

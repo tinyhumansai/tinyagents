@@ -9,7 +9,11 @@ use serde_json::json;
 
 use super::*;
 use crate::harness::message::Message;
-use crate::harness::model::{ModelRequest, ResponseFormat, ToolChoice};
+use crate::harness::model::{
+    ChatModel, ModelRequest, ModelStreamItem, ProviderError, ResponseFormat, StreamAccumulator,
+    ToolChoice,
+};
+use crate::harness::providers::{ProviderKind, ProviderSpec};
 use crate::harness::tool::ToolSchema;
 
 /// Builds a model with a fixed key/model so translation output is deterministic.
@@ -259,14 +263,17 @@ fn parse_response_errors_on_empty_choices() {
 #[test]
 fn compatible_presets_set_base_url_and_default_model() {
     let deepseek = OpenAiModel::deepseek("k");
+    assert_eq!(deepseek.provider(), "deepseek");
     assert_eq!(deepseek.base_url(), "https://api.deepseek.com/v1");
     assert_eq!(deepseek.model(), "deepseek-chat");
 
     let anthropic = OpenAiModel::anthropic("k");
+    assert_eq!(anthropic.provider(), "anthropic");
     assert_eq!(anthropic.base_url(), "https://api.anthropic.com/v1");
     assert_eq!(anthropic.model(), "claude-3-5-sonnet-latest");
 
     let ollama = OpenAiModel::ollama();
+    assert_eq!(ollama.provider(), "ollama");
     assert_eq!(ollama.base_url(), "http://localhost:11434/v1");
     assert_eq!(ollama.model(), "llama3.2");
 
@@ -277,8 +284,53 @@ fn compatible_presets_set_base_url_and_default_model() {
 
     // Fully generic compatible endpoint.
     let generic = OpenAiModel::compatible("k", "https://example.test/v1/", "my-model");
+    assert_eq!(generic.provider(), "openai");
     assert_eq!(generic.base_url(), "https://example.test/v1");
     assert_eq!(generic.model(), "my-model");
+
+    let named = OpenAiModel::compatible_provider(
+        "custom",
+        "k",
+        "https://custom.example/v1/",
+        "custom-model",
+    );
+    assert_eq!(named.provider(), "custom");
+    assert_eq!(named.base_url(), "https://custom.example/v1");
+    assert_eq!(named.model(), "custom-model");
+}
+
+#[test]
+fn provider_spec_builds_compatible_model() {
+    let spec = ProviderSpec::for_kind(ProviderKind::Ollama).with_model("qwen2.5");
+    let model = OpenAiModel::from_spec(spec, "ignored").unwrap();
+
+    assert_eq!(model.provider(), "ollama");
+    assert_eq!(model.base_url(), "http://localhost:11434/v1");
+    assert_eq!(model.model(), "qwen2.5");
+    assert_eq!(
+        <OpenAiModel as ChatModel<()>>::profile(&model)
+            .unwrap()
+            .provider
+            .as_deref(),
+        Some("ollama")
+    );
+}
+
+#[test]
+fn provider_failed_stream_item_finishes_as_model_error() {
+    let mut accumulator = StreamAccumulator::new();
+    accumulator.push(&ModelStreamItem::ProviderFailed(ProviderError {
+        provider: "groq".to_string(),
+        model: Some("llama-3.3-70b-versatile".to_string()),
+        status: Some(429),
+        code: Some("rate_limit".to_string()),
+        message: "too many requests".to_string(),
+        retryable: true,
+        raw: None,
+    }));
+
+    let error = accumulator.finish().unwrap_err().to_string();
+    assert!(error.contains("groq provider error (rate_limit): too many requests"));
 }
 
 #[test]

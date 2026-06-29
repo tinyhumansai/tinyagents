@@ -8,8 +8,35 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use crate::harness::events::{AgentEvent, EventSink, RecordingListener};
-use crate::harness::model::{ModelRequest, ModelResponse};
+use crate::harness::model::{ModelRequest, ModelResponse, ModelStreamItem};
 use crate::harness::tool::ToolCall;
+
+// ---------------------------------------------------------------------------
+// StreamingMock
+// ---------------------------------------------------------------------------
+
+/// A [`crate::harness::model::ChatModel`] that yields a scripted sequence of
+/// [`ModelStreamItem`]s, exercising the real streaming pipeline deterministically.
+///
+/// Each call to [`crate::harness::model::ChatModel::stream`] replays the same
+/// scripted items, and [`crate::harness::model::ChatModel::invoke`] returns the
+/// merged response those items fold into (via
+/// [`crate::harness::model::StreamAccumulator`]), so the mock behaves
+/// consistently on both the streaming and unary paths.
+///
+/// # Example
+///
+/// ```rust
+/// # use tinyagents::harness::testkit::StreamingMock;
+/// // Streams "Hello, world" as three message deltas plus a merged completion.
+/// let model = StreamingMock::from_text_chunks(["Hello", ", ", "world"]);
+/// ```
+pub struct StreamingMock {
+    /// The scripted items replayed on every `stream` call.
+    pub(crate) items: Vec<ModelStreamItem>,
+    /// Number of `stream`/`invoke` calls made so far.
+    pub(crate) calls: Mutex<u64>,
+}
 
 // ---------------------------------------------------------------------------
 // ScriptedModel

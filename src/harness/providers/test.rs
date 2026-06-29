@@ -7,7 +7,7 @@ use serde_json::json;
 
 use crate::harness::message::{Message, MessageDelta};
 use crate::harness::model::{ChatModel, ModelRequest, ModelStreamItem};
-use crate::harness::providers::MockModel;
+use crate::harness::providers::{MockModel, ProviderKind, ProviderSpec};
 
 // ---------------------------------------------------------------------------
 // Shared helper: a unit state used throughout
@@ -306,4 +306,51 @@ async fn responses_have_non_empty_message_id() {
             "every response should carry a non-empty message id"
         );
     }
+}
+
+#[test]
+fn provider_kind_infers_langchain_style_model_names() {
+    assert_eq!(
+        ProviderKind::infer("openai:gpt-4.1-mini"),
+        Some(ProviderKind::OpenAi)
+    );
+    assert_eq!(
+        ProviderKind::infer("anthropic:claude-sonnet-4"),
+        Some(ProviderKind::Anthropic)
+    );
+    assert_eq!(
+        ProviderKind::infer("ollama:llama3.2"),
+        Some(ProviderKind::Ollama)
+    );
+    assert_eq!(
+        ProviderKind::infer("gpt-4.1-mini"),
+        Some(ProviderKind::OpenAi)
+    );
+    assert_eq!(
+        ProviderKind::infer("claude-sonnet-4"),
+        Some(ProviderKind::Anthropic)
+    );
+    assert_eq!(
+        ProviderKind::infer("mistral-small-latest"),
+        Some(ProviderKind::Mistral)
+    );
+    assert_eq!(ProviderKind::infer("unknown-model"), None);
+}
+
+#[test]
+fn provider_spec_defaults_and_overrides_are_normalized() {
+    let spec = ProviderSpec::for_kind(ProviderKind::Ollama)
+        .with_model("qwen2.5")
+        .with_base_url("http://localhost:11434/v1/")
+        .with_provider("local-ollama");
+
+    assert_eq!(spec.kind, ProviderKind::Ollama);
+    assert_eq!(spec.provider, "local-ollama");
+    assert_eq!(spec.model, "qwen2.5");
+    assert_eq!(spec.base_url, "http://localhost:11434/v1");
+    assert!(!spec.requires_api_key);
+
+    let openai = ProviderSpec::for_kind(ProviderKind::OpenAi);
+    assert_eq!(openai.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+    assert!(openai.requires_api_key);
 }
