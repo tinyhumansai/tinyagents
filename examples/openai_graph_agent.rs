@@ -14,10 +14,10 @@
 
 use std::sync::Arc;
 
-use rustagents::harness::message::Message;
-use rustagents::harness::providers::openai::OpenAiModel;
-use rustagents::harness::runtime::AgentHarness;
-use rustagents::{Node, NodeOutput, Result, StateGraph};
+use tinyagents::harness::message::Message;
+use tinyagents::harness::providers::openai::OpenAiModel;
+use tinyagents::harness::runtime::AgentHarness;
+use tinyagents::{Node, NodeOutput, Result, StateGraph};
 
 /// State threaded through the graph: the question to ask and the answer the
 /// agent node fills in.

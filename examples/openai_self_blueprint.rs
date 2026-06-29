@@ -24,20 +24,20 @@
 
 use std::sync::Arc;
 
-use rustagents::Result;
-use rustagents::harness::message::Message;
-use rustagents::harness::providers::openai::OpenAiModel;
-use rustagents::harness::runtime::AgentHarness;
-use rustagents::language::compiler::{
+use tinyagents::Result;
+use tinyagents::harness::message::Message;
+use tinyagents::harness::providers::openai::OpenAiModel;
+use tinyagents::harness::runtime::AgentHarness;
+use tinyagents::language::compiler::{
     CapabilityResolver, NodeFactory, bind_capabilities, build_graph, compile,
 };
-use rustagents::language::parser::parse_str;
-use rustagents::language::types::{NodeSpec, Routing};
-use rustagents::{Node, NodeOutput, StateGraph};
+use tinyagents::language::parser::parse_str;
+use tinyagents::language::types::{NodeSpec, Routing};
+use tinyagents::{Node, NodeOutput, StateGraph};
 
 /// Grammar + worked example handed to the model so it emits valid `.rag`.
 const SYSTEM_PROMPT: &str = r#"
-You author agent graphs in the RustAgents expressive language (`.rag`).
+You author agent graphs in the tinyagents expressive language (`.rag`).
 Output ONLY `.rag` source code. No prose, no explanation, no markdown fences.
 
 Grammar (one graph):

@@ -12,10 +12,10 @@
 
 use std::sync::Arc;
 
-use rustagents::Result;
-use rustagents::harness::message::Message;
-use rustagents::harness::providers::openai::OpenAiModel;
-use rustagents::harness::runtime::AgentHarness;
+use tinyagents::Result;
+use tinyagents::harness::message::Message;
+use tinyagents::harness::providers::openai::OpenAiModel;
+use tinyagents::harness::runtime::AgentHarness;
 
 #[tokio::main]
 async fn main() -> Result<()> {

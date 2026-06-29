@@ -11,10 +11,10 @@
 //! cargo run --example rag_blueprint
 //! ```
 
-use rustagents::Result;
-use rustagents::language::compiler::{CapabilityResolver, bind_capabilities, compile};
-use rustagents::language::parser::parse_str;
-use rustagents::language::types::Routing;
+use tinyagents::Result;
+use tinyagents::language::compiler::{CapabilityResolver, bind_capabilities, compile};
+use tinyagents::language::parser::parse_str;
+use tinyagents::language::types::Routing;
 
 const SUPPORT_AGENT: &str = r#"
 // A support workflow with a tool loop.

@@ -17,11 +17,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
-use rustagents::Result;
-use rustagents::harness::message::Message;
-use rustagents::harness::providers::openai::OpenAiModel;
-use rustagents::harness::runtime::AgentHarness;
-use rustagents::harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
+use tinyagents::Result;
+use tinyagents::harness::message::Message;
+use tinyagents::harness::providers::openai::OpenAiModel;
+use tinyagents::harness::runtime::AgentHarness;
+use tinyagents::harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
 
 /// A tiny canned weather tool. In a real app this would call a weather API; for
 /// the example it returns a deterministic string so the loop is reproducible.

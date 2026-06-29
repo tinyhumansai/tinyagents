@@ -15,8 +15,8 @@
 
 use std::sync::Arc;
 
-use rustagents::graph::ClosureStateReducer;
-use rustagents::{
+use tinyagents::graph::ClosureStateReducer;
+use tinyagents::{
     Checkpointer, GraphBuilder, InMemoryCheckpointer, NodeContext, NodeResult, Result,
 };
 

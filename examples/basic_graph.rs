@@ -1,4 +1,4 @@
-use rustagents::{ChatMessage, Node, NodeOutput, Result, StateGraph};
+use tinyagents::{ChatMessage, Node, NodeOutput, Result, StateGraph};
 
 #[derive(Clone, Debug)]
 struct AgentState {
@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
         .add_node(Node::new("tool", |mut state: AgentState| async move {
             state.messages.push(ChatMessage::tool(
                 "echo",
-                "tool result: hello from RustAgents",
+                "tool result: hello from tinyagents",
             ));
             state.needs_tool = false;
             Ok(NodeOutput::continue_with(state))

@@ -15,13 +15,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
-use rustagents::Result;
-use rustagents::harness::message::{AssistantMessage, ContentBlock, Message};
-use rustagents::harness::model::ModelResponse;
-use rustagents::harness::runtime::AgentHarness;
-use rustagents::harness::testkit::ScriptedModel;
-use rustagents::harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
-use rustagents::harness::usage::Usage;
+use tinyagents::Result;
+use tinyagents::harness::message::{AssistantMessage, ContentBlock, Message};
+use tinyagents::harness::model::ModelResponse;
+use tinyagents::harness::runtime::AgentHarness;
+use tinyagents::harness::testkit::ScriptedModel;
+use tinyagents::harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
+use tinyagents::harness::usage::Usage;
 
 /// A tiny calculator tool that adds two numbers from its JSON arguments.
 struct CalculatorTool;

@@ -15,11 +15,11 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use rustagents::Result;
-use rustagents::harness::message::Message;
-use rustagents::harness::model::ResponseFormat;
-use rustagents::harness::providers::openai::OpenAiModel;
-use rustagents::harness::runtime::{AgentHarness, RunPolicy};
+use tinyagents::Result;
+use tinyagents::harness::message::Message;
+use tinyagents::harness::model::ResponseFormat;
+use tinyagents::harness::providers::openai::OpenAiModel;
+use tinyagents::harness::runtime::{AgentHarness, RunPolicy};
 
 #[tokio::main]
 async fn main() -> Result<()> {
