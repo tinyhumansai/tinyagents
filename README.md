@@ -4,67 +4,127 @@
  <img src="https://github.com/tinyhumansai/tinyagents/raw/main/docs/readme.png" alt="The Tet" />
 </p>
 
-[![CI](https://github.com/tinyhumansai/tinyagents/actions/workflows/ci.yml/badge.svg)](https://github.com/tinyhumansai/tinyagents/actions/workflows/ci.yml)
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+<p align="center">
+ <a href="https://crates.io/crates/tinyagents"><img src="https://img.shields.io/crates/v/tinyagents.svg" alt="crates.io" /></a>
+ <a href="https://docs.rs/tinyagents"><img src="https://docs.rs/tinyagents/badge.svg" alt="docs.rs" /></a>
+ <a href="https://github.com/tinyhumansai/tinyagents/actions/workflows/ci.yml"><img src="https://github.com/tinyhumansai/tinyagents/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+ <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3" /></a>
+</p>
 
-TinyAgents is a Rust-native framework for building LLM agents as typed,
-inspectable workflows.
+**TinyAgents is a recursive language-model (RLM) harness for Rust.** It is a
+typed, durable runtime where language models call models, agents call agents,
+graphs run graphs, and a model can author, compile, and run the very workflow it
+is standing inside — all as inspectable, checkpointed, policy-checked Rust.
 
-It gives agent systems the shape production Rust teams expect: explicit state,
-durable graph execution, provider-neutral model adapters, typed tools,
-observable runs, and declarative workflow blueprints that can be reviewed before
-they execute.
+## What is an RLM, and why recursive?
 
-## Why TinyAgents
+Most agent frameworks stuff everything into one ever-growing context window and
+hope the model copes. **Recursive Language Models (RLMs)** take a different
+stance: a long prompt is treated as an external *environment* that the model
+explores through a REPL — examining it, decomposing it, and **recursively calling
+itself (or sub-models) over snippets** instead of swallowing the whole thing at
+once. This mitigates "context rot" and lets effective context exceed the raw
+window.
 
-LLM applications should not be hidden loops of callbacks, prompt fragments, and
-untracked side effects. TinyAgents makes the moving parts visible:
+The idea comes from recent research:
 
-- typed state instead of unstructured runtime bags
-- explicit graph execution instead of implicit control flow
-- provider-neutral model and tool interfaces
-- deterministic routing around nondeterministic model calls
-- streaming, usage, and provider errors normalized at the harness boundary
-- registries for models, tools, agents, graphs, stores, middleware, and policy
-- `.rag` blueprints for workflows that humans and agents can inspect together
+- **Paper:** "Recursive Language Models," Alex L. Zhang, Tim Kraska, Omar Khattab
+  (MIT CSAIL), 2025 — [arXiv:2512.24601](https://arxiv.org/abs/2512.24601)
+- **Blog:** Alex L. Zhang, "Recursive Language Models" —
+  <https://alexzhang13.github.io/blog/2025/rlm/>
+- **Reference implementation:** <https://github.com/alexzhang13/rlm>
 
-TinyAgents is early, but the foundation is already in place for durable graph
-runs, harness composition, provider adapters, registry-backed capabilities, and
-language-backed workflow definitions.
+TinyAgents is **inspired by and architected around** the RLM execution model — a
+production-shaped Rust harness for building RLM-style systems. It does not claim
+to reproduce the paper's benchmark numbers; instead it brings the *execution
+model* to Rust as concrete, implemented surfaces:
+
+- **Sub-agents (agents calling agents).** A harness agent is exposed *as a tool*
+  to another agent, so orchestration is literally a model calling a model
+  (`SubAgent`, `SubAgentSession`, `SubAgentTool`).
+- **Recursion policy + depth tracking.** The runtime tracks `root_run_id` /
+  `parent_run_id`, enforces a recursion limit, and rolls child runs' events,
+  usage, and cost up to the parent as first-class observable runs.
+- **Graphs that run graphs.** A node can embed another compiled graph, and the
+  `.ragsh` REPL can drive a graph from inside a graph node (graph → REPL →
+  graph).
+- **The REPL as the RLM core.** In `.ragsh`, context and prompts are runtime
+  *values*, not just prompt text. The model writes small programs, inspects their
+  output, calls sub-models / sub-agents / sub-graphs as functions, and iterates —
+  the RLM/CodeAct loop.
+- **Self-authoring (the deepest recursion).** A model can emit a `.rag`
+  blueprint that compiles through the *same* registry-bound compiler path as a
+  human-authored file, then runs on the *same* runtime the model is already
+  executing in. The harness can describe and re-enter itself.
+
+Two languages, one runtime: `.rag` (declarative blueprint) and `.ragsh`
+(imperative REPL) both lower into the exact same `graph` + `harness` types as
+hand-written Rust — a language whose programs *are* the runtime that interprets
+them.
+
+## Features
+
+- **Harness** — provider-neutral model calls, typed tools, middleware,
+  structured output, streaming, usage/cost accounting, retries and limits,
+  response caching, memory/embeddings, summarization, steering, and a testkit.
+- **Graph runtime** — LangGraph-style durable, typed state graphs: `START`/`END`,
+  nodes, edges, conditional routing, commands, `Send` fanout, reducers/channels,
+  checkpoints, interrupts, subgraphs, streaming, topology export, and time
+  travel.
+- **Registry** — a named capability catalog (models, tools, agents, graphs,
+  stores, middleware, policy) that `.rag` and `.ragsh` bind by name.
+- **`.rag` expressive language** — a declarative, side-effect-free blueprint
+  format that compiles (lexer → parser → compiler) into the runtime; the safe
+  boundary for agent-authored plans.
+- **`.ragsh` REPL language** — imperative, capability-bound interactive
+  orchestration; the RLM/CodeAct loop surface.
+- **Recursion & sub-agents** — agents-as-tools, subgraphs, depth tracking, and a
+  recursion policy so deep call trees stay bounded and observable.
+- **Durability & checkpoints** — resume long runs, replay history, and travel
+  back in time across superstep boundaries.
+- **Provider-neutral** — one interface across hosted and local providers; swap
+  models without rewriting workflows.
+- **Observability** — normalized events, usage, and cost that roll up across
+  recursive child runs.
+- **Structured output & streaming** — typed responses and incremental token
+  streams at the harness boundary.
 
 ## Architecture
 
 ```text
-                              +-------------------+
-                              |   .rag source     |
-                              | workflow blueprint|
-                              +---------+---------+
-                                        |
-                                        v
-+-------------+        +-------------------------------+
-| Application |------->| Capability Registry           |
-| Rust code   |        | models | tools | graphs | etc.|
-+------+------+        +---------------+---------------+
-       |                               |
-       |                               v
-       |        +--------------------------------------+
-       +------->| Durable Graph Runtime                |
-                | typed state | nodes | edges | resume |
-                +------------------+-------------------+
-                                   |
-                                   v
-                +--------------------------------------+
-                | Agent Harness                        |
-                | prompts | tools | middleware | usage |
-                +--------+-------------+---------------+
-                         |             |
-                         v             v
-                +----------------+  +------------------+
-                | Model Providers|  | Typed Tools      |
-                | OpenAI/Ollama  |  | local functions  |
-                | Anthropic/etc. |  | external systems |
-                +----------------+  +------------------+
+            +-----------------------+      +-----------------------+
+            |   .rag blueprint      |      |   .ragsh REPL         |
+            | declarative workflow  |      | imperative RLM loop   |
+            +-----------+-----------+      +-----------+-----------+
+                        \                              /
+                         \   compile / lower (by name) /
+                          v                            v
++-------------+        +-------------------------------------------+
+| Application |------->| Capability Registry                       |
+| Rust code   |        | models | tools | agents | graphs | policy |
++------+------+        +---------------------+---------------------+
+       |                                     |
+       |                                     v
+       |              +-------------------------------------------+
+       +------------->| Durable Graph Runtime                     |
+                      | typed state | nodes | edges | checkpoints |
+                      +---------------------+---------------------+
+                                            |
+                                            v
+                      +-------------------------------------------+
+                      | Agent Harness                             |
+                      | prompts | tools | middleware | usage/cost |
+                      +----+--------------------------+-----------+
+                           |                          |
+                           v                          v
+                 +------------------+        +------------------+
+                 | Model Providers  |        | Typed Tools      |
+                 | OpenAI/Anthropic |        | local functions  |
+                 | Ollama/etc.      |        | external systems |
+                 +------------------+        +------------------+
 ```
+
+The recursion loop — agents call agents, and graphs run graphs:
 
 ```text
         +-------+
@@ -72,78 +132,95 @@ language-backed workflow definitions.
         +---+---+
             |
             v
-      +-------------+
-      | Agent Node  |
-      +------+------+
+      +-------------+        a sub-agent is just a tool,
+      | Agent Node  |        and a tool may itself be a
+      +------+------+        whole compiled graph...
              |
-      +------+------+
-      |             |
- needs tool        done
-      |             |
-      v             v
-+-----------+    +-----+
-| Tool Node |--->| END |
-+-----------+    +-----+
-      |
-      +---- loops back to Agent Node
+      +------+-------------------------+
+      |              |                 |
+ needs tool     calls sub-agent    done
+      |              |                 |
+      v              v                 v
++-----------+  +---------------+    +-----+
+| Tool Node |  | SubAgent /    |    | END |
++-----+-----+  | Subgraph Node |    +-----+
+      |        +-------+-------+
+      |                |  depth +1, recursion policy,
+      |                |  child run rolls up usage/cost
+      +-- loops back --+--- re-enters the runtime ---+
+          to Agent Node     (graph -> REPL -> graph)
 ```
 
-## Features
+## Quick start
 
-- Rust 2024 library crate with async graph and harness primitives.
-- LangGraph-style durable graphs with `START`, `END`, nodes, edges,
-  conditional routing, commands, checkpoints, interrupts, and topology export.
-- LangChain-style harness concepts: chat models, tools, middleware, structured
-  output, streaming, usage, events, retries, test doubles, and provider
-  profiles.
-- Standardized provider specs for OpenAI, Anthropic, Ollama, DeepSeek, Groq,
-  xAI, OpenRouter, Together, Mistral, and OpenAI-compatible endpoints.
-- Focused examples for local graphs, OpenAI-backed agents, tool calling,
-  structured output, and model-authored `.rag` blueprints.
-
-## Quick Setup
-
-Until the crate is published, depend on the repository directly:
+Add TinyAgents to your project:
 
 ```toml
 [dependencies]
-tinyagents = { git = "https://github.com/tinyhumansai/rustagents" }
+tinyagents = "0.1"
 ```
 
-For local development:
+The default build is offline. To enable hosted providers, turn on the `openai`
+feature:
+
+```toml
+[dependencies]
+tinyagents = { version = "0.1", features = ["openai"] }
+```
+
+To explore locally:
 
 ```sh
 git clone git@github.com:tinyhumansai/rustagents.git
 cd rustagents
-cargo test
 cargo run --example basic_graph
 ```
 
-For hosted providers, enable the matching feature and set provider credentials:
+OpenAI-backed examples need the feature flag and an API key:
 
 ```sh
 export OPENAI_API_KEY=...
 cargo run --features openai --example openai_chat
 ```
 
-For local Ollama-compatible development, run Ollama's OpenAI-compatible server
-and use the provider helpers documented in the wiki.
+## Examples to explore
+
+All live in [`examples/`](examples/):
+
+- **`basic_graph`** — a minimal typed state graph: `START`, nodes, edges, `END`.
+- **`complex_graph`** — conditional routing, fanout, and richer topology.
+- **`durable_graph`** — checkpoints, resume, and time-travel over supersteps.
+- **`agent_loop_tools`** — the agent ↔ tool loop the harness runs.
+- **`orchestrator_subagents`** — **recursion in action:** an orchestrator agent
+  that calls sub-agents as tools, with depth tracking and rolled-up usage.
+- **`openai_self_blueprint`** — **the deepest recursion:** a model authors a
+  `.rag` blueprint that is compiled and run on the same runtime.
+- **`rag_blueprint`** — load and run a declarative `.rag` workflow.
+- **`openai_chat`** — a single provider-backed chat turn.
+- **`openai_tools`** — tool calling against a hosted model.
+- **`openai_structured`** — typed structured output.
+- **`openai_graph_agent`** — a provider-backed agent driven inside a graph.
+
+OpenAI-backed examples require `--features openai` and `OPENAI_API_KEY`.
 
 ## Documentation
 
-The root README stays high level. Detailed examples, architecture notes,
-provider setup, and workflow documentation live in the GitHub wiki:
-
+- [crates.io](https://crates.io/crates/tinyagents)
+- [docs.rs API reference](https://docs.rs/tinyagents)
 - [Wiki home](https://github.com/tinyhumansai/tinyagents/wiki)
-- [Quick start](https://github.com/tinyhumansai/tinyagents/wiki/Quick-Start)
-- [Examples](https://github.com/tinyhumansai/tinyagents/wiki/Examples)
-- [Providers](https://github.com/tinyhumansai/tinyagents/wiki/Providers)
-- [Architecture](https://github.com/tinyhumansai/tinyagents/wiki/Architecture)
-- [Graph runtime](https://github.com/tinyhumansai/tinyagents/wiki/Graph-Runtime)
+  - [Recursion and the RLM model](https://github.com/tinyhumansai/tinyagents/wiki/Recursion-and-RLM)
+  - [Harness](https://github.com/tinyhumansai/tinyagents/wiki/Harness)
+  - [Graph runtime](https://github.com/tinyhumansai/tinyagents/wiki/Graph-Runtime)
+  - [Registry](https://github.com/tinyhumansai/tinyagents/wiki/Registry)
+  - [Expressive language `.rag`](https://github.com/tinyhumansai/tinyagents/wiki/Expressive-Language-RAG)
+  - [REPL language `.ragsh`](https://github.com/tinyhumansai/tinyagents/wiki/REPL-Language-RAGSH)
+  - [Providers](https://github.com/tinyhumansai/tinyagents/wiki/Providers)
+  - [Quick start](https://github.com/tinyhumansai/tinyagents/wiki/Quick-Start)
+  - [Examples](https://github.com/tinyhumansai/tinyagents/wiki/Examples)
+  - [Development](https://github.com/tinyhumansai/tinyagents/wiki/Development)
 
-The checked-in architecture specification remains available under
-[`docs/spec/README.md`](docs/spec/README.md) for contributors working directly
-in the repository.
+Contributors working directly in the repository should also read the checked-in
+architecture specification under [`docs/spec/README.md`](docs/spec/README.md).
 
 ## Development
 
@@ -157,7 +234,8 @@ cargo test
 ## Contributing
 
 TinyAgents welcomes focused contributions that improve the graph runtime,
-harness contracts, provider adapters, tests, examples, and documentation.
+harness contracts, the registry, the `.rag` / `.ragsh` languages, provider
+adapters, tests, examples, and documentation.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 

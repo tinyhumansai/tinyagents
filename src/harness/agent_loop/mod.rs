@@ -657,9 +657,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 // wall-clock budget so a hung or slow model call is interrupted
                 // mid-flight, not merely detected by the between-call deadline
                 // check. reqwest/futures are cancel-safe, so dropping the future
-                // on elapse cancels the underlying request. When the run has no
-                // timeout configured the call is awaited unbounded.
-                let remaining = ctx.remaining_wall_clock();
+                // on elapse cancels the underlying request. When neither the run
+                // config nor the harness policy configures a timeout the call is
+                // awaited unbounded.
+                let remaining = self.call_budget(ctx);
                 let attempt_result = if streaming {
                     let fut =
                         self.invoke_model_streaming_once(state, ctx, &model, request, call_id);
@@ -718,6 +719,36 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     }
                 }
             }
+        }
+    }
+
+    /// Computes the wall-clock budget for the next individual model call.
+    ///
+    /// The budget is the *tighter* of two remaining-time sources:
+    ///
+    /// - the run config's `timeout_ms` (the same deadline the between-call
+    ///   [`RunContext::check_deadline`] enforces), tracked by the run's
+    ///   [`crate::harness::limits::LimitTracker`], and
+    /// - the harness policy's
+    ///   [`RunLimits::max_wall_clock_ms`][crate::harness::limits::RunLimits::max_wall_clock_ms],
+    ///   measured against the same tracker start.
+    ///
+    /// Either source may be absent; when both are absent the call is unbounded
+    /// (`None`). Honoring the policy source lets a sub-agent whose child
+    /// [`RunConfig`] carries no per-run timeout still be bounded by its
+    /// harness's policy-level wall-clock cap.
+    fn call_budget(&self, ctx: &RunContext<Ctx>) -> Option<Duration> {
+        let config_budget = ctx.remaining_wall_clock();
+        let policy_budget = self.policy.limits.max_wall_clock_ms.map(|ms| {
+            Duration::from_millis(ms)
+                .checked_sub(ctx.limits.elapsed())
+                .unwrap_or(Duration::ZERO)
+        });
+        match (config_budget, policy_budget) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
         }
     }
 

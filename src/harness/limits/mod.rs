@@ -131,6 +131,15 @@ impl LimitTracker {
         Ok(())
     }
 
+    /// Returns the wall-clock time elapsed since this tracker was created.
+    ///
+    /// Exposed so callers (the agent loop) can compute a remaining budget
+    /// against a deadline sourced from somewhere other than the run config —
+    /// for example the harness-level [`RunLimits::max_wall_clock_ms`].
+    pub fn elapsed(&self) -> Duration {
+        self.started_at.elapsed()
+    }
+
     /// Returns the wall-clock budget still remaining before the configured
     /// deadline, measured from this tracker's start instant.
     ///
