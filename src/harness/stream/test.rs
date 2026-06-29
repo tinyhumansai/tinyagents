@@ -84,3 +84,55 @@ fn smoke_chunk_mode_matches_variant() {
     );
     assert_eq!(StreamChunk::Custom(json!(null)).mode(), StreamMode::Custom);
 }
+
+#[test]
+fn sink_enable_disable_and_is_active() {
+    let mut sink = StreamSink::new([StreamMode::Messages]);
+    assert!(sink.is_active(StreamMode::Messages));
+    assert!(!sink.is_active(StreamMode::Debug));
+
+    // Enabling Debug starts accepting debug chunks.
+    sink.enable(StreamMode::Debug);
+    assert!(sink.is_active(StreamMode::Debug));
+    sink.push(StreamChunk::Debug("now kept".into()));
+    assert_eq!(sink.len(), 1);
+
+    // Disabling Messages discards subsequent message chunks but keeps buffered.
+    sink.disable(StreamMode::Messages);
+    assert!(!sink.is_active(StreamMode::Messages));
+    sink.push(StreamChunk::Message(MessageDelta::default()));
+    assert_eq!(sink.len(), 1);
+}
+
+#[test]
+fn sink_active_modes_returns_set() {
+    let sink = StreamSink::new([StreamMode::Values, StreamMode::Custom]);
+    let modes = sink.active_modes();
+    assert_eq!(modes.len(), 2);
+    assert!(modes.contains(&StreamMode::Values));
+    assert!(modes.contains(&StreamMode::Custom));
+}
+
+#[test]
+fn sink_empty_modes_discards_everything() {
+    let sink = StreamSink::new([]);
+    sink.push(StreamChunk::Debug("x".into()));
+    sink.push(StreamChunk::Values(json!(1)));
+    assert!(sink.is_empty());
+    assert_eq!(sink.len(), 0);
+}
+
+#[test]
+fn sink_peek_does_not_consume() {
+    let sink = StreamSink::all();
+    sink.push(StreamChunk::Debug("a".into()));
+    sink.push(StreamChunk::Debug("b".into()));
+
+    let peeked = sink.peek();
+    assert_eq!(peeked.len(), 2);
+    // Peek leaves the buffer intact.
+    assert_eq!(sink.len(), 2);
+    // Drain still returns the same chunks.
+    assert_eq!(sink.drain().len(), 2);
+    assert!(sink.is_empty());
+}

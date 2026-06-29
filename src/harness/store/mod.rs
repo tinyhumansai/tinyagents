@@ -107,6 +107,14 @@ impl FileStore {
                 "store namespace and key must not be empty".into(),
             ));
         }
+        // Reject names composed solely of dots (`.`, `..`, `...`). A namespace
+        // is joined onto `root_dir` without a suffix, so `".."` would resolve to
+        // the parent directory and escape the store root (path traversal).
+        if name.bytes().all(|b| b == b'.') {
+            return Err(RustAgentsError::Validation(format!(
+                "store name must not be all dots: {name:?} (path-traversal guard)"
+            )));
+        }
         if name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
