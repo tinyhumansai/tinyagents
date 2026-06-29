@@ -15,7 +15,10 @@ use crate::error::{Result, TinyAgentsError};
 use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::limits::RunLimits;
 use crate::harness::message::{AssistantMessage, ContentBlock, Message};
-use crate::harness::middleware::{AgentRun, Middleware};
+use crate::harness::middleware::{
+    AgentRun, Middleware, MiddlewareModelOutcome, MiddlewareToolOutcome, ModelHandler,
+    ModelMiddleware, ToolHandler, ToolMiddleware,
+};
 use crate::harness::model::{
     ChatModel, ModelProfile, ModelRequest, ModelResponse, ResponseFormat, ToolChoice,
 };
@@ -172,7 +175,119 @@ impl ChatModel<()> for FailingModel {
     }
 }
 
+/// Around-model wrap middleware that calls the inner pipeline then stamps the
+/// finish reason on the resulting response.
+struct StampModelWrap;
+
+#[async_trait]
+impl ModelMiddleware<()> for StampModelWrap {
+    fn name(&self) -> &str {
+        "stamp_model"
+    }
+    async fn wrap_model(
+        &self,
+        ctx: &mut RunContext<()>,
+        state: &(),
+        request: ModelRequest,
+        next: ModelHandler<'_, (), ()>,
+    ) -> Result<MiddlewareModelOutcome> {
+        let mut response = next.run(ctx, state, request).await?.into_response();
+        response.finish_reason = Some("wrapped".to_string());
+        Ok(response.into())
+    }
+}
+
+/// Around-tool wrap middleware that calls the inner pipeline then prefixes the
+/// result content.
+struct StampToolWrap;
+
+#[async_trait]
+impl ToolMiddleware<()> for StampToolWrap {
+    fn name(&self) -> &str {
+        "stamp_tool"
+    }
+    async fn wrap_tool(
+        &self,
+        ctx: &mut RunContext<()>,
+        state: &(),
+        call: ToolCall,
+        next: ToolHandler<'_, (), ()>,
+    ) -> Result<MiddlewareToolOutcome> {
+        let mut result = next.run(ctx, state, call).await?.into_result();
+        result.content = format!("[wrapped] {}", result.content);
+        Ok(result.into())
+    }
+}
+
+/// Around-model wrap middleware that short-circuits with a canned response and
+/// never calls the inner pipeline (so the provider is never contacted).
+struct ShortCircuitModelWrap;
+
+#[async_trait]
+impl ModelMiddleware<()> for ShortCircuitModelWrap {
+    fn name(&self) -> &str {
+        "short_circuit_model"
+    }
+    async fn wrap_model(
+        &self,
+        _ctx: &mut RunContext<()>,
+        _state: &(),
+        _request: ModelRequest,
+        _next: ModelHandler<'_, (), ()>,
+    ) -> Result<MiddlewareModelOutcome> {
+        Ok(text_response("canned", 0, 0).into())
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn wrap_middleware_fires_around_model_and_tool_calls() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "lookup", json!({"q": "x"})),
+            text_response("done", 4, 2),
+        ])),
+    );
+    harness.register_tool(Arc::new(FakeTool::new("lookup", "tool-output")));
+    harness.push_model_middleware(Arc::new(StampModelWrap));
+    harness.push_tool_middleware(Arc::new(StampToolWrap));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("run succeeds");
+
+    // The tool-wrap mutated the tool result that was appended to the transcript.
+    assert_eq!(run.messages[2].text(), "[wrapped] tool-output");
+    // The model-wrap stamped the final response's finish reason.
+    assert_eq!(
+        run.final_response.unwrap().finish_reason.as_deref(),
+        Some("wrapped")
+    );
+}
+
+#[tokio::test]
+async fn wrap_model_short_circuit_skips_provider() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    // FailingModel errors on every invoke and counts attempts; if the wrap
+    // middleware short-circuits, the provider is never contacted.
+    let model = Arc::new(FailingModel {
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("mock", model.clone());
+    harness.push_model_middleware(Arc::new(ShortCircuitModelWrap));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("short-circuited run succeeds without the provider");
+
+    assert_eq!(run.text(), Some("canned".to_string()));
+    assert_eq!(*model.attempts.lock().unwrap(), 0);
+}
 
 #[tokio::test]
 async fn single_model_call_no_tools() {

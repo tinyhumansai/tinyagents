@@ -31,6 +31,9 @@ mod types;
 
 pub use types::*;
 
+pub mod library;
+pub use library::*;
+
 use std::sync::Arc;
 
 use crate::error::{Result, TinyAgentsError};

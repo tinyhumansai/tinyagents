@@ -69,7 +69,9 @@ use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::events::{AgentEvent, HarnessRunStatus};
 use crate::harness::ids::{CallId, ComponentId, HarnessPhase};
 use crate::harness::message::{Message, MessageDelta};
-use crate::harness::middleware::{AgentRun, BoxModelFuture, BoxToolFuture, ModelBaseCall, ToolBaseCall};
+use crate::harness::middleware::{
+    AgentRun, BoxModelFuture, BoxToolFuture, ModelBaseCall, ToolBaseCall,
+};
 use crate::harness::model::{
     ChatModel, ModelDelta, ModelRequest, ModelResolutionSource, ModelResponse, ModelStreamItem,
     ResolvedModel, ResolvedModelBinding, ResponseFormat, StreamAccumulator, ToolChoice,
@@ -919,7 +921,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> ModelBaseCall<State, Ctx>
                 model: Arc::clone(&self.model),
             };
             self.harness
-                .invoke_model_with_retry(state, ctx, &request, &self.call_id, binding, self.streaming)
+                .invoke_model_with_retry(
+                    state,
+                    ctx,
+                    &request,
+                    &self.call_id,
+                    binding,
+                    self.streaming,
+                )
                 .await
         })
     }

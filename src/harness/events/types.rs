@@ -134,6 +134,25 @@ pub enum AgentEvent {
         attempt: usize,
     },
 
+    /// A rate-limit gate (token bucket) blocked a model call until capacity was
+    /// available. Emitted by
+    /// [`RateLimitMiddleware`][crate::harness::middleware::RateLimitMiddleware]
+    /// each time it must wait before acquiring tokens.
+    RateLimitWaited {
+        /// Approximate time the call was held back, in milliseconds.
+        waited_ms: u64,
+    },
+
+    /// A model fallback middleware swapped the request from one model to
+    /// another after the primary failed. Emitted by
+    /// [`ModelFallbackMiddleware`][crate::harness::middleware::ModelFallbackMiddleware].
+    FallbackSelected {
+        /// The model that failed (the previous selection).
+        from: String,
+        /// The fallback model now being tried.
+        to: String,
+    },
+
     /// A sub-agent child run is about to be invoked from a parent run.
     SubAgentStarted {
         /// Name of the sub-agent being invoked.
@@ -236,6 +255,8 @@ impl AgentEvent {
             AgentEvent::CacheHit { .. } => "cache.hit",
             AgentEvent::CacheMiss { .. } => "cache.miss",
             AgentEvent::RetryScheduled { .. } => "retry.scheduled",
+            AgentEvent::RateLimitWaited { .. } => "rate_limit.waited",
+            AgentEvent::FallbackSelected { .. } => "model.fallback_selected",
             AgentEvent::SubAgentStarted { .. } => "subagent.started",
             AgentEvent::SubAgentCompleted { .. } => "subagent.completed",
             AgentEvent::SubAgentReused { .. } => "subagent.reused",

@@ -63,31 +63,47 @@ pub trait Middleware<State, Ctx = ()>: Send + Sync {
 }
 ```
 
-Wrap hooks need separate traits because they receive a handler:
+Wrap hooks need separate traits because they receive a handler. These are
+implemented in `crate::harness::middleware`:
 
 ```rust
 #[async_trait]
 pub trait ModelMiddleware<State, Ctx = ()>: Send + Sync {
+    fn name(&self) -> &str;
     async fn wrap_model(
         &self,
-        state: &State,
         ctx: &mut RunContext<Ctx>,
+        state: &State,
         request: ModelRequest,
         next: ModelHandler<'_, State, Ctx>,
-    ) -> Result<ModelMiddlewareOutcome>;
+    ) -> Result<MiddlewareModelOutcome>;
 }
 
 #[async_trait]
 pub trait ToolMiddleware<State, Ctx = ()>: Send + Sync {
+    fn name(&self) -> &str;
     async fn wrap_tool(
         &self,
-        state: &State,
         ctx: &mut RunContext<Ctx>,
-        request: ToolCallRequest,
+        state: &State,
+        call: ToolCall,
         next: ToolHandler<'_, State, Ctx>,
-    ) -> Result<ToolMiddlewareOutcome>;
+    ) -> Result<MiddlewareToolOutcome>;
 }
 ```
+
+`next` is a borrowed handle to the rest of the onion (`ModelHandler` /
+`ToolHandler`); calling `next.run(ctx, state, request_or_call)` proceeds to the
+inner layer and ultimately the real model/tool call. Because `run` borrows
+`&self`, a wrap middleware can call it **zero** times (short-circuit /
+replace), **once** (proceed), or **many** times (retry / fallback). The
+innermost layer is supplied by the agent loop via the `ModelBaseCall` /
+`ToolBaseCall` traits, and the stack composes the onion through
+`MiddlewareStack::run_wrapped_model` / `run_wrapped_tool` (registration order =
+outermost first). `MiddlewareModelOutcome::Response(ModelResponse)` and
+`MiddlewareToolOutcome::Result(ToolResult)` carry the resolved value; both are
+`#[non_exhaustive]`. The agent loop runs each lifecycle `before_*` hook, then
+the wrap onion, then each lifecycle `after_*` hook.
 
 ## Ordering
 

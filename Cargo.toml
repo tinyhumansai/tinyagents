@@ -3,7 +3,7 @@ name = "tinyagents"
 version = "0.1.2"
 edition = "2024"
 license = "GPL-3.0-only"
-description = "A Rust LLM orchestration library inspired by LangChain and LangGraph."
+description = "A recursive language-model (RLM) harness for Rust."
 repository = "https://github.com/tinyhumansai/tinyagents"
 readme = "README.md"
 keywords = ["llm", "agents", "graph", "langchain", "langgraph"]
@@ -38,7 +38,7 @@ default = []
 openai = ["dep:reqwest"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
 # `.env` loading for the runnable examples.
 dotenvy = "0.15"
 # Stream combinators (`StreamExt::next`) for integration tests that drive a
