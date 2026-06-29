@@ -1,3 +1,8 @@
+//! Unit tests for the component identity/metadata types: [`ComponentId`]
+//! construction and display, the [`ComponentKind`] string form matching its
+//! serde representation, and the [`ComponentMetadata`] builder and JSON
+//! round-trip.
+
 use super::*;
 
 #[test]

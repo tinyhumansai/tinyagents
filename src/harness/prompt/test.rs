@@ -1,4 +1,8 @@
-//! Tests added in a later pass.
+//! Tests for prompt assembly: `{name}` placeholder substitution and escaping,
+//! unknown/unclosed-placeholder errors, per-role message rendering,
+//! `MessagesTemplate` ordering and error propagation, and `PromptBuilder`
+//! segment composition (cacheability by segment type and stable-prefix
+//! fingerprinting).
 
 use super::*;
 use serde_json::{Map, json};

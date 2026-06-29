@@ -1,7 +1,9 @@
 //! Types for run-scoped limit enforcement.
 //!
-//! [`RunLimits`] carries the configured policy; [`LimitTracker`] holds the live
-//! counters and checks them against the policy.
+//! [`RunLimits`] carries the configured policy — including the
+//! [`RunLimits::max_depth`] recursion cap that bounds how far the sub-agent /
+//! sub-graph run tree may nest; [`LimitTracker`] (in the sibling `mod.rs`)
+//! holds the live counters and checks them against the policy.
 
 /// Configures the hard limits applied across a single harness run.
 ///

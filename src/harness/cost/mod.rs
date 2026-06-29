@@ -1,5 +1,10 @@
 //! Cost accounting.
 //!
+//! Because [`CostTotals`] is additive, cost composes the same way the runtime
+//! recurses: each model call's cost folds into its run, and a parent run rolls
+//! up the cost of every nested sub-agent and sub-graph beneath it into one
+//! total.
+//!
 //! [`estimate_cost`] prices a [`Usage`] record against a [`ModelPricing`] entry
 //! from the registry catalog. [`CostTotals`] supports `+`/`+=` accumulation so
 //! a run can roll up cost across many calls.

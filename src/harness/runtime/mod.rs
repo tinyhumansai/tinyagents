@@ -1,5 +1,13 @@
 //! Harness runtime facade.
 //!
+//! [`AgentHarness`] is the single composed runtime that every level of the
+//! recursion runs *inside*: a sub-agent, a subgraph node, a REPL session, or a
+//! model-authored blueprint all execute on the same harness — the same model
+//! and tool registries, middleware stack, and [`RunPolicy`]. That shared,
+//! re-entrant runtime is what makes "agents calling agents" and self-authored
+//! workflows recurse on one consistent set of capabilities rather than spinning
+//! up disjoint engines.
+//!
 //! Owns the high-level [`AgentHarness`] builder and the [`RunPolicy`] bundle
 //! that wires registries, middleware, and run policy into a single ergonomic
 //! entry point. The agent loop driven by this facade lives in the sibling

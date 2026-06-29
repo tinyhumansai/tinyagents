@@ -1,4 +1,15 @@
-//! REPL language (`.ragsh`) — capability-bound interactive orchestration.
+//! REPL language (`.ragsh`) — capability-bound interactive orchestration; the
+//! RLM/CodeAct surface of the runtime.
+//!
+//! `.ragsh` is TinyAgents' answer to the Recursive Language Model execution
+//! model: instead of stuffing everything into one context window, an
+//! orchestrator (a human, or a model acting as one) drives a session by issuing
+//! small typed commands — set/get session *values*, load and compile a `.rag`
+//! blueprint, run a graph, or `call` a registered capability — inspecting each
+//! [`ReplOutcome`] and iterating. Because every capability-bearing command is
+//! checked against a [`CapabilityPolicy`] allowlist before it can touch the
+//! runtime, the same surface is safe to expose to a model that is recursively
+//! orchestrating sub-models, sub-agents, and sub-graphs from inside a run.
 //!
 //! The REPL language is the interactive, session-oriented counterpart to the
 //! declarative `.rag` expressive language.  An operator (human or parent
@@ -7,8 +18,10 @@
 //!
 //! This module is currently at **milestone R1** (Documentation and Types).  It
 //! establishes the command grammar, a line-oriented parser, a session/capability
-//! boundary, and structured outcomes.  Wiring to the live harness/graph runtime
-//! is deferred to milestones R2–R6.
+//! boundary, and structured outcomes.  Commands that need live harness/graph
+//! integration are policy-checked and returned as [`ReplOutcome::Planned`]
+//! rather than executed; wiring to the live harness/graph runtime is deferred to
+//! milestones R2–R6.
 //!
 //! # Grammar
 //!

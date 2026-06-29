@@ -1,5 +1,12 @@
 //! REPL command and session types for the `.ragsh` interactive language.
 //!
+//! These types model the RLM/CodeAct loop as data: a [`ReplCommand`] is one
+//! step an orchestrator issues, a [`ReplSession`] holds the durable values and
+//! command history that step runs against, a [`CapabilityPolicy`] is the
+//! allowlist that bounds what a (possibly model-driven) session may invoke, and
+//! a [`ReplOutcome`] is the structured, inspectable result fed back into the
+//! next step.
+//!
 //! All public types for the REPL skeleton live here.  Logic (parsing) lives in
 //! [`super`]; tests live in `test.rs`.
 

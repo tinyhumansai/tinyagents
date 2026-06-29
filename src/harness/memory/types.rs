@@ -1,5 +1,9 @@
 //! Type definitions for the harness memory module.
 //!
+//! These types carry the conversation values that persist across runs in the
+//! recursive runtime, so a thread can be paused and re-entered rather than
+//! rebuilt from scratch on every turn.
+//!
 //! Memory is the conversation- and application-state capability of the harness,
 //! distinct from graph checkpoints. It has two conceptual layers:
 //!

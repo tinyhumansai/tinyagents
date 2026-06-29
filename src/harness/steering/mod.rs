@@ -1,5 +1,13 @@
 //! Policy-checked, observable orchestrator → sub-agent steering.
 //!
+//! In the recursive architecture this is how a *parent* in the run tree exerts
+//! typed control over a *child* it is currently running: an orchestrating agent
+//! (or human, or graph supervisor) injects [`SteeringCommand`]s into a live
+//! sub-agent loop without killing or restarting it. It is the mid-run
+//! counterpart to [`crate::harness::subagent::SubAgentSession`] reuse (which
+//! resumes a *completed* child) — together they cover both ways an orchestrator
+//! keeps a sub-agent "in play".
+//!
 //! Steering lets an orchestrator (a parent agent, a human UI, a graph
 //! supervisor, or a test harness) guide an already-running agent loop without
 //! breaking its run identity or observability. The flow is:

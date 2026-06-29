@@ -1,3 +1,6 @@
+//! Unit tests for command/interrupt constructors: building commands with
+//! updates, `goto` routing, and resume values, plus interrupt id generation.
+
 use super::*;
 use serde_json::json;
 

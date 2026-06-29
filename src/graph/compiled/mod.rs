@@ -1,5 +1,12 @@
 //! Superstep executor for the durable graph.
 //!
+//! This is the engine that makes the recursive runtime durable: it drives a
+//! [`CompiledGraph`] in checkpointed supersteps, and because a node handler may
+//! recurse into another compiled graph (a subgraph) or a sub-agent, every level
+//! of that recursion is observed through the same step/boundary/checkpoint
+//! discipline — child runs roll their state, events, and interrupts up through
+//! the parent's reducer and checkpointer.
+//!
 //! The executor runs in supersteps. Each step: take the active node set, run
 //! each active node against the committed state snapshot, collect updates /
 //! commands / interrupts, apply the reducer at the step boundary, persist a

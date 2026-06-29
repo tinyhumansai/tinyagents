@@ -1,5 +1,12 @@
 //! Tool layer for the harness.
 //!
+//! In the recursive architecture the [`Tool`] trait is the universal call
+//! boundary that makes recursion uniform: a tool can be a plain function, but it
+//! can equally be an *entire other agent* —
+//! [`crate::harness::subagent::SubAgentTool`] implements [`Tool`], so "a model
+//! calling a model" is just "a model calling a tool". Everything the agent loop
+//! can invoke flows through this layer and its [`ToolRegistry`].
+//!
 //! See [`types`] for definitions. This module provides constructors and the
 //! [`ToolRegistry`] logic for registering and looking up tools by name.
 

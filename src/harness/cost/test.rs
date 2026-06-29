@@ -1,3 +1,10 @@
+//! Unit tests for cost accounting.
+//!
+//! These cover [`super::estimate_cost`] pricing each token class (input,
+//! output, cache read/creation, reasoning) against a [`ModelPricing`] entry,
+//! the handling of missing prices as zero cost, and [`super::CostTotals`]
+//! `+`/`+=` accumulation with total recomputation.
+
 use super::*;
 use crate::harness::usage::Usage;
 use crate::registry::catalog::ModelPricing;

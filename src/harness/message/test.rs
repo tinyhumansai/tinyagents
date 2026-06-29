@@ -1,3 +1,10 @@
+//! Unit tests for the rich internal message model.
+//!
+//! Covers the ergonomic [`Message`] constructors and the [`Message::text`]
+//! accessor (including that it concatenates text blocks and ignores non-text
+//! content), that assistant messages carry tool calls and usage, that tool
+//! messages preserve their call id, and the [`MessageDelta`] default.
+
 use super::*;
 use crate::harness::tool::ToolCall;
 use crate::harness::usage::Usage;

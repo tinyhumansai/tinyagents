@@ -1,5 +1,12 @@
 //! Rich internal message model.
 //!
+//! [`Message`] is the common currency that flows through every level of the
+//! recursive runtime: the same typed value is what a parent agent sends into a
+//! sub-agent, what a sub-graph node consumes, and what a REPL step inspects as a
+//! runtime *value* rather than raw prompt text. Keeping the model structured
+//! (typed [`ContentBlock`]s rather than strings) is what lets those recursive
+//! hand-offs stay inspectable and lossless.
+//!
 //! See [`types`] for definitions. This module provides ergonomic constructors
 //! and a [`Message::text`] accessor.
 

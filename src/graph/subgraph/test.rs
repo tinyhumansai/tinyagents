@@ -1,3 +1,9 @@
+//! Unit tests for the subgraph adapters: shared-state embedding, adapter
+//! embedding (including folding child output together with parent context), and
+//! checkpoint-namespace isolation — verifying that recursively nested and
+//! sibling embeddings accumulate distinct namespaces and never collide on
+//! checkpoint ids when sharing one checkpointer and thread.
+
 use std::collections::HashSet;
 use std::sync::Arc;
 

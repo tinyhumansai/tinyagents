@@ -1,5 +1,13 @@
 //! Component identity, kind, and metadata for the named capability registry.
 //!
+//! These are the vocabulary of the recursive catalog: a [`ComponentKind`]
+//! ([`Model`](ComponentKind::Model), [`Tool`](ComponentKind::Tool),
+//! [`Graph`](ComponentKind::Graph), [`Agent`](ComponentKind::Agent), …) plus a
+//! [`ComponentId`] name is exactly what a `.rag`/`.ragsh` reference carries, and
+//! [`ComponentMetadata`] is the durable, serializable description that lets a
+//! capability be discovered, listed, and bound by name long after the process
+//! that registered it has exited.
+//!
 //! See [`types`] for the definitions. This module adds constructors, accessors,
 //! and string conversions used by the [`crate::registry::CapabilityRegistry`].
 

@@ -1,3 +1,6 @@
+//! Unit tests for the event sinks: [`CollectingSink`] records emitted events in
+//! order for inspection, and [`NoopSink`] silently drops them.
+
 use super::*;
 use crate::harness::ids::NodeId;
 

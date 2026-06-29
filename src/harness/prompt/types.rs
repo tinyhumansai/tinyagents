@@ -1,5 +1,10 @@
 //! Public types for the prompt assembly module.
 //!
+//! These template and builder types let prompts be assembled from runtime values
+//! rather than baked in, which is what makes prompt construction itself a
+//! programmable step in the recursive harness — a model or graph node can render
+//! the prompt for the sub-call it is about to make.
+//!
 //! All user-visible structs and enums live here so that [`super`] can provide
 //! clean implementations without mixing type definitions and method bodies.
 

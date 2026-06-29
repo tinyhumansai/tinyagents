@@ -53,21 +53,6 @@ pub struct SubAgent<State: Send + Sync, Ctx: Send + Sync = ()> {
     pub(crate) system_prompt: Option<String>,
 }
 
-/// A [`Tool`] adapter that exposes a [`SubAgent`] to a parent agent.
-///
-/// [`Tool`]: crate::harness::tool::Tool
-///
-/// When the parent model calls this tool, [`SubAgentTool`] runs the wrapped
-/// sub-agent as a child run at the configured `parent_depth` and returns the
-/// child's final assistant text as the [`crate::harness::tool::ToolResult`]
-/// content. This makes an entire agent composable as a single tool call.
-///
-/// Because the [`Tool`] trait gives `call` no access to the live parent
-/// [`crate::harness::context::RunContext`], the depth the child runs at is fixed
-/// at construction (`parent_depth`, default `0`). Nesting deeper sub-agents is
-/// expressed by constructing the inner tool with a larger `parent_depth`. For
-/// fully context-threaded invocation (reading the live parent depth) call
-/// [`SubAgent::invoke_in_parent`] directly instead of going through the tool.
 /// A persistent, *reusable* conversation with a single [`SubAgent`].
 ///
 /// Where [`SubAgentTool`] runs a fresh, stateless child run per tool call, a
@@ -114,6 +99,23 @@ pub struct SubAgentSession<State: Send + Sync, Ctx: Send + Sync = ()> {
     pub(crate) seeded: bool,
 }
 
+/// A [`Tool`] adapter that exposes a [`SubAgent`] to a parent agent — the
+/// surface that turns "agents calling agents" into an ordinary tool call.
+///
+/// [`Tool`]: crate::harness::tool::Tool
+///
+/// When the parent model calls this tool, [`SubAgentTool`] runs the wrapped
+/// sub-agent as a child run at the configured `parent_depth` and returns the
+/// child's final assistant text as the [`crate::harness::tool::ToolResult`]
+/// content. This makes an entire agent composable as a single tool call, so a
+/// model orchestrating tools is, transparently, a model orchestrating models.
+///
+/// Because the [`Tool`] trait gives `call` no access to the live parent
+/// [`crate::harness::context::RunContext`], the depth the child runs at is fixed
+/// at construction (`parent_depth`, default `0`). Nesting deeper sub-agents is
+/// expressed by constructing the inner tool with a larger `parent_depth`. For
+/// fully context-threaded invocation (reading the live parent depth) call
+/// [`SubAgent::invoke_in_parent`] directly instead of going through the tool.
 pub struct SubAgentTool<State: Send + Sync, Ctx: Send + Sync = ()> {
     /// The wrapped child agent.
     pub(crate) subagent: Arc<SubAgent<State, Ctx>>,

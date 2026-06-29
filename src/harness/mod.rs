@@ -1,4 +1,11 @@
-//! Harness runtime modules.
+//! Harness runtime modules — the execution layer of the recursive runtime.
+//!
+//! The harness is the surface where a single model call becomes a recursive
+//! system: it runs the agent loop (model ⇄ tools), and because a whole harness
+//! agent can be wrapped as a [`tool`] via [`subagent`], an agent calling a tool
+//! *is* an agent calling another agent. Parent/child run lineage, depth limits,
+//! usage/cost roll-up, [`steering`], and [`cancel`]lation all flow through here,
+//! making nested runs first-class, observable, and policy-checked.
 //!
 //! The harness is intentionally split by feature. Each submodule owns one
 //! substantial part of model/tool orchestration so the implementation can grow

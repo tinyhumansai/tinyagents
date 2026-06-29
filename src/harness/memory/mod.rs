@@ -1,5 +1,13 @@
 //! Short-term conversation memory and its store boundary.
 //!
+//! Memory is the persistent-state side of the recursive runtime: a thread's
+//! transcript survives across runs so an orchestrator can interrupt a
+//! sub-agent, take human input, and re-enter the *same* thread later (the
+//! reuse-with-accumulating-context pattern that
+//! [`crate::harness::subagent`] builds on). [`MemoryScope`] separates the
+//! thread-local short-term layer from the cross-thread long-term
+//! [`Store`][crate::harness::store::Store].
+//!
 //! This module provides the harness memory capability: thread-scoped
 //! conversation history ([`ChatHistory`]) with both an ephemeral
 //! ([`InMemoryChatHistory`]) and a store-backed ([`StoreChatHistory`])

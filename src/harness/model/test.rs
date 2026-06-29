@@ -1,3 +1,9 @@
+//! Tests for the harness model layer: `ModelRequest`/`ModelResponse` builders
+//! and accessors, `ModelProfile`/`CapabilitySet` matching, `ModelRegistry`
+//! resolution precedence (override, state reuse, hints, agent/registry
+//! default), and `StreamAccumulator`/`collect_model_stream` folding of streamed
+//! items (deltas, usage, terminal `Completed`/`Failed`) into a response.
+
 use super::*;
 use crate::harness::message::Message;
 use crate::harness::usage::Usage;

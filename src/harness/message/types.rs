@@ -1,5 +1,9 @@
 //! Rich internal message model for the harness.
 //!
+//! These typed values are the data that moves between recursion levels — parent
+//! to sub-agent, node to sub-graph, model to REPL — so they are deliberately
+//! structured rather than stringly typed.
+//!
 //! Raw strings appear only at API boundaries; internally the harness works
 //! with structured [`Message`] values made of typed [`ContentBlock`]s.
 //! Ergonomic constructors ([`Message::system`], [`Message::user`], …) and a

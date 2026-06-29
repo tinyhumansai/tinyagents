@@ -1,3 +1,7 @@
+//! Unit tests for the graph builder and its compile contract: reducer
+//! requirement, START/END validation, missing-node/route detection, and the
+//! rejection of nodes that mix command routing with static/conditional edges.
+
 use super::*;
 use crate::TinyAgentsError;
 use crate::graph::command::NodeResult;

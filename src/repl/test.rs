@@ -1,4 +1,7 @@
-//! Tests for the `.ragsh` REPL skeleton.
+//! Tests for the `.ragsh` REPL skeleton: command-line parsing (verbs, quoting,
+//! JSON `call` arguments, and error cases), session variable get/set/show,
+//! capability-policy enforcement, and the structured [`ReplOutcome`] returned
+//! for side-effect-free versus policy-gated commands.
 
 use super::{CapabilityPolicy, ReplCommand, ReplOutcome, ReplSession, parse_command};
 use crate::error::TinyAgentsError;

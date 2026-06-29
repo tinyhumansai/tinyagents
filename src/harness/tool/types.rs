@@ -1,5 +1,10 @@
 //! Tool layer types used by the harness.
 //!
+//! These types define the call boundary every harness capability shares —
+//! including sub-agents exposed as tools (see
+//! [`crate::harness::subagent::SubAgentTool`]), which is how the recursive
+//! architecture turns "agents calling agents" into ordinary tool calls.
+//!
 //! Here a [`ToolCall`] carries a required `id` so results can be correlated
 //! back to the originating call, matching provider tool-call semantics.
 

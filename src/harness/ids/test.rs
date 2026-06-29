@@ -1,3 +1,10 @@
+//! Unit tests for the harness id newtypes and lifecycle enums.
+//!
+//! Covers construction and `as_str`/`Display` round-tripping, `From<&str>` /
+//! `From<String>` conversions, the transparent string serde representation of
+//! the id newtypes, and the snake_case serde encoding of [`ExecutionStatus`]
+//! and [`HarnessPhase`].
+
 use super::*;
 
 #[test]

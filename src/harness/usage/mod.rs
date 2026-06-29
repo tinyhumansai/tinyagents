@@ -1,5 +1,11 @@
 //! Token usage accounting.
 //!
+//! In the recursive architecture this is the additive unit that lets cost and
+//! token consumption *roll up the run tree*: because [`Usage`] is composable via
+//! `+`/`+=` and [`UsageTotals`] accumulates across calls, a child run's usage
+//! folds into its parent's, so a top-level run can report the full token cost of
+//! every sub-agent, sub-model, and sub-graph it transitively spawned.
+//!
 //! [`Usage`] records per-call token counts and supports `+`/`+=` accumulation.
 //! [`UsageTotals`] aggregates many calls, also tracking the call count.
 

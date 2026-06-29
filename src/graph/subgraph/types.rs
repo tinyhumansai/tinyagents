@@ -1,7 +1,10 @@
-//! Subgraph node adapters.
+//! Subgraph node adapters — conceptual overview of the graph-level recursion
+//! modes.
 //!
-//! A [`crate::graph::CompiledGraph`] can be embedded as a node in a parent
-//! graph in two modes:
+//! Embedding a [`crate::graph::CompiledGraph`] as a node is how this runtime
+//! expresses recursion at the graph layer (the analogue of a model calling a
+//! model in the harness). A child graph can be embedded in a parent in two
+//! modes:
 //!
 //! - **shared-state**: parent and child share the same `State`/`Update`
 //!   channel. The child runs over the parent's state and its final state is

@@ -1,6 +1,13 @@
 //! Reducer trait implementations.
 //!
-//! See [`types`] for the trait and marker definitions.
+//! Reducers are the deterministic fan-in point of the recursive runtime: when a
+//! superstep runs several active nodes — including parallel branches or a node
+//! that merged results from a subgraph or sub-agent — the executor folds their
+//! updates back into one committed state through a reducer, in deterministic
+//! active-set order, so merged state is reproducible regardless of completion
+//! order. This module supplies the built-in channel/state reducers and the
+//! closure-backed escape hatches; see [`types`] for the trait and marker
+//! definitions.
 
 mod types;
 

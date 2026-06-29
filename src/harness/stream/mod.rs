@@ -1,5 +1,12 @@
 //! Higher-level streaming projections for the harness.
 //!
+//! In the recursive architecture this is the typed lens an observer uses to
+//! watch work unfold across a nested run tree: state snapshots, diffs, model
+//! deltas, debug traces, and interrupts from a run — and, transitively, from
+//! the sub-agents and sub-graphs it spawns — are projected as filtered
+//! [`StreamChunk`]s so a parent (or a REPL/CodeAct loop driving the run) can
+//! consume only the categories it cares about.
+//!
 //! This module provides:
 //!
 //! - [`StreamMode`] — an enum selecting which chunk categories a consumer

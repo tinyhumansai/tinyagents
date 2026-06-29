@@ -1,4 +1,7 @@
 //! Cost accounting types.
+//!
+//! [`CostTotals`] is the additive value that lets cost roll up across a
+//! recursive run tree (model call → run → parent run).
 
 use serde::{Deserialize, Serialize};
 

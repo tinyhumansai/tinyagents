@@ -1,9 +1,22 @@
-//! Implementation of the [`CapabilityRegistry`].
+//! Implementation of the [`CapabilityRegistry`] — the name-resolution engine
+//! behind recursion.
+//!
+//! This is where a name like `"researcher"` or `"summarize"` becomes a real,
+//! callable handle. By registering capabilities here and then handing the
+//! registry to the language layer, a parent run lets a `.rag` blueprint or
+//! `.ragsh` line spawn sub-models, sub-agents, and sub-graphs it never
+//! hardcoded — while the registry's allowlist guarantees those references can
+//! only resolve to capabilities a human actually registered.
 //!
 //! See [`types`] for the data definitions. This module provides registration,
 //! lookup, aliasing, duplicate validation, and conveniences for handing the
-//! catalog's models and tools to a harness or to the `.rag` capability
-//! resolver.
+//! catalog's models and tools to a harness ([`to_model_registry`] /
+//! [`to_tool_registry`]) or to the `.rag`/`.ragsh` capability resolver
+//! ([`capability_resolver`]).
+//!
+//! [`to_model_registry`]: CapabilityRegistry::to_model_registry
+//! [`to_tool_registry`]: CapabilityRegistry::to_tool_registry
+//! [`capability_resolver`]: CapabilityRegistry::capability_resolver
 
 mod types;
 

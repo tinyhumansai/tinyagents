@@ -1,5 +1,12 @@
 //! First-class sub-agents with recursion-depth tracking.
 //!
+//! This is the harness's flagship recursion surface: it lets one agent run
+//! another agent as a child of itself, so a language model orchestrating tools
+//! is, transparently, a language model orchestrating *other models*. It is the
+//! concrete "agents calling agents" mechanism behind the crate's
+//! recursive-language-model framing — the in-harness analogue of the graph-side
+//! [`crate::graph::subgraph`] recursion.
+//!
 //! This module provides the agent-calling-agent compositional primitive:
 //!
 //! - [`SubAgent`] wraps an [`AgentHarness`] and runs it as a *child run* one

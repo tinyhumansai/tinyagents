@@ -1,5 +1,13 @@
 //! Explicit message trimming, summarization, and compression policies.
 //!
+//! In the recursive architecture this is the harness's direct answer to
+//! "context rot": context-window-aware gating ([`SummarizationPolicy`]) decides
+//! *when* a run's transcript has grown large enough to compress, and the
+//! trimming/summarization primitives decide *what* to keep verbatim versus fold
+//! into a summary. This mirrors the recursive-language-model idea of treating a
+//! long prompt as something to decompose rather than stuff whole into one
+//! window — keeping each (sub-)agent's effective context bounded as runs nest.
+//!
 //! This module provides:
 //!
 //! - [`estimate_tokens`] — cheap heuristic token counter (chars / 4).

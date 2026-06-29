@@ -1,3 +1,8 @@
+//! Unit tests for the [`CapabilityRegistry`](super::CapabilityRegistry):
+//! registration and lookup of models/tools/graphs, kind-scoped namespacing,
+//! duplicate rejection, `replace_*` overwrite semantics, alias resolution and
+//! validation, and the harness/`.rag` resolver hand-off builders.
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

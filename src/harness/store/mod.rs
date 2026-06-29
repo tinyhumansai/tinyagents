@@ -1,5 +1,12 @@
 //! Harness store module — long-term key-value storage backends.
 //!
+//! In the recursive architecture the store is the durable, shared substrate
+//! that outlives any single run: parent and child runs, sub-agents, and
+//! REPL/blueprint executions read and write the same namespaced values, so a
+//! deeply nested call can persist a result that a sibling or a later turn picks
+//! up. It is the harness-side persistence layer, distinct from graph
+//! checkpointing.
+//!
 //! The store is the persistence layer for harness runtime data: events, model
 //! call records, tool call records, message history, artifacts, and memory. It
 //! is intentionally separate from graph checkpointing (which belongs to the

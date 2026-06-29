@@ -1,4 +1,11 @@
 //! Types for retry, fallback, and rate-limiting policies.
+//!
+//! These declarative policy structs ([`RetryPolicy`], [`FallbackPolicy`],
+//! [`RateLimiter`]) are the durability knobs the recursive harness applies to
+//! the model call that every level of the recursion ultimately reduces to, so
+//! the same resilience settings govern parent and nested calls alike. Each is
+//! deterministically testable: backoff and the limiter take an explicit
+//! `rand01` / `now` rather than reading a global clock or RNG.
 
 /// Configures how a harness call is retried on transient failure.
 ///

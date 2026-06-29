@@ -1,4 +1,13 @@
-//! Pluggable event sinks for graph streaming and observability.
+//! Pluggable event sinks for graph streaming and observability — how a
+//! recursive run makes its progress visible to the outside (and to a parent
+//! run).
+//!
+//! The durable executor emits a stream of [`GraphEvent`]s as it walks
+//! supersteps, schedules tasks, updates state, saves checkpoints, and raises
+//! interrupts. Routing those events into a [`GraphEventSink`] is what lets a
+//! REPL, a UI, or an enclosing graph watch a subgraph or sub-agent execute in
+//! real time; because every event is tagged with its node and step, the streams
+//! of nested runs can be merged and attributed back up the run tree.
 //!
 //! See [`types`] for the event and stream-mode definitions. The executor emits
 //! [`GraphEvent`]s into an optional [`GraphEventSink`]; callers can plug in a

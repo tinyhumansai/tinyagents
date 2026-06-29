@@ -1,3 +1,6 @@
+//! Unit tests for the built-in reducers (overwrite, append, set-union, min,
+//! max) and the closure-backed channel/state reducers.
+
 use super::*;
 
 #[test]

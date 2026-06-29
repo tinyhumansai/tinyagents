@@ -1,3 +1,7 @@
+//! Unit tests for the superstep executor: sequential and parallel runs,
+//! reducer fan-in ordering, conditional/command routing, checkpoint
+//! persistence, interrupt/resume, and recursion-limit enforcement.
+
 use super::*;
 use crate::graph::builder::{GraphBuilder, NodeContext};
 use crate::graph::checkpoint::{Checkpointer, InMemoryCheckpointer};

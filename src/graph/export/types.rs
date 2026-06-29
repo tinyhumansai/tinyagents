@@ -1,4 +1,9 @@
-//! Serializable graph-topology types for export and visualization.
+//! Serializable graph-topology types for export and visualization — the single,
+//! behavior-free description every graph in the recursive runtime collapses to.
+//!
+//! Hand-built graphs, `.rag` blueprints, and model-authored graphs all extract
+//! to the same [`GraphTopology`] shape, so one type backs JSON export, Mermaid
+//! rendering, and test snapshots regardless of how the graph came to exist.
 //!
 //! These types describe the *structure* of a graph — its nodes, edges, and
 //! conditional routes — without referencing any runnable node behavior (handler

@@ -1,5 +1,11 @@
 //! Run-scoped limit enforcement.
 //!
+//! Limits are what keep recursion bounded: because agents can call agents and
+//! graphs can run graphs, an unbounded run tree could fan out forever or burn a
+//! provider budget. [`RunLimits::max_depth`] caps how deep the sub-agent /
+//! sub-graph recursion may go, while the call and wall-clock caps bound the
+//! work within each run.
+//!
 //! [`RunLimits`] holds the policy; [`LimitTracker`] tracks live counters and
 //! checks them against the policy.  Every model call and tool call must go
 //! through the tracker so limits are fail-closed.

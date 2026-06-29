@@ -1,23 +1,31 @@
-//! Feature-gated model provider integrations.
+//! Feature-gated model provider integrations — the leaves of the recursion.
 //!
-//! Owns optional adapters for hosted and local models. Provider modules should
-//! translate between TinyAgents' provider-neutral request types and
-//! provider-specific APIs without leaking provider shape into core harness code.
+//! Every recursive call in the runtime — an agent, a sub-agent, a graph node, a
+//! `.ragsh` step — ultimately bottoms out in a concrete model invocation, and
+//! that invocation goes through a provider adapter here. Adapters translate
+//! between TinyAgents' provider-neutral request/response types
+//! ([`ModelRequest`]/[`ModelResponse`]) and a provider's own wire API, so the
+//! recursive machinery above stays provider-agnostic and no provider-specific
+//! JSON leaks into core harness code.
 //!
 //! # Available providers
 //!
 //! | Provider | Feature flag | Status |
 //! |---|---|---|
 //! | [`MockModel`] | *(always available)* | Implemented — deterministic, no network |
-//! | `openai`      | `openai`   | Placeholder — see below |
-//! | `anthropic`   | `anthropic` | Placeholder — see below |
-//! | `ollama`      | `ollama`   | Placeholder — see below |
+//! | `openai` (and OpenAI-compatible endpoints) | `openai` | Implemented |
 //!
-//! Real providers are gated behind Cargo features.  To add one, enable the
-//! feature in `Cargo.toml` and uncomment the corresponding module declaration:
+//! [`MockModel`] is always compiled and needs no network, keeping the default
+//! build offline and deterministic. The `openai` module is gated behind the
+//! `openai` Cargo feature and additionally serves every OpenAI-compatible
+//! endpoint (Anthropic, Ollama, DeepSeek, Groq, xAI, OpenRouter, Together,
+//! Mistral) through the same Chat Completions wire format.
+//!
+//! To add a provider with a different wire protocol, enable a new feature in
+//! `Cargo.toml` and add the corresponding gated module declaration:
 //!
 //! ```text
-//! // #[cfg(feature = "openai")]    pub mod openai;
+//! #[cfg(feature = "openai")]    pub mod openai;
 //! // #[cfg(feature = "anthropic")] pub mod anthropic;
 //! // #[cfg(feature = "ollama")]    pub mod ollama;
 //! ```

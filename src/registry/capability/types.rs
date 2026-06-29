@@ -1,5 +1,6 @@
 //! The named capability registry: a higher-level catalog of capabilities
-//! addressable by name.
+//! addressable by name — the data structure that lets a workflow reference
+//! sub-capabilities it didn't hardcode.
 //!
 //! This layer is deliberately distinct from the harness'
 //! [`crate::harness::model::ModelRegistry`] and

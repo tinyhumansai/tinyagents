@@ -1,4 +1,13 @@
-//! Graph export and visualization.
+//! Graph export and visualization — the introspection surface that lets a
+//! recursive harness read back the shape of any graph, including ones a model
+//! authored or assembled at runtime.
+//!
+//! Because graphs in this runtime can be built by hand, compiled from a `.rag`
+//! blueprint, or emitted by a model and run on the same runtime, it matters
+//! that all three reduce to one inspectable description. Export captures that
+//! description as a behavior-free [`GraphTopology`] — never the runnable
+//! handler/router closures — so a graph can be diffed, snapshotted in tests, or
+//! drawn for a human reviewing what an agent just constructed.
 //!
 //! This module turns a graph's structure into portable artifacts: a
 //! `serde`-serializable [`GraphTopology`], a pretty JSON document, and a

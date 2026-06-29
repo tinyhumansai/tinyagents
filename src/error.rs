@@ -161,6 +161,9 @@ pub enum TinyAgentsError {
     #[error("duplicate component: {0}")]
     DuplicateComponent(String),
 
+    /// A `serde_json` (de)serialization failure, automatically converted from
+    /// [`serde_json::Error`] via `?` wherever JSON is read or written
+    /// (checkpoints, model wire formats, structured output, blueprints).
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 }

@@ -1,4 +1,7 @@
-//! Tests added in a later pass.
+//! Unit tests for run-scoped limit enforcement.
+//!
+//! Smoke-checks that default [`RunLimits`] build a [`LimitTracker`] and that
+//! recording a model call advances the counter.
 
 #[test]
 fn smoke_default_limits_compile() {

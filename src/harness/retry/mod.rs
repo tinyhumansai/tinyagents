@@ -1,5 +1,11 @@
 //! Retry, fallback, and rate-limiting policy implementations.
 //!
+//! These policies make the recursive harness durable under transient failure:
+//! because every level of the recursion bottoms out in the same model call,
+//! retry/backoff, model fallback, and rate limiting apply uniformly to a
+//! top-level agent and to any nested sub-agent or graph-node call, so a flaky
+//! provider does not collapse a deep recursion.
+//!
 //! Three independent policies live here:
 //!
 //! - [`RetryPolicy`] — exponential backoff with optional jitter and a per-call

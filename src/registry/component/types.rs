@@ -1,4 +1,5 @@
-//! Identity and discovery types for registered named capabilities.
+//! Identity and discovery types for registered named capabilities — the
+//! by-name handles a recursive workflow uses to address sub-capabilities.
 //!
 //! These are the durable, provider-neutral descriptors used by the
 //! [`crate::registry::CapabilityRegistry`]. They intentionally do *not* carry

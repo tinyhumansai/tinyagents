@@ -1,4 +1,7 @@
-//! Tests added in a later pass.
+//! Tests for the retry/fallback/rate-limit policies: exponential backoff growth
+//! and capping, jitter scaling and clamping, `should_retry` boundaries,
+//! `is_retryable` error classification, `FallbackPolicy::next_after` traversal,
+//! and token-bucket acquisition, time-based refill, and capacity capping.
 
 use std::time::{Duration, Instant};
 

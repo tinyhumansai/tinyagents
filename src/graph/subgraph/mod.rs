@@ -1,8 +1,21 @@
-//! Subgraph node adapters.
+//! Subgraph node adapters — the graph-level recursion surface where a graph
+//! runs another graph.
 //!
-//! See [`types`] for the conceptual overview. The functions here wrap a
-//! [`CompiledGraph`] into a node handler usable with
-//! [`crate::graph::GraphBuilder::add_node`].
+//! This is the structural counterpart to harness sub-agents (a model calling a
+//! model): here an entire [`CompiledGraph`] is embedded *as a node* inside a
+//! parent graph, so "graphs that run graphs" is just an ordinary node handler.
+//! Each embedding extends the child's checkpoint namespace with the embedding
+//! node id, which keeps every level of a recursively
+//! nested run durable and collision-free, and the executor's recursion limit
+//! bounds how deep that nesting can go.
+//!
+//! See [`types`] for the conceptual overview of the two embedding modes. The
+//! functions here wrap a [`CompiledGraph`] into a node handler usable with
+//! [`crate::graph::GraphBuilder::add_node`]:
+//!
+//! - [`shared_subgraph_node`] — parent and child share one state channel.
+//! - [`adapter_subgraph_node`] — parent and child use different state shapes,
+//!   bridged by `to_child` / `from_child` mappings.
 
 mod types;
 

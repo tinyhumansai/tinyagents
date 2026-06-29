@@ -1,5 +1,13 @@
 //! Test-support toolkit for the harness.
 //!
+//! In the recursive architecture this is how nested, model-driven behaviour is
+//! made *deterministically testable*: scripted/streaming model doubles, fake
+//! tools, controllable clocks/ids, and a [`Trajectory`] over recorded
+//! [`AgentEvent`]s let tests assert exactly what an agent — and the sub-agents
+//! and sub-graphs it spawns — did, all without a live provider. The same
+//! [`EventRecorder`] that observes a top-level run also captures child-run
+//! events fanned onto a shared sink, so recursion is observable in tests.
+//!
 //! Provides deterministic doubles and trajectory assertions that make it
 //! possible to test model-and-tool workflows without live providers.
 //!

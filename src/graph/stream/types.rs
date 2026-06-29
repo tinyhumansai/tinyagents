@@ -1,4 +1,12 @@
-//! Low-level graph events and high-level stream modes.
+//! Low-level graph events and high-level stream modes — the wire vocabulary the
+//! recursive executor uses to narrate its own execution.
+//!
+//! [`GraphEvent`] is the fine-grained, per-node/per-step lifecycle signal the
+//! durable executor emits at every boundary; [`StreamMode`] is the LangGraph-
+//! style selection of *which projection* of that stream a caller wants (full
+//! values, per-node updates, model messages, debug detail, interrupts, or
+//! custom node writes). Together they let observers — including a parent run
+//! consuming a subgraph — follow a run without inspecting its internal state.
 
 use crate::graph::command::Interrupt;
 use crate::harness::ids::{CheckpointId, NodeId};

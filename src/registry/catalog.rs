@@ -110,85 +110,134 @@ pub struct ModelCatalogSnapshot {
     /// Optional human-readable description of the snapshot.
     #[serde(default)]
     pub description: Option<String>,
+    /// Provenance entries describing where the snapshot data came from.
     #[serde(default)]
     pub sources: Vec<ModelCatalogSource>,
+    /// The catalog entries themselves, one per model.
     #[serde(default)]
     pub models: Vec<ModelCatalogEntry>,
 }
 
+/// One provenance record for a [`ModelCatalogSnapshot`].
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelCatalogSource {
+    /// Human-readable name of the source.
     pub name: String,
+    /// URL the data was retrieved from.
     pub url: String,
+    /// ISO-8601 timestamp recording when the source was retrieved.
     pub retrieved_at: String,
 }
 
+/// A single model's catalog record: identity, limits, pricing, and capability
+/// flags.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelCatalogEntry {
+    /// Provider that serves this model (e.g. `"openai"`, `"anthropic"`).
     pub provider: String,
+    /// Canonical model identifier within the provider.
     pub model_id: String,
+    /// Alternate identifiers that also resolve to this entry in lookups.
     #[serde(default)]
     pub aliases: Vec<String>,
+    /// Serving mode for the model (e.g. `"chat"`, `"embedding"`).
     pub mode: String,
+    /// Maximum number of input (context) tokens, when known.
     #[serde(default)]
     pub max_input_tokens: Option<u64>,
+    /// Maximum number of output tokens, when known.
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
+    /// Announced deprecation date, when the provider has published one.
     #[serde(default)]
     pub deprecation_date: Option<String>,
+    /// Per-token pricing for the model.
     #[serde(default)]
     pub pricing: ModelPricing,
+    /// Capability flags advertised for the model.
     #[serde(default)]
     pub capabilities: ModelCapabilities,
+    /// Identifier of the upstream source this entry was derived from.
     pub source: String,
+    /// Optional URL pointing at the source documentation for this entry.
     #[serde(default)]
     pub source_url: Option<String>,
+    /// Raw provider payload preserved verbatim for fields not modeled above.
     #[serde(default)]
     pub raw: Value,
 }
 
+/// Per-token pricing for a model, in the snapshot's currency and unit.
+///
+/// Every field is optional: a `None` means the price is unknown or not
+/// applicable to the model rather than free.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ModelPricing {
+    /// Price per input (prompt) token.
     #[serde(default)]
     pub input_per_token: Option<f64>,
+    /// Price per output (completion) token.
     #[serde(default)]
     pub output_per_token: Option<f64>,
+    /// Discounted price per input token served from prompt cache.
     #[serde(default)]
     pub cache_read_input_per_token: Option<f64>,
+    /// Price per input token when writing to the prompt cache.
     #[serde(default)]
     pub cache_creation_input_per_token: Option<f64>,
+    /// Price per audio input token.
     #[serde(default)]
     pub input_audio_per_token: Option<f64>,
+    /// Price per reasoning output token (for reasoning models that bill these
+    /// separately).
     #[serde(default)]
     pub output_reasoning_per_token: Option<f64>,
 }
 
+/// Boolean capability flags advertised for a model.
+///
+/// These let recursive runs gate behavior before dispatch — for example,
+/// refusing to hand tools to a sub-agent backed by a model whose
+/// [`tool_calling`](Self::tool_calling) flag is `false`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ModelCapabilities {
+    /// The model supports token streaming.
     #[serde(default)]
     pub streaming: bool,
+    /// The model supports tool/function calling.
     #[serde(default)]
     pub tool_calling: bool,
+    /// The model can request multiple tool calls in a single turn.
     #[serde(default)]
     pub parallel_tool_calling: bool,
+    /// The model supports JSON-schema-constrained structured output.
     #[serde(default)]
     pub json_schema: bool,
+    /// The model accepts system messages.
     #[serde(default)]
     pub system_messages: bool,
+    /// The model accepts image input.
     #[serde(default)]
     pub vision: bool,
+    /// The model accepts audio input.
     #[serde(default)]
     pub audio_input: bool,
+    /// The model can produce audio output.
     #[serde(default)]
     pub audio_output: bool,
+    /// The model accepts PDF input.
     #[serde(default)]
     pub pdf_input: bool,
+    /// The model supports prompt caching.
     #[serde(default)]
     pub prompt_caching: bool,
+    /// The model exposes explicit reasoning/thinking.
     #[serde(default)]
     pub reasoning: bool,
 }
 
+/// Tests that the embedded seed snapshot loads and that entries resolve by
+/// canonical id and by alias.
 #[cfg(test)]
 mod tests {
     use super::*;

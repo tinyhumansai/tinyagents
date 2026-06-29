@@ -1,5 +1,11 @@
 //! Real OpenAI Chat Completions provider (feature `openai`).
 //!
+//! This is one of the concrete leaves the recursive runtime bottoms out in: a
+//! single [`OpenAiModel`] backs hosted OpenAI *and* every OpenAI-compatible
+//! endpoint (Anthropic, Ollama, DeepSeek, Groq, xAI, OpenRouter, Together,
+//! Mistral) via the preset constructors below, so the sub-agent / sub-graph
+//! layers above never need to know which provider answered.
+//!
 //! [`OpenAiModel`] implements [`ChatModel`] against the hosted OpenAI Chat
 //! Completions endpoint (`POST {base_url}/chat/completions`). It translates the
 //! provider-neutral [`ModelRequest`] into OpenAI's JSON wire format (see
