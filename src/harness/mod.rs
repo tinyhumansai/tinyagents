@@ -5,7 +5,9 @@
 //! without creating one large runtime file.
 
 pub mod agent_loop;
+pub mod cache;
 pub mod context;
+pub mod cost;
 pub mod events;
 pub mod limits;
 pub mod memory;
@@ -16,7 +18,10 @@ pub mod prompt;
 pub mod providers;
 pub mod retry;
 pub mod runtime;
-pub mod structured;
+pub mod stream;
 pub mod store;
+pub mod summarization;
+pub mod structured;
 pub mod testkit;
 pub mod tool;
+pub mod usage;

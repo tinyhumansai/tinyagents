@@ -1,8 +1,25 @@
 # RustAgents
 
-A Rust LLM orchestration library inspired by LangChain and LangGraph.
+RustAgents is an open source, modular agentic harness for Rust.
 
-RustAgents is currently a small foundation for building agentic workflows:
+While building OpenHuman, the TinyHumans team found that Rust did not have an
+agent harness that felt comparable to the mature options available in Python
+and TypeScript. Python and TypeScript developers could reach for projects such
+as LangChain, LangGraph, Pydantic AI, and other orchestration frameworks, but
+Rust developers did not have a similarly capable, ergonomic, and extensible
+foundation for building agentic systems.
+
+RustAgents takes inspiration from the best ideas across those harnesses and
+brings them into a Rust-native design: strongly typed state, async-first model
+and tool abstractions, explicit graph execution, and a small public API that can
+grow without hiding the runtime behavior.
+
+RustAgents is a gift from TinyHumans to the Rust community: the harness the team
+wanted while building OpenHuman, released openly so Rust developers can build
+production agent workflows without having to recreate the same foundation from
+scratch.
+
+The crate currently provides:
 
 - chat message primitives
 - async chat model and tool traits

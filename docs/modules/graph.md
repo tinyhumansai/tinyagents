@@ -1,7 +1,8 @@
 # Graph Module Specification
 
 The graph module is the workflow runtime. It owns topology, state transitions,
-routing, execution history, checkpointing, interrupts, streaming, and subgraphs.
+routing, execution history, checkpointing, interrupts, streaming, parallel
+execution, sub-agent nodes, recursive graph calls, and depth tracking.
 
 The graph module should be usable without the expressive language. The expressive
 language compiles into graph structures; the graph runtime should not know or
@@ -29,6 +30,9 @@ Primary references:
 - Apply state updates through reducer policies.
 - Route through direct, conditional, and command-based edges.
 - Enforce recursion and concurrency policy.
+- Execute parallel branches.
+- Represent sub-agents as graph nodes.
+- Support recursive graph/subgraph invocation with explicit depth tracking.
 - Persist checkpoints at execution boundaries.
 - Support interrupts and resume.
 - Emit typed execution events.
@@ -60,9 +64,12 @@ src/graph/
   executor.rs
   interrupt.rs
   node.rs
+  parallel.rs
   reducer.rs
+  recursion.rs
   state.rs
   stream.rs
+  subagent.rs
   subgraph.rs
   testkit.rs
 ```
@@ -93,6 +100,7 @@ pub struct GraphRun<State> {
     pub visited: Vec<NodeId>,
     pub checkpoints: Vec<CheckpointId>,
     pub interrupts: Vec<Interrupt>,
+    pub max_depth: usize,
 }
 ```
 
@@ -236,6 +244,8 @@ Target executor:
 - checkpoint after step completion
 - support pending writes from completed parallel nodes
 - resume from checkpoint
+- recursive call tracking
+- child graph and child agent run tracking
 
 Superstep lifecycle:
 
@@ -250,6 +260,106 @@ Superstep lifecycle:
 
 Checkpointing mid-node should be avoided. Async Rust stack suspension is not a
 stable persistence primitive; node rerun semantics are easier to reason about.
+
+## Parallelization
+
+Parallel execution is expressed as multiple active nodes in a superstep. A node
+can route to more than one next node through conditional routing or a command.
+
+```rust
+Command::new()
+    .update(update)
+    .goto(["retrieve_docs", "lookup_user", "score_risk"])
+```
+
+Parallel execution rules:
+
+- all active nodes in a superstep read the same state snapshot
+- each node returns a partial update, command, interrupt, or error
+- reducers merge successful updates at the step boundary
+- a failed required node fails the superstep unless policy says otherwise
+- completed writes can be preserved as pending writes when checkpointing supports
+  them
+- concurrency is bounded by graph and run config
+
+Parallelism must be visible in events:
+
+- `StepStarted { active: [...] }`
+- `NodeStarted`
+- `NodeCompleted`
+- `NodeFailed`
+- `StateUpdated`
+- `StepCompleted`
+
+## Sub-Agents
+
+Sub-agents are harness agents registered in the registry and invoked from graph
+nodes. They are not special opaque side effects; they are child runs with their
+own events, usage, cost, and failures.
+
+```rust
+pub struct SubAgentNode {
+    pub agent: ComponentId,
+    pub input_mapper: InputMapper,
+    pub output_mapper: OutputMapper,
+    pub policy: SubAgentPolicy,
+}
+```
+
+Sub-agent requirements:
+
+- create a child `run_id`
+- preserve `root_run_id`
+- set `parent_run_id` to the graph node run
+- forward harness events through graph/registry streaming
+- apply timeout, retry, and budget policy
+- map child output into parent graph update
+- make child usage and cost visible in parent rollups
+
+Sub-agents allow a graph to coordinate specialized workers while keeping each
+worker independently observable.
+
+## Recursion And Depth Tracking
+
+The graph should allow recursive execution, but only with explicit limits and
+tracking.
+
+Recursive cases:
+
+- a graph invokes itself as a subgraph
+- a graph invokes a subgraph that eventually invokes the parent graph
+- an agent node calls another agent that calls back into the same graph
+- a router intentionally loops through nodes until state converges
+
+Required tracking:
+
+```rust
+pub struct RecursionFrame {
+    pub graph_id: GraphId,
+    pub node_id: Option<NodeId>,
+    pub run_id: RunId,
+    pub depth: usize,
+    pub parent: Option<RunId>,
+}
+
+pub struct RecursionPolicy {
+    pub max_depth: usize,
+    pub max_visits_per_node: Option<usize>,
+    pub max_total_steps: usize,
+}
+```
+
+Rules:
+
+- every graph/subgraph/sub-agent call pushes a recursion frame
+- every return pops the frame
+- depth is emitted on graph and registry events
+- exceeding `max_depth` fails with a clear recursion error
+- node-loop recursion and graph-call recursion are tracked separately
+- checkpoint metadata includes the current recursion stack
+
+Depth tracking is part of observability, not just safety. Web UIs should be able
+to render nested runs and recursive calls without reconstructing them from logs.
 
 ## Commands
 
@@ -365,12 +475,16 @@ The graph event stream should be typed.
 ```rust
 pub enum GraphEvent {
     RunStarted { run_id: RunId, graph_id: GraphId },
+    RunStreamingStarted { run_id: RunId },
     StepStarted { step: usize, active: Vec<NodeId> },
     NodeStarted { node: NodeId },
     NodeCompleted { node: NodeId },
     NodeFailed { node: NodeId, error: String },
     StateUpdated { node: NodeId, update: serde_json::Value },
     RouteSelected { node: NodeId, routes: Vec<NodeId> },
+    SubAgentStarted { node: NodeId, agent: ComponentId, child_run_id: RunId },
+    SubAgentCompleted { node: NodeId, agent: ComponentId, child_run_id: RunId },
+    RecursionDepthChanged { depth: usize },
     CheckpointSaved { checkpoint_id: CheckpointId },
     InterruptEmitted { interrupt: Interrupt },
     RunCompleted { run_id: RunId },
@@ -387,9 +501,21 @@ Stream modes:
 - `interrupts`: interrupt payloads
 - `debug`: executor internals
 - `messages`: harness message deltas emitted by model nodes
+- `subagents`: child agent lifecycle and output events
+- `depth`: recursion frame/depth changes
 
 The graph stream should be able to forward harness events from graph nodes while
 preserving node id and run id.
+
+Streaming requirements:
+
+- graph runs can be consumed as an async stream
+- streaming does not require waiting for final state
+- every streamed event carries run hierarchy and recursion depth
+- harness streams from model/tool/sub-agent nodes are forwarded with graph node
+  context
+- subscribers can filter to graph events, harness events, sub-agent events, or
+  state updates
 
 ## Subgraphs
 
@@ -541,3 +667,17 @@ assert_graph(run)
 - add multi-active-node executor
 - add subgraph node
 - add checkpoint namespaces
+
+### G7: Sub-Agents And Recursion
+
+- add `SubAgentNode`
+- add child run hierarchy
+- add recursion stack
+- add depth events
+- add max-depth policy
+
+### G8: Graph Streaming
+
+- expose async graph event stream
+- forward harness streams with node context
+- add stream filters for updates, values, messages, subagents, and depth
