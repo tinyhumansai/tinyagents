@@ -11,6 +11,22 @@ render spend in web UIs.
 - Enforce per-run and per-thread budgets.
 - Roll costs up across sub-agents and graph nodes.
 - Emit cost events.
+- Keep price data updateable outside provider adapter code.
+- Mark estimated versus provider-confirmed cost.
+- Carry currency explicitly.
+
+## Source Inspiration
+
+LangChain standardizes usage on messages and traces, while LangSmith tracks
+additional cost information. LangChain model profiles intentionally focus on
+capability data, not prices:
+
+- usage metadata:
+  <https://github.com/langchain-ai/langchain/blob/master/libs/core/langchain_core/messages/ai.py>
+- usage callbacks:
+  <https://github.com/langchain-ai/langchain/blob/master/libs/core/langchain_core/callbacks/usage.py>
+- model profiles:
+  <https://github.com/langchain-ai/langchain/blob/master/libs/core/langchain_core/language_models/model_profile.py>
 
 ## Core Types
 
@@ -33,3 +49,18 @@ pub struct CostRecord {
 
 Pricing tables are time-sensitive. They should be updateable through config or a
 store-backed table, not hardcoded permanently in provider adapters.
+
+## Budget Enforcement
+
+Budget policy should support:
+
+- per-run maximum cost
+- per-thread maximum cost
+- per-model-call maximum cost estimate
+- soft warning thresholds
+- hard stop thresholds
+- currency validation
+
+The harness should estimate cost before calls when enough information exists,
+then reconcile after provider usage is known. Unknown prices should either fail
+closed or emit an unpriced usage record depending on policy.

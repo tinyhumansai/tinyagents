@@ -1,12 +1,14 @@
 # RustAgents System Specification
 
-RustAgents is a Rust-native LLM application framework inspired by LangChain and
-LangGraph. The system is organized around three modules:
+RustAgents is a Rust-native LLM application framework inspired by LangChain,
+LangGraph, and CodeAct-style recursive language-model runtimes. The system is
+organized around five modules:
 
 1. the harness
 2. the graph
 3. the registry
 4. the expressive language
+5. the REPL language
 
 The goal is to make agent systems easy to define, inspect, run, test, and
 eventually serialize without hiding the Rust types that make production systems
@@ -14,10 +16,11 @@ reliable.
 
 ## Detailed Module Docs
 
-- [Harness module](modules/harness.md)
-- [Graph module](modules/graph.md)
-- [Registry module](modules/registry.md)
-- [Expressive language module](modules/expressive-language.md)
+- [Harness module](../modules/harness/README.md)
+- [Graph module](../modules/graph/README.md)
+- [Registry module](../modules/registry/README.md)
+- [Expressive language module](../modules/expressive-language/README.md)
+- [REPL language module](../modules/repl-language/README.md)
 
 ## Design Goals
 
@@ -28,6 +31,8 @@ reliable.
 - Keep model providers, tools, memory, and tracing behind stable traits.
 - Support both Rust builder APIs and a compact expressive language for workflow
   definitions.
+- Support a capability-bound REPL language for interactive graph and harness
+  orchestration.
 - Prefer deterministic state transitions around inherently nondeterministic LLM
   calls.
 

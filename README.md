@@ -26,8 +26,8 @@ The crate currently provides:
 - executable state graphs with direct and conditional routing
 - examples and tests for the first public API
 
-See [docs/SPEC.md](docs/SPEC.md) for the system specification across the
-harness, graph runtime, and expressive language.
+See [docs/spec/README.md](docs/spec/README.md) for the system specification across the
+harness, graph runtime, expressive language, and REPL language.
 
 ## Install
 

@@ -1,5 +1,7 @@
 # Registry Module Specification
 
+Parent module: [Registry](README.md).
+
 The registry module is the coordination layer for RustAgents. It registers
 agents, graphs, tools, models, stores, middleware, and listeners, then provides
 an event-friendly runtime surface for external systems such as web UIs, CLIs,

@@ -8,6 +8,12 @@ The language compiles into the same harness and graph runtime structures as
 hand-written Rust. The graph runtime should not know whether a graph came from
 Rust builders or a source file.
 
+This module is intentionally declarative. Interactive scripting and
+CodeAct-style recursive execution belong to the
+[REPL language module](../repl-language/README.md). A `.rag` file defines graph topology
+and bindings; a `.ragsh` session inspects, scripts, and orchestrates harness or
+graph calls through capability-bound functions.
+
 ## Responsibilities
 
 - Parse workflow source into an AST.

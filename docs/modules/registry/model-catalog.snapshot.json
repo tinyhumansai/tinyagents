@@ -1,0 +1,213 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "2026-06-29-litellm-seed",
+  "created_at": "2026-06-29T00:00:00Z",
+  "currency": "USD",
+  "unit": "token",
+  "description": "Small seed snapshot for registry model-catalog schema design. Refresh before using for production pricing.",
+  "sources": [
+    {
+      "name": "litellm",
+      "url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "retrieved_at": "2026-06-29T00:00:00Z"
+    },
+    {
+      "name": "openai_pricing",
+      "url": "https://openai.com/api/pricing/",
+      "retrieved_at": "2026-06-29T00:00:00Z"
+    },
+    {
+      "name": "anthropic_pricing",
+      "url": "https://www.anthropic.com/pricing",
+      "retrieved_at": "2026-06-29T00:00:00Z"
+    },
+    {
+      "name": "gemini_pricing",
+      "url": "https://ai.google.dev/gemini-api/docs/pricing",
+      "retrieved_at": "2026-06-29T00:00:00Z"
+    }
+  ],
+  "models": [
+    {
+      "provider": "openai",
+      "model_id": "gpt-4.1",
+      "aliases": [],
+      "mode": "chat",
+      "max_input_tokens": 1047576,
+      "max_output_tokens": 32768,
+      "pricing": {
+        "input_per_token": 0.000002,
+        "output_per_token": 0.000008,
+        "cache_read_input_per_token": 0.0000005
+      },
+      "capabilities": {
+        "streaming": true,
+        "tool_calling": true,
+        "parallel_tool_calling": true,
+        "json_schema": true,
+        "system_messages": true,
+        "vision": true,
+        "audio_input": false,
+        "audio_output": false,
+        "pdf_input": true,
+        "prompt_caching": true,
+        "reasoning": false
+      },
+      "source": "litellm",
+      "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "raw": {
+        "litellm_provider": "openai",
+        "supported_endpoints": [
+          "/v1/chat/completions",
+          "/v1/batch",
+          "/v1/responses"
+        ]
+      }
+    },
+    {
+      "provider": "openai",
+      "model_id": "gpt-4.1-mini",
+      "aliases": [],
+      "mode": "chat",
+      "max_input_tokens": 1047576,
+      "max_output_tokens": 32768,
+      "pricing": {
+        "input_per_token": 0.0000004,
+        "output_per_token": 0.0000016,
+        "cache_read_input_per_token": 0.0000001
+      },
+      "capabilities": {
+        "streaming": true,
+        "tool_calling": true,
+        "parallel_tool_calling": true,
+        "json_schema": true,
+        "system_messages": true,
+        "vision": true,
+        "audio_input": false,
+        "audio_output": false,
+        "pdf_input": true,
+        "prompt_caching": true,
+        "reasoning": false
+      },
+      "source": "litellm",
+      "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "raw": {
+        "litellm_provider": "openai",
+        "supported_endpoints": [
+          "/v1/chat/completions",
+          "/v1/batch",
+          "/v1/responses"
+        ]
+      }
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-sonnet-4-20250514",
+      "aliases": [
+        "claude-sonnet-4"
+      ],
+      "mode": "chat",
+      "max_input_tokens": 1000000,
+      "max_output_tokens": 64000,
+      "deprecation_date": "2026-05-14",
+      "pricing": {
+        "input_per_token": 0.000003,
+        "output_per_token": 0.000015,
+        "cache_creation_input_per_token": 0.00000375,
+        "cache_read_input_per_token": 0.0000003
+      },
+      "capabilities": {
+        "streaming": false,
+        "tool_calling": true,
+        "parallel_tool_calling": false,
+        "json_schema": true,
+        "system_messages": false,
+        "vision": true,
+        "audio_input": false,
+        "audio_output": false,
+        "pdf_input": true,
+        "prompt_caching": true,
+        "reasoning": true
+      },
+      "source": "litellm",
+      "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "raw": {
+        "litellm_provider": "anthropic",
+        "input_cost_per_token_above_200k_tokens": 0.000006,
+        "output_cost_per_token_above_200k_tokens": 0.0000225
+      }
+    },
+    {
+      "provider": "gemini",
+      "model_id": "gemini/gemini-2.5-pro",
+      "aliases": [
+        "gemini-2.5-pro"
+      ],
+      "mode": "chat",
+      "max_input_tokens": 1048576,
+      "max_output_tokens": 65535,
+      "pricing": {
+        "input_per_token": 0.00000125,
+        "output_per_token": 0.00001,
+        "cache_read_input_per_token": 0.000000125
+      },
+      "capabilities": {
+        "streaming": false,
+        "tool_calling": true,
+        "parallel_tool_calling": false,
+        "json_schema": true,
+        "system_messages": true,
+        "vision": true,
+        "audio_input": true,
+        "audio_output": false,
+        "pdf_input": true,
+        "prompt_caching": true,
+        "reasoning": true
+      },
+      "source": "litellm",
+      "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "raw": {
+        "litellm_provider": "gemini",
+        "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+        "input_cost_per_token_above_200k_tokens": 0.0000025,
+        "output_cost_per_token_above_200k_tokens": 0.000015
+      }
+    },
+    {
+      "provider": "gemini",
+      "model_id": "gemini/gemini-2.5-flash",
+      "aliases": [
+        "gemini-2.5-flash"
+      ],
+      "mode": "chat",
+      "max_input_tokens": 1048576,
+      "max_output_tokens": 65535,
+      "pricing": {
+        "input_per_token": 0.0000003,
+        "output_per_token": 0.0000025,
+        "cache_read_input_per_token": 0.00000003,
+        "input_audio_per_token": 0.000001,
+        "output_reasoning_per_token": 0.0000025
+      },
+      "capabilities": {
+        "streaming": false,
+        "tool_calling": true,
+        "parallel_tool_calling": true,
+        "json_schema": true,
+        "system_messages": true,
+        "vision": true,
+        "audio_input": true,
+        "audio_output": false,
+        "pdf_input": true,
+        "prompt_caching": true,
+        "reasoning": true
+      },
+      "source": "litellm",
+      "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "raw": {
+        "litellm_provider": "gemini",
+        "source": "https://ai.google.dev/gemini-api/docs/models#gemini-2.5-flash-preview"
+      }
+    }
+  ]
+}

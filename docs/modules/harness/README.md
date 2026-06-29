@@ -47,6 +47,11 @@ Primary references:
   <https://github.com/langchain-ai/langchain/tree/master/libs/model-profiles>
 - LangChain message and content-block model:
   <https://github.com/langchain-ai/langchain/tree/master/libs/core/langchain_core/messages>
+- LangChain embeddings, vector stores, retrievers, and indexing:
+  <https://github.com/langchain-ai/langchain/tree/master/libs/core/langchain_core/embeddings>
+  <https://github.com/langchain-ai/langchain/tree/master/libs/core/langchain_core/vectorstores>
+  <https://github.com/langchain-ai/langchain/blob/master/libs/core/langchain_core/retrievers.py>
+  <https://github.com/langchain-ai/langchain/tree/master/libs/core/langchain_core/indexing>
 - LangChain runnable config, fallbacks, retry, and event streams:
   <https://github.com/langchain-ai/langchain/tree/master/libs/core/langchain_core/runnables>
 - LangChain callbacks, tracers, and usage accounting:
@@ -70,7 +75,9 @@ tests for every adapter.
 - Build model requests from messages, prompts, tools, memory, and config.
 - Track context-window pressure and choose trimming or summarization policies.
 - Dispatch model calls through provider-neutral traits.
+- Dispatch embedding calls through provider-neutral traits.
 - Dispatch tool calls through a registry with schema validation.
+- Expose retrievers and vector stores for retrieval-augmented context assembly.
 - Run the standard model-tool-model agent loop.
 - Apply middleware before and after model calls, tool calls, retries, and errors.
 - Enforce model-call limits, tool-call limits, timeouts, and retry policy.
@@ -121,6 +128,7 @@ src/harness/
   cache.rs
   context.rs
   cost.rs
+  embeddings.rs
   events.rs
   limits.rs
   memory.rs
@@ -150,6 +158,8 @@ Feature ownership:
 - `cache`: prompt, response, summary, and artifact cache policy.
 - `context`: `RunConfig`, `RunContext`, inherited metadata, runtime values.
 - `cost`: model pricing, budget policy, and cost rollups.
+- `embeddings`: embedding providers, vector stores, retrievers, indexing, and
+  retrieval-context records.
 - `events`: typed harness events, sinks, streams, redaction adapters.
 - `limits`: model-call, tool-call, concurrency, timeout, and recursion policy.
 - `memory`: short-term thread memory and long-term stores.
@@ -170,21 +180,22 @@ Feature ownership:
 
 Feature details:
 
-- [Context feature](harness/context.md)
-- [Model and provider feature](harness/model.md)
-- [Prompt feature](harness/prompt.md)
-- [Tool feature](harness/tool.md)
-- [Middleware feature](harness/middleware.md)
-- [Structured output feature](harness/structured-output.md)
-- [Limits, retry, fallback, and rate limiting](harness/limits-retry.md)
-- [Summarization feature](harness/summarization.md)
-- [Usage feature](harness/usage.md)
-- [Cost feature](harness/cost.md)
-- [Cache feature](harness/cache.md)
-- [Streaming feature](harness/streaming.md)
-- [Store feature](harness/store.md)
-- [Observability and events](harness/observability.md)
-- [Testkit feature](harness/testkit.md)
+- [Context feature](context.md)
+- [Model and provider feature](model.md)
+- [Embeddings and retrieval feature](embeddings.md)
+- [Prompt feature](prompt.md)
+- [Tool feature](tool.md)
+- [Middleware feature](middleware.md)
+- [Structured output feature](structured-output.md)
+- [Limits, retry, fallback, and rate limiting](limits-retry.md)
+- [Summarization feature](summarization.md)
+- [Usage feature](usage.md)
+- [Cost feature](cost.md)
+- [Cache feature](cache.md)
+- [Streaming feature](streaming.md)
+- [Store feature](store.md)
+- [Observability and events](observability.md)
+- [Testkit feature](testkit.md)
 
 ## LangChain Feature Parity Map
 
@@ -200,6 +211,9 @@ surface area that RustAgents should intentionally support, adapt, or reject.
 | Message model | `libs/core/langchain_core/messages/*.py` | Use typed content blocks for text, JSON, image, audio, file, tool call, tool result, reasoning, citations, refusal/safety, and provider extension data. |
 | Content translation | `libs/core/langchain_core/messages/block_translators/*.py` | Provider adapters must translate to/from the canonical RustAgents message model without losing ids, tool-call chunks, reasoning, usage, or provider metadata. |
 | Model profiles | `libs/core/langchain_core/language_models/model_profile.py` | Store model capability metadata: context limits, modalities, tool calling, tool-choice support, streaming tool chunks, structured output, reasoning output, temperature, attachments, status, and release dates. |
+| Embeddings | `libs/core/langchain_core/embeddings/embeddings.py` | Define provider-neutral embedding traits for documents and queries, with batch, async, dimensionality, provider metadata, usage, cost, cache, and fake deterministic implementations. |
+| Vector stores | `libs/core/langchain_core/vectorstores/base.py`, `in_memory.py` | Support add/update/delete/get-by-id, similarity search, score-threshold search, MMR search, metadata filters, async variants, and in-memory test stores. |
+| Retrievers and indexing | `libs/core/langchain_core/retrievers.py`, `indexing/*.py` | Treat retrievers as query-to-document components with events, tags, metadata, and record-manager-backed incremental indexing for dedupe and cleanup. |
 | Tool runtime injection | `langgraph.prebuilt.ToolRuntime` as re-exported by `libs/langchain_v1/langchain/tools/tool_node.py` | Tools should receive typed runtime context, state, store handles, stream writers, and cancellation handles through Rust parameters, not model-visible JSON schema fields. |
 | Callback/tracer events | `libs/core/langchain_core/callbacks` and `libs/core/langchain_core/tracers` | Emit typed events for every lifecycle boundary and expose sinks for tracing, streaming, logs, tests, and future UI replay. |
 | Runnables config | `libs/core/langchain_core/runnables/config.py` | `RunConfig` should carry tags, metadata, configurable values, concurrency, recursion, callbacks/events, and stable run identity through nested calls. |
@@ -213,6 +227,7 @@ surface area that RustAgents should intentionally support, adapt, or reject.
 ```rust
 pub struct AgentHarness<State, Ctx = ()> {
     models: ModelRegistry<State, Ctx>,
+    embeddings: EmbeddingRegistry<Ctx>,
     tools: ToolRegistry<State, Ctx>,
     middleware: MiddlewareStack<State, Ctx>,
     memory: Option<Arc<dyn ShortTermMemory<State>>>,

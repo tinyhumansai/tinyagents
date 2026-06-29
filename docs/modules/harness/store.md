@@ -6,6 +6,11 @@ used by memory, events, model calls, tool calls, artifacts, web UIs, and tests.
 The store is not graph checkpointing. Graph checkpoints belong to the graph
 module. Harness stores record application/runtime data around LLM orchestration.
 
+The store may also back status and event-journal features for the harness and
+for graph integrations. That does not make those records generic memory: status
+records are operational snapshots, event records are append-only execution
+history, and checkpoints remain graph-owned resumable state.
+
 ## Source Inspiration
 
 LangChain separates generic stores from chat history:
@@ -20,11 +25,16 @@ LangChain separates generic stores from chat history:
 RustAgents should follow the separation, but make event-friendly storage a
 first-class harness feature.
 
+LangChain v1 agents can also receive graph/store runtime objects through tool
+runtime injection. RustAgents should expose stores through `RunContext` and
+`ToolRuntime`, while still hiding store handles from model-visible tool schemas.
+
 ## Responsibilities
 
 - Provide key/value storage.
 - Provide append-only stream storage.
 - Store messages, run records, events, tool records, model records, and artifacts.
+- Store embedding records and vector/retrieval metadata when configured.
 - Support in-memory tests.
 - Support JSONL local development.
 - Support MongoDB server deployments.
@@ -32,6 +42,10 @@ first-class harness feature.
 - Emit store events.
 - Apply redaction rules to event payloads.
 - Keep backend-specific code out of memory, tools, and agent loop modules.
+- Keep store interfaces separate from model context selection.
+- Support namespaces so applications can isolate memory, events, artifacts, and
+  cache data.
+- Provide deterministic ordering for test stores.
 
 ## Non-Responsibilities
 
@@ -194,21 +208,30 @@ Suggested collections:
 
 - `threads`
 - `runs`
+- `run_status`
 - `messages`
 - `events`
+- `event_offsets`
 - `tool_calls`
 - `model_calls`
 - `artifacts`
 - `memory`
+- `embeddings`
+- `retrievals`
 
 Minimum indexes:
 
 - `events.run_id + events.time`
 - `events.thread_id + events.time`
+- `events.run_id + events.offset`
+- `run_status.run_id`
+- `run_status.thread_id + run_status.updated_at`
 - `runs.thread_id + runs.created_at`
 - `messages.thread_id + messages.created_at`
 - `tool_calls.run_id + tool_calls.call_id`
 - `model_calls.run_id + model_calls.call_id`
+- `retrievals.run_id + retrievals.time`
+- `embeddings.model + embeddings.created_at`
 
 ### Future Backends
 
@@ -217,6 +240,63 @@ Minimum indexes:
 - Redis for cache/session data.
 - S3-compatible blob store for artifacts.
 - Vector store adapter for retrieval memory.
+
+## Store Events
+
+Store operations that affect harness-visible state should emit events:
+
+- store get
+- store put
+- store delete
+- append
+- read from stream
+- artifact written
+- artifact read
+- backend error
+
+Payloads should be redacted by sink policy. Events should include namespace,
+key or key fingerprint, stream name, offset when applicable, elapsed time, and
+backend name.
+
+## Status And Event Journal Records
+
+Store-backed observability uses two different record families:
+
+- status records are overwritten by id and answer "what is running now?"
+- event journal records are append-only and answer "what happened?"
+
+Harness status records should store the compact `HarnessRunStatus` shape from
+[observability](observability.md). Graph integrations may store graph status
+records in the same backend, but graph-specific fields such as checkpoint id,
+checkpoint namespace, step, active nodes, and interrupts remain graph-owned.
+
+Event journal records should be addressable by stream and offset:
+
+```rust
+pub struct StoredEventRecord {
+    pub stream: StoreStream,
+    pub offset: StoreOffset,
+    pub event_id: EventId,
+    pub run_id: RunId,
+    pub root_run_id: RunId,
+    pub thread_id: Option<ThreadId>,
+    pub time: SystemTime,
+    pub kind: String,
+    pub redaction: RedactionStatus,
+    pub value: StoreValue,
+}
+```
+
+Recommended streams:
+
+- `runs/{run_id}/events`
+- `threads/{thread_id}/events`
+- `roots/{root_run_id}/events`
+- `components/{component_id}/events`
+
+The same event may appear in multiple query indexes, but one append stream
+should be the authoritative ordered source for replay. Consumers should store
+the last processed offset, not the last timestamp.
 
 ## Data Records
 
@@ -232,6 +312,24 @@ pub struct StoredRun {
     pub status: RunStatus,
     pub started_at: SystemTime,
     pub ended_at: Option<SystemTime>,
+    pub metadata: serde_json::Value,
+}
+```
+
+Run status record:
+
+```rust
+pub struct StoredRunStatus {
+    pub run_id: RunId,
+    pub root_run_id: RunId,
+    pub thread_id: Option<ThreadId>,
+    pub component_id: ComponentId,
+    pub status: RunStatus,
+    pub phase: Option<String>,
+    pub last_event_id: Option<EventId>,
+    pub updated_at: SystemTime,
+    pub ended_at: Option<SystemTime>,
+    pub error: Option<ErrorSummary>,
     pub metadata: serde_json::Value,
 }
 ```
