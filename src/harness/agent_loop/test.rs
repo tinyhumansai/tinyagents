@@ -526,7 +526,12 @@ async fn invoke_streaming_fires_on_model_delta_per_delta_and_accumulates() {
     }));
 
     let run = harness
-        .invoke_streaming(&(), (), RunConfig::new("stream-run"), vec![Message::user("hi")])
+        .invoke_streaming(
+            &(),
+            (),
+            RunConfig::new("stream-run"),
+            vec![Message::user("hi")],
+        )
         .await
         .expect("streaming run succeeds");
 
