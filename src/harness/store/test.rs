@@ -193,3 +193,126 @@ async fn store_registry_register_replaces() {
     reg.register("s", Arc::new(InMemoryStore::new()));
     assert_eq!(reg.get("s").unwrap().get("ns", "k").await.unwrap(), None);
 }
+
+// ── InMemoryAppendStore ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn in_memory_append_returns_increasing_offsets() {
+    let store = InMemoryAppendStore::new();
+    assert_eq!(store.len("evts").await.unwrap(), 0);
+
+    assert_eq!(store.append("evts", json!({"n": 0})).await.unwrap(), 0);
+    assert_eq!(store.append("evts", json!({"n": 1})).await.unwrap(), 1);
+    assert_eq!(store.append("evts", json!({"n": 2})).await.unwrap(), 2);
+
+    // len equals the offset the next append will receive.
+    assert_eq!(store.len("evts").await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn in_memory_read_from_returns_tail() {
+    let store = InMemoryAppendStore::new();
+    for n in 0..5 {
+        store.append("s", json!(n)).await.unwrap();
+    }
+
+    // Whole stream from offset 0.
+    let all = store.read_from("s", 0).await.unwrap();
+    assert_eq!(all.len(), 5);
+    assert_eq!(all[0], (0, json!(0)));
+    assert_eq!(all[4], (4, json!(4)));
+
+    // Tail from a mid offset.
+    let tail = store.read_from("s", 3).await.unwrap();
+    assert_eq!(tail, vec![(3, json!(3)), (4, json!(4))]);
+
+    // Reading from len (or beyond) yields nothing.
+    assert!(store.read_from("s", 5).await.unwrap().is_empty());
+    assert!(store.read_from("s", 99).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn in_memory_append_streams_are_isolated() {
+    let store = InMemoryAppendStore::new();
+    store.append("a", json!("a0")).await.unwrap();
+    store.append("b", json!("b0")).await.unwrap();
+    store.append("a", json!("a1")).await.unwrap();
+
+    assert_eq!(store.len("a").await.unwrap(), 2);
+    assert_eq!(store.len("b").await.unwrap(), 1);
+    // An unwritten stream reads back empty without error.
+    assert!(store.read_from("missing", 0).await.unwrap().is_empty());
+    assert_eq!(store.len("missing").await.unwrap(), 0);
+}
+
+// ── JsonlAppendStore ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn jsonl_append_returns_increasing_offsets_and_reads_tail() {
+    let dir = TempDir::new("jsonl-basic");
+    let store = JsonlAppendStore::new(&dir.0);
+
+    assert_eq!(store.append("evts", json!({"n": 0})).await.unwrap(), 0);
+    assert_eq!(store.append("evts", json!({"n": 1})).await.unwrap(), 1);
+    assert_eq!(store.append("evts", json!({"n": 2})).await.unwrap(), 2);
+    assert_eq!(store.len("evts").await.unwrap(), 3);
+
+    let tail = store.read_from("evts", 1).await.unwrap();
+    assert_eq!(tail, vec![(1, json!({"n": 1})), (2, json!({"n": 2}))]);
+
+    // A stream that was never written reads back empty.
+    assert!(store.read_from("other", 0).await.unwrap().is_empty());
+    assert_eq!(store.len("other").await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn jsonl_round_trips_across_two_store_instances() {
+    let dir = TempDir::new("jsonl-reopen");
+
+    {
+        let first = JsonlAppendStore::new(&dir.0);
+        first
+            .append("runs", json!({"kind": "started"}))
+            .await
+            .unwrap();
+        first.append("runs", json!({"kind": "step"})).await.unwrap();
+    }
+
+    // A fresh store on the same directory sees prior entries and continues the
+    // offset sequence.
+    let second = JsonlAppendStore::new(&dir.0);
+    assert_eq!(second.len("runs").await.unwrap(), 2);
+    assert_eq!(
+        second
+            .append("runs", json!({"kind": "finished"}))
+            .await
+            .unwrap(),
+        2
+    );
+
+    let all = second.read_from("runs", 0).await.unwrap();
+    assert_eq!(
+        all,
+        vec![
+            (0, json!({"kind": "started"})),
+            (1, json!({"kind": "step"})),
+            (2, json!({"kind": "finished"})),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn jsonl_rejects_unsafe_stream_names() {
+    let dir = TempDir::new("jsonl-sanitize");
+    let store = JsonlAppendStore::new(&dir.0);
+
+    assert!(store.append("../etc", json!(1)).await.is_err());
+    assert!(store.append("a/b", json!(1)).await.is_err());
+    assert!(store.append("", json!(1)).await.is_err());
+    assert!(store.append("..", json!(1)).await.is_err());
+    assert!(store.read_from("with space", 0).await.is_err());
+    assert!(store.len("a\\b").await.is_err());
+
+    // Allowed characters round-trip.
+    assert_eq!(store.append("runs-1.events_v2", json!(1)).await.unwrap(), 0);
+}

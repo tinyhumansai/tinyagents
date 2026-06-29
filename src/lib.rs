@@ -101,6 +101,12 @@ pub use harness::steering::{
 // --- Cooperative run cancellation ---
 pub use harness::cancel::CancellationToken;
 
+// --- Harness: durable observability (journals, status stores, sinks) ---
+pub use harness::observability::{
+    AgentObservation, FanOutSink, HarnessEventJournal, HarnessStatusStore, InMemoryEventJournal,
+    InMemoryStatusStore, JournalSink, JsonlSink, RedactingSink, StoreEventJournal,
+};
+
 // --- Graph: durable execution model (LangGraph-style) ---
 // Re-exported with explicit names so the durable API is discoverable at the
 // crate root. The `harness::stream::StreamMode` and `graph::stream::StreamMode`
@@ -109,6 +115,14 @@ pub use graph::{
     Checkpoint, CheckpointMetadata, Checkpointer, ClosureReducer, ClosureStateReducer, Command,
     CompiledGraph, END, ForkId, GraphBuilder, GraphEvent, GraphExecution, GraphRunStatus,
     InMemoryCheckpointer, Interrupt, NodeContext, NodeResult, Reducer, START, StateReducer,
+};
+
+// --- Graph: durable observability (journals, status stores, journaling sink) ---
+// Names are graph-prefixed so they never collide with the harness observability
+// re-exports above.
+pub use graph::{
+    GraphEventJournal, GraphObservation, GraphStatusStore, InMemoryGraphEventJournal,
+    InMemoryGraphStatusStore, JournalGraphSink, StoreGraphEventJournal,
 };
 
 // --- Graph: export / visualization ---

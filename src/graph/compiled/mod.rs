@@ -113,6 +113,8 @@ impl<State, Update> CompiledGraph<State, Update> {
             recursion_limit,
             checkpointer: None,
             event_sink: None,
+            journal: None,
+            status_store: None,
             namespace: Vec::new(),
             parallel,
         }
@@ -146,6 +148,29 @@ impl<State, Update> CompiledGraph<State, Update> {
     /// Sets the checkpoint namespace (used by subgraph wrappers).
     pub fn with_namespace(mut self, namespace: Vec<String>) -> Self {
         self.namespace = namespace;
+        self
+    }
+
+    /// Attaches a durable event journal. Every emitted [`GraphEvent`] is wrapped
+    /// into a [`crate::graph::observability::GraphObservation`] (stamped with the
+    /// run's lineage, the graph's checkpoint namespace, and the run id) and
+    /// appended for offset-addressable replay. Opt-in; default off.
+    pub fn with_event_journal(
+        mut self,
+        journal: Arc<dyn crate::graph::observability::GraphEventJournal>,
+    ) -> Self {
+        self.journal = Some(journal);
+        self
+    }
+
+    /// Attaches a run-status store. The executor writes a compact
+    /// [`GraphRunStatus`] at every lifecycle boundary (start, terminal,
+    /// interrupt, failure) so observers can poll run state. Opt-in; default off.
+    pub fn with_status_store(
+        mut self,
+        status_store: Arc<dyn crate::graph::observability::GraphStatusStore>,
+    ) -> Self {
+        self.status_store = Some(status_store);
         self
     }
 
@@ -232,12 +257,64 @@ where
 
     async fn execute(
         &self,
+        state: State,
+        initial_active: Vec<NodeId>,
+        thread_id: Option<ThreadId>,
+        resume_map: HashMap<NodeId, serde_json::Value>,
+    ) -> Result<GraphExecution<State>> {
+        let run_id = RunId::new(next_id("run"));
+        // When a durable journal is configured, run against a clone whose event
+        // sink wraps every emitted event into a `GraphObservation` and appends
+        // it (while still forwarding to any pre-existing live sink). The journal
+        // sink carries this graph's checkpoint namespace so subgraph runs record
+        // their nested path. Default (no journal) leaves `self` untouched.
+        if self.journal.is_some() {
+            let this = self.clone_with_journal_sink(&run_id, &thread_id);
+            this.execute_run(run_id, state, initial_active, thread_id, resume_map)
+                .await
+        } else {
+            self.execute_run(run_id, state, initial_active, thread_id, resume_map)
+                .await
+        }
+    }
+
+    /// Builds a clone whose `event_sink` is a [`JournalGraphSink`] for `run_id`,
+    /// wrapping any existing sink as the live downstream. Returns a plain clone
+    /// when no journal is configured.
+    fn clone_with_journal_sink(&self, run_id: &RunId, thread_id: &Option<ThreadId>) -> Self {
+        let Some(journal) = &self.journal else {
+            return self.clone();
+        };
+        let mut sink = crate::graph::observability::JournalGraphSink::new(
+            journal.clone(),
+            run_id.clone(),
+            self.graph_id.clone(),
+        )
+        .with_namespace(self.namespace.clone())
+        .with_thread(thread_id.clone());
+        if let Some(inner) = &self.event_sink {
+            sink = sink.with_inner(inner.clone());
+        }
+        let mut this = self.clone();
+        this.event_sink = Some(Arc::new(sink));
+        this
+    }
+
+    /// Best-effort status write; never aborts the run on a status-store error.
+    async fn save_status(&self, status: GraphRunStatus) {
+        if let Some(store) = &self.status_store {
+            let _ = store.put_status(status).await;
+        }
+    }
+
+    async fn execute_run(
+        &self,
+        run_id: RunId,
         mut state: State,
         initial_active: Vec<NodeId>,
         thread_id: Option<ThreadId>,
         mut resume_map: HashMap<NodeId, serde_json::Value>,
     ) -> Result<GraphExecution<State>> {
-        let run_id = RunId::new(next_id("run"));
         let started_at = SystemTime::now();
         let mut visited: Vec<NodeId> = Vec::new();
         let mut steps = 0usize;
@@ -245,9 +322,20 @@ where
         let mut parent_checkpoint: Option<String> = None;
         let mut active = dedupe(initial_active);
 
+        self.emit(GraphEvent::RunStarted {
+            run_id: run_id.clone(),
+        });
+        // Record the run as live before the first superstep is scheduled.
+        let mut running = self.base_status(&run_id, &thread_id, started_at);
+        running.active_nodes = active.clone();
+        self.save_status(running).await;
+
         while !active.is_empty() {
             if steps >= self.recursion_limit {
-                return Err(TinyAgentsError::RecursionLimit(self.recursion_limit));
+                let err = TinyAgentsError::RecursionLimit(self.recursion_limit);
+                self.fail_run(&run_id, &thread_id, started_at, steps, &err)
+                    .await;
+                return Err(err);
             }
             steps += 1;
             self.emit(GraphEvent::StepStarted {
@@ -255,11 +343,7 @@ where
                 active: active.clone(),
             });
 
-            let StepRun {
-                updates,
-                goto_map,
-                interrupt,
-            } = if self.parallel && active.len() > 1 {
+            let run_result = if self.parallel && active.len() > 1 {
                 self.run_active_parallel(
                     &active,
                     &state,
@@ -269,7 +353,7 @@ where
                     &mut resume_map,
                     &mut visited,
                 )
-                .await?
+                .await
             } else {
                 self.run_active_sequential(
                     &active,
@@ -280,7 +364,19 @@ where
                     &mut resume_map,
                     &mut visited,
                 )
-                .await?
+                .await
+            };
+            let StepRun {
+                updates,
+                goto_map,
+                interrupt,
+            } = match run_result {
+                Ok(step_run) => step_run,
+                Err(err) => {
+                    self.fail_run(&run_id, &thread_id, started_at, steps, &err)
+                        .await;
+                    return Err(err);
+                }
             };
 
             // Apply collected updates through the reducer at the boundary.
@@ -313,6 +409,7 @@ where
                 status.active_nodes = pending;
                 status.pending_interrupts = vec![interrupt_id];
                 status.checkpoint_id = checkpoint_id.clone();
+                self.save_status(status.clone()).await;
 
                 return Ok(GraphExecution {
                     state,
@@ -370,6 +467,11 @@ where
         status.current_step = steps;
         status.checkpoint_id = last_checkpoint.clone();
         status.ended_at = Some(SystemTime::now());
+        self.save_status(status.clone()).await;
+        self.emit(GraphEvent::RunCompleted {
+            run_id: run_id.clone(),
+            steps,
+        });
 
         Ok(GraphExecution {
             state,
@@ -379,6 +481,28 @@ where
             status,
             checkpoint_id: last_checkpoint,
         })
+    }
+
+    /// Emits a [`GraphEvent::RunFailed`] and records a terminal `Failed` status
+    /// for a run that aborted with `err`.
+    async fn fail_run(
+        &self,
+        run_id: &RunId,
+        thread_id: &Option<ThreadId>,
+        started_at: SystemTime,
+        steps: usize,
+        err: &TinyAgentsError,
+    ) {
+        self.emit(GraphEvent::RunFailed {
+            run_id: run_id.clone(),
+            error: err.to_string(),
+        });
+        let mut status = self.base_status(run_id, thread_id, started_at);
+        status.status = ExecutionStatus::Failed;
+        status.current_step = steps;
+        status.ended_at = Some(SystemTime::now());
+        status.error = Some(err.to_string());
+        self.save_status(status).await;
     }
 
     /// Builds the per-task [`NodeContext`] for `node_id` at the given branch.
@@ -563,6 +687,11 @@ where
                 step,
             });
 
+            self.emit(GraphEvent::ContextForked {
+                node: node_id.clone(),
+                fork: index,
+                step,
+            });
             let fork = Some(ForkId::new(index, node_id.clone()));
             let ctx = self.node_context(node_id, run_id, thread_id, step, resume_map, fork);
             futures.push((node.handler)(state.clone(), ctx));

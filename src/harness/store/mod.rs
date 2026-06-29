@@ -202,6 +202,141 @@ impl Store for FileStore {
     }
 }
 
+// ── InMemoryAppendStore ─────────────────────────────────────────────────────────
+
+impl InMemoryAppendStore {
+    /// Creates a new, empty in-memory append store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl AppendStore for InMemoryAppendStore {
+    async fn append(&self, stream: &str, value: Value) -> Result<u64> {
+        let mut streams = self
+            .streams
+            .lock()
+            .map_err(|e| TinyAgentsError::Validation(format!("append store lock poisoned: {e}")))?;
+        let entries = streams.entry(stream.to_string()).or_default();
+        let offset = entries.len() as u64;
+        entries.push((now_ms(), value));
+        Ok(offset)
+    }
+
+    async fn read_from(&self, stream: &str, offset: u64) -> Result<Vec<(u64, Value)>> {
+        let streams = self
+            .streams
+            .lock()
+            .map_err(|e| TinyAgentsError::Validation(format!("append store lock poisoned: {e}")))?;
+        let Some(entries) = streams.get(stream) else {
+            return Ok(Vec::new());
+        };
+        Ok(entries
+            .iter()
+            .enumerate()
+            .skip(offset as usize)
+            .map(|(i, (_ts, value))| (i as u64, value.clone()))
+            .collect())
+    }
+
+    async fn len(&self, stream: &str) -> Result<u64> {
+        let streams = self
+            .streams
+            .lock()
+            .map_err(|e| TinyAgentsError::Validation(format!("append store lock poisoned: {e}")))?;
+        Ok(streams.get(stream).map(|e| e.len() as u64).unwrap_or(0))
+    }
+}
+
+// ── JsonlAppendStore ──────────────────────────────────────────────────────────
+
+impl JsonlAppendStore {
+    /// Creates a JSONL append store rooted at `root_dir`.
+    ///
+    /// The directory is created lazily on the first append, so constructing a
+    /// store for a path that does not yet exist is not an error.
+    pub fn new(root_dir: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            root_dir: root_dir.into(),
+        }
+    }
+
+    /// Returns the `<stream>.jsonl` path for `stream`, validating the name.
+    fn stream_path(&self, stream: &str) -> Result<std::path::PathBuf> {
+        FileStore::sanitize(stream)?;
+        Ok(self.root_dir.join(format!("{stream}.jsonl")))
+    }
+
+    /// Reads and decodes every [`StoreRecord`] line in `path`, in file order.
+    fn read_records(path: &std::path::Path) -> Result<Vec<StoreRecord>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let text = fs::read_to_string(path)
+            .map_err(|e| TinyAgentsError::Validation(format!("append store read error: {e}")))?;
+        let mut records = Vec::new();
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let record: StoreRecord = serde_json::from_str(line)?;
+            records.push(record);
+        }
+        Ok(records)
+    }
+}
+
+#[async_trait]
+impl AppendStore for JsonlAppendStore {
+    async fn append(&self, stream: &str, value: Value) -> Result<u64> {
+        let path = self.stream_path(stream)?;
+        fs::create_dir_all(&self.root_dir)
+            .map_err(|e| TinyAgentsError::Validation(format!("append store mkdir error: {e}")))?;
+        // The offset is the count of existing lines; re-read to stay correct
+        // across separate store instances on the same directory.
+        let offset = Self::read_records(&path)?.len() as u64;
+        let record = StoreRecord {
+            offset,
+            value,
+            created_at_ms: now_ms(),
+        };
+        let mut line = serde_json::to_string(&record)?;
+        line.push('\n');
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| TinyAgentsError::Validation(format!("append store open error: {e}")))?;
+        std::io::Write::write_all(&mut file, line.as_bytes())
+            .map_err(|e| TinyAgentsError::Validation(format!("append store write error: {e}")))?;
+        Ok(offset)
+    }
+
+    async fn read_from(&self, stream: &str, offset: u64) -> Result<Vec<(u64, Value)>> {
+        let path = self.stream_path(stream)?;
+        Ok(Self::read_records(&path)?
+            .into_iter()
+            .skip(offset as usize)
+            .map(|r| (r.offset, r.value))
+            .collect())
+    }
+
+    async fn len(&self, stream: &str) -> Result<u64> {
+        let path = self.stream_path(stream)?;
+        Ok(Self::read_records(&path)?.len() as u64)
+    }
+}
+
+/// Returns the current time in Unix-epoch milliseconds, saturating at `0` for
+/// clocks set before the epoch.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 // ── StoreRegistry ─────────────────────────────────────────────────────────────
 
 impl StoreRegistry {

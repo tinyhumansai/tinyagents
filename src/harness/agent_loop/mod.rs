@@ -66,7 +66,7 @@ use std::time::Duration;
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::cache::{ResponseCache, cache_key};
 use crate::harness::context::{RunConfig, RunContext};
-use crate::harness::events::{AgentEvent, HarnessRunStatus};
+use crate::harness::events::{AgentEvent, HarnessRunStatus, LimitKind};
 use crate::harness::ids::{CallId, ComponentId, HarnessPhase};
 use crate::harness::message::{Message, MessageDelta};
 use crate::harness::middleware::{
@@ -329,13 +329,19 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             }
 
             // Fail-closed limit and deadline checks before each model call.
-            ctx.check_deadline().map_err(|_| {
-                TinyAgentsError::Timeout(format!(
+            if ctx.check_deadline().is_err() {
+                ctx.emit(AgentEvent::LimitReached {
+                    kind: LimitKind::WallClock,
+                });
+                return Err(TinyAgentsError::Timeout(format!(
                     "run `{}` exceeded its wall-clock deadline",
                     ctx.run_id()
-                ))
-            })?;
+                )));
+            }
             if run.model_calls >= self.policy.limits.max_model_calls {
+                ctx.emit(AgentEvent::LimitReached {
+                    kind: LimitKind::ModelCalls,
+                });
                 return Err(TinyAgentsError::LimitExceeded(format!(
                     "max model calls ({}) reached",
                     self.policy.limits.max_model_calls
@@ -450,6 +456,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             if let Some(usage) = response.usage {
                 run.usage.record(usage);
                 status.usage = run.usage;
+                let record = ctx.emit(AgentEvent::UsageRecorded { usage });
+                status.set_last_event(record.id);
             }
             let record = ctx.emit(AgentEvent::ModelCompleted {
                 call_id,
@@ -491,13 +499,19 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 if ctx.cancellation.is_cancelled() {
                     return Err(TinyAgentsError::Cancelled);
                 }
-                ctx.check_deadline().map_err(|_| {
-                    TinyAgentsError::Timeout(format!(
+                if ctx.check_deadline().is_err() {
+                    ctx.emit(AgentEvent::LimitReached {
+                        kind: LimitKind::WallClock,
+                    });
+                    return Err(TinyAgentsError::Timeout(format!(
                         "run `{}` exceeded its wall-clock deadline",
                         ctx.run_id()
-                    ))
-                })?;
+                    )));
+                }
                 if run.tool_calls >= self.policy.limits.max_tool_calls {
+                    ctx.emit(AgentEvent::LimitReached {
+                        kind: LimitKind::ToolCalls,
+                    });
                     return Err(TinyAgentsError::LimitExceeded(format!(
                         "max tool calls ({}) reached",
                         self.policy.limits.max_tool_calls

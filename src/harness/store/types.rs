@@ -42,6 +42,71 @@ pub trait Store: Send + Sync {
     async fn list(&self, namespace: &str) -> Result<Vec<String>>;
 }
 
+// ── AppendStore trait ─────────────────────────────────────────────────────────
+
+/// Append-only stream storage for the harness.
+///
+/// Where [`Store`] answers "what is the current value of this key?", an
+/// `AppendStore` answers "what happened, in order?". It is the durable backbone
+/// for event journals: each `stream` is an independent, ordered, append-only
+/// log of [`serde_json::Value`] entries addressed by a monotonically increasing
+/// **offset**.
+///
+/// # Offsets
+/// Offsets are zero-based positional indexes within a stream. The first entry
+/// appended to a fresh stream is stored at offset `0`, the next at `1`, and so
+/// on, so the offset returned by [`append`](Self::append) equals the number of
+/// entries that preceded it. [`len`](Self::len) returns the count of entries
+/// (equivalently, the offset the *next* append will receive). Consumers should
+/// persist the last processed offset and resume with
+/// [`read_from`](Self::read_from) rather than re-reading the whole stream.
+///
+/// Implementations must be `Send + Sync` so they can be shared across async
+/// task boundaries.
+#[async_trait]
+pub trait AppendStore: Send + Sync {
+    /// Appends `value` to the end of `stream` and returns the offset it was
+    /// stored at.
+    ///
+    /// The returned offset is the zero-based position of the new entry, which
+    /// is also the stream length immediately before the append.
+    async fn append(&self, stream: &str, value: Value) -> Result<u64>;
+
+    /// Returns every entry in `stream` whose offset is `>= offset`, in offset
+    /// order, paired with its offset.
+    ///
+    /// Reading from `0` returns the whole stream; reading from
+    /// [`len`](Self::len) (or any larger offset) returns an empty `Vec`.
+    /// Reading from a stream that has never been written returns an empty
+    /// `Vec` rather than an error.
+    async fn read_from(&self, stream: &str, offset: u64) -> Result<Vec<(u64, Value)>>;
+
+    /// Returns the number of entries currently stored in `stream`.
+    ///
+    /// This equals the offset the next [`append`](Self::append) will receive.
+    /// Returns `0` for a stream that has never been written.
+    async fn len(&self, stream: &str) -> Result<u64>;
+}
+
+// ── StoreRecord ───────────────────────────────────────────────────────────────
+
+/// A single decoded entry read back from an [`AppendStore`].
+///
+/// The trait methods deliberately hand back the lighter `(offset, value)` tuple
+/// shape, but `StoreRecord` is provided as a convenience for callers that want
+/// to carry the append timestamp alongside the value (for example when
+/// rendering an event journal). It is intentionally simple — richer
+/// observability envelopes live in the events module.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoreRecord {
+    /// The zero-based offset of this entry within its stream.
+    pub offset: u64,
+    /// The stored JSON payload.
+    pub value: Value,
+    /// Unix-epoch milliseconds at which the entry was appended.
+    pub created_at_ms: u64,
+}
+
 // ── InMemoryStore ────────────────────────────────────────────────────────────
 
 /// Thread-safe in-memory store backed by a nested [`HashMap`].
@@ -81,6 +146,59 @@ pub struct InMemoryStore {
 #[derive(Clone, Debug)]
 pub struct FileStore {
     /// The root directory under which namespace subdirectories live.
+    pub(crate) root_dir: PathBuf,
+}
+
+// ── InMemoryAppendStore ───────────────────────────────────────────────────────
+
+/// Thread-safe, in-memory [`AppendStore`].
+///
+/// Each stream is a `Vec` of `(created_at_ms, value)` entries held behind a
+/// single [`Mutex`]. Offsets are positional indexes into that `Vec`.
+///
+/// # Use cases
+/// - Unit tests and deterministic replay of event journals.
+/// - Examples and local prototyping.
+///
+/// # Caveats
+/// There is **no durability**: entries are lost when the value is dropped. The
+/// store is cheaply clonable through the inner [`Arc`]; clones share the same
+/// underlying streams.
+#[derive(Clone, Debug, Default)]
+pub struct InMemoryAppendStore {
+    /// `stream → ordered entries`, each entry being `(created_at_ms, value)`.
+    pub(crate) streams: Arc<Mutex<HashMap<String, Vec<AppendEntry>>>>,
+}
+
+/// A single in-memory append entry: `(created_at_ms, value)`.
+pub(crate) type AppendEntry = (u64, Value);
+
+// ── JsonlAppendStore ──────────────────────────────────────────────────────────
+
+/// JSONL-file-backed [`AppendStore`] for local development and durable journals.
+///
+/// Each **stream** maps to a `<stream>.jsonl` file inside `root_dir`. An append
+/// writes exactly one JSON line — a [`StoreRecord`] object holding the offset,
+/// the value, and the append timestamp — and `read_from` reads lines back from
+/// the requested offset. The files are append-only and easy to tail or inspect
+/// with ordinary shell tools.
+///
+/// # Stream-name sanitization
+/// Stream names are validated the same way [`FileStore`] validates namespaces:
+/// only ASCII alphanumerics, hyphens (`-`), underscores (`_`), and dots (`.`)
+/// are allowed, and all-dot names are rejected. This blocks path traversal.
+///
+/// # Concurrency
+/// Operations use blocking [`std::fs`] (no async-fs dependency is pulled in for
+/// this local backend). Each call opens the file, performs its read or append,
+/// and closes it; appends are done with `OpenOptions::append`, which is atomic
+/// per line on POSIX for small writes, but no advisory lock is held. For
+/// high-concurrency writers, funnel appends through a single writer task or
+/// prefer a future server backend. The blocking calls are short-lived; callers
+/// inside an async runtime accept that they briefly block the worker thread.
+#[derive(Clone, Debug)]
+pub struct JsonlAppendStore {
+    /// The root directory under which `<stream>.jsonl` files live.
     pub(crate) root_dir: PathBuf,
 }
 

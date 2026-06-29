@@ -24,6 +24,7 @@ pub mod memory;
 pub mod message;
 pub mod middleware;
 pub mod model;
+pub mod observability;
 pub mod prompt;
 pub mod providers;
 pub mod retry;

@@ -220,6 +220,81 @@ pub enum AgentEvent {
         route: String,
     },
 
+    /// Token usage for a completed model call was folded into the run totals.
+    ///
+    /// Emitted by the agent loop immediately after a model response that
+    /// carried provider-reported usage, so usage-mode stream consumers and
+    /// durable journals see per-call token counts without inspecting the
+    /// [`AgentEvent::ModelCompleted`] payload.
+    UsageRecorded {
+        /// The usage reported for the model call just completed.
+        usage: Usage,
+    },
+
+    /// Estimated cost for a completed model call was folded into the run
+    /// totals.
+    ///
+    /// Defined for future emit: cost is computed once a pricing table is wired
+    /// into the loop. Carries the cost delta attributed to the call.
+    CostRecorded {
+        /// The cost attributed to the model call just completed.
+        cost: CostTotals,
+    },
+
+    /// A configured run limit (cap) tripped and the run is about to fail.
+    ///
+    /// Emitted by the agent loop just before returning
+    /// [`crate::error::TinyAgentsError::LimitExceeded`] /
+    /// [`crate::error::TinyAgentsError::Timeout`] so observers can distinguish
+    /// a limit-driven stop from other failures.
+    LimitReached {
+        /// Which cap was reached. Serialized as `limit_kind` to avoid colliding
+        /// with the enum's `"kind"` serde tag.
+        #[serde(rename = "limit_kind")]
+        kind: LimitKind,
+    },
+
+    /// Conversation/working memory was loaded for the run.
+    ///
+    /// Defined for future emit when memory wiring lands; carries no payload so
+    /// that loading remains observable without exposing memory contents.
+    MemoryLoaded,
+
+    /// Conversation/working memory was persisted for the run.
+    ///
+    /// Defined for future emit when memory wiring lands.
+    MemorySaved,
+
+    /// A long-running tool reported incremental progress before completing.
+    ///
+    /// Defined for future emit: a tool that streams progress can surface it
+    /// here so UIs render activity between [`AgentEvent::ToolStarted`] and
+    /// [`AgentEvent::ToolCompleted`].
+    ToolProgress {
+        /// Identifier for the in-flight tool call.
+        call_id: CallId,
+        /// Human-readable progress message.
+        message: String,
+    },
+
+    /// A middleware hook reported a failure.
+    ///
+    /// Defined for future emit alongside [`AgentEvent::MiddlewareStarted`] /
+    /// [`AgentEvent::MiddlewareCompleted`] so a failing hook is observable.
+    MiddlewareFailed {
+        /// Registered name of the middleware that failed.
+        name: String,
+        /// Human-readable error description.
+        error: String,
+    },
+
+    /// A streaming model call's chunk stream was closed (gracefully or by
+    /// cancellation).
+    ///
+    /// Defined for future emit so stream consumers can detect end-of-stream
+    /// without correlating against [`AgentEvent::ModelCompleted`].
+    StreamClosed,
+
     /// A harness run finished successfully.
     RunCompleted {
         /// Identifier for the run that completed.
@@ -233,6 +308,29 @@ pub enum AgentEvent {
         /// Human-readable error description.
         error: String,
     },
+}
+
+/// Names the kind of run limit that tripped in an [`AgentEvent::LimitReached`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitKind {
+    /// The maximum number of model calls per run was reached.
+    ModelCalls,
+    /// The maximum number of tool calls per run was reached.
+    ToolCalls,
+    /// The run's wall-clock deadline elapsed.
+    WallClock,
+}
+
+impl LimitKind {
+    /// Returns a stable, snake_case string naming the limit kind.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LimitKind::ModelCalls => "model_calls",
+            LimitKind::ToolCalls => "tool_calls",
+            LimitKind::WallClock => "wall_clock",
+        }
+    }
 }
 
 impl AgentEvent {
@@ -263,6 +361,14 @@ impl AgentEvent {
             AgentEvent::Steered { .. } => "agent.steered",
             AgentEvent::Compressed { .. } => "context.compressed",
             AgentEvent::RouteSelected { .. } => "route.selected",
+            AgentEvent::UsageRecorded { .. } => "usage.recorded",
+            AgentEvent::CostRecorded { .. } => "cost.recorded",
+            AgentEvent::LimitReached { .. } => "limit.reached",
+            AgentEvent::MemoryLoaded => "memory.loaded",
+            AgentEvent::MemorySaved => "memory.saved",
+            AgentEvent::ToolProgress { .. } => "tool.progress",
+            AgentEvent::MiddlewareFailed { .. } => "middleware.failed",
+            AgentEvent::StreamClosed => "stream.closed",
             AgentEvent::RunCompleted { .. } => "run.completed",
             AgentEvent::RunFailed { .. } => "run.failed",
         }

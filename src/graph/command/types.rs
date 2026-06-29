@@ -45,7 +45,7 @@ pub struct Command<Update> {
 /// Interrupts require a checkpointer. When a node returns an interrupt the
 /// executor persists a checkpoint at the boundary and returns control to the
 /// caller; `CompiledGraph::resume` re-runs the interrupted node.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Interrupt {
     /// Stable id for matching a resume value to this interrupt.
     pub id: String,

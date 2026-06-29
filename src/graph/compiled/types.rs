@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::graph::builder::{Branch, BuilderNode};
 use crate::graph::checkpoint::Checkpointer;
 use crate::graph::command::Interrupt;
+use crate::graph::observability::{GraphEventJournal, GraphStatusStore};
 use crate::graph::reducer::StateReducer;
 use crate::graph::status::GraphRunStatus;
 use crate::graph::stream::GraphEventSink;
@@ -27,6 +28,12 @@ pub struct CompiledGraph<State, Update> {
     pub(crate) recursion_limit: usize,
     pub(crate) checkpointer: Option<Arc<dyn Checkpointer<State>>>,
     pub(crate) event_sink: Option<Arc<dyn GraphEventSink>>,
+    /// Optional durable observation journal (opt-in via
+    /// [`CompiledGraph::with_event_journal`]).
+    pub(crate) journal: Option<Arc<dyn GraphEventJournal>>,
+    /// Optional run-status surface (opt-in via
+    /// [`CompiledGraph::with_status_store`]).
+    pub(crate) status_store: Option<Arc<dyn GraphStatusStore>>,
     pub(crate) namespace: Vec<String>,
     /// When true, the active node set of a superstep is executed concurrently.
     pub(crate) parallel: bool,
@@ -58,6 +65,8 @@ impl<State, Update> Clone for CompiledGraph<State, Update> {
             recursion_limit: self.recursion_limit,
             checkpointer: self.checkpointer.clone(),
             event_sink: self.event_sink.clone(),
+            journal: self.journal.clone(),
+            status_store: self.status_store.clone(),
             namespace: self.namespace.clone(),
             parallel: self.parallel,
         }
