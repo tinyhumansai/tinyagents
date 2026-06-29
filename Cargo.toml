@@ -11,17 +11,25 @@ categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
 async-trait = "0.1"
-# Runtime-agnostic future combinators (`join_all` for concurrent supersteps).
-# Default features only; the library must not depend on tokio at runtime.
+# Runtime-agnostic future combinators (`join_all` for concurrent supersteps) and
+# the `Stream`/`StreamExt` traits backing the real streaming pipeline
+# (`harness::model::ModelStream`).
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
-# Optional HTTP client, pulled in only by hosted-provider features.
+# Async runtime primitives used by the streaming pipeline. The library only
+# needs the lightweight pieces (synchronization + timers); the full
+# multi-threaded runtime stays a dev-dependency for examples and tests.
+tokio = { version = "1", default-features = false, features = ["sync", "time"] }
+
+# Optional HTTP client, pulled in only by hosted-provider features. The `stream`
+# feature enables `Response::bytes_stream` for Server-Sent-Events streaming.
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
+    "stream",
 ], optional = true }
 
 [features]

@@ -295,10 +295,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                         let strategy = StructuredStrategy::for_profile(binding.model.profile());
                         match strategy {
                             StructuredStrategy::ProviderSchema => {
-                                request.response_format = Some(ResponseFormat::json_schema(
-                                    name.clone(),
-                                    schema.clone(),
-                                ));
+                                request.response_format =
+                                    Some(ResponseFormat::json_schema(name.clone(), schema.clone()));
                             }
                             StructuredStrategy::ToolCall => {
                                 request.response_format = Some(ResponseFormat::Text);

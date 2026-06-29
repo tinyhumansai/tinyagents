@@ -6,14 +6,16 @@
 //! metadata.
 
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::harness::cache::CachePolicy;
-use crate::harness::message::{AssistantMessage, Message};
+use crate::harness::message::{AssistantMessage, Message, MessageDelta};
 use crate::harness::tool::{ToolDelta, ToolSchema};
 use crate::harness::usage::Usage;
 
@@ -409,6 +411,45 @@ pub struct ModelDelta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call: Option<ToolDelta>,
 }
+
+/// A single item produced by a real, asynchronous model stream.
+///
+/// A well-behaved stream begins with [`ModelStreamItem::Started`], emits zero or
+/// more [`ModelStreamItem::MessageDelta`] / [`ModelStreamItem::ToolCallDelta`] /
+/// [`ModelStreamItem::UsageDelta`] items as the provider produces output, and
+/// terminates with exactly one of [`ModelStreamItem::Completed`] (carrying the
+/// fully merged response) or [`ModelStreamItem::Failed`] (carrying an error
+/// message). Providers that can build an authoritative final response — such as
+/// the OpenAI adapter — emit it via [`ModelStreamItem::Completed`] so the
+/// merged response preserves tool-call names and ids that individual deltas may
+/// omit.
+///
+/// Use [`StreamAccumulator`] (or the [`collect_model_stream`] helper) to fold a
+/// stream of these items back into a [`ModelResponse`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ModelStreamItem {
+    /// The stream has opened; no content has arrived yet.
+    Started,
+    /// An incremental message fragment (text and/or a tool-call fragment).
+    MessageDelta(MessageDelta),
+    /// An incremental tool-call argument fragment correlated by call id.
+    ToolCallDelta(ToolDelta),
+    /// A usage update. Providers may send cumulative usage; the accumulator
+    /// keeps the most recent value.
+    UsageDelta(Usage),
+    /// Terminal success: the fully merged response.
+    Completed(ModelResponse),
+    /// Terminal failure with a human-readable error message.
+    Failed(String),
+}
+
+/// A pinned, boxed, `Send` stream of [`ModelStreamItem`]s.
+///
+/// This is the return type of [`ChatModel::stream`]. It is runtime-agnostic: the
+/// caller's executor drives it, and dropping it cancels consumption without any
+/// dependency on a specific async runtime.
+pub type ModelStream = Pin<Box<dyn Stream<Item = ModelStreamItem> + Send>>;
 
 /// A provider-neutral chat model.
 ///

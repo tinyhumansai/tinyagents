@@ -1,9 +1,44 @@
 //! Tests added in a later pass.
 
 use super::*;
-use crate::harness::model::{ModelResponse, ResponseFormat};
+use crate::harness::model::{ModelProfile, ModelResponse, ResponseFormat};
 use crate::harness::tool::ToolCall;
 use serde_json::json;
+
+#[test]
+fn auto_strategy_defaults_to_provider_schema_without_profile() {
+    assert_eq!(
+        StructuredStrategy::for_profile(None),
+        StructuredStrategy::ProviderSchema
+    );
+}
+
+#[test]
+fn auto_strategy_uses_tool_call_when_no_native_structured_output() {
+    let profile = ModelProfile {
+        tool_calling: true,
+        json_schema: false,
+        native_structured_output: false,
+        ..ModelProfile::default()
+    };
+    assert_eq!(
+        StructuredStrategy::for_profile(Some(&profile)),
+        StructuredStrategy::ToolCall
+    );
+}
+
+#[test]
+fn auto_strategy_uses_provider_schema_with_native_structured_output() {
+    let profile = ModelProfile {
+        native_structured_output: true,
+        json_schema: true,
+        ..ModelProfile::default()
+    };
+    assert_eq!(
+        StructuredStrategy::for_profile(Some(&profile)),
+        StructuredStrategy::ProviderSchema
+    );
+}
 
 #[test]
 fn provider_schema_parses_json_text() {

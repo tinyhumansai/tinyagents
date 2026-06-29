@@ -16,26 +16,6 @@ state, async model and tool traits, executable graph primitives, and a roadmap
 for declarative agent workflow languages that LLMs can safely author, inspect,
 compile, and run.
 
-## Why TinyAgents
-
-Python and TypeScript have mature agent frameworks. Rust developers deserve the
-same level of orchestration power without giving up Rust's clarity, type system,
-performance, and production discipline.
-
-TinyAgents is designed for teams that want to build real agent products:
-
-- typed state instead of unstructured runtime bags
-- explicit graph execution instead of implicit control flow
-- model and tool traits that are easy to test
-- deterministic routing around nondeterministic LLM calls
-- observable runs with room for streaming, checkpoints, interrupts, and replay
-- declarative workflow definitions that can be reviewed before execution
-- parallel agents, sub-agent fanout, context forking, and blocking child agents
-  as first-class workflow concepts
-
-The long-term goal is not just "call an LLM from Rust." The goal is to make
-Rust a serious home for durable agent runtimes.
-
 ## The Big Idea: Declarative Workflows For LLMs
 
 LLMs are good at proposing plans, but raw generated code is a dangerous
@@ -93,6 +73,26 @@ This is the power TinyAgents is built around: agents can author workflows that
 spawn other agents, run branches in parallel, call blocking reviewers, fork
 context safely, and merge outputs through typed reducers while the runtime keeps
 policy and observability intact.
+
+## Why TinyAgents
+
+Python and TypeScript have mature agent frameworks. Rust developers deserve the
+same level of orchestration power without giving up Rust's clarity, type system,
+performance, and production discipline.
+
+TinyAgents is designed for teams that want to build real agent products:
+
+- typed state instead of unstructured runtime bags
+- explicit graph execution instead of implicit control flow
+- model and tool traits that are easy to test
+- deterministic routing around nondeterministic LLM calls
+- observable runs with room for streaming, checkpoints, interrupts, and replay
+- declarative workflow definitions that can be reviewed before execution
+- parallel agents, sub-agent fanout, context forking, and blocking child agents
+  as first-class workflow concepts
+
+The long-term goal is not just "call an LLM from Rust." The goal is to make
+Rust a serious home for durable agent runtimes.
 
 ## Current Status
 

@@ -16,7 +16,9 @@ use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::limits::RunLimits;
 use crate::harness::message::{AssistantMessage, ContentBlock, Message};
 use crate::harness::middleware::{AgentRun, Middleware};
-use crate::harness::model::{ChatModel, ModelRequest, ModelResponse, ResponseFormat, ToolChoice};
+use crate::harness::model::{
+    ChatModel, ModelProfile, ModelRequest, ModelResponse, ResponseFormat, ToolChoice,
+};
 use crate::harness::providers::MockModel;
 use crate::harness::retry::{FallbackPolicy, RetryPolicy};
 use crate::harness::runtime::{AgentHarness, RunPolicy};
@@ -111,6 +113,49 @@ impl Middleware<(), ()> for InjectMiddleware {
         // Also flip tool choice so we can assert mutation visibly.
         request.tool_choice = ToolChoice::None;
         Ok(())
+    }
+}
+
+/// A model whose profile lacks native structured output, so `Auto` should
+/// resolve to the tool-call strategy. It answers with a tool call named after
+/// the artificial structured tool the loop appends, carrying the structured
+/// arguments.
+struct ToolStructuredModel {
+    profile: ModelProfile,
+}
+
+impl ToolStructuredModel {
+    fn new() -> Self {
+        Self {
+            profile: ModelProfile {
+                tool_calling: true,
+                native_structured_output: false,
+                json_schema: false,
+                ..ModelProfile::default()
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl ChatModel<()> for ToolStructuredModel {
+    fn profile(&self) -> Option<&ModelProfile> {
+        Some(&self.profile)
+    }
+    async fn invoke(&self, _state: &(), request: ModelRequest) -> Result<ModelResponse> {
+        // The loop appends an artificial structured tool and forces the choice
+        // to it; the tool name is the schema name.
+        assert_eq!(request.tool_choice, ToolChoice::Tool("answer".to_string()));
+        let name = request
+            .tools
+            .last()
+            .map(|t| t.name.clone())
+            .unwrap_or_default();
+        Ok(tool_call_response(
+            "s1",
+            &name,
+            json!({"value":"viatool","score":7}),
+        ))
     }
 }
 
@@ -303,6 +348,53 @@ async fn structured_output_is_extracted() {
     let structured = run.structured.expect("structured output present");
     assert_eq!(structured["value"], "hi");
     assert_eq!(structured["score"], 42);
+}
+
+#[tokio::test]
+async fn auto_format_uses_provider_schema_for_native_model() {
+    // MockModel advertises a permissive profile (native structured output), so
+    // `Auto` resolves to provider-native schema mode and parses the JSON text.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::constant(r#"{"value":"native","score":1}"#)),
+    );
+    harness.with_policy(RunPolicy {
+        default_response_format: Some(ResponseFormat::auto("answer", json!({"type": "object"}))),
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("answer")])
+        .await
+        .expect("run succeeds");
+
+    let structured = run.structured.expect("structured output present");
+    assert_eq!(structured["value"], "native");
+}
+
+#[tokio::test]
+async fn auto_format_uses_tool_call_for_non_native_model() {
+    // A model without native structured output drives `Auto` down the tool-call
+    // fallback; the structured value is read from the tool-call arguments and
+    // the artificial tool call is treated as the final response.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("tool", Arc::new(ToolStructuredModel::new()));
+    harness.with_policy(RunPolicy {
+        default_response_format: Some(ResponseFormat::auto("answer", json!({"type": "object"}))),
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("answer")])
+        .await
+        .expect("run succeeds");
+
+    let structured = run.structured.expect("structured output present");
+    assert_eq!(structured["value"], "viatool");
+    assert_eq!(structured["score"], 7);
+    // Exactly one model call: the structured tool call ends the loop.
+    assert_eq!(run.model_calls, 1);
 }
 
 #[tokio::test]
