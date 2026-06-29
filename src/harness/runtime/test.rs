@@ -68,6 +68,7 @@ fn with_policy_replaces_policy() {
         retry: RetryPolicy::default().with_max_attempts(1),
         fallback: Some(FallbackPolicy::new(["a", "b"])),
         default_response_format: None,
+        ..RunPolicy::default()
     };
     harness.with_policy(policy.clone());
     assert_eq!(harness.policy(), &policy);

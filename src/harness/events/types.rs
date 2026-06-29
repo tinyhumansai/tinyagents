@@ -100,6 +100,25 @@ pub enum AgentEvent {
         name: String,
     },
 
+    /// A response-cache lookup served the model call from the local
+    /// [`crate::harness::cache::ResponseCache`]; the provider was **not**
+    /// invoked.
+    CacheHit {
+        /// Identifier for the model call this cache hit satisfies.
+        call_id: CallId,
+        /// The stable cache key (see [`crate::harness::cache::cache_key`]).
+        key: String,
+    },
+
+    /// A response-cache lookup missed, so the provider is being invoked and the
+    /// result will be stored under `key`.
+    CacheMiss {
+        /// Identifier for the model call that triggered the lookup.
+        call_id: CallId,
+        /// The stable cache key (see [`crate::harness::cache::cache_key`]).
+        key: String,
+    },
+
     /// A failed call has been scheduled for retry.
     RetryScheduled {
         /// Identifier for the call that will be retried.
@@ -179,6 +198,8 @@ impl AgentEvent {
             AgentEvent::StateUpdate => "state.update",
             AgentEvent::MiddlewareStarted { .. } => "middleware.started",
             AgentEvent::MiddlewareCompleted { .. } => "middleware.completed",
+            AgentEvent::CacheHit { .. } => "cache.hit",
+            AgentEvent::CacheMiss { .. } => "cache.miss",
             AgentEvent::RetryScheduled { .. } => "retry.scheduled",
             AgentEvent::SubAgentStarted { .. } => "subagent.started",
             AgentEvent::SubAgentCompleted { .. } => "subagent.completed",

@@ -673,3 +673,140 @@ async fn cancelled_mid_run_stops_before_next_model_call() {
     // tool cancelled the run, so the loop unwound before the second model call.
     assert_eq!(*invocations.lock().unwrap(), 1);
 }
+
+// ── Response caching ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn response_cache_serves_repeated_request_without_calling_model() {
+    use crate::harness::cache::InMemoryResponseCache;
+    use crate::harness::testkit::EventRecorder;
+
+    // A scripted model that would yield *different* text on a second call; if
+    // the cache works the second run must reuse the first response, proving the
+    // model was not invoked again.
+    let model = Arc::new(MockModel::with_responses(vec![
+        text_response("first-answer", 4, 2),
+        text_response("second-answer", 4, 2),
+    ]));
+
+    let cache = Arc::new(InMemoryResponseCache::new());
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", model.clone());
+    harness.with_response_cache(cache.clone());
+
+    // First run: cache miss, model invoked once.
+    let recorder1 = EventRecorder::new();
+    let ctx1 = RunContext::new(RunConfig::new("cache-run"), ()).with_events(recorder1.sink());
+    let run1 = harness
+        .invoke_in_context(&(), ctx1, vec![Message::user("same question")])
+        .await
+        .expect("first run succeeds");
+
+    assert_eq!(model.call_count(), 1, "model invoked once on first run");
+    assert_eq!(run1.text(), Some("first-answer".to_string()));
+    assert!(
+        recorder1.kinds().iter().any(|k| k == "cache.miss"),
+        "first run should emit a cache miss"
+    );
+    assert!(
+        !recorder1.kinds().iter().any(|k| k == "cache.hit"),
+        "first run should not emit a cache hit"
+    );
+
+    // Second run with the SAME input: served from cache, model NOT invoked.
+    let recorder2 = EventRecorder::new();
+    let ctx2 = RunContext::new(RunConfig::new("cache-run-2"), ()).with_events(recorder2.sink());
+    let run2 = harness
+        .invoke_in_context(&(), ctx2, vec![Message::user("same question")])
+        .await
+        .expect("second run succeeds");
+
+    assert_eq!(
+        model.call_count(),
+        1,
+        "model must NOT be invoked again on a cache hit"
+    );
+    assert_eq!(
+        run2.text(),
+        Some("first-answer".to_string()),
+        "cached response text is reused"
+    );
+    assert!(
+        recorder2.kinds().iter().any(|k| k == "cache.hit"),
+        "second run should emit a cache hit"
+    );
+    // Accounting stays consistent: the hit is still counted as a model call.
+    assert_eq!(run2.model_calls, 1);
+}
+
+#[tokio::test]
+async fn no_cache_attached_invokes_model_each_run() {
+    // Control: without a cache the model is invoked on every run.
+    let model = Arc::new(MockModel::echo());
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", model.clone());
+
+    harness
+        .invoke_default(&(), vec![Message::user("hello")])
+        .await
+        .expect("first run succeeds");
+    harness
+        .invoke_default(&(), vec![Message::user("hello")])
+        .await
+        .expect("second run succeeds");
+
+    assert_eq!(
+        model.call_count(),
+        2,
+        "without a cache the model is invoked on every run"
+    );
+}
+
+#[tokio::test]
+async fn request_cache_policy_overrides_run_policy_to_disable_caching() {
+    use crate::harness::cache::{CachePolicy, InMemoryResponseCache};
+
+    // A middleware that disables caching for the call via the request-level
+    // cache policy, overriding the harness default (which is enabled).
+    struct DisableCaching;
+    #[async_trait]
+    impl Middleware<(), ()> for DisableCaching {
+        fn name(&self) -> &str {
+            "disable-caching"
+        }
+        async fn before_model(
+            &self,
+            _ctx: &mut RunContext<()>,
+            _state: &(),
+            request: &mut ModelRequest,
+        ) -> Result<()> {
+            request.cache_policy = Some(CachePolicy {
+                response_cache_enabled: false,
+                protect_prompt_prefix: false,
+            });
+            Ok(())
+        }
+    }
+
+    let model = Arc::new(MockModel::echo());
+    let cache = Arc::new(InMemoryResponseCache::new());
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", model.clone());
+    harness.with_response_cache(cache.clone());
+    harness.push_middleware(Arc::new(DisableCaching));
+
+    harness
+        .invoke_default(&(), vec![Message::user("hello")])
+        .await
+        .expect("first run succeeds");
+    harness
+        .invoke_default(&(), vec![Message::user("hello")])
+        .await
+        .expect("second run succeeds");
+
+    assert_eq!(
+        model.call_count(),
+        2,
+        "request-level cache_policy disabling caching must bypass the cache"
+    );
+}

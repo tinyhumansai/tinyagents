@@ -10,6 +10,9 @@
 //! `crate::harness::runtime` directly. Implementations and tests live in the
 //! sibling `mod.rs` and `test.rs`.
 
+use std::sync::Arc;
+
+use crate::harness::cache::{CachePolicy, ResponseCache};
 use crate::harness::limits::RunLimits;
 use crate::harness::middleware::MiddlewareStack;
 use crate::harness::model::{ModelRegistry, ResponseFormat};
@@ -32,8 +35,11 @@ use crate::harness::tool::ToolRegistry;
 ///   output extraction on the final response.
 ///
 /// [`RunPolicy::default`] yields the crate-default limits and retry policy, no
-/// fallback chain, and no response format.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// fallback chain, no response format, and a [`CachePolicy`] whose response
+/// caching is enabled — caching only takes effect once a [`ResponseCache`] is
+/// actually attached via [`AgentHarness::with_response_cache`], so the default
+/// is safe even without a cache.
+#[derive(Clone, Debug, PartialEq)]
 pub struct RunPolicy {
     /// Hard run limits enforced fail-closed by the agent loop.
     pub limits: RunLimits,
@@ -43,6 +49,30 @@ pub struct RunPolicy {
     pub fallback: Option<FallbackPolicy>,
     /// Response format attached to every model request when set.
     pub default_response_format: Option<ResponseFormat>,
+    /// Default caching policy for the run.
+    ///
+    /// The loop consults [`CachePolicy::response_cache_enabled`] only when a
+    /// [`ResponseCache`] is attached to the harness *and* the per-call
+    /// [`crate::harness::model::ModelRequest::cache_policy`] does not override
+    /// it. A request-level `cache_policy` always wins over this default.
+    pub cache: CachePolicy,
+}
+
+impl Default for RunPolicy {
+    fn default() -> Self {
+        Self {
+            limits: RunLimits::default(),
+            retry: RetryPolicy::default(),
+            fallback: None,
+            default_response_format: None,
+            // Caching defaults ON, but is gated by an attached `ResponseCache`,
+            // so a harness with no cache never caches regardless of this flag.
+            cache: CachePolicy {
+                response_cache_enabled: true,
+                protect_prompt_prefix: false,
+            },
+        }
+    }
 }
 
 /// High-level facade that composes model selection, tool execution, middleware,
@@ -79,4 +109,11 @@ pub struct AgentHarness<State: Send + Sync, Ctx: Send + Sync = ()> {
     pub(crate) middleware: MiddlewareStack<State, Ctx>,
     /// Cross-cutting run policy (limits, retry, fallback, response format).
     pub(crate) policy: RunPolicy,
+    /// Optional local response cache shared across runs of this harness.
+    ///
+    /// When set, the agent loop consults it before each provider call (subject
+    /// to the effective [`CachePolicy`]) and stores successful responses back
+    /// into it. Because it is owned by the harness rather than a single run, a
+    /// repeated identical request can be served from an earlier run's result.
+    pub(crate) response_cache: Option<Arc<dyn ResponseCache>>,
 }

@@ -18,6 +18,7 @@ pub use types::*;
 
 use std::sync::Arc;
 
+use crate::harness::cache::ResponseCache;
 use crate::harness::middleware::{Middleware, MiddlewareStack};
 use crate::harness::model::{ChatModel, ModelRegistry};
 use crate::harness::tool::{Tool, ToolRegistry};
@@ -31,6 +32,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             tools: ToolRegistry::new(),
             middleware: MiddlewareStack::new(),
             policy: RunPolicy::default(),
+            response_cache: None,
         }
     }
 
@@ -70,6 +72,33 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     pub fn with_policy(&mut self, policy: RunPolicy) -> &mut Self {
         self.policy = policy;
         self
+    }
+
+    /// Attaches a [`ResponseCache`] shared across every run this harness drives.
+    ///
+    /// Once attached, the agent loop computes a stable
+    /// [`cache_key`][crate::harness::cache::cache_key] for each model request
+    /// and consults the cache before calling the provider. On a hit the
+    /// provider is **not** invoked and the cached
+    /// [`crate::harness::model::ModelResponse`] is reused; on a miss the
+    /// provider is called and the successful response is stored back. Whether
+    /// caching is active for a given call is governed by the effective
+    /// [`CachePolicy`][crate::harness::cache::CachePolicy] (the per-request
+    /// [`crate::harness::model::ModelRequest::cache_policy`] overriding
+    /// [`RunPolicy::cache`]).
+    ///
+    /// Because the cache lives on the harness rather than a single run, two
+    /// identical requests issued across separate runs share a key, so the
+    /// second run can be served entirely from cache. Returns `&mut Self` for
+    /// chaining.
+    pub fn with_response_cache(&mut self, cache: Arc<dyn ResponseCache>) -> &mut Self {
+        self.response_cache = Some(cache);
+        self
+    }
+
+    /// Returns a reference to the attached response cache, if any.
+    pub fn response_cache(&self) -> Option<&Arc<dyn ResponseCache>> {
+        self.response_cache.as_ref()
     }
 
     /// Returns a reference to the model registry.

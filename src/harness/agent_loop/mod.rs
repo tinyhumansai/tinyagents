@@ -52,6 +52,7 @@ pub use types::*;
 use std::sync::Arc;
 
 use crate::error::{Result, TinyAgentsError};
+use crate::harness::cache::{ResponseCache, cache_key};
 use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::events::{AgentEvent, HarnessRunStatus};
 use crate::harness::ids::{CallId, ComponentId, HarnessPhase};
@@ -534,7 +535,90 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         Ok(())
     }
 
-    /// Invokes a model with retry and fallback.
+    /// Resolves the effective response-cache decision for `request`.
+    ///
+    /// Returns `Some((cache, key))` when a [`ResponseCache`] is attached to the
+    /// harness *and* caching is enabled for this call. The per-request
+    /// [`ModelRequest::cache_policy`] takes precedence over the harness-level
+    /// [`RunPolicy::cache`][crate::harness::runtime::RunPolicy]; when the request
+    /// carries no policy the run policy's
+    /// [`response_cache_enabled`][crate::harness::cache::CachePolicy] decides.
+    /// Returns `None` (caching disabled) when no cache is attached or the
+    /// effective policy disables it.
+    fn response_cache_decision(
+        &self,
+        request: &ModelRequest,
+    ) -> Option<(Arc<dyn ResponseCache>, String)> {
+        let cache = self.response_cache.as_ref()?;
+        let enabled = match &request.cache_policy {
+            Some(policy) => policy.response_cache_enabled,
+            None => self.policy.cache.response_cache_enabled,
+        };
+        if !enabled {
+            return None;
+        }
+        Some((Arc::clone(cache), cache_key(request)))
+    }
+
+    /// Invokes a model, consulting the local response cache around the
+    /// retry/fallback path.
+    ///
+    /// When caching is enabled for this call (see
+    /// [`Self::response_cache_decision`]) the cache is checked **before** any
+    /// provider call: on a hit an [`AgentEvent::CacheHit`] is emitted and the
+    /// cached [`ModelResponse`] is returned *without* invoking the underlying
+    /// [`ChatModel`] (the retry/fallback path is skipped entirely); on a miss an
+    /// [`AgentEvent::CacheMiss`] is emitted, the provider is invoked normally,
+    /// and the successful response is written back to the cache.
+    ///
+    /// # Accounting
+    ///
+    /// A cache hit is still counted as a model "step"/call by the caller
+    /// ([`Self::run_loop`] increments `model_calls`/`steps` and emits
+    /// [`AgentEvent::ModelCompleted`] after this returns) so usage and limit
+    /// bookkeeping stay consistent whether or not a call was served from cache.
+    /// The behavioral guarantee is only that the underlying provider is not
+    /// contacted on a hit.
+    async fn invoke_model_with_retry(
+        &self,
+        state: &State,
+        ctx: &mut RunContext<Ctx>,
+        request: &ModelRequest,
+        call_id: &CallId,
+        binding: ResolvedModelBinding<State>,
+        streaming: bool,
+    ) -> Result<ModelResponse> {
+        let decision = self.response_cache_decision(request);
+
+        if let Some((cache, key)) = decision.as_ref() {
+            if let Some(mut cached) = cache.get(key).await? {
+                ctx.emit(AgentEvent::CacheHit {
+                    call_id: call_id.clone(),
+                    key: key.clone(),
+                });
+                if cached.resolved_model.is_none() {
+                    cached.resolved_model = Some(binding.resolved.clone());
+                }
+                return Ok(cached);
+            }
+            ctx.emit(AgentEvent::CacheMiss {
+                call_id: call_id.clone(),
+                key: key.clone(),
+            });
+        }
+
+        let response = self
+            .invoke_model_resolving(state, ctx, request, call_id, binding, streaming)
+            .await?;
+
+        if let Some((cache, key)) = decision.as_ref() {
+            cache.put(key, response.clone()).await?;
+        }
+
+        Ok(response)
+    }
+
+    /// Invokes a model with retry and fallback (no caching).
     ///
     /// Retries are governed by [`RunPolicy::retry`][crate::harness::runtime::RunPolicy]
     /// and apply only to retryable errors (see [`is_retryable`]); each scheduled
@@ -542,7 +626,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// (or the error is non-retryable) and a [`crate::harness::retry::FallbackPolicy`]
     /// is configured, the next model in the chain is tried. The computed backoff
     /// duration is intentionally not slept on (see the module docs).
-    async fn invoke_model_with_retry(
+    async fn invoke_model_resolving(
         &self,
         state: &State,
         ctx: &mut RunContext<Ctx>,
