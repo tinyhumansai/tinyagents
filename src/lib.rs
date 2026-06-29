@@ -22,7 +22,7 @@ pub use graph::{Edge, GraphRun, Node, NodeOutput, StateGraph};
 // crate root. The `harness::stream::StreamMode` and `graph::stream::StreamMode`
 // types intentionally stay behind their module paths to avoid a name clash.
 pub use graph::{
-    Checkpoint, CheckpointMetadata, Checkpointer, Command, CompiledGraph, GraphBuilder,
+    Checkpoint, CheckpointMetadata, Checkpointer, Command, CompiledGraph, END, GraphBuilder,
     GraphEvent, GraphExecution, GraphRunStatus, InMemoryCheckpointer, Interrupt, NodeContext,
-    NodeResult, Reducer, StateReducer, END, START,
+    NodeResult, Reducer, START, StateReducer,
 };
