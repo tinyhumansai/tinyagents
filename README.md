@@ -1,4 +1,8 @@
-# TinyAgents
+<h1 align="center">TinyAgents</h1>
+
+<p align="center">
+ <img src="./docs/readme.png" alt="The Tet" />
+</p>
 
 [![CI](https://github.com/tinyhumansai/tinyagents/actions/workflows/ci.yml/badge.svg)](https://github.com/tinyhumansai/tinyagents/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
@@ -30,26 +34,58 @@ language-backed workflow definitions.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    App[Application] --> Harness[Agent Harness]
-    Harness --> Models[Model Providers]
-    Harness --> Tools[Typed Tools]
-    Harness --> Events[Events and Usage]
-    App --> Graph[Durable Graph Runtime]
-    Graph --> Harness
-    Registry[Capability Registry] --> Harness
-    Registry --> Graph
-    Language[.rag Blueprints] --> Registry
-    Language --> Graph
+```text
+                              +-------------------+
+                              |   .rag source     |
+                              | workflow blueprint|
+                              +---------+---------+
+                                        |
+                                        v
++-------------+        +-------------------------------+
+| Application |------->| Capability Registry           |
+| Rust code   |        | models | tools | graphs | etc.|
++------+------+        +---------------+---------------+
+       |                               |
+       |                               v
+       |        +--------------------------------------+
+       +------->| Durable Graph Runtime                |
+                | typed state | nodes | edges | resume |
+                +------------------+-------------------+
+                                   |
+                                   v
+                +--------------------------------------+
+                | Agent Harness                        |
+                | prompts | tools | middleware | usage |
+                +--------+-------------+---------------+
+                         |             |
+                         v             v
+                +----------------+  +------------------+
+                | Model Providers|  | Typed Tools      |
+                | OpenAI/Ollama  |  | local functions  |
+                | Anthropic/etc. |  | external systems |
+                +----------------+  +------------------+
 ```
 
-```mermaid
-flowchart TD
-    Start((START)) --> Agent[Agent Node]
-    Agent -->|needs tool| Tool[Tool Node]
-    Tool --> Agent
-    Agent -->|done| End((END))
+```text
+        +-------+
+        | START |
+        +---+---+
+            |
+            v
+      +-------------+
+      | Agent Node  |
+      +------+------+
+             |
+      +------+------+
+      |             |
+ needs tool        done
+      |             |
+      v             v
++-----------+    +-----+
+| Tool Node |--->| END |
++-----------+    +-----+
+      |
+      +---- loops back to Agent Node
 ```
 
 ## Features
