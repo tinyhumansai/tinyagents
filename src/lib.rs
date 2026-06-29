@@ -29,7 +29,7 @@ pub use harness::embeddings::{
 };
 
 // --- Harness: first-class sub-agents (agent-calling-agent composition) ---
-pub use harness::subagent::{SubAgent, SubAgentTool};
+pub use harness::subagent::{SubAgent, SubAgentSession, SubAgentTool};
 
 // --- Harness: orchestrator → sub-agent steering ---
 pub use harness::steering::{

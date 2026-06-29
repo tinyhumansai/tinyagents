@@ -210,10 +210,65 @@ impl Summarizer for ConcatSummarizer {
 // ---------------------------------------------------------------------------
 
 impl SummarizationPolicy {
-    /// Returns `true` when the estimated total tokens of `messages` exceed
-    /// [`trigger_tokens`][Self::trigger_tokens].
+    /// Builds a policy from a model [`ModelProfile`], reading its
+    /// [`max_input_tokens`][crate::harness::model::ModelProfile::max_input_tokens]
+    /// as the context window and using `threshold` as the trigger fraction.
+    ///
+    /// All other fields take their [`Default`] values (`trigger_tokens = 0`,
+    /// `keep_last = 0`). Chain [`with_threshold_fraction`][Self::with_threshold_fraction]
+    /// or set `keep_last` afterwards to tune retention. When the profile does
+    /// not advertise `max_input_tokens` the resulting `context_window` is
+    /// `None`, so [`should_summarize`][Self::should_summarize] falls back to the
+    /// raw `trigger_tokens` threshold.
+    pub fn from_profile(profile: &crate::harness::model::ModelProfile, threshold: f64) -> Self {
+        Self {
+            context_window: profile.max_input_tokens,
+            threshold_fraction: threshold,
+            ..Self::default()
+        }
+    }
+
+    /// Sets the context window (the model's maximum input tokens) and returns
+    /// the updated policy. Enables context-window-aware triggering.
+    pub fn with_context_window(mut self, max_input_tokens: u64) -> Self {
+        self.context_window = Some(max_input_tokens);
+        self
+    }
+
+    /// Sets the [`threshold_fraction`][Self::threshold_fraction] and returns the
+    /// updated policy.
+    pub fn with_threshold_fraction(mut self, fraction: f64) -> Self {
+        self.threshold_fraction = fraction;
+        self
+    }
+
+    /// Returns the effective token budget at which summarization triggers.
+    ///
+    /// When [`context_window`][Self::context_window] is `Some(window)`, the
+    /// budget is `floor(window * threshold_fraction)`. When it is `None`, the
+    /// budget is the raw [`trigger_tokens`][Self::trigger_tokens].
+    pub fn trigger_budget(&self) -> u64 {
+        match self.context_window {
+            Some(window) => (window as f64 * self.threshold_fraction) as u64,
+            None => self.trigger_tokens,
+        }
+    }
+
+    /// Returns `true` when the estimated total tokens of `messages` reach the
+    /// summarization threshold.
+    ///
+    /// - When [`context_window`][Self::context_window] is set, returns `true`
+    ///   once the estimate is **at or above** `context_window *
+    ///   threshold_fraction` (the window-usage gate).
+    /// - When `context_window` is `None`, falls back to the original behaviour:
+    ///   returns `true` when the estimate **exceeds**
+    ///   [`trigger_tokens`][Self::trigger_tokens].
     pub fn should_summarize(&self, messages: &[Message]) -> bool {
-        slice_token_estimate(messages) > self.trigger_tokens
+        let tokens = slice_token_estimate(messages);
+        match self.context_window {
+            Some(_) => tokens >= self.trigger_budget(),
+            None => tokens > self.trigger_tokens,
+        }
     }
 
     /// Split `messages` into `(to_summarize, to_keep)`.

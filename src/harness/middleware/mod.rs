@@ -31,7 +31,10 @@ use crate::harness::cache::{CacheLayoutEvent, PromptCacheLayout};
 use crate::harness::context::RunContext;
 use crate::harness::events::AgentEvent;
 use crate::harness::model::{ModelDelta, ModelRequest, ModelResponse};
-use crate::harness::summarization::{TrimStrategy, trim_messages};
+use crate::harness::summarization::{
+    ConcatSummarizer, SummarizationPolicy, Summarizer, SummaryRecord, TrimStrategy,
+    estimate_tokens, trim_messages,
+};
 use crate::harness::tool::{ToolCall, ToolDelta, ToolResult};
 use crate::harness::usage::UsageTotals;
 
@@ -485,6 +488,89 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for MessageTri
         request: &mut ModelRequest,
     ) -> Result<()> {
         request.messages = trim_messages(&request.messages, &self.strategy);
+        Ok(())
+    }
+}
+
+// ── ContextCompressionMiddleware ──────────────────────────────────────────────
+
+/// Estimate the total tokens of a message slice using the same per-message
+/// heuristic the [`SummarizationPolicy`] uses internally.
+fn total_message_tokens(messages: &[crate::harness::message::Message]) -> u64 {
+    messages.iter().map(|m| estimate_tokens(&m.text())).sum()
+}
+
+impl ContextCompressionMiddleware {
+    /// Creates a compression middleware backed by the default
+    /// [`ConcatSummarizer`].
+    pub fn new(policy: SummarizationPolicy) -> Self {
+        Self::with_summarizer(policy, Box::new(ConcatSummarizer))
+    }
+
+    /// Creates a compression middleware with a custom [`Summarizer`].
+    pub fn with_summarizer(policy: SummarizationPolicy, summarizer: Box<dyn Summarizer>) -> Self {
+        Self {
+            label: "context_compression",
+            policy,
+            summarizer,
+            records: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Returns the configured [`SummarizationPolicy`].
+    pub fn policy(&self) -> &SummarizationPolicy {
+        &self.policy
+    }
+
+    /// Returns the [`SummaryRecord`]s produced so far, in order. Each record
+    /// carries the compression provenance for one compaction.
+    pub fn records(&self) -> Vec<SummaryRecord> {
+        self.records.lock().expect("records mutex poisoned").clone()
+    }
+}
+
+#[async_trait]
+impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for ContextCompressionMiddleware {
+    fn name(&self) -> &str {
+        self.label
+    }
+
+    async fn before_model(
+        &self,
+        ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        request: &mut ModelRequest,
+    ) -> Result<()> {
+        // Below the window threshold: pass through untouched (no-op, no event).
+        if !self.policy.should_summarize(&request.messages) {
+            return Ok(());
+        }
+
+        let (to_summarize, to_keep) = self.policy.plan(&request.messages);
+        // Nothing old enough to compress (e.g. keep_last covers everything):
+        // leave the transcript untouched rather than summarizing an empty set.
+        if to_summarize.is_empty() {
+            return Ok(());
+        }
+
+        let from_tokens = total_message_tokens(&request.messages);
+        let record = self.summarizer.summarize(&to_summarize).await?;
+
+        let mut new_messages = Vec::with_capacity(to_keep.len() + 1);
+        new_messages.push(record.summary.clone());
+        new_messages.extend(to_keep);
+        let to_tokens = total_message_tokens(&new_messages);
+
+        self.records
+            .lock()
+            .expect("records mutex poisoned")
+            .push(record);
+        request.messages = new_messages;
+
+        ctx.emit(AgentEvent::Compressed {
+            from_tokens,
+            to_tokens,
+        });
         Ok(())
     }
 }

@@ -19,7 +19,8 @@ use crate::harness::message::{AssistantMessage, ContentBlock, Message};
 use crate::harness::model::ModelResponse;
 use crate::harness::providers::MockModel;
 use crate::harness::runtime::{AgentHarness, RunPolicy};
-use crate::harness::subagent::{SubAgent, SubAgentTool};
+use crate::harness::subagent::{SubAgent, SubAgentSession, SubAgentTool};
+use crate::harness::testkit::ScriptedModel;
 use crate::harness::tool::{Tool, ToolCall};
 use crate::harness::usage::Usage;
 
@@ -210,6 +211,152 @@ async fn invoke_with_events_emits_lifecycle_on_shared_sink() {
             .iter()
             .any(|e| matches!(e, AgentEvent::RunStarted { .. }))
     );
+}
+
+#[tokio::test]
+async fn session_reuses_subagent_and_carries_context_across_sends() {
+    // A scripted child model that records every request it receives, so we can
+    // prove the SECOND send carried the FIRST turn's messages.
+    let model = Arc::new(ScriptedModel::replies(vec!["Paris", "French"]));
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("scripted", model.clone());
+
+    let subagent = Arc::new(
+        SubAgent::new(
+            "geographer",
+            "answers geography questions",
+            Arc::new(harness),
+        )
+        .with_system_prompt("You are a concise geography expert."),
+    );
+    // Keep a separate handle to confirm the SAME Arc is reused after sends.
+    let subagent_handle = Arc::clone(&subagent);
+
+    let mut session = SubAgentSession::new(subagent);
+
+    // First send: the user's question.
+    let first = session
+        .send(
+            &(),
+            (),
+            vec![Message::user("What is the capital of France?")],
+        )
+        .await
+        .expect("first send succeeds");
+    assert_eq!(first.text(), Some("Paris".to_string()));
+    assert_eq!(session.turns(), 1);
+
+    // Second send: a follow-up human message that depends on the first answer.
+    let second = session
+        .send(
+            &(),
+            (),
+            vec![Message::user("What language do they speak there?")],
+        )
+        .await
+        .expect("second send succeeds");
+    assert_eq!(second.text(), Some("French".to_string()));
+    assert_eq!(session.turns(), 2);
+
+    // The SAME underlying SubAgent (and harness) was reused — never rebuilt.
+    assert!(
+        Arc::ptr_eq(session.subagent(), &subagent_handle),
+        "the session must reuse the same SubAgent Arc across sends"
+    );
+
+    // The scripted model saw exactly two requests (one per send) — a single,
+    // reused harness instance accumulated both.
+    let requests = model.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one model request per send on one harness"
+    );
+
+    // The SECOND request CONTAINED the first turn's messages (context carried):
+    // the original question, the first assistant answer, and the system prompt.
+    let second_texts: Vec<String> = requests[1].messages.iter().map(Message::text).collect();
+    assert!(
+        second_texts.contains(&"What is the capital of France?".to_string()),
+        "second request should retain the first user question, got {second_texts:?}"
+    );
+    assert!(
+        second_texts.contains(&"Paris".to_string()),
+        "second request should retain the first assistant answer, got {second_texts:?}"
+    );
+    assert!(
+        second_texts.contains(&"What language do they speak there?".to_string()),
+        "second request should include the follow-up human message, got {second_texts:?}"
+    );
+    // The fixed system prompt is seeded exactly once (not duplicated per send).
+    let system_count = requests[1]
+        .messages
+        .iter()
+        .filter(|m| matches!(m, Message::System(_)))
+        .count();
+    assert_eq!(system_count, 1, "system prompt seeded once, not per send");
+}
+
+#[tokio::test]
+async fn session_emits_reuse_event_only_after_first_send() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("scripted", Arc::new(ScriptedModel::replies(vec!["a", "b"])));
+    let subagent = Arc::new(SubAgent::new("helper", "helps", Arc::new(harness)));
+
+    let sink = EventSink::new();
+    let recorder = Arc::new(RecordingListener::new());
+    sink.subscribe(recorder.clone());
+
+    let mut session = SubAgentSession::new(subagent).with_events(sink);
+
+    session
+        .send(&(), (), vec![Message::user("one")])
+        .await
+        .expect("first send");
+    session
+        .send(&(), (), vec![Message::user("two")])
+        .await
+        .expect("second send");
+
+    let events: Vec<AgentEvent> = recorder.events().into_iter().map(|r| r.event).collect();
+    let reused: Vec<usize> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::SubAgentReused { name, turn } if name == "helper" => Some(*turn),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reused,
+        vec![1],
+        "exactly one reuse event, for the second send (turn 1)"
+    );
+    // Both sends still emit the started/completed bracket (depth 1).
+    let started = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::SubAgentStarted { depth, .. } if *depth == 1))
+        .count();
+    assert_eq!(started, 2, "each send brackets with SubAgentStarted");
+}
+
+#[tokio::test]
+async fn session_reset_clears_transcript_and_turns() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("scripted", Arc::new(ScriptedModel::replies(vec!["x", "y"])));
+    let subagent = Arc::new(SubAgent::new("r", "resets", Arc::new(harness)));
+
+    let mut session = SubAgentSession::new(subagent);
+    session
+        .send(&(), (), vec![Message::user("first")])
+        .await
+        .expect("send");
+    assert_eq!(session.turns(), 1);
+    assert!(!session.transcript().is_empty());
+
+    session.reset();
+    assert_eq!(session.turns(), 0);
+    assert!(session.transcript().is_empty());
 }
 
 #[test]

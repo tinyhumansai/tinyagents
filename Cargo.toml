@@ -66,3 +66,7 @@ required-features = ["openai"]
 [[example]]
 name = "openai_self_blueprint"
 required-features = ["openai"]
+
+[[example]]
+name = "orchestrator_subagents"
+required-features = ["openai"]

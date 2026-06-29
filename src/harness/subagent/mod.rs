@@ -6,6 +6,33 @@
 //!   level deeper in the recursion tree than its caller.
 //! - [`SubAgentTool`] adapts a [`SubAgent`] into a [`Tool`] so a parent agent
 //!   can invoke another agent exactly like any other tool.
+//! - [`SubAgentSession`] keeps a single [`SubAgent`] alive across multiple
+//!   turns, *reusing* the same harness while accumulating the conversation
+//!   transcript — the post-completion, human-in-the-loop reuse primitive.
+//!
+//! # Reuse vs. steering
+//!
+//! There are two ways an orchestrator keeps a sub-agent "in play" across human
+//! input:
+//!
+//! - **Reuse** ([`SubAgentSession`]): the child run *completes*, the
+//!   orchestrator obtains human input, then calls the **same** sub-agent again
+//!   carrying the prior transcript. Nothing is killed or restarted.
+//! - **Steering** ([`crate::harness::steering`]): an orchestrator/human injects
+//!   commands into a **still-running** agent at safe checkpoints.
+//!
+//! `SubAgentSession` implements the first. The flow is:
+//!
+//! 1. `session.send(state, ctx, vec![Message::user("…")])` — runs the sub-agent
+//!    over the retained transcript and folds its reply back in.
+//! 2. Inspect the returned [`AgentRun`]; obtain human input out-of-band.
+//! 3. `session.send(state, ctx, vec![Message::user(human_reply)])` — the same
+//!    sub-agent answers with the full prior context still in the transcript.
+//!
+//! Every send after the first emits [`AgentEvent::SubAgentReused`] so the reuse
+//! is visible alongside the per-send
+//! [`SubAgentStarted`][AgentEvent::SubAgentStarted]/[`SubAgentCompleted`][AgentEvent::SubAgentCompleted]
+//! bracket.
 //!
 //! # Depth tracking
 //!
@@ -205,6 +232,157 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
             name: self.name.clone(),
             depth,
         });
+
+        Ok(run)
+    }
+}
+
+impl<State: Send + Sync, Ctx: Send + Sync> SubAgentSession<State, Ctx> {
+    /// Creates a session that reuses `subagent` across turns.
+    ///
+    /// The child runs at depth `1` by default (caller `parent_depth = 0`); use
+    /// [`Self::with_parent_depth`] to express deeper nesting.
+    pub fn new(subagent: Arc<SubAgent<State, Ctx>>) -> Self {
+        Self {
+            subagent,
+            transcript: Vec::new(),
+            turn: 0,
+            parent_depth: 0,
+            events: EventSink::new(),
+            seeded: false,
+        }
+    }
+
+    /// Creates a session from an owned [`SubAgent`], wrapping it in an `Arc`.
+    pub fn from_subagent(subagent: SubAgent<State, Ctx>) -> Self {
+        Self::new(Arc::new(subagent))
+    }
+
+    /// Routes the reuse lifecycle and the child run's own events onto `events`
+    /// so an external observer (or testkit recorder) sees every send. Returns
+    /// `self` for chaining.
+    pub fn with_events(mut self, events: EventSink) -> Self {
+        self.events = events;
+        self
+    }
+
+    /// Sets the caller depth the child runs at; the child run is created at
+    /// `parent_depth + 1`. Returns `self` for chaining.
+    pub fn with_parent_depth(mut self, parent_depth: usize) -> Self {
+        self.parent_depth = parent_depth;
+        self
+    }
+
+    /// Returns the reused sub-agent. The same `Arc` is shared across every
+    /// send, so this is how callers confirm the harness was never rebuilt.
+    pub fn subagent(&self) -> &Arc<SubAgent<State, Ctx>> {
+        &self.subagent
+    }
+
+    /// Returns the accumulated conversation transcript carried across sends.
+    pub fn transcript(&self) -> &[Message] {
+        &self.transcript
+    }
+
+    /// Returns the number of completed sends (turns).
+    pub fn turns(&self) -> usize {
+        self.turn
+    }
+
+    /// Clears the retained transcript and turn counter, so the next [`Self::send`]
+    /// starts a fresh conversation (re-seeding the fixed system prompt). The
+    /// underlying [`SubAgent`]/harness is left untouched and still reused.
+    pub fn reset(&mut self) {
+        self.transcript.clear();
+        self.turn = 0;
+        self.seeded = false;
+    }
+
+    /// Builds the child [`RunConfig`] for the current turn, enforcing the depth
+    /// cap exactly as [`SubAgent::invoke`] does.
+    fn child_config(&self) -> Result<RunConfig> {
+        let max_depth = self.subagent.harness.policy().limits.max_depth;
+        let child_depth = self.parent_depth + 1;
+        if child_depth > max_depth {
+            return Err(TinyAgentsError::SubAgentDepth(max_depth));
+        }
+        Ok(RunConfig::new(format!(
+            "{}-t{}-d{child_depth}",
+            self.subagent.name, self.turn
+        ))
+        .with_depth(child_depth)
+        .with_max_depth(max_depth))
+    }
+
+    /// Runs the reused sub-agent for one turn over the FULL accumulated
+    /// transcript, then folds the produced assistant/tool messages back into
+    /// the transcript so the next send continues with full context.
+    ///
+    /// `input` (typically a single [`Message::user`] carrying human input) is
+    /// appended to the retained transcript before the run. On the first send
+    /// the sub-agent's fixed [`SubAgent::with_system_prompt`] is prepended once.
+    /// The same underlying harness is reused on every call — nothing is
+    /// reconstructed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TinyAgentsError::SubAgentDepth`] if the child depth would
+    /// exceed the configured `max_depth`, or any error surfaced by the child
+    /// agent loop.
+    pub async fn send(
+        &mut self,
+        state: &State,
+        ctx_data: Ctx,
+        input: Vec<Message>,
+    ) -> Result<AgentRun> {
+        // Seed the fixed system prompt once, on the first send.
+        if !self.seeded {
+            if let Some(prompt) = &self.subagent.system_prompt {
+                self.transcript.push(Message::system(prompt.clone()));
+            }
+            self.seeded = true;
+        }
+
+        // Append the new (e.g. human/user) input to the retained transcript.
+        self.transcript.extend(input);
+
+        let config = self.child_config()?;
+        let depth = config.depth;
+        let ctx = RunContext::new(config, ctx_data).with_events(self.events.clone());
+
+        // Clone the sink so we can emit the completion event after `ctx` is
+        // moved into the child agent loop.
+        let events = self.events.clone();
+        events.emit(AgentEvent::SubAgentStarted {
+            name: self.subagent.name.clone(),
+            depth,
+        });
+        if self.turn > 0 {
+            events.emit(AgentEvent::SubAgentReused {
+                name: self.subagent.name.clone(),
+                turn: self.turn,
+            });
+        }
+
+        // REUSE the same underlying harness/SubAgent (no reconstruction),
+        // running it over the full accumulated transcript.
+        let run = self
+            .subagent
+            .harness
+            .invoke_in_context(state, ctx, self.transcript.clone())
+            .await?;
+
+        events.emit(AgentEvent::SubAgentCompleted {
+            name: self.subagent.name.clone(),
+            depth,
+        });
+
+        // Carry the produced assistant/tool messages forward. `run.messages` is
+        // the working transcript the loop ended with (everything we passed plus
+        // the new assistant/tool messages), so the next send continues with the
+        // full context.
+        self.transcript = run.messages.clone();
+        self.turn += 1;
 
         Ok(run)
     }

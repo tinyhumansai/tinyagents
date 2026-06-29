@@ -149,21 +149,37 @@ pub struct ConcatSummarizer;
 /// summarization is needed and splits the message list accordingly.  Pass the
 /// split output to a [`Summarizer`] implementation.
 ///
+/// # Context-window awareness
+///
+/// When [`context_window`][Self::context_window] is set (typically from a
+/// model's [`ModelProfile::max_input_tokens`]), the policy only triggers once
+/// the estimated tokens reach [`threshold_fraction`][Self::threshold_fraction]
+/// of that window (default `0.9`, i.e. 90%). When `context_window` is `None`
+/// the policy falls back to the raw [`trigger_tokens`][Self::trigger_tokens]
+/// threshold, preserving the original behaviour.
+///
+/// [`ModelProfile::max_input_tokens`]: crate::harness::model::ModelProfile::max_input_tokens
+///
 /// # Example
 ///
 /// ```
 /// use tinyagents::harness::message::Message;
 /// use tinyagents::harness::summarization::SummarizationPolicy;
 ///
-/// let policy = SummarizationPolicy { trigger_tokens: 2000, keep_last: 4 };
+/// let policy = SummarizationPolicy {
+///     trigger_tokens: 2000,
+///     keep_last: 4,
+///     ..Default::default()
+/// };
 /// let msgs = vec![Message::user("hello"), Message::assistant("world")];
 /// assert!(!policy.should_summarize(&msgs));
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SummarizationPolicy {
     /// Estimated token threshold above which summarization is triggered.
     ///
-    /// When the total estimated tokens of all messages exceeds this value,
+    /// Used only when [`context_window`][Self::context_window] is `None`. When
+    /// the total estimated tokens of all messages exceeds this value,
     /// [`should_summarize`][SummarizationPolicy::should_summarize] returns
     /// `true`.
     pub trigger_tokens: u64,
@@ -172,4 +188,37 @@ pub struct SummarizationPolicy {
     /// summarization.  System messages are always kept verbatim regardless of
     /// this setting.
     pub keep_last: usize,
+
+    /// Maximum input (context) tokens of the target model, when known.
+    ///
+    /// When set, [`should_summarize`][SummarizationPolicy::should_summarize]
+    /// triggers only once the estimated tokens reach
+    /// [`threshold_fraction`][Self::threshold_fraction] of this window. When
+    /// `None`, the policy falls back to the raw
+    /// [`trigger_tokens`][Self::trigger_tokens] threshold.
+    #[serde(default)]
+    pub context_window: Option<u64>,
+
+    /// Fraction of [`context_window`][Self::context_window] that must be
+    /// reached before summarization triggers. Defaults to `0.9` (90%). Ignored
+    /// when `context_window` is `None`.
+    #[serde(default = "default_threshold_fraction")]
+    pub threshold_fraction: f64,
+}
+
+/// The default [`SummarizationPolicy::threshold_fraction`] (90% of the context
+/// window).
+pub(crate) fn default_threshold_fraction() -> f64 {
+    0.9
+}
+
+impl Default for SummarizationPolicy {
+    fn default() -> Self {
+        Self {
+            trigger_tokens: 0,
+            keep_last: 0,
+            context_window: None,
+            threshold_fraction: default_threshold_fraction(),
+        }
+    }
 }

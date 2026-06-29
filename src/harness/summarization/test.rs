@@ -42,6 +42,7 @@ mod smoke {
         let policy = SummarizationPolicy {
             trigger_tokens: 10_000,
             keep_last: 4,
+            ..Default::default()
         };
         let msgs = vec![Message::user("hi"), Message::assistant("hello")];
         assert!(!policy.should_summarize(&msgs));
@@ -183,6 +184,7 @@ mod smoke {
         let policy = SummarizationPolicy {
             trigger_tokens: 2,
             keep_last: 1,
+            ..Default::default()
         };
         // ~16 chars → 4 tokens > trigger 2.
         let msgs = vec![Message::user("aaaaaaaaaaaaaaaa")];
@@ -194,6 +196,7 @@ mod smoke {
         let policy = SummarizationPolicy {
             trigger_tokens: 0,
             keep_last: 2,
+            ..Default::default()
         };
         let msgs = vec![
             Message::system("sys"),
@@ -214,11 +217,93 @@ mod smoke {
         assert_eq!(keep_texts, vec!["sys", "recent1", "recent2"]);
     }
 
+    // ── context-window-aware triggering ───────────────────────────────────────
+
+    #[test]
+    fn policy_below_window_threshold_does_not_summarize() {
+        // 1000-token window, 0.9 threshold → budget 900 tokens.
+        let policy = SummarizationPolicy::default()
+            .with_context_window(1000)
+            .with_threshold_fraction(0.9);
+        assert_eq!(policy.trigger_budget(), 900);
+
+        // ~400 chars → ~100 tokens, far below the 900-token budget.
+        let msgs = vec![Message::user("a".repeat(400))];
+        assert!(!policy.should_summarize(&msgs));
+    }
+
+    #[test]
+    fn policy_at_or_above_window_threshold_summarizes() {
+        // 100-token window, 0.5 threshold → budget 50 tokens.
+        let policy = SummarizationPolicy::default()
+            .with_context_window(100)
+            .with_threshold_fraction(0.5);
+        assert_eq!(policy.trigger_budget(), 50);
+
+        // Exactly at the budget: 200 chars → 50 tokens (>= 50 triggers).
+        let at = vec![Message::user("a".repeat(200))];
+        assert!(policy.should_summarize(&at));
+
+        // Above the budget triggers too.
+        let above = vec![Message::user("a".repeat(400))];
+        assert!(policy.should_summarize(&above));
+
+        // Below the budget does not.
+        let below = vec![Message::user("a".repeat(100))];
+        assert!(!policy.should_summarize(&below));
+    }
+
+    #[test]
+    fn policy_none_window_falls_back_to_trigger_tokens() {
+        // No context window → use raw trigger_tokens with strict `>` semantics.
+        let policy = SummarizationPolicy {
+            trigger_tokens: 2,
+            keep_last: 1,
+            ..Default::default()
+        };
+        assert_eq!(policy.context_window, None);
+        assert_eq!(policy.trigger_budget(), 2);
+
+        // ~16 chars → 4 tokens > 2.
+        let over = vec![Message::user("aaaaaaaaaaaaaaaa")];
+        assert!(policy.should_summarize(&over));
+
+        // ~4 chars → 1 token, not > 2.
+        let under = vec![Message::user("aaaa")];
+        assert!(!policy.should_summarize(&under));
+    }
+
+    #[test]
+    fn policy_default_threshold_is_ninety_percent() {
+        let policy = SummarizationPolicy::default();
+        assert!((policy.threshold_fraction - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn policy_from_profile_reads_max_input_tokens() {
+        use crate::harness::model::ModelProfile;
+
+        let profile = ModelProfile {
+            max_input_tokens: Some(1000),
+            ..Default::default()
+        };
+        let policy = SummarizationPolicy::from_profile(&profile, 0.8);
+        assert_eq!(policy.context_window, Some(1000));
+        assert!((policy.threshold_fraction - 0.8).abs() < f64::EPSILON);
+        assert_eq!(policy.trigger_budget(), 800);
+
+        // A profile without max_input_tokens leaves the window None (fallback).
+        let bare = ModelProfile::default();
+        let fallback = SummarizationPolicy::from_profile(&bare, 0.9);
+        assert_eq!(fallback.context_window, None);
+    }
+
     #[test]
     fn policy_plan_keeps_everything_when_few_messages() {
         let policy = SummarizationPolicy {
             trigger_tokens: 0,
             keep_last: 5,
+            ..Default::default()
         };
         let msgs = vec![Message::system("sys"), Message::user("u")];
         let (to_summarize, to_keep) = policy.plan(&msgs);

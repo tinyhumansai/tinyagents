@@ -143,6 +143,22 @@ pub enum AgentEvent {
         depth: usize,
     },
 
+    /// An existing sub-agent was *reused* for a follow-up turn rather than
+    /// reconstructed, carrying the prior conversation context forward.
+    ///
+    /// Emitted by [`crate::harness::subagent::SubAgentSession`] on every send
+    /// after the first (i.e. `turn >= 1`), so post-completion reuse — the
+    /// orchestrator → sub-agent → human input → *same* sub-agent pattern — is
+    /// visible in the event stream and distinguishable from a fresh
+    /// [`AgentEvent::SubAgentStarted`].
+    SubAgentReused {
+        /// Name of the reused sub-agent.
+        name: String,
+        /// Zero-based index of the turn being started for this reuse (the
+        /// second send is `turn == 1`).
+        turn: usize,
+    },
+
     /// A steering command was delivered to a running agent at a safe
     /// checkpoint and either applied or rejected by the run's steering policy.
     ///
@@ -158,6 +174,18 @@ pub enum AgentEvent {
         /// `true` when the run's policy permitted the command and it was
         /// applied; `false` when the policy rejected it.
         accepted: bool,
+    },
+
+    /// The transcript was compressed/summarized because it neared the model's
+    /// context window. Emitted by
+    /// [`ContextCompressionMiddleware`][crate::harness::middleware::ContextCompressionMiddleware]
+    /// only when it actually compresses; below-threshold requests pass through
+    /// without emitting this event.
+    Compressed {
+        /// Estimated total tokens of the transcript before compression.
+        from_tokens: u64,
+        /// Estimated total tokens of the transcript after compression.
+        to_tokens: u64,
     },
 
     /// A graph routing decision produced a named route.
@@ -203,7 +231,9 @@ impl AgentEvent {
             AgentEvent::RetryScheduled { .. } => "retry.scheduled",
             AgentEvent::SubAgentStarted { .. } => "subagent.started",
             AgentEvent::SubAgentCompleted { .. } => "subagent.completed",
+            AgentEvent::SubAgentReused { .. } => "subagent.reused",
             AgentEvent::Steered { .. } => "agent.steered",
+            AgentEvent::Compressed { .. } => "context.compressed",
             AgentEvent::RouteSelected { .. } => "route.selected",
             AgentEvent::RunCompleted { .. } => "run.completed",
             AgentEvent::RunFailed { .. } => "run.failed",

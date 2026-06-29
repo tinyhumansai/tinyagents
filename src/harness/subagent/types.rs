@@ -14,6 +14,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::harness::events::EventSink;
+use crate::harness::message::Message;
 use crate::harness::runtime::AgentHarness;
 
 /// The argument key a [`SubAgentTool`] reads the child input from.
@@ -66,6 +68,52 @@ pub struct SubAgent<State: Send + Sync, Ctx: Send + Sync = ()> {
 /// expressed by constructing the inner tool with a larger `parent_depth`. For
 /// fully context-threaded invocation (reading the live parent depth) call
 /// [`SubAgent::invoke_in_parent`] directly instead of going through the tool.
+/// A persistent, *reusable* conversation with a single [`SubAgent`].
+///
+/// Where [`SubAgentTool`] runs a fresh, stateless child run per tool call, a
+/// `SubAgentSession` keeps the **same** underlying [`SubAgent`] (and therefore
+/// the same [`AgentHarness`]) alive across multiple turns and retains the full
+/// conversation transcript between them. This is *post-completion reuse*: the
+/// child run finishes normally, the orchestrator inspects/awaits human input,
+/// then calls the same sub-agent again — distinct from *steering*, which
+/// interrupts a still-running agent.
+///
+/// # Human-in-the-loop reuse flow
+///
+/// 1. `send` the first input (e.g. a user question). The session appends it to
+///    the retained transcript, runs the sub-agent over the full transcript, and
+///    folds the resulting assistant (and any tool) messages back in.
+/// 2. Inspect the returned [`AgentRun`] and obtain human input out-of-band.
+/// 3. Wrap that human input as a [`Message::user`] and `send` it again. Because
+///    the prior turn's messages are still in the transcript, the sub-agent
+///    answers *with full context* — without being killed and restarted.
+///
+/// Each send after the first emits [`AgentEvent::SubAgentReused`][reused]
+/// (alongside the usual [`SubAgentStarted`][started]/[`SubAgentCompleted`][completed]
+/// bracket) so reuse is observable in the event stream.
+///
+/// [reused]: crate::harness::events::AgentEvent::SubAgentReused
+/// [started]: crate::harness::events::AgentEvent::SubAgentStarted
+/// [completed]: crate::harness::events::AgentEvent::SubAgentCompleted
+pub struct SubAgentSession<State: Send + Sync, Ctx: Send + Sync = ()> {
+    /// The reused child agent. The same `Arc` is shared across every send, so
+    /// the underlying harness is never reconstructed.
+    pub(crate) subagent: Arc<SubAgent<State, Ctx>>,
+    /// The accumulating conversation transcript carried across sends.
+    pub(crate) transcript: Vec<Message>,
+    /// Number of completed sends (turns) so far.
+    pub(crate) turn: usize,
+    /// Caller depth the child runs at; the child run is created at
+    /// `parent_depth + 1` (default `0`, so the child runs at depth `1`).
+    pub(crate) parent_depth: usize,
+    /// Event sink the reuse lifecycle (and the child run's own events) are
+    /// emitted on. Defaults to a fresh, unsubscribed sink.
+    pub(crate) events: EventSink,
+    /// Whether the fixed system prompt has been seeded into the transcript yet
+    /// (it is prepended once, on the first send).
+    pub(crate) seeded: bool,
+}
+
 pub struct SubAgentTool<State: Send + Sync, Ctx: Send + Sync = ()> {
     /// The wrapped child agent.
     pub(crate) subagent: Arc<SubAgent<State, Ctx>>,

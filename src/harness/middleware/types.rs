@@ -18,7 +18,7 @@ use crate::error::{Result, TinyAgentsError};
 use crate::harness::cache::CacheLayoutEvent;
 use crate::harness::context::RunContext;
 use crate::harness::model::{ModelDelta, ModelRequest, ModelResponse};
-use crate::harness::summarization::TrimStrategy;
+use crate::harness::summarization::{SummarizationPolicy, Summarizer, SummaryRecord, TrimStrategy};
 use crate::harness::tool::{ToolCall, ToolDelta, ToolResult};
 use crate::harness::usage::UsageTotals;
 
@@ -259,6 +259,34 @@ pub struct LoggingMiddleware {
 pub struct MessageTrimMiddleware {
     /// The trimming strategy applied to `request.messages`.
     pub strategy: TrimStrategy,
+}
+
+// ── ContextCompressionMiddleware ──────────────────────────────────────────────
+
+/// Middleware that summarizes/compresses the request transcript, but **only**
+/// when it nears the model's context window.
+///
+/// In `before_model` it consults the configured [`SummarizationPolicy`]. The
+/// policy is normally built with a context window (for example via
+/// [`SummarizationPolicy::from_profile`] or
+/// [`SummarizationPolicy::with_context_window`]) and a `threshold_fraction`
+/// (default `0.9`). When the estimated transcript tokens are **below** the
+/// window threshold this middleware is a complete no-op: `request.messages` is
+/// left untouched and no event is emitted. When the threshold is reached, the
+/// older messages are condensed by the [`Summarizer`] into a single summary
+/// message, the recent window and system messages are kept verbatim, the
+/// resulting [`SummaryRecord`] (with its compression provenance) is recorded,
+/// and an [`AgentEvent::Compressed`][crate::harness::events::AgentEvent::Compressed]
+/// event is emitted.
+///
+/// [`ConcatSummarizer`][crate::harness::summarization::ConcatSummarizer] is used
+/// by default; supply any [`Summarizer`] via
+/// [`ContextCompressionMiddleware::with_summarizer`].
+pub struct ContextCompressionMiddleware {
+    pub(crate) label: &'static str,
+    pub(crate) policy: SummarizationPolicy,
+    pub(crate) summarizer: Box<dyn Summarizer>,
+    pub(crate) records: Mutex<Vec<SummaryRecord>>,
 }
 
 // ── PromptCacheGuardMiddleware ────────────────────────────────────────────────

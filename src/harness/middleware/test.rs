@@ -10,7 +10,7 @@ use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::events::{AgentEvent, RecordingListener};
 use crate::harness::message::{AssistantMessage, ContentBlock, Message, UserMessage};
 use crate::harness::model::{ModelRequest, ModelResponse, PromptSegment, SegmentRole};
-use crate::harness::summarization::TrimStrategy;
+use crate::harness::summarization::{SummarizationPolicy, TrimStrategy};
 use crate::harness::usage::Usage;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -211,6 +211,140 @@ async fn message_trim_middleware_shrinks_request() {
 
     assert_eq!(request.messages.len(), 1);
     assert_eq!(request.messages[0], user("three"));
+}
+
+#[tokio::test]
+async fn context_compression_is_noop_below_window_threshold() {
+    // 1000-token window, 0.9 threshold → 900-token budget. A tiny transcript
+    // stays far below it, so the middleware must leave messages untouched and
+    // emit no Compressed event.
+    let policy = SummarizationPolicy::default()
+        .with_context_window(1000)
+        .with_threshold_fraction(0.9);
+    let mw = Arc::new(ContextCompressionMiddleware::new(policy));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw.clone());
+
+    let recorder = Arc::new(RecordingListener::new());
+    let mut c = ctx();
+    c.events.subscribe(recorder.clone());
+
+    let before = vec![user("one"), user("two"), user("three")];
+    let mut request = ModelRequest {
+        messages: before.clone(),
+        ..Default::default()
+    };
+    stack
+        .run_before_model(&mut c, &(), &mut request)
+        .await
+        .unwrap();
+
+    // Messages unchanged.
+    assert_eq!(request.messages, before);
+    // No record produced.
+    assert!(mw.records().is_empty());
+    // No Compressed event emitted (only the stack's started/completed events).
+    let events: Vec<AgentEvent> = recorder.events().into_iter().map(|r| r.event).collect();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Compressed { .. })),
+    );
+}
+
+#[tokio::test]
+async fn context_compression_compresses_at_or_above_threshold() {
+    // 100-token window, 0.5 threshold → 50-token budget. keep_last=1 keeps the
+    // newest message verbatim; everything older is summarized.
+    let policy = SummarizationPolicy {
+        keep_last: 1,
+        ..SummarizationPolicy::default()
+    }
+    .with_context_window(100)
+    .with_threshold_fraction(0.5);
+    let mw = Arc::new(ContextCompressionMiddleware::new(policy));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw.clone());
+
+    let recorder = Arc::new(RecordingListener::new());
+    let mut c = ctx();
+    c.events.subscribe(recorder.clone());
+
+    // Three ~50-token (200-char) messages → ~150 tokens, well above the 50 budget.
+    let big = "a".repeat(200);
+    let mut request = ModelRequest {
+        messages: vec![
+            user(&format!("{big}-1")),
+            user(&format!("{big}-2")),
+            user(&format!("{big}-3")),
+        ],
+        ..Default::default()
+    };
+    stack
+        .run_before_model(&mut c, &(), &mut request)
+        .await
+        .unwrap();
+
+    // Compressed to: one summary message + the single kept recent message.
+    assert_eq!(request.messages.len(), 2);
+    assert!(matches!(request.messages[0], Message::System(_)));
+    assert_eq!(request.messages[1].text(), format!("{big}-3"));
+
+    // Provenance recorded: the two oldest messages were the source.
+    let records = mw.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].provenance.source_ids, vec!["msg-0", "msg-1"]);
+    assert!(records[0].provenance.original_token_estimate > 0);
+
+    // A single Compressed event was emitted. (ConcatSummarizer keeps text
+    // verbatim, so the guarantee is fewer messages, not fewer tokens; the event
+    // still reports the before/after token estimates.)
+    let compressed: Vec<(u64, u64)> = recorder
+        .events()
+        .into_iter()
+        .filter_map(|r| match r.event {
+            AgentEvent::Compressed {
+                from_tokens,
+                to_tokens,
+            } => Some((from_tokens, to_tokens)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(compressed.len(), 1);
+    assert!(compressed[0].0 > 0);
+    assert!(compressed[0].1 > 0);
+}
+
+#[tokio::test]
+async fn context_compression_none_window_falls_back_to_trigger_tokens() {
+    // No context window → raw trigger_tokens gate (strict `>`). Trigger at 2
+    // tokens, keep_last=1.
+    let policy = SummarizationPolicy {
+        trigger_tokens: 2,
+        keep_last: 1,
+        ..SummarizationPolicy::default()
+    };
+    assert_eq!(policy.context_window, None);
+    let mw = Arc::new(ContextCompressionMiddleware::new(policy));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw.clone());
+
+    let mut c = ctx();
+    // Two ~4-token (16-char) messages → ~8 tokens > 2 trigger.
+    let mut request = ModelRequest {
+        messages: vec![user("aaaaaaaaaaaaaaaa"), user("bbbbbbbbbbbbbbbb")],
+        ..Default::default()
+    };
+    stack
+        .run_before_model(&mut c, &(), &mut request)
+        .await
+        .unwrap();
+
+    // Summary + the one kept recent message.
+    assert_eq!(request.messages.len(), 2);
+    assert!(matches!(request.messages[0], Message::System(_)));
+    assert_eq!(request.messages[1].text(), "bbbbbbbbbbbbbbbb");
+    assert_eq!(mw.records().len(), 1);
 }
 
 #[tokio::test]
