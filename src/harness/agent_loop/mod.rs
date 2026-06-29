@@ -221,6 +221,17 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         self.middleware.run_before_agent(ctx, state).await?;
 
         loop {
+            // Safe steering checkpoint: drain any orchestrator/human steering
+            // commands and apply the policy-permitted ones before the next
+            // model call. Cancel terminates the run; Pause short-circuits it.
+            match crate::harness::steering::apply_pending_steering(ctx, &mut messages)? {
+                crate::harness::steering::SteeringOutcome::Cancel => {
+                    return Err(RustAgentsError::Cancelled);
+                }
+                crate::harness::steering::SteeringOutcome::Pause => break,
+                crate::harness::steering::SteeringOutcome::Continue => {}
+            }
+
             // Fail-closed limit and deadline checks before each model call.
             ctx.check_deadline().map_err(|_| {
                 RustAgentsError::Timeout(format!(

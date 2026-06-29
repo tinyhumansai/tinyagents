@@ -108,6 +108,39 @@ pub enum AgentEvent {
         attempt: usize,
     },
 
+    /// A sub-agent child run is about to be invoked from a parent run.
+    SubAgentStarted {
+        /// Name of the sub-agent being invoked.
+        name: String,
+        /// Depth of the child run in the recursion tree (parent depth + 1).
+        depth: usize,
+    },
+
+    /// A sub-agent child run finished.
+    SubAgentCompleted {
+        /// Name of the sub-agent that completed.
+        name: String,
+        /// Depth of the child run in the recursion tree.
+        depth: usize,
+    },
+
+    /// A steering command was delivered to a running agent at a safe
+    /// checkpoint and either applied or rejected by the run's steering policy.
+    ///
+    /// Emitted by the agent loop for every drained
+    /// [`crate::harness::steering::SteeringCommand`] so that orchestrator and
+    /// human steering is fully observable in the event stream and never an
+    /// untracked side channel.
+    Steered {
+        /// Stable name of the steered command kind (e.g. `"inject_message"`,
+        /// `"cancel"`); see
+        /// [`crate::harness::steering::SteeringCommandKind::as_str`].
+        command_kind: String,
+        /// `true` when the run's policy permitted the command and it was
+        /// applied; `false` when the policy rejected it.
+        accepted: bool,
+    },
+
     /// A graph routing decision produced a named route.
     RouteSelected {
         /// The route name chosen by the router.
@@ -147,6 +180,9 @@ impl AgentEvent {
             AgentEvent::MiddlewareStarted { .. } => "middleware.started",
             AgentEvent::MiddlewareCompleted { .. } => "middleware.completed",
             AgentEvent::RetryScheduled { .. } => "retry.scheduled",
+            AgentEvent::SubAgentStarted { .. } => "subagent.started",
+            AgentEvent::SubAgentCompleted { .. } => "subagent.completed",
+            AgentEvent::Steered { .. } => "agent.steered",
             AgentEvent::RouteSelected { .. } => "route.selected",
             AgentEvent::RunCompleted { .. } => "run.completed",
             AgentEvent::RunFailed { .. } => "run.failed",

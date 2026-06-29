@@ -6,7 +6,7 @@
 mod types;
 
 pub(crate) use types::{Branch, BuilderNode};
-pub use types::{END, GraphBuilder, NodeContext, NodeFuture, NodeHandler, RouterFn, START};
+pub use types::{END, ForkId, GraphBuilder, NodeContext, NodeFuture, NodeHandler, RouterFn, START};
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -44,7 +44,25 @@ where
             command_nodes: HashSet::new(),
             reducer: None,
             recursion_limit: 50,
+            parallel: false,
         }
+    }
+
+    /// Enables or disables concurrent execution of the active node set within a
+    /// superstep. Defaults to `false` (sequential), which preserves the exact
+    /// milestone-1 ordering and semantics.
+    ///
+    /// When enabled, a superstep with more than one active node runs every
+    /// branch concurrently via `futures::future::join_all`. Each branch gets its
+    /// own cloned `State` snapshot (`State: Clone`) and a distinct
+    /// [`ForkId`] on its [`NodeContext`]. Branch results are still folded into
+    /// the reducer in deterministic active-set order at the step boundary, so a
+    /// downstream node always observes the same merged state regardless of which
+    /// branch finished first. See [`crate::graph::CompiledGraph`] for the full
+    /// concurrency and interrupt semantics.
+    pub fn with_parallel(mut self, parallel: bool) -> Self {
+        self.parallel = parallel;
+        self
     }
 
     /// Overrides the graph id.
@@ -211,6 +229,7 @@ where
             command_nodes,
             reducer,
             recursion_limit,
+            parallel,
         } = self;
 
         Ok(CompiledGraph::from_parts(
@@ -222,6 +241,7 @@ where
             entry,
             reducer.expect("reducer presence checked above"),
             recursion_limit,
+            parallel,
         ))
     }
 

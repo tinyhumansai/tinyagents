@@ -11,6 +11,9 @@ categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
 async-trait = "0.1"
+# Runtime-agnostic future combinators (`join_all` for concurrent supersteps).
+# Default features only; the library must not depend on tokio at runtime.
+futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -27,7 +30,7 @@ default = []
 openai = ["dep:reqwest"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 # `.env` loading for the runnable examples.
 dotenvy = "0.15"
 

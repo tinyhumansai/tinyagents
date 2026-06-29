@@ -16,6 +16,14 @@ pub use error::{Result, RustAgentsError};
 pub use model::{ChatModel, ModelRequest, ModelResponse};
 pub use tool::{Tool, ToolCall, ToolResult};
 
+// --- Harness: first-class sub-agents (agent-calling-agent composition) ---
+pub use harness::subagent::{SubAgent, SubAgentTool};
+
+// --- Harness: orchestrator → sub-agent steering ---
+pub use harness::steering::{
+    SteeringCommand, SteeringCommandKind, SteeringHandle, SteeringOutcome, SteeringPolicy,
+};
+
 // --- Graph: legacy sequential API (milestone 1) ---
 pub use graph::{Edge, GraphRun, Node, NodeOutput, StateGraph};
 
@@ -25,6 +33,11 @@ pub use graph::{Edge, GraphRun, Node, NodeOutput, StateGraph};
 // types intentionally stay behind their module paths to avoid a name clash.
 pub use graph::{
     Checkpoint, CheckpointMetadata, Checkpointer, ClosureReducer, ClosureStateReducer, Command,
-    CompiledGraph, END, GraphBuilder, GraphEvent, GraphExecution, GraphRunStatus,
+    CompiledGraph, END, ForkId, GraphBuilder, GraphEvent, GraphExecution, GraphRunStatus,
     InMemoryCheckpointer, Interrupt, NodeContext, NodeResult, Reducer, START, StateReducer,
 };
+
+// --- Graph: export / visualization ---
+// Topology types are surfaced at the crate root; the `to_json`/`to_mermaid`
+// free functions stay behind `graph::export::` to avoid generic-name clashes.
+pub use graph::{ChannelInfo, ConditionalEdgeInfo, EdgeInfo, GraphTopology, NodeInfo, RouteInfo};

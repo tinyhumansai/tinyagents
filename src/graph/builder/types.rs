@@ -27,6 +27,33 @@ pub type NodeHandler<State, Update> =
 /// resolved against the node's route table at the step boundary.
 pub type RouterFn<State> = dyn Fn(&State) -> String + Send + Sync;
 
+/// Identifies one branch of a concurrent (fan-out) superstep.
+///
+/// When a graph compiled with [`crate::graph::GraphBuilder::with_parallel`]
+/// runs more than one active node in a single superstep, every branch executes
+/// against its own cloned `State` snapshot and receives a distinct `ForkId` on
+/// its [`NodeContext`]. The `branch_index` is the branch's position in the
+/// deterministically-ordered active set, so a handler can tell which fork it is
+/// (e.g. to seed per-fork randomness or pick a strategy) and the executor can
+/// keep reducer application reproducible regardless of completion order.
+///
+/// In sequential mode (the default), and in a parallel step that happens to
+/// have a single active node, `NodeContext::fork` is `None`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForkId {
+    /// The branch's index in the superstep's active set (0-based, stable).
+    pub branch_index: usize,
+    /// The node executing on this branch.
+    pub node: NodeId,
+}
+
+impl ForkId {
+    /// Creates a fork id for `node` at `branch_index` within the active set.
+    pub fn new(branch_index: usize, node: NodeId) -> Self {
+        Self { branch_index, node }
+    }
+}
+
 /// Per-task runtime context passed to a durable node handler.
 ///
 /// The context exposes run identity, the current step, and — crucially — an
@@ -45,6 +72,9 @@ pub struct NodeContext {
     pub step: usize,
     /// Resume value supplied by `CompiledGraph::resume`, if any.
     pub resume: Option<serde_json::Value>,
+    /// The branch identity when this node runs as one fork of a concurrent
+    /// (fan-out) superstep; `None` in sequential mode or single-node steps.
+    pub fork: Option<ForkId>,
 }
 
 /// A compiled-in node: id plus its handler.
@@ -92,4 +122,6 @@ pub struct GraphBuilder<State, Update> {
     pub(crate) command_nodes: HashSet<NodeId>,
     pub(crate) reducer: Option<Arc<dyn StateReducer<State, Update>>>,
     pub(crate) recursion_limit: usize,
+    /// When true, active nodes in a superstep run concurrently (fan-out).
+    pub(crate) parallel: bool,
 }

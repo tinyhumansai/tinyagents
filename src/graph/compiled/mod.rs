@@ -8,9 +8,28 @@
 //! branch reaches [`END`], an interrupt pauses the run, or the recursion limit
 //! is hit (a deterministic [`RustAgentsError::RecursionLimit`]).
 //!
-//! Execution is sequential within a step for now, but the data flow — snapshot
-//! reads, boundary reducer application, boundary checkpointing — is structured
-//! so that intra-step concurrency can be added without changing semantics.
+//! By default execution is sequential within a step. When the graph is compiled
+//! with [`crate::graph::GraphBuilder::with_parallel`], a step with more than one
+//! active node runs every branch concurrently via
+//! [`futures::future::join_all`], yet the data flow — snapshot reads, boundary
+//! reducer application, boundary checkpointing — is identical: each branch reads
+//! the same committed snapshot (its own clone), and results are folded into the
+//! reducer in deterministic active-set order at the step boundary, so the merged
+//! state is reproducible regardless of which branch finishes first.
+//!
+//! ## Concurrency and interrupt semantics
+//!
+//! - All active branches in a parallel step start before any is awaited, and all
+//!   are driven to completion (`join_all`) before the step boundary runs.
+//! - Branch results are then folded in active-set index order. The reducer is
+//!   the fan-in / join: lower-index branches' updates are applied first.
+//! - The *lowest-index* branch that errors or interrupts is the step's terminal
+//!   outcome. Updates produced by lower-index successful branches are still
+//!   applied/persisted; an error aborts the run, an interrupt persists a
+//!   checkpoint whose pending nodes are that branch and every later active node.
+//! - Because branches run on cloned snapshots and never share mutable state,
+//!   concurrency is data-race free; the reducer alone resolves conflicting
+//!   writes (deterministically, by index).
 
 mod types;
 
@@ -21,7 +40,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
-use crate::graph::builder::{Branch, BuilderNode, END, NodeContext};
+use crate::graph::builder::{Branch, BuilderNode, END, ForkId, NodeContext};
 use crate::graph::checkpoint::{Checkpoint, Checkpointer};
 use crate::graph::command::{Command, Interrupt, NodeResult};
 use crate::graph::reducer::StateReducer;
@@ -41,6 +60,17 @@ pub(crate) fn next_seq() -> u64 {
 
 fn next_id(prefix: &str) -> String {
     format!("{prefix}-{}", next_seq())
+}
+
+/// The folded result of running a superstep's active node set, ready to apply
+/// at the step boundary.
+struct StepRun<Update> {
+    /// Branch updates in deterministic active-set index order.
+    updates: Vec<Update>,
+    /// Explicit `goto` routing keyed by the node that produced it.
+    goto_map: HashMap<NodeId, Vec<NodeId>>,
+    /// The lowest-index branch interrupt, if any (its active-set index + value).
+    interrupt: Option<(usize, Interrupt)>,
 }
 
 fn dedupe(nodes: Vec<NodeId>) -> Vec<NodeId> {
@@ -63,6 +93,7 @@ impl<State, Update> CompiledGraph<State, Update> {
         entry: NodeId,
         reducer: Arc<dyn StateReducer<State, Update>>,
         recursion_limit: usize,
+        parallel: bool,
     ) -> Self {
         Self {
             graph_id,
@@ -76,6 +107,7 @@ impl<State, Update> CompiledGraph<State, Update> {
             checkpointer: None,
             event_sink: None,
             namespace: Vec::new(),
+            parallel,
         }
     }
 
@@ -216,81 +248,33 @@ where
                 active: active.clone(),
             });
 
-            let mut updates: Vec<Update> = Vec::new();
-            let mut goto_map: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-            let mut interrupt: Option<(usize, Interrupt)> = None;
-
-            for (index, node_id) in active.iter().enumerate() {
-                let node = self
-                    .nodes
-                    .get(node_id)
-                    .ok_or_else(|| RustAgentsError::MissingNode(node_id.to_string()))?;
-
-                self.emit(GraphEvent::TaskScheduled {
-                    node: node_id.clone(),
-                    step: steps,
-                });
-                self.emit(GraphEvent::NodeStarted {
-                    node: node_id.clone(),
-                    step: steps,
-                });
-
-                let ctx = NodeContext {
-                    node_id: node_id.clone(),
-                    run_id: run_id.clone(),
-                    thread_id: thread_id.clone(),
-                    step: steps,
-                    resume: resume_map.remove(node_id),
-                };
-
-                let result = match (node.handler)(state.clone(), ctx).await {
-                    Ok(result) => result,
-                    Err(error) => {
-                        self.emit(GraphEvent::NodeFailed {
-                            node: node_id.clone(),
-                            step: steps,
-                            error: error.to_string(),
-                        });
-                        return Err(error);
-                    }
-                };
-
-                visited.push(node_id.clone());
-
-                match result {
-                    NodeResult::Update(update) => {
-                        updates.push(update);
-                        self.emit(GraphEvent::StateUpdated {
-                            node: node_id.clone(),
-                            step: steps,
-                        });
-                    }
-                    NodeResult::Command(command) => {
-                        if let Some(update) = command.update {
-                            updates.push(update);
-                            self.emit(GraphEvent::StateUpdated {
-                                node: node_id.clone(),
-                                step: steps,
-                            });
-                        }
-                        if !command.goto.is_empty() {
-                            goto_map.insert(node_id.clone(), command.goto);
-                        }
-                    }
-                    NodeResult::Interrupt(emitted) => {
-                        self.emit(GraphEvent::InterruptEmitted {
-                            interrupt: emitted.clone(),
-                        });
-                        interrupt = Some((index, emitted));
-                        break;
-                    }
-                }
-
-                self.emit(GraphEvent::NodeCompleted {
-                    node: node_id.clone(),
-                    step: steps,
-                });
-            }
+            let StepRun {
+                updates,
+                goto_map,
+                interrupt,
+            } = if self.parallel && active.len() > 1 {
+                self.run_active_parallel(
+                    &active,
+                    &state,
+                    &run_id,
+                    &thread_id,
+                    steps,
+                    &mut resume_map,
+                    &mut visited,
+                )
+                .await?
+            } else {
+                self.run_active_sequential(
+                    &active,
+                    &state,
+                    &run_id,
+                    &thread_id,
+                    steps,
+                    &mut resume_map,
+                    &mut visited,
+                )
+                .await?
+            };
 
             // Apply collected updates through the reducer at the boundary.
             for update in updates {
@@ -387,6 +371,235 @@ where
             interrupts: Vec::new(),
             status,
             checkpoint_id: last_checkpoint,
+        })
+    }
+
+    /// Builds the per-task [`NodeContext`] for `node_id` at the given branch.
+    ///
+    /// `fork` carries the branch identity in a concurrent step (`None` in
+    /// sequential mode or single-node steps). The resume value for the node is
+    /// consumed from `resume_map`.
+    fn node_context(
+        &self,
+        node_id: &NodeId,
+        run_id: &RunId,
+        thread_id: &Option<ThreadId>,
+        step: usize,
+        resume_map: &mut HashMap<NodeId, serde_json::Value>,
+        fork: Option<ForkId>,
+    ) -> NodeContext {
+        NodeContext {
+            node_id: node_id.clone(),
+            run_id: run_id.clone(),
+            thread_id: thread_id.clone(),
+            step,
+            resume: resume_map.remove(node_id),
+            fork,
+        }
+    }
+
+    /// Folds a single successful branch result into the step accumulators.
+    ///
+    /// Pushes the node to `visited`, records updates/goto, emits the matching
+    /// events, and returns the interrupt (with its branch index) when the branch
+    /// paused. Shared by the sequential and parallel run paths so both fold
+    /// results identically; only the *running* of handlers differs.
+    #[allow(clippy::too_many_arguments)]
+    fn fold_result(
+        &self,
+        index: usize,
+        node_id: &NodeId,
+        step: usize,
+        result: NodeResult<Update>,
+        updates: &mut Vec<Update>,
+        goto_map: &mut HashMap<NodeId, Vec<NodeId>>,
+        visited: &mut Vec<NodeId>,
+    ) -> Option<(usize, Interrupt)> {
+        visited.push(node_id.clone());
+        match result {
+            NodeResult::Update(update) => {
+                updates.push(update);
+                self.emit(GraphEvent::StateUpdated {
+                    node: node_id.clone(),
+                    step,
+                });
+            }
+            NodeResult::Command(command) => {
+                if let Some(update) = command.update {
+                    updates.push(update);
+                    self.emit(GraphEvent::StateUpdated {
+                        node: node_id.clone(),
+                        step,
+                    });
+                }
+                if !command.goto.is_empty() {
+                    goto_map.insert(node_id.clone(), command.goto);
+                }
+            }
+            NodeResult::Interrupt(emitted) => {
+                self.emit(GraphEvent::InterruptEmitted {
+                    interrupt: emitted.clone(),
+                });
+                return Some((index, emitted));
+            }
+        }
+        self.emit(GraphEvent::NodeCompleted {
+            node: node_id.clone(),
+            step,
+        });
+        None
+    }
+
+    /// Runs the active node set one node at a time (default behavior).
+    ///
+    /// Short-circuits on the first error (run aborts) or interrupt (later nodes
+    /// in the step are not started), exactly preserving milestone-1 semantics.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_active_sequential(
+        &self,
+        active: &[NodeId],
+        state: &State,
+        run_id: &RunId,
+        thread_id: &Option<ThreadId>,
+        step: usize,
+        resume_map: &mut HashMap<NodeId, serde_json::Value>,
+        visited: &mut Vec<NodeId>,
+    ) -> Result<StepRun<Update>> {
+        let mut updates: Vec<Update> = Vec::new();
+        let mut goto_map: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut interrupt: Option<(usize, Interrupt)> = None;
+
+        for (index, node_id) in active.iter().enumerate() {
+            let node = self
+                .nodes
+                .get(node_id)
+                .ok_or_else(|| RustAgentsError::MissingNode(node_id.to_string()))?;
+
+            self.emit(GraphEvent::TaskScheduled {
+                node: node_id.clone(),
+                step,
+            });
+            self.emit(GraphEvent::NodeStarted {
+                node: node_id.clone(),
+                step,
+            });
+
+            let ctx = self.node_context(node_id, run_id, thread_id, step, resume_map, None);
+            let result = match (node.handler)(state.clone(), ctx).await {
+                Ok(result) => result,
+                Err(error) => {
+                    self.emit(GraphEvent::NodeFailed {
+                        node: node_id.clone(),
+                        step,
+                        error: error.to_string(),
+                    });
+                    return Err(error);
+                }
+            };
+
+            if let Some(found) = self.fold_result(
+                index,
+                node_id,
+                step,
+                result,
+                &mut updates,
+                &mut goto_map,
+                visited,
+            ) {
+                interrupt = Some(found);
+                break;
+            }
+        }
+
+        Ok(StepRun {
+            updates,
+            goto_map,
+            interrupt,
+        })
+    }
+
+    /// Runs the active node set concurrently (opt-in via `with_parallel`).
+    ///
+    /// Every branch starts before any is awaited and all are driven to
+    /// completion via [`futures::future::join_all`]; each branch executes on its
+    /// own cloned `State` snapshot and a distinct [`ForkId`]. Results are then
+    /// folded in active-set index order — the reducer is the join/fan-in — so the
+    /// merged state is reproducible regardless of completion order. The
+    /// lowest-index branch that errors or interrupts is the step's terminal
+    /// outcome; lower-index successful branches still contribute their updates.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_active_parallel(
+        &self,
+        active: &[NodeId],
+        state: &State,
+        run_id: &RunId,
+        thread_id: &Option<ThreadId>,
+        step: usize,
+        resume_map: &mut HashMap<NodeId, serde_json::Value>,
+        visited: &mut Vec<NodeId>,
+    ) -> Result<StepRun<Update>> {
+        // Build one forked context + future per branch. Node lookup and resume
+        // consumption happen up front so the futures borrow nothing local.
+        let mut futures = Vec::with_capacity(active.len());
+        for (index, node_id) in active.iter().enumerate() {
+            let node = self
+                .nodes
+                .get(node_id)
+                .ok_or_else(|| RustAgentsError::MissingNode(node_id.to_string()))?;
+
+            self.emit(GraphEvent::TaskScheduled {
+                node: node_id.clone(),
+                step,
+            });
+            self.emit(GraphEvent::NodeStarted {
+                node: node_id.clone(),
+                step,
+            });
+
+            let fork = Some(ForkId::new(index, node_id.clone()));
+            let ctx = self.node_context(node_id, run_id, thread_id, step, resume_map, fork);
+            futures.push((node.handler)(state.clone(), ctx));
+        }
+
+        // Drive all branches concurrently to completion.
+        let results = futures::future::join_all(futures).await;
+
+        // Fold in deterministic active-set index order.
+        let mut updates: Vec<Update> = Vec::new();
+        let mut goto_map: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut interrupt: Option<(usize, Interrupt)> = None;
+
+        for (index, (node_id, result)) in active.iter().zip(results).enumerate() {
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    self.emit(GraphEvent::NodeFailed {
+                        node: node_id.clone(),
+                        step,
+                        error: error.to_string(),
+                    });
+                    return Err(error);
+                }
+            };
+
+            if let Some(found) = self.fold_result(
+                index,
+                node_id,
+                step,
+                result,
+                &mut updates,
+                &mut goto_map,
+                visited,
+            ) {
+                interrupt = Some(found);
+                break;
+            }
+        }
+
+        Ok(StepRun {
+            updates,
+            goto_map,
+            interrupt,
         })
     }
 

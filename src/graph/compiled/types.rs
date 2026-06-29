@@ -28,6 +28,8 @@ pub struct CompiledGraph<State, Update> {
     pub(crate) checkpointer: Option<Arc<dyn Checkpointer<State>>>,
     pub(crate) event_sink: Option<Arc<dyn GraphEventSink>>,
     pub(crate) namespace: Vec<String>,
+    /// When true, the active node set of a superstep is executed concurrently.
+    pub(crate) parallel: bool,
 }
 
 impl<State, Update> std::fmt::Debug for CompiledGraph<State, Update> {
@@ -38,6 +40,7 @@ impl<State, Update> std::fmt::Debug for CompiledGraph<State, Update> {
             .field("entry", &self.entry)
             .field("recursion_limit", &self.recursion_limit)
             .field("namespace", &self.namespace)
+            .field("parallel", &self.parallel)
             .finish_non_exhaustive()
     }
 }
@@ -56,6 +59,7 @@ impl<State, Update> Clone for CompiledGraph<State, Update> {
             checkpointer: self.checkpointer.clone(),
             event_sink: self.event_sink.clone(),
             namespace: self.namespace.clone(),
+            parallel: self.parallel,
         }
     }
 }

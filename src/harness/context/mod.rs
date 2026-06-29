@@ -53,6 +53,8 @@ impl RunConfig {
             timeout_ms: None,
             max_model_calls: 25,
             max_tool_calls: 50,
+            depth: 0,
+            max_depth: RunLimits::default().max_depth,
         }
     }
 
@@ -92,15 +94,45 @@ impl RunConfig {
         self
     }
 
+    /// Sets this run's depth in the sub-agent / recursion tree.
+    ///
+    /// Top-level runs are depth `0`; child runs spawned by a
+    /// [`crate::harness::subagent::SubAgent`] carry the parent depth plus one.
+    pub fn with_depth(mut self, depth: usize) -> Self {
+        self.depth = depth;
+        self
+    }
+
+    /// Sets the maximum sub-agent / recursion depth permitted for this run tree.
+    pub fn with_max_depth(mut self, max_depth: usize) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+
+    /// Builds the [`RunConfig`] for a child run one level deeper than this one.
+    ///
+    /// The returned config keeps this config's `max_depth` and thread, sets
+    /// `depth = self.depth + 1`, and uses `child_run_id` as the run identity.
+    /// It does **not** copy tags or metadata, which are run-specific.
+    pub fn child(&self, child_run_id: impl Into<String>) -> Self {
+        let mut config = Self::new(child_run_id);
+        config.depth = self.depth + 1;
+        config.max_depth = self.max_depth;
+        config.thread_id = self.thread_id.clone();
+        config
+    }
+
     /// Builds the [`RunLimits`] policy implied by this config.
     ///
-    /// Carries `max_model_calls`, `max_tool_calls`, and the timeout (as the
-    /// wall-clock cap) across; other limit fields use their defaults.
+    /// Carries `max_model_calls`, `max_tool_calls`, the timeout (as the
+    /// wall-clock cap), and `max_depth` across; other limit fields use their
+    /// defaults.
     fn to_run_limits(&self) -> RunLimits {
         RunLimits::default()
             .with_max_model_calls(self.max_model_calls)
             .with_max_tool_calls(self.max_tool_calls)
             .with_max_wall_clock_ms(self.timeout_ms)
+            .with_max_depth(self.max_depth)
     }
 }
 
@@ -121,6 +153,7 @@ impl<Ctx> RunContext<Ctx> {
             stores: StoreRegistry::new(),
             events: EventSink::new(),
             limits,
+            steering: None,
         }
     }
 
@@ -133,6 +166,17 @@ impl<Ctx> RunContext<Ctx> {
     /// Replaces the event sink with a (possibly shared) `events`.
     pub fn with_events(mut self, events: EventSink) -> Self {
         self.events = events;
+        self
+    }
+
+    /// Attaches a [`crate::harness::steering::SteeringHandle`] so an
+    /// orchestrator can steer this run at safe checkpoints.
+    ///
+    /// The agent loop drains the handle before each model call via
+    /// [`crate::harness::steering::apply_pending_steering`]. Without this the
+    /// run accepts no steering.
+    pub fn with_steering(mut self, steering: crate::harness::steering::SteeringHandle) -> Self {
+        self.steering = Some(steering);
         self
     }
 
@@ -149,6 +193,17 @@ impl<Ctx> RunContext<Ctx> {
     /// Returns this run's thread id, if it is threaded.
     pub fn thread_id(&self) -> Option<&ThreadId> {
         self.config.thread_id.as_ref()
+    }
+
+    /// Returns this run's depth in the sub-agent / recursion tree.
+    pub fn depth(&self) -> usize {
+        self.config.depth
+    }
+
+    /// Returns the maximum sub-agent / recursion depth permitted for this run
+    /// tree.
+    pub fn max_depth(&self) -> usize {
+        self.config.max_depth
     }
 
     /// Records one model call against the run's limits.

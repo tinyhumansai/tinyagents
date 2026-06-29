@@ -19,6 +19,16 @@ pub enum RustAgentsError {
     #[error("graph exceeded the recursion limit of {0} steps")]
     RecursionLimit(usize),
 
+    /// A sub-agent invocation would exceed the configured maximum recursion
+    /// depth. The payload is the `max_depth` cap that was reached.
+    ///
+    /// This is distinct from [`RustAgentsError::RecursionLimit`], which counts
+    /// graph *super-steps*; `SubAgentDepth` counts nested run-tree *levels*
+    /// (parent → child → grandchild …) so the two limits can be reasoned about
+    /// and surfaced independently.
+    #[error("sub-agent recursion exceeded the maximum depth of {0}")]
+    SubAgentDepth(usize),
+
     #[error("model error: {0}")]
     Model(String),
 
@@ -53,6 +63,13 @@ pub enum RustAgentsError {
     /// A middleware hook reported a failure.
     #[error("middleware error: {0}")]
     Middleware(String),
+
+    /// A steering command was rejected because the run's
+    /// [`crate::harness::steering::SteeringPolicy`] does not allow it, or it
+    /// could not be applied. The payload is a human-readable description naming
+    /// the offending command kind.
+    #[error("steering error: {0}")]
+    Steering(String),
 
     /// A memory backend operation failed.
     #[error("memory error: {0}")]

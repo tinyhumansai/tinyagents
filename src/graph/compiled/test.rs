@@ -7,6 +7,8 @@ use crate::graph::stream::{CollectingSink, GraphEvent};
 use crate::harness::ids::ExecutionStatus;
 use serde_json::json;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq)]
 struct Counter {
@@ -276,6 +278,253 @@ async fn events_are_emitted() {
         events
             .iter()
             .any(|e| matches!(e, GraphEvent::StepCompleted { .. }))
+    );
+}
+
+// --- Parallel (fan-out / fan-in) execution ---------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Fan {
+    /// Values contributed by branches, in reducer-application order.
+    values: Vec<i32>,
+    /// Fork branch indices observed by branches, in reducer-application order.
+    forks: Vec<usize>,
+    /// Sum a downstream join node computed over the merged `values`.
+    joined_sum: Option<i32>,
+}
+
+#[derive(Clone, Debug)]
+enum FanUpdate {
+    Branch { value: i32, fork: usize },
+    Join(i32),
+}
+
+/// Shared instrumentation proving how many branches were in flight at once.
+#[derive(Clone)]
+struct Concurrency {
+    inflight: Arc<AtomicUsize>,
+    max: Arc<AtomicUsize>,
+}
+
+impl Concurrency {
+    fn new() -> Self {
+        Self {
+            inflight: Arc::new(AtomicUsize::new(0)),
+            max: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn max_observed(&self) -> usize {
+        self.max.load(AtomicOrdering::SeqCst)
+    }
+
+    async fn track<T>(&self, sleep: Duration, value: T) -> T {
+        let now = self.inflight.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+        self.max.fetch_max(now, AtomicOrdering::SeqCst);
+        tokio::time::sleep(sleep).await;
+        self.inflight.fetch_sub(1, AtomicOrdering::SeqCst);
+        value
+    }
+}
+
+/// Builds a fan-out/fan-in graph: `super` routes to three branches that each
+/// contribute a value and their fork index; all three converge on `join`, which
+/// observes the merged state. `parallel` toggles concurrent branch execution.
+/// Branch sleeps are deliberately reversed (a shortest, c longest) so reducer
+/// ordering cannot accidentally match completion order.
+fn fanout_graph(parallel: bool, conc: Concurrency) -> CompiledGraph<Fan, FanUpdate> {
+    let (c_a, c_b, c_c) = (conc.clone(), conc.clone(), conc);
+    GraphBuilder::<Fan, FanUpdate>::new()
+        .with_parallel(parallel)
+        .set_reducer(ClosureStateReducer::new(|mut s: Fan, u: FanUpdate| {
+            match u {
+                FanUpdate::Branch { value, fork } => {
+                    s.values.push(value);
+                    s.forks.push(fork);
+                }
+                FanUpdate::Join(sum) => s.joined_sum = Some(sum),
+            }
+            Ok(s)
+        }))
+        .add_node("super", |_s: Fan, _c: NodeContext| async move {
+            Ok(NodeResult::Command(
+                Command::default().with_goto(["a", "b", "c"]),
+            ))
+        })
+        .add_node("a", move |_s: Fan, c: NodeContext| {
+            let conc = c_a.clone();
+            let fork = c
+                .fork
+                .as_ref()
+                .map(|f| f.branch_index)
+                .unwrap_or(usize::MAX);
+            async move {
+                Ok(NodeResult::Update(
+                    conc.track(
+                        Duration::from_millis(20),
+                        FanUpdate::Branch { value: 1, fork },
+                    )
+                    .await,
+                ))
+            }
+        })
+        .add_node("b", move |_s: Fan, c: NodeContext| {
+            let conc = c_b.clone();
+            let fork = c
+                .fork
+                .as_ref()
+                .map(|f| f.branch_index)
+                .unwrap_or(usize::MAX);
+            async move {
+                Ok(NodeResult::Update(
+                    conc.track(
+                        Duration::from_millis(60),
+                        FanUpdate::Branch { value: 2, fork },
+                    )
+                    .await,
+                ))
+            }
+        })
+        .add_node("c", move |_s: Fan, c: NodeContext| {
+            let conc = c_c.clone();
+            let fork = c
+                .fork
+                .as_ref()
+                .map(|f| f.branch_index)
+                .unwrap_or(usize::MAX);
+            async move {
+                Ok(NodeResult::Update(
+                    conc.track(
+                        Duration::from_millis(100),
+                        FanUpdate::Branch { value: 4, fork },
+                    )
+                    .await,
+                ))
+            }
+        })
+        .add_node("join", |s: Fan, _c: NodeContext| async move {
+            Ok(NodeResult::Update(FanUpdate::Join(s.values.iter().sum())))
+        })
+        .set_entry("super")
+        .mark_command_routing("super")
+        .add_edge("a", "join")
+        .add_edge("b", "join")
+        .add_edge("c", "join")
+        .set_finish("join")
+        .compile()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn parallel_runs_branches_concurrently_and_merges() {
+    let conc = Concurrency::new();
+    let graph = fanout_graph(true, conc.clone());
+    let run = graph.run(Fan::default()).await.unwrap();
+
+    // All three branches ran at the same time.
+    assert_eq!(conc.max_observed(), 3);
+    // Reducer merged every branch's contribution.
+    assert_eq!(run.state.values, vec![1, 2, 4]);
+    // Fork indices are deterministic active-set positions, not completion order.
+    assert_eq!(run.state.forks, vec![0, 1, 2]);
+    // Downstream join observed the merged state.
+    assert_eq!(run.state.joined_sum, Some(7));
+    // super | (a,b,c) | join == 3 supersteps.
+    assert_eq!(run.steps, 3);
+}
+
+#[tokio::test]
+async fn sequential_mode_runs_one_branch_at_a_time() {
+    let conc = Concurrency::new();
+    let graph = fanout_graph(false, conc.clone());
+    let run = graph.run(Fan::default()).await.unwrap();
+
+    // Never more than one branch in flight in sequential mode.
+    assert_eq!(conc.max_observed(), 1);
+    // Same deterministic merge as the parallel run.
+    assert_eq!(run.state.values, vec![1, 2, 4]);
+    assert_eq!(run.state.joined_sum, Some(7));
+    // Sequential branches get no fork identity.
+    assert_eq!(run.state.forks, vec![usize::MAX, usize::MAX, usize::MAX]);
+    assert_eq!(run.steps, 3);
+}
+
+#[tokio::test]
+async fn parallel_merge_is_reproducible() {
+    // Run the same parallel fan-out repeatedly; the merged order must be stable
+    // regardless of which branch's sleep finishes first.
+    for _ in 0..5 {
+        let graph = fanout_graph(true, Concurrency::new());
+        let run = graph.run(Fan::default()).await.unwrap();
+        assert_eq!(run.state.values, vec![1, 2, 4]);
+        assert_eq!(run.state.forks, vec![0, 1, 2]);
+        assert_eq!(run.state.joined_sum, Some(7));
+    }
+}
+
+#[tokio::test]
+async fn recursion_limit_is_deterministic_in_parallel() {
+    // A self-looping fan-out in parallel mode must still hit the recursion limit
+    // deterministically at the configured number of supersteps.
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .with_parallel(true)
+        .with_recursion_limit(3)
+        .add_node("loop", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Command(
+                Command::update(s + 1).with_goto(["loop"]),
+            ))
+        })
+        .set_entry("loop")
+        .mark_command_routing("loop")
+        .compile()
+        .unwrap();
+
+    let err = graph.run(0).await.unwrap_err();
+    assert!(matches!(err, RustAgentsError::RecursionLimit(3)));
+}
+
+#[tokio::test]
+async fn parallel_interrupt_pauses_at_lowest_index_branch() {
+    // When a parallel branch interrupts, the step pauses; the interrupted branch
+    // and every later active node become the checkpoint's pending nodes, while
+    // lower-index successful branches' updates are still applied.
+    let cp = Arc::new(InMemoryCheckpointer::<Fan>::new());
+    let graph = GraphBuilder::<Fan, FanUpdate>::new()
+        .with_parallel(true)
+        .set_reducer(ClosureStateReducer::new(|mut s: Fan, u: FanUpdate| {
+            if let FanUpdate::Branch { value, fork } = u {
+                s.values.push(value);
+                s.forks.push(fork);
+            }
+            Ok(s)
+        }))
+        .add_node("super", |_s: Fan, _c: NodeContext| async move {
+            Ok(NodeResult::Command(
+                Command::default().with_goto(["a", "b"]),
+            ))
+        })
+        .add_node("a", |_s: Fan, _c: NodeContext| async move {
+            Ok(NodeResult::Update(FanUpdate::Branch { value: 1, fork: 0 }))
+        })
+        .add_node("b", |_s: Fan, _c: NodeContext| async move {
+            Ok(NodeResult::Interrupt(Interrupt::new("b", json!({}))))
+        })
+        .set_entry("super")
+        .mark_command_routing("super")
+        .set_finish("a")
+        .set_finish("b")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    let paused = graph.run_with_thread("fan", Fan::default()).await.unwrap();
+    assert!(paused.is_interrupted());
+    // Lower-index branch `a` committed before the pause.
+    assert_eq!(paused.state.values, vec![1]);
+    // The interrupting branch `b` is the head of the pending set.
+    assert_eq!(
+        paused.status.active_nodes.first().map(|n| n.to_string()),
+        Some("b".to_string())
     );
 }
 

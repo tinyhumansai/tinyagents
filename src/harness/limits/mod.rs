@@ -54,6 +54,12 @@ impl RunLimits {
         self.max_concurrency = n;
         self
     }
+
+    /// Sets the maximum sub-agent / recursion depth for the run tree.
+    pub fn with_max_depth(mut self, n: usize) -> Self {
+        self.max_depth = n;
+        self
+    }
 }
 
 /// Tracks live counters for a single harness run and enforces [`RunLimits`].

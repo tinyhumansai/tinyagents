@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::harness::events::EventSink;
 use crate::harness::ids::{RunId, ThreadId};
 use crate::harness::limits::LimitTracker;
+use crate::harness::steering::SteeringHandle;
 use crate::harness::store::StoreRegistry;
 
 /// Declarative, serializable configuration for a single harness run.
@@ -55,6 +56,25 @@ pub struct RunConfig {
     pub max_model_calls: usize,
     /// Maximum number of tool invocations permitted for this run.
     pub max_tool_calls: usize,
+    /// Current depth of this run in the sub-agent / recursion tree.
+    ///
+    /// A top-level run is depth `0`. When a [`crate::harness::subagent::SubAgent`]
+    /// invokes a child harness, the child run's `depth` is the parent's depth
+    /// plus one. Defaults to `0` and is `#[serde(default)]` so configs written
+    /// before this field existed still deserialize.
+    #[serde(default)]
+    pub depth: usize,
+    /// Maximum sub-agent / recursion depth permitted for the run tree rooted at
+    /// this run. Carried into [`crate::harness::limits::RunLimits`] so the agent
+    /// loop and sub-agent guard share one cap. Defaults to
+    /// [`crate::harness::limits::RunLimits::DEFAULT_MAX_DEPTH`].
+    #[serde(default = "default_max_depth")]
+    pub max_depth: usize,
+}
+
+/// Serde default for [`RunConfig::max_depth`]: the crate-wide depth cap.
+fn default_max_depth() -> usize {
+    crate::harness::limits::RunLimits::DEFAULT_MAX_DEPTH
 }
 
 /// Live, in-process handle threaded through every step of a harness run.
@@ -82,4 +102,12 @@ pub struct RunContext<Ctx = ()> {
     pub events: EventSink,
     /// Live limit tracker derived from `config`.
     pub limits: LimitTracker,
+    /// Optional steering channel an orchestrator (parent agent, human UI,
+    /// graph supervisor, or test) uses to guide this run at safe checkpoints.
+    ///
+    /// `None` means the run accepts no steering. Attach one with
+    /// [`RunContext::with_steering`]; the agent loop drains it before each
+    /// model call via
+    /// [`crate::harness::steering::apply_pending_steering`].
+    pub steering: Option<SteeringHandle>,
 }

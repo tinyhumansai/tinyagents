@@ -29,6 +29,17 @@ pub struct RunLimits {
     pub max_retries_per_call: usize,
     /// Maximum number of concurrent in-flight calls. `None` means no limit.
     pub max_concurrency: Option<usize>,
+    /// Maximum sub-agent / recursion depth allowed for the run tree rooted at
+    /// this run. A top-level run is depth `0`; each nested child run increments
+    /// the depth. A sub-agent invocation whose child depth would exceed this cap
+    /// fails fast (see [`crate::harness::subagent`]). Defaults to
+    /// [`RunLimits::DEFAULT_MAX_DEPTH`].
+    pub max_depth: usize,
+}
+
+impl RunLimits {
+    /// Default sub-agent / recursion depth cap when none is configured.
+    pub const DEFAULT_MAX_DEPTH: usize = 8;
 }
 
 impl Default for RunLimits {
@@ -39,6 +50,7 @@ impl Default for RunLimits {
             max_wall_clock_ms: None,
             max_retries_per_call: 3,
             max_concurrency: None,
+            max_depth: Self::DEFAULT_MAX_DEPTH,
         }
     }
 }
