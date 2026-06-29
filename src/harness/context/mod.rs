@@ -242,6 +242,17 @@ impl<Ctx> RunContext<Ctx> {
     pub fn check_deadline(&mut self) -> Result<()> {
         self.limits.check_wall_clock()
     }
+
+    /// Returns the wall-clock budget still remaining before the run's deadline.
+    ///
+    /// Delegates to [`crate::harness::limits::LimitTracker::remaining_wall_clock`].
+    /// Returns `None` when the run has no configured timeout (so the caller
+    /// should not bound work by time); otherwise the remaining budget,
+    /// saturating at zero once the deadline has elapsed. The agent loop uses
+    /// this to bound each individual model call.
+    pub fn remaining_wall_clock(&self) -> Option<std::time::Duration> {
+        self.limits.remaining_wall_clock()
+    }
 }
 
 #[cfg(test)]

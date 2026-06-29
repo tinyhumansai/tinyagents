@@ -20,7 +20,7 @@ mod types;
 
 pub use types::*;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::error::{Result, TinyAgentsError};
 
@@ -129,6 +129,28 @@ impl LimitTracker {
             }
         }
         Ok(())
+    }
+
+    /// Returns the wall-clock budget still remaining before the configured
+    /// deadline, measured from this tracker's start instant.
+    ///
+    /// Returns `None` when no wall-clock deadline is configured (so callers
+    /// should not bound work by time). When a deadline is configured the
+    /// returned [`Duration`] is the remaining budget, saturating at
+    /// [`Duration::ZERO`] once the deadline has already elapsed.
+    ///
+    /// This is the budget the agent loop uses to bound an individual model call
+    /// (via `tokio::time::timeout`) so a hung or slow provider call is
+    /// interrupted rather than only being detected by the between-call
+    /// [`check_wall_clock`] check.
+    ///
+    /// [`check_wall_clock`]: LimitTracker::check_wall_clock
+    pub fn remaining_wall_clock(&self) -> Option<Duration> {
+        self.limits.max_wall_clock_ms.map(|max_ms| {
+            let max = Duration::from_millis(max_ms);
+            max.checked_sub(self.started_at.elapsed())
+                .unwrap_or(Duration::ZERO)
+        })
     }
 
     /// Returns the number of model calls recorded so far.

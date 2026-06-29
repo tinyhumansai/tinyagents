@@ -49,7 +49,9 @@ mod types;
 
 pub use types::*;
 
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::cache::{ResponseCache, cache_key};
@@ -638,6 +640,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         let mut current_name = binding.resolved.name.clone();
         let mut model = binding.model;
         let mut resolved = binding.resolved;
+        let run_id = ctx.run_id().clone();
 
         loop {
             // Retry loop for the current model.
@@ -650,11 +653,20 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 if ctx.cancellation.is_cancelled() {
                     return Err(TinyAgentsError::Cancelled);
                 }
+                // Bound this individual provider call by the run's *remaining*
+                // wall-clock budget so a hung or slow model call is interrupted
+                // mid-flight, not merely detected by the between-call deadline
+                // check. reqwest/futures are cancel-safe, so dropping the future
+                // on elapse cancels the underlying request. When the run has no
+                // timeout configured the call is awaited unbounded.
+                let remaining = ctx.remaining_wall_clock();
                 let attempt_result = if streaming {
-                    self.invoke_model_streaming_once(state, ctx, &model, request, call_id)
-                        .await
+                    let fut =
+                        self.invoke_model_streaming_once(state, ctx, &model, request, call_id);
+                    Self::with_call_budget(remaining, run_id.as_str(), fut).await
                 } else {
-                    model.invoke(state, request.clone()).await
+                    let fut = model.invoke(state, request.clone());
+                    Self::with_call_budget(remaining, run_id.as_str(), fut).await
                 };
                 match attempt_result {
                     Ok(response) => break Ok(response),
@@ -706,6 +718,34 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     }
                 }
             }
+        }
+    }
+
+    /// Awaits a single model-call future, optionally bounded by `budget`.
+    ///
+    /// When `budget` is `Some`, the future is wrapped in
+    /// [`tokio::time::timeout`]; if it elapses the future is dropped (cancelling
+    /// the in-flight provider request) and a
+    /// [`TinyAgentsError::Timeout`] is returned. When `budget` is `None` (no
+    /// run timeout configured) the future is awaited without a bound.
+    ///
+    /// `budget` is the run's *remaining* wall-clock budget at the time the call
+    /// is issued, so each successive call gets a tighter bound as the deadline
+    /// approaches.
+    async fn with_call_budget<F>(budget: Option<Duration>, run_id: &str, fut: F) -> F::Output
+    where
+        F: Future<Output = Result<ModelResponse>>,
+    {
+        match budget {
+            Some(budget) => match tokio::time::timeout(budget, fut).await {
+                Ok(result) => result,
+                Err(_) => Err(TinyAgentsError::Timeout(format!(
+                    "model call for run `{run_id}` exceeded its remaining wall-clock budget \
+                     ({} ms)",
+                    budget.as_millis()
+                ))),
+            },
+            None => fut.await,
         }
     }
 

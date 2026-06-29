@@ -6,6 +6,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::harness::events::{AgentEvent, EventSink, RecordingListener};
 use crate::harness::model::{ModelRequest, ModelResponse, ModelStreamItem};
@@ -36,6 +37,41 @@ pub struct StreamingMock {
     /// The scripted items replayed on every `stream` call.
     pub(crate) items: Vec<ModelStreamItem>,
     /// Number of `stream`/`invoke` calls made so far.
+    pub(crate) calls: Mutex<u64>,
+}
+
+// ---------------------------------------------------------------------------
+// SlowModel
+// ---------------------------------------------------------------------------
+
+/// A [`crate::harness::model::ChatModel`] that sleeps for a fixed delay before
+/// replying, used to deterministically trigger the agent loop's per-model-call
+/// wall-clock timeout.
+///
+/// Both [`crate::harness::model::ChatModel::invoke`] and
+/// [`crate::harness::model::ChatModel::stream`] first
+/// `tokio::time::sleep(delay).await` and then return a fixed assistant reply.
+/// (The `stream` path inherits the delay because the default trait
+/// implementation delegates to `invoke`.) Configure the run with a wall-clock
+/// timeout much smaller than `delay` (for example a 20&nbsp;ms timeout against a
+/// 200&nbsp;ms delay) so the call is reliably interrupted with
+/// [`crate::error::TinyAgentsError::Timeout`].
+///
+/// # Example
+///
+/// ```rust
+/// # use std::time::Duration;
+/// # use tinyagents::harness::testkit::SlowModel;
+/// // Sleeps 200ms before echoing a fixed reply.
+/// let model = SlowModel::new(Duration::from_millis(200), "slow reply");
+/// ```
+pub struct SlowModel {
+    /// How long [`crate::harness::model::ChatModel::invoke`] sleeps before
+    /// replying.
+    pub(crate) delay: Duration,
+    /// The fixed assistant text returned after the delay.
+    pub(crate) reply: String,
+    /// Number of `invoke` calls made so far.
     pub(crate) calls: Mutex<u64>,
 }
 

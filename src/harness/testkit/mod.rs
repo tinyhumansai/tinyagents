@@ -8,6 +8,7 @@
 //! | Type | Purpose |
 //! |------|---------|
 //! | [`ScriptedModel`] | Pre-loaded `ChatModel` returning queued responses |
+//! | [`SlowModel`] | `ChatModel` that sleeps before replying (timeout testing) |
 //! | [`FakeTool`] | Configurable `Tool` recording invocations |
 //! | [`DeterministicClock`] | Controllable millisecond clock |
 //! | [`DeterministicIds`] | Monotonic `"{prefix}-N"` id generator |
@@ -18,6 +19,7 @@ mod types;
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -107,6 +109,40 @@ impl<State: Send + Sync> ChatModel<State> for StreamingMock {
             .expect("StreamingMock calls lock poisoned") += 1;
         let items = self.items.clone();
         Ok(Box::pin(futures::stream::iter(items)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SlowModel
+// ---------------------------------------------------------------------------
+
+impl SlowModel {
+    /// Creates a slow model that sleeps `delay` before returning `reply`.
+    pub fn new(delay: Duration, reply: impl Into<String>) -> Self {
+        Self {
+            delay,
+            reply: reply.into(),
+            calls: Mutex::new(0),
+        }
+    }
+
+    /// Returns the number of `invoke` calls made so far.
+    pub fn call_count(&self) -> u64 {
+        *self.calls.lock().expect("SlowModel calls lock poisoned")
+    }
+}
+
+#[async_trait]
+impl<State: Send + Sync> ChatModel<State> for SlowModel {
+    /// Sleeps for the configured delay, then returns the fixed reply.
+    async fn invoke(&self, _state: &State, _request: ModelRequest) -> Result<ModelResponse> {
+        {
+            // Bump the counter in its own scope so the guard is dropped before
+            // the `.await` (a `MutexGuard` is not `Send`).
+            *self.calls.lock().expect("SlowModel calls lock poisoned") += 1;
+        }
+        tokio::time::sleep(self.delay).await;
+        Ok(ModelResponse::assistant(self.reply.clone()))
     }
 }
 
