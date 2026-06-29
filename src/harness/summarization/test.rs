@@ -1,8 +1,10 @@
-//! Tests added in a later pass.
+//! Tests for trimming, summarization, and compression policies.
 //!
-//! This file is a placeholder.  Comprehensive tests covering trimming,
-//! summarization, and policy logic will be added when the integration test
-//! suite is extended.
+//! Cover the [`estimate_tokens`] heuristic (clamping and ~4-chars-per-token
+//! scaling), every [`TrimStrategy`] variant (including system-message retention
+//! and the last-resort drop), [`ConcatSummarizer`] output and provenance, and
+//! [`SummarizationPolicy`] gating — both the raw `trigger_tokens` path and the
+//! context-window-aware `threshold_fraction` path, plus `plan` splitting.
 
 #[cfg(test)]
 mod smoke {

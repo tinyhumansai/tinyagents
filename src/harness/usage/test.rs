@@ -1,3 +1,8 @@
+//! Tests for token usage accounting.
+//!
+//! Cover [`Usage::new`] totalling, `+`/`+=` accumulation across the detailed
+//! token fields, and [`UsageTotals`] call-count tracking.
+
 use super::*;
 
 #[test]

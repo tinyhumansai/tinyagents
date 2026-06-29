@@ -1,3 +1,9 @@
+//! Tests for the harness tool layer.
+//!
+//! Cover [`ToolSchema`]/[`ToolCall`]/[`ToolResult`] construction (including the
+//! error path that preserves the call id) and [`ToolRegistry`] registration,
+//! lookup, name listing, and schema collection.
+
 use super::*;
 use async_trait::async_trait;
 use serde_json::json;

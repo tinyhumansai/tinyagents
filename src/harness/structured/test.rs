@@ -1,4 +1,9 @@
-//! Tests added in a later pass.
+//! Tests for structured-output extraction.
+//!
+//! Cover [`StructuredStrategy::for_profile`] selection, both extraction
+//! strategies (provider-schema JSON parsing and tool-call argument reading,
+//! including their error paths), [`response_format_for_strategy`] mapping, and
+//! [`StructuredOutput::parse`] deserialisation.
 
 use super::*;
 use crate::harness::model::{ModelProfile, ModelResponse, ResponseFormat};
