@@ -674,6 +674,71 @@ async fn cancelled_mid_run_stops_before_next_model_call() {
     assert_eq!(*invocations.lock().unwrap(), 1);
 }
 
+// ── Per-model-call timeout ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn slow_model_call_is_timed_out_by_remaining_budget() {
+    use std::time::Duration;
+
+    use crate::harness::testkit::SlowModel;
+
+    // The model sleeps far longer (200ms) than the run's wall-clock budget
+    // (20ms), so the per-call timeout must interrupt it mid-flight and surface a
+    // `Timeout` error rather than waiting for the model to return.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "slow",
+        Arc::new(SlowModel::new(Duration::from_millis(200), "too late")),
+    );
+
+    let config = RunConfig::new("timeout-run").with_timeout_ms(20);
+    let err = harness
+        .invoke(&(), (), config, vec![Message::user("hi")])
+        .await
+        .expect_err("a model call slower than the budget must time out");
+
+    assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn fast_model_call_succeeds_under_same_budget() {
+    // Control: under the same small timeout a fast model completes well within
+    // the budget, proving the timeout only fires on genuinely slow calls.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("fast", Arc::new(MockModel::constant("done")));
+
+    let config = RunConfig::new("fast-run").with_timeout_ms(20);
+    let run = harness
+        .invoke(&(), (), config, vec![Message::user("hi")])
+        .await
+        .expect("a fast model call completes within the budget");
+
+    assert_eq!(run.text(), Some("done".to_string()));
+}
+
+#[tokio::test]
+async fn slow_streaming_model_call_is_timed_out() {
+    use std::time::Duration;
+
+    use crate::harness::testkit::SlowModel;
+
+    // The streaming path must enforce the same per-call budget: the default
+    // `stream` impl delegates to `invoke`, whose sleep exceeds the 20ms budget.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "slow",
+        Arc::new(SlowModel::new(Duration::from_millis(200), "too late")),
+    );
+
+    let config = RunConfig::new("timeout-stream-run").with_timeout_ms(20);
+    let err = harness
+        .invoke_streaming(&(), (), config, vec![Message::user("hi")])
+        .await
+        .expect_err("a slow streaming model call must time out");
+
+    assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
+}
+
 // ── Response caching ──────────────────────────────────────────────────────────
 
 #[tokio::test]
