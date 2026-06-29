@@ -4,6 +4,7 @@
 pub mod chat;
 pub mod error;
 pub mod graph;
+pub mod harness;
 pub mod model;
 pub mod tool;
 

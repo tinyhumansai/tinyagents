@@ -5,11 +5,19 @@ LangGraph. The system is organized around three modules:
 
 1. the harness
 2. the graph
-3. the expressive language
+3. the registry
+4. the expressive language
 
 The goal is to make agent systems easy to define, inspect, run, test, and
 eventually serialize without hiding the Rust types that make production systems
 reliable.
+
+## Detailed Module Docs
+
+- [Harness module](modules/harness.md)
+- [Graph module](modules/graph.md)
+- [Registry module](modules/registry.md)
+- [Expressive language module](modules/expressive-language.md)
 
 ## Design Goals
 

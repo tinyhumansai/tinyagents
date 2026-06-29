@@ -1,7 +1,7 @@
 [package]
 name = "rustagents"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "GPL-3.0-only"
 description = "A Rust LLM orchestration library inspired by LangChain and LangGraph."
 repository = "https://github.com/tinyhumansai/rustagents"

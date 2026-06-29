@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{chat::ChatMessage, Result};
+use crate::{Result, chat::ChatMessage};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ModelRequest {
