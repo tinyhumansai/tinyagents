@@ -402,7 +402,7 @@ fn validate(
 /// command-routing set, and the behavior-free node-metadata map.
 fn node_parts<'a, I>(
     ids: I,
-    is_command: impl Fn(&str) -> bool,
+    is_command: impl Fn(&crate::harness::ids::NodeId) -> bool,
     meta: &std::collections::HashMap<crate::harness::ids::NodeId, crate::graph::builder::NodeMeta>,
 ) -> Vec<NodePart>
 where
@@ -414,7 +414,7 @@ where
             NodePart {
                 id: id.to_string(),
                 kind: m.and_then(|m| m.kind.clone()),
-                command_routing: is_command(id.as_str()),
+                command_routing: is_command(id),
                 subgraph: m.is_some_and(|m| m.subgraph),
                 interrupt: m.is_some_and(|m| m.interrupt),
                 deferred: m.is_some_and(|m| m.deferred),
