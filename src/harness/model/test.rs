@@ -75,6 +75,128 @@ fn response_format_json_schema() {
 }
 
 #[test]
+fn response_format_auto_constructor() {
+    let fmt = ResponseFormat::auto("person", json!({"type": "object"}));
+    match fmt {
+        ResponseFormat::Auto { name, .. } => assert_eq!(name, "person"),
+        _ => panic!("expected auto"),
+    }
+}
+
+#[test]
+fn default_profile_is_conservative() {
+    let profile = ModelProfile::default();
+    assert!(!profile.tool_calling);
+    assert!(!profile.native_structured_output);
+    assert!(!profile.streaming);
+    assert_eq!(profile.status, ModelStatus::Stable);
+    // Default modalities are text-only.
+    assert!(profile.modalities.text_in && profile.modalities.text_out);
+    assert!(!profile.modalities.image_in);
+}
+
+#[test]
+fn empty_capability_set_is_always_satisfied() {
+    let profile = ModelProfile::default();
+    assert!(profile.satisfies(&CapabilitySet::default()));
+}
+
+#[test]
+fn profile_satisfies_matching_capabilities() {
+    let profile = ModelProfile {
+        tool_calling: true,
+        streaming: true,
+        json_schema: true,
+        native_structured_output: true,
+        max_input_tokens: Some(128_000),
+        max_output_tokens: Some(8_000),
+        ..ModelProfile::default()
+    };
+    let required = CapabilitySet {
+        tool_calling: true,
+        json_schema: true,
+        native_structured_output: true,
+        min_input_tokens: Some(100_000),
+        min_output_tokens: Some(4_000),
+        ..CapabilitySet::default()
+    };
+    assert!(profile.satisfies(&required));
+}
+
+#[test]
+fn profile_does_not_satisfy_missing_capability() {
+    let profile = ModelProfile {
+        tool_calling: true,
+        ..ModelProfile::default()
+    };
+    // Requires reasoning, which the profile does not advertise.
+    let required = CapabilitySet {
+        tool_calling: true,
+        reasoning: true,
+        ..CapabilitySet::default()
+    };
+    assert!(!profile.satisfies(&required));
+}
+
+#[test]
+fn profile_token_requirement_fails_when_capacity_unknown_or_too_small() {
+    // Unknown capacity fails a token requirement.
+    let unknown = ModelProfile::default();
+    assert!(!unknown.satisfies(&CapabilitySet {
+        min_input_tokens: Some(1_000),
+        ..CapabilitySet::default()
+    }));
+
+    // Known-but-too-small capacity also fails.
+    let small = ModelProfile {
+        max_output_tokens: Some(512),
+        ..ModelProfile::default()
+    };
+    assert!(!small.satisfies(&CapabilitySet {
+        min_output_tokens: Some(4_096),
+        ..CapabilitySet::default()
+    }));
+}
+
+#[test]
+fn permissive_profile_satisfies_demanding_capability_set() {
+    let profile = ModelProfile::permissive();
+    let required = CapabilitySet {
+        tool_calling: true,
+        parallel_tool_calls: true,
+        streaming: true,
+        streaming_tool_chunks: true,
+        native_structured_output: true,
+        json_schema: true,
+        reasoning: true,
+        image_in: true,
+        image_out: true,
+        audio_in: true,
+        audio_out: true,
+        ..CapabilitySet::default()
+    };
+    assert!(profile.satisfies(&required));
+}
+
+#[test]
+fn model_request_capability_and_provider_option_builders() {
+    let caps = CapabilitySet {
+        tool_calling: true,
+        ..CapabilitySet::default()
+    };
+    let req = ModelRequest::new(vec![])
+        .with_required_capabilities(caps.clone())
+        .with_provider_options(json!({"top_k": 5}))
+        .with_continuation_id("resp-1");
+    assert_eq!(req.required_capabilities, Some(caps));
+    assert_eq!(req.provider_options, json!({"top_k": 5}));
+    assert_eq!(req.continuation_id.as_deref(), Some("resp-1"));
+    // Defaults stay null/None so existing builders/tests are unaffected.
+    assert!(ModelRequest::default().provider_options.is_null());
+    assert!(ModelRequest::default().required_capabilities.is_none());
+}
+
+#[test]
 fn response_helpers() {
     let resp = ModelResponse::assistant("hi")
         .with_finish_reason("stop")

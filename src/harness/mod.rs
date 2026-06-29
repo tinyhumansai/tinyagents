@@ -33,7 +33,10 @@ pub mod usage;
 pub use cost::CostTotals;
 pub use ids::*;
 pub use message::{ContentBlock, Message};
-pub use model::{ModelRequest, ModelResponse, ResponseFormat, ToolChoice};
+pub use model::{
+    CapabilitySet, Modalities, ModelProfile, ModelRequest, ModelResponse, ModelStatus,
+    ResponseFormat, ToolChoice,
+};
 pub use tool::{
     Tool as HarnessTool, ToolCall as HarnessToolCall, ToolRegistry,
     ToolResult as HarnessToolResult, ToolSchema,

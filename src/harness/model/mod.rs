@@ -24,6 +24,74 @@ impl ResponseFormat {
             schema,
         }
     }
+
+    /// Constructs a [`ResponseFormat::Auto`] format that lets the harness pick a
+    /// structured-output strategy from the resolved model profile.
+    pub fn auto(name: impl Into<String>, schema: Value) -> Self {
+        ResponseFormat::Auto {
+            name: name.into(),
+            schema,
+        }
+    }
+}
+
+impl ModelProfile {
+    /// Returns `true` when this profile satisfies every requirement in `set`.
+    ///
+    /// Boolean requirements must be matched by an equal-or-stronger capability
+    /// on the profile. A token requirement is satisfied only when the profile
+    /// advertises a known capacity at least as large; an unknown
+    /// (`None`) capacity fails a token requirement, to stay conservative.
+    pub fn satisfies(&self, set: &CapabilitySet) -> bool {
+        let bool_ok = (!set.tool_calling || self.tool_calling)
+            && (!set.parallel_tool_calls || self.parallel_tool_calls)
+            && (!set.streaming || self.streaming)
+            && (!set.streaming_tool_chunks || self.streaming_tool_chunks)
+            && (!set.native_structured_output || self.native_structured_output)
+            && (!set.json_schema || self.json_schema)
+            && (!set.reasoning || self.reasoning)
+            && (!set.image_in || self.modalities.image_in)
+            && (!set.image_out || self.modalities.image_out)
+            && (!set.audio_in || self.modalities.audio_in)
+            && (!set.audio_out || self.modalities.audio_out);
+        if !bool_ok {
+            return false;
+        }
+        if let Some(min) = set.min_input_tokens
+            && self.max_input_tokens.is_none_or(|cap| cap < min)
+        {
+            return false;
+        }
+        if let Some(min) = set.min_output_tokens
+            && self.max_output_tokens.is_none_or(|cap| cap < min)
+        {
+            return false;
+        }
+        true
+    }
+
+    /// A permissive profile that advertises every capability and broad
+    /// modalities. Useful for mocks and tests.
+    pub fn permissive() -> Self {
+        Self {
+            modalities: Modalities {
+                text_in: true,
+                text_out: true,
+                image_in: true,
+                image_out: true,
+                audio_in: true,
+                audio_out: true,
+            },
+            tool_calling: true,
+            parallel_tool_calls: true,
+            streaming: true,
+            streaming_tool_chunks: true,
+            native_structured_output: true,
+            json_schema: true,
+            reasoning: true,
+            ..Self::default()
+        }
+    }
 }
 
 impl ModelRequest {
@@ -98,6 +166,30 @@ impl ModelRequest {
     /// Sets the declared prompt cache segments.
     pub fn with_cache_segments(mut self, segments: Vec<PromptSegment>) -> Self {
         self.cache_segments = segments;
+        self
+    }
+
+    /// Sets the capabilities the resolved model must satisfy.
+    pub fn with_required_capabilities(mut self, capabilities: CapabilitySet) -> Self {
+        self.required_capabilities = Some(capabilities);
+        self
+    }
+
+    /// Sets the provider-specific pass-through options.
+    pub fn with_provider_options(mut self, options: Value) -> Self {
+        self.provider_options = options;
+        self
+    }
+
+    /// Sets the caching policy for this call.
+    pub fn with_cache_policy(mut self, policy: crate::harness::cache::CachePolicy) -> Self {
+        self.cache_policy = Some(policy);
+        self
+    }
+
+    /// Sets the provider continuation id for stateful follow-ups.
+    pub fn with_continuation_id(mut self, id: impl Into<String>) -> Self {
+        self.continuation_id = Some(id.into());
         self
     }
 

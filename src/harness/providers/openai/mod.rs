@@ -33,7 +33,10 @@ use serde_json::{Value, json};
 
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::message::{AssistantMessage, ContentBlock, Message};
-use crate::harness::model::{ChatModel, ModelRequest, ModelResponse, ResponseFormat, ToolChoice};
+use crate::harness::model::{
+    ChatModel, Modalities, ModelProfile, ModelRequest, ModelResponse, ModelStatus, ResponseFormat,
+    ToolChoice,
+};
 use crate::harness::tool::ToolCall;
 use crate::harness::usage::Usage;
 
@@ -56,6 +59,40 @@ pub struct OpenAiModel {
     model: String,
     /// API base URL (no trailing slash); `/chat/completions` is appended.
     base_url: String,
+    /// Capability profile derived from the default model id.
+    profile: ModelProfile,
+}
+
+/// Derives a static [`ModelProfile`] for an OpenAI(-compatible) model id.
+///
+/// All targets support tool calling, streaming (including tool-call chunks),
+/// and JSON Schema response formats. Modern OpenAI-family models additionally
+/// advertise native structured output and (for the o-series) reasoning output.
+fn derive_profile(model: &str) -> ModelProfile {
+    let lower = model.to_ascii_lowercase();
+    let native_structured = lower.contains("gpt-4o")
+        || lower.contains("gpt-4.1")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4");
+    let reasoning = lower.starts_with("o1") || lower.starts_with("o3") || lower.starts_with("o4");
+    ModelProfile {
+        provider: Some("openai".to_string()),
+        model: Some(model.to_string()),
+        status: ModelStatus::Stable,
+        modalities: Modalities {
+            image_in: true,
+            ..Modalities::default()
+        },
+        tool_calling: true,
+        parallel_tool_calls: true,
+        streaming: true,
+        streaming_tool_chunks: true,
+        native_structured_output: native_structured,
+        json_schema: true,
+        reasoning,
+        ..ModelProfile::default()
+    }
 }
 
 impl OpenAiModel {
@@ -67,12 +104,14 @@ impl OpenAiModel {
             api_key: api_key.into(),
             model: DEFAULT_MODEL.to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
+            profile: derive_profile(DEFAULT_MODEL),
         }
     }
 
     /// Overrides the default model id.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        self.profile = derive_profile(&self.model);
         self
     }
 
@@ -335,14 +374,19 @@ fn translate_response_format(format: &ResponseFormat) -> Option<Value> {
     match format {
         ResponseFormat::Text => None,
         ResponseFormat::JsonObject => Some(json!({ "type": "json_object" })),
-        ResponseFormat::JsonSchema { name, schema } => Some(json!({
-            "type": "json_schema",
-            "json_schema": {
-                "name": name,
-                "schema": schema,
-                "strict": true,
-            }
-        })),
+        // OpenAI supports native structured output, so `Auto` maps to a JSON
+        // schema request directly. (The agent loop normally resolves `Auto`
+        // before reaching the provider; this keeps direct calls correct too.)
+        ResponseFormat::JsonSchema { name, schema } | ResponseFormat::Auto { name, schema } => {
+            Some(json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": name,
+                    "schema": schema,
+                    "strict": true,
+                }
+            }))
+        }
     }
 }
 
@@ -411,6 +455,11 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
 
 #[async_trait]
 impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
+    /// Returns the capability profile derived from the configured model id.
+    fn profile(&self) -> Option<&ModelProfile> {
+        Some(&self.profile)
+    }
+
     /// Invokes the OpenAI Chat Completions endpoint and maps the response into a
     /// [`ModelResponse`].
     ///

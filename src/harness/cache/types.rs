@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::harness::model::ModelResponse;
@@ -97,7 +98,7 @@ pub struct CacheLayoutEvent {
 ///
 /// Both flags default to `false` (no caching / no protection) so the harness
 /// is safe-by-default and opts must be explicit.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CachePolicy {
     /// When `true`, the harness will look up (and write) local response cache
     /// entries via [`ResponseCache`] before calling the provider.

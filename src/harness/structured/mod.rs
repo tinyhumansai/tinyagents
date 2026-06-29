@@ -43,7 +43,56 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::error::{Result, TinyAgentsError};
-use crate::harness::model::{ModelResponse, ResponseFormat};
+use crate::harness::model::{ModelProfile, ModelResponse, ResponseFormat};
+
+// ---------------------------------------------------------------------------
+// Strategy selection
+// ---------------------------------------------------------------------------
+
+impl StructuredStrategy {
+    /// Chooses a strategy for [`ResponseFormat::Auto`] based on a model profile.
+    ///
+    /// Returns [`StructuredStrategy::ProviderSchema`] when the model advertises
+    /// native structured output *and* JSON Schema support, or when no profile is
+    /// available (the conservative default). Otherwise returns
+    /// [`StructuredStrategy::ToolCall`], which works on any tool-calling model.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use tinyagents::harness::structured::StructuredStrategy;
+    /// use tinyagents::harness::model::ModelProfile;
+    ///
+    /// // No profile -> provider-native schema mode.
+    /// assert_eq!(
+    ///     StructuredStrategy::for_profile(None),
+    ///     StructuredStrategy::ProviderSchema
+    /// );
+    ///
+    /// // A tool-calling model without native structured output -> tool call.
+    /// let mut profile = ModelProfile { tool_calling: true, ..ModelProfile::default() };
+    /// assert_eq!(
+    ///     StructuredStrategy::for_profile(Some(&profile)),
+    ///     StructuredStrategy::ToolCall
+    /// );
+    ///
+    /// // A model with native structured output -> provider schema.
+    /// profile.native_structured_output = true;
+    /// profile.json_schema = true;
+    /// assert_eq!(
+    ///     StructuredStrategy::for_profile(Some(&profile)),
+    ///     StructuredStrategy::ProviderSchema
+    /// );
+    /// ```
+    pub fn for_profile(profile: Option<&ModelProfile>) -> StructuredStrategy {
+        match profile {
+            Some(p) if !(p.native_structured_output && p.json_schema) => {
+                StructuredStrategy::ToolCall
+            }
+            _ => StructuredStrategy::ProviderSchema,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // StructuredOutput

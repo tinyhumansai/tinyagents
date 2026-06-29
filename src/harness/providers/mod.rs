@@ -38,7 +38,7 @@ use serde_json::Value;
 use crate::Result;
 use crate::error::TinyAgentsError;
 use crate::harness::message::{AssistantMessage, ContentBlock, Message};
-use crate::harness::model::{ChatModel, ModelDelta, ModelRequest, ModelResponse};
+use crate::harness::model::{ChatModel, ModelDelta, ModelProfile, ModelRequest, ModelResponse};
 use crate::harness::tool::ToolCall;
 use crate::harness::usage::Usage;
 
@@ -141,8 +141,23 @@ impl MockModel {
 // ChatModel<State> impl
 // ---------------------------------------------------------------------------
 
+/// Returns the shared permissive [`ModelProfile`] advertised by [`MockModel`].
+///
+/// `MockModel` can satisfy any reasonable [`CapabilitySet`][crate::harness::model::CapabilitySet]
+/// and supports every structured-output strategy, so its profile enables all
+/// capabilities.
+fn mock_profile() -> &'static ModelProfile {
+    static PROFILE: std::sync::OnceLock<ModelProfile> = std::sync::OnceLock::new();
+    PROFILE.get_or_init(ModelProfile::permissive)
+}
+
 #[async_trait]
 impl<State: Send + Sync> ChatModel<State> for MockModel {
+    /// Returns a permissive profile advertising every capability.
+    fn profile(&self) -> Option<&ModelProfile> {
+        Some(mock_profile())
+    }
+
     /// Invokes the mock model and returns a deterministic response.
     ///
     /// Increments the internal call counter on every invocation.

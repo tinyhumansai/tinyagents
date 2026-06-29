@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::harness::cache::CachePolicy;
 use crate::harness::message::{AssistantMessage, Message};
 use crate::harness::tool::{ToolDelta, ToolSchema};
 use crate::harness::usage::Usage;
@@ -46,6 +47,183 @@ pub enum ResponseFormat {
         /// JSON Schema document.
         schema: Value,
     },
+    /// Request structured JSON output but let the harness pick the extraction
+    /// strategy from the resolved model's [`ModelProfile`].
+    ///
+    /// The harness resolves this into either provider-native schema mode
+    /// ([`StructuredStrategy::ProviderSchema`]) when the model advertises
+    /// native structured output, or a tool-call fallback
+    /// ([`StructuredStrategy::ToolCall`]) otherwise. When no profile is
+    /// available it falls back to provider-native schema mode.
+    ///
+    /// [`StructuredStrategy::ProviderSchema`]: crate::harness::structured::StructuredStrategy::ProviderSchema
+    /// [`StructuredStrategy::ToolCall`]: crate::harness::structured::StructuredStrategy::ToolCall
+    Auto {
+        /// Schema name advertised to the provider or used as the fallback tool
+        /// name.
+        name: String,
+        /// JSON Schema document describing the desired structure.
+        schema: Value,
+    },
+}
+
+/// Lifecycle status of a model, used by [`ModelProfile`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelStatus {
+    /// Generally available and supported.
+    #[default]
+    Stable,
+    /// Preview/beta; behavior may change.
+    Preview,
+    /// Slated for removal; callers should migrate.
+    Deprecated,
+    /// No longer served by the provider.
+    Retired,
+}
+
+/// The input/output modalities a model supports.
+///
+/// [`Default`] enables text in and text out only; all media modalities are
+/// disabled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Modalities {
+    /// Accepts text input.
+    pub text_in: bool,
+    /// Produces text output.
+    pub text_out: bool,
+    /// Accepts image input (vision).
+    pub image_in: bool,
+    /// Produces image output.
+    pub image_out: bool,
+    /// Accepts audio input.
+    pub audio_in: bool,
+    /// Produces audio output.
+    pub audio_out: bool,
+}
+
+impl Default for Modalities {
+    fn default() -> Self {
+        Self {
+            text_in: true,
+            text_out: true,
+            image_in: false,
+            image_out: false,
+            audio_in: false,
+            audio_out: false,
+        }
+    }
+}
+
+/// A capability profile describing what a model can do.
+///
+/// Profiles let the harness reject impossible requests before a network call,
+/// choose native structured output versus tool-based structured output, decide
+/// whether tool-call chunks can stream, and select fallbacks that satisfy
+/// required capabilities. Profiles are not a pricing table; prices live in the
+/// cost feature.
+///
+/// [`Default`] is conservative: text-only modalities and every optional
+/// capability disabled. Providers should override with what they actually
+/// support.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelProfile {
+    /// Provider family identifier (for example `openai`), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Provider model id this profile describes, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Human-readable display name, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Lifecycle status.
+    #[serde(default)]
+    pub status: ModelStatus,
+    /// Release date in ISO-8601 (`YYYY-MM-DD`), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
+    /// Supported input/output modalities.
+    #[serde(default)]
+    pub modalities: Modalities,
+    /// Supports tool/function calling.
+    #[serde(default)]
+    pub tool_calling: bool,
+    /// Supports multiple tool calls in a single response.
+    #[serde(default)]
+    pub parallel_tool_calls: bool,
+    /// Supports streaming responses.
+    #[serde(default)]
+    pub streaming: bool,
+    /// Streams tool-call fragments incrementally (versus reconstructing them
+    /// from a final response).
+    #[serde(default)]
+    pub streaming_tool_chunks: bool,
+    /// Supports provider-native structured output (constrained JSON).
+    #[serde(default)]
+    pub native_structured_output: bool,
+    /// Honors a JSON Schema in the response-format request.
+    #[serde(default)]
+    pub json_schema: bool,
+    /// Emits reasoning/thinking output.
+    #[serde(default)]
+    pub reasoning: bool,
+    /// Maximum input (context) tokens, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u64>,
+    /// Maximum output tokens, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+}
+
+/// A set of required capabilities used to validate a request against a
+/// [`ModelProfile`] and to filter candidate models during resolution.
+///
+/// Every boolean field is a *requirement*: `true` means the capability must be
+/// present, `false` means "don't care". The token fields require a minimum
+/// advertised capacity. [`Default`] requires nothing, so it is satisfied by any
+/// profile.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilitySet {
+    /// Requires tool/function calling.
+    #[serde(default)]
+    pub tool_calling: bool,
+    /// Requires parallel tool calls.
+    #[serde(default)]
+    pub parallel_tool_calls: bool,
+    /// Requires streaming responses.
+    #[serde(default)]
+    pub streaming: bool,
+    /// Requires incremental tool-call streaming.
+    #[serde(default)]
+    pub streaming_tool_chunks: bool,
+    /// Requires provider-native structured output.
+    #[serde(default)]
+    pub native_structured_output: bool,
+    /// Requires JSON Schema support.
+    #[serde(default)]
+    pub json_schema: bool,
+    /// Requires reasoning output.
+    #[serde(default)]
+    pub reasoning: bool,
+    /// Requires image input (vision).
+    #[serde(default)]
+    pub image_in: bool,
+    /// Requires image output.
+    #[serde(default)]
+    pub image_out: bool,
+    /// Requires audio input.
+    #[serde(default)]
+    pub audio_in: bool,
+    /// Requires audio output.
+    #[serde(default)]
+    pub audio_out: bool,
+    /// Requires at least this many input (context) tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_input_tokens: Option<u64>,
+    /// Requires at least this many output tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_output_tokens: Option<u64>,
 }
 
 /// The role a [`PromptSegment`] plays in the assembled prompt. Earlier roles
@@ -183,6 +361,21 @@ pub struct ModelRequest {
     /// Fingerprint of the stable prompt prefix, when computed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_fingerprint: Option<String>,
+    /// Capabilities the resolved model must satisfy. Used to validate the
+    /// request before a provider call and to filter resolution candidates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_capabilities: Option<CapabilitySet>,
+    /// Provider-specific options passed through untouched (for example OpenAI
+    /// Responses API knobs or Anthropic thinking config). Defaults to JSON
+    /// null.
+    #[serde(default)]
+    pub provider_options: Value,
+    /// Optional caching policy for this call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_policy: Option<CachePolicy>,
+    /// Optional provider continuation/response id for stateful follow-ups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_id: Option<String>,
 }
 
 /// A provider-neutral chat model response.
@@ -223,6 +416,16 @@ pub struct ModelDelta {
 /// [`crate::model::ChatModel`].
 #[async_trait]
 pub trait ChatModel<State: Send + Sync>: Send + Sync {
+    /// Returns the model's capability [`ModelProfile`], when known.
+    ///
+    /// The default returns `None`; providers that know their capabilities
+    /// should override this. The harness consults the profile to choose a
+    /// structured-output strategy for [`ResponseFormat::Auto`] and to validate
+    /// [`ModelRequest::required_capabilities`].
+    fn profile(&self) -> Option<&ModelProfile> {
+        None
+    }
+
     /// Invokes the model and returns a complete response.
     async fn invoke(&self, state: &State, request: ModelRequest) -> Result<ModelResponse>;
 

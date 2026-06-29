@@ -57,11 +57,13 @@ use crate::harness::message::Message;
 use crate::harness::middleware::AgentRun;
 use crate::harness::model::{
     ModelRequest, ModelResolutionSource, ModelResponse, ResolvedModel, ResolvedModelBinding,
-    ResponseFormat,
+    ResponseFormat, ToolChoice,
 };
 use crate::harness::retry::is_retryable;
 use crate::harness::runtime::AgentHarness;
 use crate::harness::structured::{StructuredExtractor, StructuredStrategy};
+use crate::harness::tool::ToolSchema;
+use serde_json::Value;
 
 impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// Runs the default agent loop and returns the accumulated [`AgentRun`].
@@ -282,6 +284,40 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 })?;
             let model_name = binding.resolved.name.clone();
 
+            // Resolve the structured-output plan against the resolved model.
+            // `Auto` consults the model profile to choose provider-native schema
+            // mode versus a tool-call fallback; an explicit `JsonSchema` always
+            // uses provider-native mode. The chosen strategy drives extraction of
+            // the final response below.
+            let structured_plan: Option<(StructuredStrategy, String, Value)> =
+                match request.response_format.clone() {
+                    Some(ResponseFormat::Auto { name, schema }) => {
+                        let strategy = StructuredStrategy::for_profile(binding.model.profile());
+                        match strategy {
+                            StructuredStrategy::ProviderSchema => {
+                                request.response_format = Some(ResponseFormat::json_schema(
+                                    name.clone(),
+                                    schema.clone(),
+                                ));
+                            }
+                            StructuredStrategy::ToolCall => {
+                                request.response_format = Some(ResponseFormat::Text);
+                                request.tools.push(ToolSchema {
+                                    name: name.clone(),
+                                    description: format!("Return the result as `{name}`."),
+                                    parameters: schema.clone(),
+                                });
+                                request.tool_choice = ToolChoice::Tool(name.clone());
+                            }
+                        }
+                        Some((strategy, name, schema))
+                    }
+                    Some(ResponseFormat::JsonSchema { name, schema }) => {
+                        Some((StructuredStrategy::ProviderSchema, name, schema))
+                    }
+                    _ => None,
+                };
+
             let call_id = CallId::new(format!("{}-model-{}", ctx.run_id(), run.model_calls + 1));
             status.mark_running(HarnessPhase::Model);
             status.active_model_call = Some(call_id.clone());
@@ -318,16 +354,22 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             messages.push(Message::Assistant(response.message.clone()));
 
             let tool_calls = response.tool_calls().to_vec();
-            if tool_calls.is_empty() {
-                // Final response: optionally extract structured output.
-                if let Some(ResponseFormat::JsonSchema { name, schema }) =
-                    &self.policy.default_response_format
-                {
-                    let extractor = StructuredExtractor::new(
-                        StructuredStrategy::ProviderSchema,
-                        name.clone(),
-                        schema.clone(),
-                    );
+
+            // A tool-call structured-output strategy produces an artificial tool
+            // call that is not a registered tool; treat it as the final response
+            // rather than attempting to execute it.
+            let structured_tool_hit = matches!(
+                &structured_plan,
+                Some((StructuredStrategy::ToolCall, name, _))
+                    if tool_calls.iter().any(|c| &c.name == name)
+            );
+
+            if tool_calls.is_empty() || structured_tool_hit {
+                // Final response: optionally extract structured output using the
+                // resolved plan (provider-native schema or tool-call arguments).
+                if let Some((strategy, name, schema)) = &structured_plan {
+                    let extractor =
+                        StructuredExtractor::new(*strategy, name.clone(), schema.clone());
                     let output = extractor.extract(&response)?;
                     run.structured = Some(output.value);
                 }
