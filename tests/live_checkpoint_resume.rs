@@ -36,6 +36,8 @@ async fn live_durable_graph_checkpoints_then_resumes_across_model_call() {
         NodeResult,
     };
 
+    // Load .env so `cargo test` picks up local credentials.
+    let _ = dotenvy::dotenv();
     if std::env::var("OPENAI_API_KEY").is_err() {
         eprintln!(
             "skipping live_durable_graph_checkpoints_then_resumes_across_model_call: \

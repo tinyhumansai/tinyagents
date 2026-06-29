@@ -26,6 +26,8 @@ async fn live_openai_parent_composes_child_subagent() {
     use rustagents::harness::testkit::{EventRecorder, Trajectory};
     use rustagents::{SubAgent, SubAgentTool};
 
+    // Load .env so `cargo test` picks up local credentials.
+    let _ = dotenvy::dotenv();
     if std::env::var("OPENAI_API_KEY").is_err() {
         eprintln!("skipping live_openai_parent_composes_child_subagent: OPENAI_API_KEY is not set");
         return;

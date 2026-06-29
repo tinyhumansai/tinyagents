@@ -20,6 +20,8 @@ use rustagents::{SteeringCommand, SteeringHandle};
 
 #[tokio::test]
 async fn orchestrator_steers_a_real_openai_run() {
+    // Load .env so `cargo test` picks up local credentials.
+    let _ = dotenvy::dotenv();
     if std::env::var("OPENAI_API_KEY").is_err() {
         eprintln!("OPENAI_API_KEY not set — skipping live_steering test");
         return;
