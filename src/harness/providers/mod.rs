@@ -37,8 +37,10 @@ use serde_json::Value;
 
 use crate::Result;
 use crate::error::TinyAgentsError;
-use crate::harness::message::{AssistantMessage, ContentBlock, Message};
-use crate::harness::model::{ChatModel, ModelDelta, ModelProfile, ModelRequest, ModelResponse};
+use crate::harness::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
+use crate::harness::model::{
+    ChatModel, ModelProfile, ModelRequest, ModelResponse, ModelStream, ModelStreamItem,
+};
 use crate::harness::tool::ToolCall;
 use crate::harness::usage::Usage;
 
@@ -248,50 +250,43 @@ impl<State: Send + Sync> ChatModel<State> for MockModel {
         Ok(response)
     }
 
-    /// Streams the model response as two [`ModelDelta`]s.
+    /// Streams the model response as a real [`ModelStream`].
     ///
-    /// Internally calls [`invoke`][MockModel::invoke] and splits the
-    /// resulting text into two roughly equal halves (by Unicode scalar value).
-    /// This exercises streaming consumers without real network infrastructure.
-    ///
-    /// When the response carries no text (e.g. a tool-call response), a single
-    /// empty delta is returned with the message id as `call_id`.
-    async fn stream(&self, state: &State, request: ModelRequest) -> Result<Vec<ModelDelta>> {
+    /// Internally calls [`invoke`][MockModel::invoke], then replays the response
+    /// as a [`ModelStreamItem::Started`] item, one or two
+    /// [`ModelStreamItem::MessageDelta`] items, and a terminal
+    /// [`ModelStreamItem::Completed`] carrying the full response. Text responses
+    /// are split into two roughly equal halves (by Unicode scalar value) so
+    /// streaming consumers observe multiple deltas without real network
+    /// infrastructure. Tool-call (or otherwise text-less) responses emit a
+    /// single empty text delta before completing.
+    async fn stream(&self, state: &State, request: ModelRequest) -> Result<ModelStream> {
         let response = self.invoke(state, request).await?;
-        let call_id = response
-            .message
-            .id
-            .clone()
-            .unwrap_or_else(|| "mock-stream".to_string());
-
         let text = response.text();
 
+        let mut items = vec![ModelStreamItem::Started];
+
         if text.is_empty() {
-            return Ok(vec![ModelDelta {
-                call_id,
-                content: String::new(),
+            items.push(ModelStreamItem::MessageDelta(MessageDelta::default()));
+        } else {
+            // Split by Unicode scalar values so we never bisect a multi-byte
+            // char.
+            let chars: Vec<char> = text.chars().collect();
+            let mid = chars.len() / 2;
+            let first: String = chars[..mid].iter().collect();
+            let second: String = chars[mid..].iter().collect();
+            items.push(ModelStreamItem::MessageDelta(MessageDelta {
+                text: first,
                 tool_call: None,
-            }]);
+            }));
+            items.push(ModelStreamItem::MessageDelta(MessageDelta {
+                text: second,
+                tool_call: None,
+            }));
         }
 
-        // Split by Unicode scalar values so we never bisect a multi-byte char.
-        let chars: Vec<char> = text.chars().collect();
-        let mid = chars.len() / 2;
-        let first: String = chars[..mid].iter().collect();
-        let second: String = chars[mid..].iter().collect();
-
-        Ok(vec![
-            ModelDelta {
-                call_id: call_id.clone(),
-                content: first,
-                tool_call: None,
-            },
-            ModelDelta {
-                call_id,
-                content: second,
-                tool_call: None,
-            },
-        ])
+        items.push(ModelStreamItem::Completed(response));
+        Ok(Box::pin(futures::stream::iter(items)))
     }
 }
 

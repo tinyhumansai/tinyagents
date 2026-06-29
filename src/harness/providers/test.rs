@@ -2,10 +2,11 @@
 //!
 //! All tests are deterministic and have no network dependencies.
 
+use futures::StreamExt;
 use serde_json::json;
 
-use crate::harness::message::Message;
-use crate::harness::model::{ChatModel, ModelRequest};
+use crate::harness::message::{Message, MessageDelta};
+use crate::harness::model::{ChatModel, ModelRequest, ModelStreamItem};
 use crate::harness::providers::MockModel;
 
 // ---------------------------------------------------------------------------
@@ -171,10 +172,11 @@ async fn stream_also_increments_call_count() {
     let model = MockModel::constant("hello");
     assert_eq!(model.call_count(), 0);
 
-    model
+    let stream = model
         .stream(&NoState, ModelRequest::new(vec![Message::user("x")]))
         .await
         .unwrap();
+    let _items: Vec<ModelStreamItem> = stream.collect().await;
     assert_eq!(
         model.call_count(),
         1,
@@ -189,37 +191,57 @@ async fn stream_also_increments_call_count() {
 #[tokio::test]
 async fn stream_splits_text_into_two_deltas() {
     let model = MockModel::constant("hello world");
-    let deltas = model
+    let stream = model
         .stream(&NoState, ModelRequest::new(vec![Message::user("hi")]))
         .await
         .unwrap();
+    let items: Vec<ModelStreamItem> = stream.collect().await;
 
-    assert_eq!(deltas.len(), 2, "constant text should produce two deltas");
+    let message_deltas: Vec<String> = items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        message_deltas.len(),
+        2,
+        "constant text should produce two message deltas"
+    );
 
-    let combined: String = deltas.iter().map(|d| d.content.as_str()).collect();
+    let combined: String = message_deltas.concat();
     assert_eq!(
         combined, "hello world",
         "deltas should reconstruct the full text"
     );
 
-    // Both deltas share the same call_id.
-    assert_eq!(deltas[0].call_id, deltas[1].call_id);
+    assert!(matches!(items.first(), Some(ModelStreamItem::Started)));
+    assert!(matches!(items.last(), Some(ModelStreamItem::Completed(_))));
 }
 
 #[tokio::test]
 async fn stream_tool_call_response_returns_single_empty_delta() {
     let model = MockModel::with_tool_call("do_thing", json!({}));
-    let deltas = model
+    let stream = model
         .stream(&NoState, ModelRequest::new(vec![Message::user("run")]))
         .await
         .unwrap();
+    let items: Vec<ModelStreamItem> = stream.collect().await;
 
+    let message_deltas: Vec<&MessageDelta> = items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        deltas.len(),
+        message_deltas.len(),
         1,
         "tool-call responses have no text → one empty delta"
     );
-    assert_eq!(deltas[0].content, "");
+    assert_eq!(message_deltas[0].text, "");
 }
 
 // ---------------------------------------------------------------------------

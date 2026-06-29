@@ -412,6 +412,35 @@ pub struct ModelDelta {
     pub tool_call: Option<ToolDelta>,
 }
 
+/// Normalized provider failure details.
+///
+/// Provider adapters use this shape for HTTP failures, stream error events, and
+/// terminal stream failures so callers can reason about errors without parsing
+/// provider-specific JSON. The original provider payload can still be retained
+/// in [`ProviderError::raw`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProviderError {
+    /// Provider family identifier, for example `openai` or `ollama`.
+    pub provider: String,
+    /// Provider model id, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Transport status code, when the failure came from HTTP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// Provider error code or type, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Human-readable error message.
+    pub message: String,
+    /// Whether retrying the same request may succeed.
+    #[serde(default)]
+    pub retryable: bool,
+    /// Raw provider payload, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<Value>,
+}
+
 /// A single item produced by a real, asynchronous model stream.
 ///
 /// A well-behaved stream begins with [`ModelStreamItem::Started`], emits zero or
@@ -442,6 +471,8 @@ pub enum ModelStreamItem {
     Completed(ModelResponse),
     /// Terminal failure with a human-readable error message.
     Failed(String),
+    /// Terminal failure with normalized provider details.
+    ProviderFailed(ProviderError),
 }
 
 /// A pinned, boxed, `Send` stream of [`ModelStreamItem`]s.
@@ -470,15 +501,26 @@ pub trait ChatModel<State: Send + Sync>: Send + Sync {
     /// Invokes the model and returns a complete response.
     async fn invoke(&self, state: &State, request: ModelRequest) -> Result<ModelResponse>;
 
-    /// Streams the model response. The default implementation calls
-    /// [`ChatModel::invoke`] and yields a single delta with the full text.
-    async fn stream(&self, state: &State, request: ModelRequest) -> Result<Vec<ModelDelta>> {
+    /// Streams the model response as a real asynchronous [`ModelStream`].
+    ///
+    /// The default implementation calls [`ChatModel::invoke`] and replays the
+    /// complete response as three items: [`ModelStreamItem::Started`], a single
+    /// [`ModelStreamItem::MessageDelta`] carrying the full text, and a terminal
+    /// [`ModelStreamItem::Completed`] carrying the response. Providers that talk
+    /// to a streaming endpoint (for example the OpenAI adapter) override this to
+    /// emit incremental deltas as bytes arrive.
+    async fn stream(&self, state: &State, request: ModelRequest) -> Result<ModelStream> {
         let response = self.invoke(state, request).await?;
-        Ok(vec![ModelDelta {
-            call_id: response.message.id.clone().unwrap_or_default(),
-            content: response.text(),
+        let delta = MessageDelta {
+            text: response.text(),
             tool_call: None,
-        }])
+        };
+        let items = vec![
+            ModelStreamItem::Started,
+            ModelStreamItem::MessageDelta(delta),
+            ModelStreamItem::Completed(response),
+        ];
+        Ok(Box::pin(futures::stream::iter(items)))
     }
 }
 

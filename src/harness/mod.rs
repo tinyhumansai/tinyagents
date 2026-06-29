@@ -34,8 +34,9 @@ pub use cost::CostTotals;
 pub use ids::*;
 pub use message::{ContentBlock, Message};
 pub use model::{
-    CapabilitySet, Modalities, ModelProfile, ModelRequest, ModelResponse, ModelStatus,
-    ResponseFormat, ToolChoice,
+    CapabilitySet, Modalities, ModelProfile, ModelRequest, ModelResponse, ModelStatus, ModelStream,
+    ModelStreamItem, ProviderError, ResponseFormat, StreamAccumulator, ToolChoice,
+    collect_model_stream,
 };
 pub use tool::{
     Tool as HarnessTool, ToolCall as HarnessToolCall, ToolRegistry,

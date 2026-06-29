@@ -8,8 +8,10 @@ mod types;
 
 use std::sync::Arc;
 
+use futures::StreamExt;
 use serde_json::Value;
 
+use crate::Result;
 use crate::harness::message::{AssistantMessage, ContentBlock, Message};
 use crate::harness::tool::{ToolCall, ToolSchema};
 use crate::harness::usage::Usage;
@@ -400,6 +402,171 @@ impl<State: Send + Sync> Default for ModelRegistry<State> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// StreamAccumulator
+// ---------------------------------------------------------------------------
+
+/// Deterministically folds a sequence of [`ModelStreamItem`]s into a final
+/// [`ModelResponse`].
+///
+/// The accumulator implements the chunk-merge rules from the streaming spec:
+///
+/// - text fragments are concatenated in arrival order;
+/// - tool-call argument fragments are correlated by call id and concatenated,
+///   preserving first-seen order;
+/// - usage updates overwrite the running value (providers commonly report
+///   cumulative usage, so the last value wins);
+/// - a terminal [`ModelStreamItem::Completed`] is treated as authoritative: its
+///   response is returned as-is (only back-filling usage when absent), because
+///   providers build it with full tool-call names and ids that individual
+///   deltas may not carry;
+/// - a terminal [`ModelStreamItem::Failed`] or
+///   [`ModelStreamItem::ProviderFailed`] turns [`StreamAccumulator::finish`]
+///   into an error.
+///
+/// When no `Completed` item is seen, [`StreamAccumulator::finish`] reconstructs
+/// a best-effort response from the accumulated text, tool-call fragments, and
+/// usage.
+#[derive(Clone, Debug, Default)]
+pub struct StreamAccumulator {
+    /// Concatenated text fragments.
+    text: String,
+    /// Per-call-id accumulated tool-call argument fragments, in first-seen
+    /// order.
+    tool_chunks: Vec<(String, String)>,
+    /// Most recent usage value seen.
+    usage: Option<Usage>,
+    /// Authoritative final response, when a `Completed` item was seen.
+    completed: Option<ModelResponse>,
+    /// Terminal error message, when a failure item was seen.
+    failed: Option<String>,
+}
+
+impl StreamAccumulator {
+    /// Creates an empty accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Folds one stream item into the running state.
+    pub fn push(&mut self, item: &ModelStreamItem) {
+        match item {
+            ModelStreamItem::Started => {}
+            ModelStreamItem::MessageDelta(delta) => {
+                self.text.push_str(&delta.text);
+                if let Some(tool_call) = &delta.tool_call {
+                    self.push_tool_chunk(&tool_call.call_id, &tool_call.content);
+                }
+            }
+            ModelStreamItem::ToolCallDelta(delta) => {
+                self.push_tool_chunk(&delta.call_id, &delta.content);
+            }
+            ModelStreamItem::UsageDelta(usage) => {
+                self.usage = Some(*usage);
+            }
+            ModelStreamItem::Completed(response) => {
+                self.completed = Some(response.clone());
+            }
+            ModelStreamItem::Failed(message) => {
+                self.failed = Some(message.clone());
+            }
+            ModelStreamItem::ProviderFailed(error) => {
+                self.failed = Some(format!(
+                    "{} provider error{}: {}",
+                    error.provider,
+                    error
+                        .code
+                        .as_deref()
+                        .map(|code| format!(" ({code})"))
+                        .unwrap_or_default(),
+                    error.message
+                ));
+            }
+        }
+    }
+
+    /// Appends a tool-call argument fragment for `call_id`, preserving
+    /// first-seen ordering across calls.
+    fn push_tool_chunk(&mut self, call_id: &str, content: &str) {
+        if let Some(entry) = self.tool_chunks.iter_mut().find(|(id, _)| id == call_id) {
+            entry.1.push_str(content);
+        } else {
+            self.tool_chunks
+                .push((call_id.to_string(), content.to_string()));
+        }
+    }
+
+    /// Returns `true` when a terminal item (`Completed` or `Failed`) has been
+    /// folded in.
+    pub fn is_terminal(&self) -> bool {
+        self.completed.is_some() || self.failed.is_some()
+    }
+
+    /// Consumes the accumulator and returns the merged response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::TinyAgentsError::Model`] when a
+    /// [`ModelStreamItem::Failed`] item was folded in.
+    pub fn finish(self) -> Result<ModelResponse> {
+        if let Some(message) = self.failed {
+            return Err(crate::error::TinyAgentsError::Model(message));
+        }
+
+        if let Some(mut response) = self.completed {
+            if response.usage.is_none() {
+                response.usage = self.usage;
+                response.message.usage = self.usage;
+            }
+            return Ok(response);
+        }
+
+        // No authoritative response: reconstruct from accumulated deltas.
+        let mut content = Vec::new();
+        if !self.text.is_empty() {
+            content.push(ContentBlock::Text(self.text));
+        }
+        let tool_calls = self
+            .tool_chunks
+            .into_iter()
+            .map(|(id, args)| ToolCall {
+                name: String::new(),
+                arguments: serde_json::from_str(&args).unwrap_or(Value::Null),
+                id,
+            })
+            .collect();
+        let message = AssistantMessage {
+            id: None,
+            content,
+            tool_calls,
+            usage: self.usage,
+        };
+        Ok(ModelResponse {
+            message,
+            usage: self.usage,
+            finish_reason: None,
+            raw: None,
+            resolved_model: None,
+        })
+    }
+}
+
+/// Drives a [`ModelStream`] to completion and folds it into a [`ModelResponse`].
+///
+/// This is a convenience wrapper over [`StreamAccumulator`] for callers that do
+/// not need to observe individual items.
+///
+/// # Errors
+///
+/// Returns an error when the stream terminates with [`ModelStreamItem::Failed`].
+pub async fn collect_model_stream(mut stream: ModelStream) -> Result<ModelResponse> {
+    let mut accumulator = StreamAccumulator::new();
+    while let Some(item) = stream.next().await {
+        accumulator.push(&item);
+    }
+    accumulator.finish()
 }
 
 #[cfg(test)]

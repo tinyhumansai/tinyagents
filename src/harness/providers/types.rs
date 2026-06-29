@@ -77,12 +77,16 @@ pub(crate) struct MockInner {
 /// # Streaming
 ///
 /// The [`ChatModel::stream`][crate::harness::model::ChatModel] override
-/// internally calls [`ChatModel::invoke`] and then splits the response text
-/// into **two equal-sized [`ModelDelta`][crate::harness::model::ModelDelta]s**
-/// (by Unicode scalar value). This lets downstream streaming consumers be
+/// internally calls [`ChatModel::invoke`] and replays the response as a real
+/// [`ModelStream`][crate::harness::model::ModelStream]: a
+/// [`Started`][crate::harness::model::ModelStreamItem::Started] item, one or two
+/// [`MessageDelta`][crate::harness::model::ModelStreamItem::MessageDelta] items
+/// (text split into two equal-sized halves by Unicode scalar value), and a
+/// terminal [`Completed`][crate::harness::model::ModelStreamItem::Completed]
+/// item carrying the full response. This lets downstream streaming consumers be
 /// exercised without any real streaming infrastructure. When the response
-/// contains no text (e.g. a tool-call response), a single empty delta is
-/// returned with `call_id` set to the message id.
+/// contains no text (e.g. a tool-call response), a single empty text delta is
+/// emitted before completion.
 ///
 /// # Usage estimates
 ///

@@ -35,6 +35,82 @@ pub struct ChatCompletionRequest {
     /// Maximum number of output tokens. Omitted when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Request Server-Sent-Events streaming. Omitted (false) for unary calls.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub stream: bool,
+    /// Streaming options (for example `{"include_usage": true}`). Omitted for
+    /// unary calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<Value>,
+}
+
+// ---------------------------------------------------------------------------
+// Streaming response shapes (deserialized from SSE `data:` chunks)
+// ---------------------------------------------------------------------------
+
+/// One streamed chunk from `POST /chat/completions` with `stream: true`.
+///
+/// Each Server-Sent-Events `data:` line carries one of these JSON objects. The
+/// terminal `data: [DONE]` sentinel is handled by the transport, not parsed
+/// into this type.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ChatCompletionChunk {
+    /// Provider response/message id (repeated on every chunk).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Per-choice incremental deltas; the first choice is used.
+    #[serde(default)]
+    pub choices: Vec<ChunkChoiceWire>,
+    /// Cumulative usage, sent on the final chunk when `include_usage` is set.
+    #[serde(default)]
+    pub usage: Option<UsageWire>,
+}
+
+/// A single streamed choice carrying an incremental [`ChunkDeltaWire`].
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ChunkChoiceWire {
+    /// The incremental delta for this choice.
+    #[serde(default)]
+    pub delta: ChunkDeltaWire,
+    /// Finish reason, present only on the terminal content chunk.
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+}
+
+/// The incremental `delta` object inside a [`ChunkChoiceWire`].
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ChunkDeltaWire {
+    /// Incremental text fragment, when present.
+    #[serde(default)]
+    pub content: Option<String>,
+    /// Incremental tool-call fragments, correlated by `index`.
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallChunkWire>,
+}
+
+/// One incremental tool-call fragment in a streamed delta.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ToolCallChunkWire {
+    /// Stable slot index used to correlate fragments across chunks.
+    #[serde(default)]
+    pub index: u32,
+    /// Provider-assigned call id, sent on the first fragment for the slot.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Incremental function name/arguments fragment.
+    #[serde(default)]
+    pub function: Option<FunctionChunkWire>,
+}
+
+/// The incremental `function` payload of a [`ToolCallChunkWire`].
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct FunctionChunkWire {
+    /// Function name, sent on the first fragment for the slot.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Incremental stringified-JSON arguments fragment.
+    #[serde(default)]
+    pub arguments: Option<String>,
 }
 
 /// A single message in the request `messages` array.

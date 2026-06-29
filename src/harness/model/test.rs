@@ -2,6 +2,7 @@ use super::*;
 use crate::harness::message::Message;
 use crate::harness::usage::Usage;
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde_json::json;
 
 struct StaticModel;
@@ -224,9 +225,26 @@ async fn registry_register_get_default_and_stream() {
     assert_eq!(resp.text(), "hello");
     assert_eq!(resp.usage.unwrap().total_tokens, 4);
 
-    let deltas = model.stream(&(), ModelRequest::default()).await.unwrap();
-    assert_eq!(deltas.len(), 1);
-    assert_eq!(deltas[0].content, "hello");
+    let stream = model.stream(&(), ModelRequest::default()).await.unwrap();
+    let items: Vec<ModelStreamItem> = stream.collect().await;
+    // Default stream impl: Started + one MessageDelta + Completed.
+    assert!(matches!(items.first(), Some(ModelStreamItem::Started)));
+    assert!(matches!(items.last(), Some(ModelStreamItem::Completed(_))));
+    let text: String = items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "hello");
+
+    let merged = crate::harness::model::collect_model_stream(
+        model.stream(&(), ModelRequest::default()).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(merged.text(), "hello");
 }
 
 #[tokio::test]

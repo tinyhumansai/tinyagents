@@ -28,16 +28,20 @@ mod types;
 
 pub use types::*;
 
+use std::collections::VecDeque;
+use std::pin::Pin;
+
 use async_trait::async_trait;
+use futures::{Stream, StreamExt};
 use serde_json::{Value, json};
 
 use crate::error::{Result, TinyAgentsError};
-use crate::harness::message::{AssistantMessage, ContentBlock, Message};
+use crate::harness::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
 use crate::harness::model::{
-    ChatModel, Modalities, ModelProfile, ModelRequest, ModelResponse, ModelStatus, ResponseFormat,
-    ToolChoice,
+    ChatModel, Modalities, ModelProfile, ModelRequest, ModelResponse, ModelStatus, ModelStream,
+    ModelStreamItem, ResponseFormat, ToolChoice,
 };
-use crate::harness::tool::ToolCall;
+use crate::harness::tool::{ToolCall, ToolDelta};
 use crate::harness::usage::Usage;
 
 /// Default model id used when neither the request nor the builder override it.
@@ -295,6 +299,8 @@ impl OpenAiModel {
             response_format,
             temperature: request.temperature,
             max_tokens: request.max_tokens,
+            stream: false,
+            stream_options: None,
         })
     }
 }
@@ -426,16 +432,7 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
         })
         .collect();
 
-    let usage = parsed.usage.map(|u| Usage {
-        input_tokens: u.prompt_tokens,
-        output_tokens: u.completion_tokens,
-        total_tokens: u.total_tokens,
-        cache_read_tokens: u
-            .prompt_tokens_details
-            .map(|d| d.cached_tokens)
-            .unwrap_or(0),
-        ..Usage::default()
-    });
+    let usage = parsed.usage.map(convert_usage);
 
     let message = AssistantMessage {
         id: parsed.id,
@@ -451,6 +448,225 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
         raw: Some(value),
         resolved_model: None,
     })
+}
+
+/// Converts an OpenAI [`UsageWire`] into the harness-neutral [`Usage`].
+fn convert_usage(wire: UsageWire) -> Usage {
+    Usage {
+        input_tokens: wire.prompt_tokens,
+        output_tokens: wire.completion_tokens,
+        total_tokens: wire.total_tokens,
+        cache_read_tokens: wire
+            .prompt_tokens_details
+            .map(|d| d.cached_tokens)
+            .unwrap_or(0),
+        ..Usage::default()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming (SSE) machinery
+// ---------------------------------------------------------------------------
+
+/// In-progress reconstruction of a single tool call across streamed fragments.
+#[derive(Clone, Debug, Default)]
+struct ToolCallBuild {
+    /// Provider-assigned call id (filled from the first fragment carrying it).
+    id: String,
+    /// Function name (filled from the first fragment carrying it).
+    name: String,
+    /// Concatenated stringified-JSON argument fragments.
+    args: String,
+}
+
+/// Provider-side accumulator that rebuilds the authoritative [`ModelResponse`]
+/// from streamed chunks. Distinct from the generic
+/// [`StreamAccumulator`][crate::harness::model::StreamAccumulator]: it tracks
+/// tool-call names and ids (which the neutral deltas omit) so the terminal
+/// [`ModelStreamItem::Completed`] carries a faithful response.
+#[derive(Clone, Debug, Default)]
+struct OpenAiStreamAcc {
+    id: Option<String>,
+    text: String,
+    tool_calls: Vec<ToolCallBuild>,
+    usage: Option<Usage>,
+    finish_reason: Option<String>,
+}
+
+impl OpenAiStreamAcc {
+    /// Folds one parsed chunk into the accumulator and pushes the corresponding
+    /// neutral [`ModelStreamItem`]s onto `pending`.
+    fn ingest(&mut self, chunk: ChatCompletionChunk, pending: &mut VecDeque<ModelStreamItem>) {
+        if let Some(id) = chunk.id
+            && self.id.is_none()
+        {
+            self.id = Some(id);
+        }
+        if let Some(usage_wire) = chunk.usage {
+            let usage = convert_usage(usage_wire);
+            self.usage = Some(usage);
+            pending.push_back(ModelStreamItem::UsageDelta(usage));
+        }
+        for choice in chunk.choices {
+            if let Some(reason) = choice.finish_reason {
+                self.finish_reason = Some(reason);
+            }
+            if let Some(content) = choice.delta.content.filter(|c| !c.is_empty()) {
+                self.text.push_str(&content);
+                pending.push_back(ModelStreamItem::MessageDelta(MessageDelta {
+                    text: content,
+                    tool_call: None,
+                }));
+            }
+            for fragment in choice.delta.tool_calls {
+                let idx = fragment.index as usize;
+                while self.tool_calls.len() <= idx {
+                    self.tool_calls.push(ToolCallBuild::default());
+                }
+                let slot = &mut self.tool_calls[idx];
+                if let Some(id) = fragment.id.filter(|id| !id.is_empty()) {
+                    slot.id = id;
+                }
+                if let Some(function) = fragment.function {
+                    if let Some(name) = function.name.filter(|n| !n.is_empty()) {
+                        slot.name = name;
+                    }
+                    if let Some(args) = function.arguments.filter(|a| !a.is_empty()) {
+                        slot.args.push_str(&args);
+                        let call_id = if slot.id.is_empty() {
+                            format!("tool-{idx}")
+                        } else {
+                            slot.id.clone()
+                        };
+                        pending.push_back(ModelStreamItem::ToolCallDelta(ToolDelta {
+                            call_id,
+                            content: args,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Consumes the accumulator into the final, merged [`ModelResponse`].
+    fn into_response(self) -> ModelResponse {
+        let mut content = Vec::new();
+        if !self.text.is_empty() {
+            content.push(ContentBlock::Text(self.text));
+        }
+        let tool_calls = self
+            .tool_calls
+            .into_iter()
+            .filter(|b| !b.name.is_empty() || !b.args.is_empty())
+            .enumerate()
+            .map(|(idx, b)| ToolCall {
+                id: if b.id.is_empty() {
+                    format!("tool-{idx}")
+                } else {
+                    b.id
+                },
+                name: b.name,
+                arguments: serde_json::from_str(&b.args).unwrap_or(Value::Null),
+            })
+            .collect();
+        let message = AssistantMessage {
+            id: self.id,
+            content,
+            tool_calls,
+            usage: self.usage,
+        };
+        ModelResponse {
+            message,
+            usage: self.usage,
+            finish_reason: self.finish_reason,
+            raw: None,
+            resolved_model: None,
+        }
+    }
+}
+
+/// Mutable driver state threaded through [`futures::stream::unfold`] while
+/// parsing the SSE byte stream into [`ModelStreamItem`]s.
+struct SseState {
+    /// Raw response byte chunks (errors already mapped onto the crate error).
+    bytes: Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>,
+    /// Bytes received but not yet split into complete lines.
+    buf: String,
+    /// Parsed items waiting to be yielded, in order.
+    pending: VecDeque<ModelStreamItem>,
+    /// Provider-side response reconstruction.
+    acc: OpenAiStreamAcc,
+    /// Whether the leading [`ModelStreamItem::Started`] has been emitted.
+    started: bool,
+    /// Whether the byte stream ended or `[DONE]` was seen.
+    finished: bool,
+    /// Whether the terminal [`ModelStreamItem::Completed`]/[`ModelStreamItem::Failed`]
+    /// has been emitted.
+    terminal_emitted: bool,
+}
+
+impl SseState {
+    /// Splits buffered bytes into complete lines and folds each SSE `data:`
+    /// payload into the accumulator. The trailing partial line (if any) is kept
+    /// for the next chunk.
+    fn drain_lines(&mut self) {
+        while let Some(pos) = self.buf.find('\n') {
+            let line: String = self.buf.drain(..=pos).collect();
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some(rest) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let payload = rest.trim();
+            if payload == "[DONE]" {
+                self.finished = true;
+                continue;
+            }
+            // Ignore keepalives / unparseable lines rather than failing the run.
+            if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(payload) {
+                let mut pending = std::mem::take(&mut self.pending);
+                self.acc.ingest(chunk, &mut pending);
+                self.pending = pending;
+            }
+        }
+    }
+}
+
+/// Advances the SSE [`SseState`] by one item for [`futures::stream::unfold`].
+async fn sse_next(mut state: SseState) -> Option<(ModelStreamItem, SseState)> {
+    loop {
+        if let Some(item) = state.pending.pop_front() {
+            return Some((item, state));
+        }
+        if !state.started {
+            state.started = true;
+            return Some((ModelStreamItem::Started, state));
+        }
+        if state.finished {
+            if state.terminal_emitted {
+                return None;
+            }
+            state.terminal_emitted = true;
+            let response = std::mem::take(&mut state.acc).into_response();
+            return Some((ModelStreamItem::Completed(response), state));
+        }
+        match state.bytes.next().await {
+            Some(Ok(chunk)) => {
+                state.buf.push_str(&String::from_utf8_lossy(&chunk));
+                state.drain_lines();
+            }
+            Some(Err(error)) => {
+                state.finished = true;
+                state.terminal_emitted = true;
+                return Some((ModelStreamItem::Failed(error.to_string()), state));
+            }
+            None => {
+                state.finished = true;
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -494,6 +710,70 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
 
         let value: Value = serde_json::from_str(&text)?;
         parse_response(value)
+    }
+
+    /// Streams the OpenAI Chat Completions response as a real [`ModelStream`].
+    ///
+    /// Sends the request with `stream: true` (and `stream_options.include_usage`
+    /// so a usage chunk is delivered), reads the Server-Sent-Events body
+    /// incrementally with [`reqwest::Response::bytes_stream`], and parses each
+    /// `data:` line into [`ModelStreamItem`]s: a leading
+    /// [`ModelStreamItem::Started`], a [`ModelStreamItem::MessageDelta`] per text
+    /// fragment, a [`ModelStreamItem::ToolCallDelta`] per tool-call argument
+    /// fragment, a [`ModelStreamItem::UsageDelta`] when usage arrives, and a
+    /// terminal [`ModelStreamItem::Completed`] carrying the fully merged
+    /// response (with reassembled tool-call names and ids). Transport errors
+    /// surface as a terminal [`ModelStreamItem::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TinyAgentsError::Model`] when the initial request fails or the
+    /// endpoint returns a non-2xx status (per-chunk transport errors are
+    /// surfaced as [`ModelStreamItem::Failed`] inside the stream instead).
+    async fn stream(&self, _state: &State, request: ModelRequest) -> Result<ModelStream> {
+        let mut body = self.translate_request(&request)?;
+        body.stream = true;
+        body.stream_options = Some(json!({ "include_usage": true }));
+        let url = format!("{}/chat/completions", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                TinyAgentsError::Model(format!("openai stream request to {url} failed: {e}"))
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(TinyAgentsError::Model(format!(
+                "openai returned HTTP {status}: {text}"
+            )));
+        }
+
+        // Map each raw byte chunk onto an owned `Vec<u8>` so the boxed stream's
+        // item type is nameable without depending on the `bytes` crate.
+        let bytes = response.bytes_stream().map(|chunk| {
+            chunk
+                .map(|b| b.to_vec())
+                .map_err(|e| TinyAgentsError::Model(format!("openai stream chunk failed: {e}")))
+        });
+
+        let state = SseState {
+            bytes: Box::pin(bytes),
+            buf: String::new(),
+            pending: VecDeque::new(),
+            acc: OpenAiStreamAcc::default(),
+            started: false,
+            finished: false,
+            terminal_emitted: false,
+        };
+
+        Ok(Box::pin(futures::stream::unfold(state, sse_next)))
     }
 }
 
