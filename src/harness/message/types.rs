@@ -1,9 +1,9 @@
 //! Rich internal message model for the harness.
 //!
 //! Raw strings appear only at API boundaries; internally the harness works
-//! with structured [`Message`] values made of typed [`ContentBlock`]s. A
-//! bridge to and from the simple top-level [`crate::chat::ChatMessage`] keeps
-//! the public surface ergonomic.
+//! with structured [`Message`] values made of typed [`ContentBlock`]s.
+//! Ergonomic constructors ([`Message::system`], [`Message::user`], …) and a
+//! [`Message::text`] accessor keep the public surface easy to use.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

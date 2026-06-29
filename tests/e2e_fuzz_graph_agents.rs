@@ -1,8 +1,9 @@
 //! Deterministic end-to-end fuzz matrix for graph/agent composition.
 //!
 //! These tests generate a compact matrix of graph shapes and agent behaviors:
-//! legacy whole-state graphs, durable linear/conditional graphs, command
-//! fan-out graphs, and adapter-subgraph graphs. Graph nodes drive real
+//! whole-state (overwrite) graphs, durable partial-update linear/conditional
+//! graphs, command fan-out graphs, and adapter-subgraph graphs. Graph nodes
+//! drive real
 //! `AgentHarness` runs whose scripted models may make ordinary tool calls,
 //! sub-agent tool calls, or both. The assertions are structural: graph visit
 //! paths, reducer state, model/tool event counts, and tool-result transcript
@@ -22,13 +23,12 @@ use tinyagents::harness::testkit::{EventRecorder, FakeTool, ScriptedModel, Traje
 use tinyagents::harness::tool::ToolCall;
 use tinyagents::harness::usage::Usage;
 use tinyagents::{
-    Command, GraphBuilder, Node, NodeContext, NodeOutput, NodeResult, Result, StateReducer,
-    SubAgent, SubAgentTool,
+    Command, GraphBuilder, NodeContext, NodeResult, Result, StateReducer, SubAgent, SubAgentTool,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GraphShape {
-    LegacyLinear,
+    WholeStateLinear,
     DurableLinear,
     DurableConditional,
     DurableCommandFanout,
@@ -108,7 +108,7 @@ fn scenarios() -> Vec<Scenario> {
     vec![
         Scenario {
             id: 0,
-            shape: GraphShape::LegacyLinear,
+            shape: GraphShape::WholeStateLinear,
             parallel: false,
             branch_count: 0,
             use_regular_tool: false,
@@ -117,7 +117,7 @@ fn scenarios() -> Vec<Scenario> {
         },
         Scenario {
             id: 1,
-            shape: GraphShape::LegacyLinear,
+            shape: GraphShape::WholeStateLinear,
             parallel: false,
             branch_count: 0,
             use_regular_tool: true,
@@ -356,27 +356,30 @@ async fn run_agent_node(
     })
 }
 
-async fn run_legacy_scenario(scenario: Scenario, recorder: &EventRecorder) -> Result<FuzzState> {
+async fn run_whole_state_linear(scenario: Scenario, recorder: &EventRecorder) -> Result<FuzzState> {
     let events = recorder.sink();
-    let prep = Node::new("prep", |mut state: FuzzState| async move {
-        state.path.push("prep".to_string());
-        Ok(NodeOutput::Continue(state))
-    });
-    let agent = Node::new("agent", move |mut state: FuzzState| {
-        let events = events.clone();
-        async move {
-            let update = run_agent_node(scenario, "agent", events).await?;
-            state = reducer().apply(state, update)?;
-            Ok(NodeOutput::End(state))
-        }
-    });
-
-    let graph = tinyagents::StateGraph::new()
-        .add_node(prep)
-        .add_node(agent)
-        .set_start("prep")
+    // A whole-state (overwrite) durable graph: each node returns the full next
+    // state. The agent node folds its update through the shared reducer itself.
+    let graph = GraphBuilder::<FuzzState, FuzzState>::overwrite()
+        .add_node(
+            "prep",
+            |mut state: FuzzState, _ctx: NodeContext| async move {
+                state.path.push("prep".to_string());
+                Ok(NodeResult::Update(state))
+            },
+        )
+        .add_node("agent", move |state: FuzzState, _ctx: NodeContext| {
+            let events = events.clone();
+            async move {
+                let update = run_agent_node(scenario, "agent", events).await?;
+                let state = reducer().apply(state, update)?;
+                Ok(NodeResult::Update(state))
+            }
+        })
+        .set_entry("prep")
         .add_edge("prep", "agent")
-        .add_end("agent");
+        .set_finish("agent")
+        .compile()?;
 
     let run = graph
         .run(FuzzState {
@@ -385,12 +388,7 @@ async fn run_legacy_scenario(scenario: Scenario, recorder: &EventRecorder) -> Re
         })
         .await?;
 
-    assert_eq!(
-        run.visited,
-        vec!["prep".to_string(), "agent".to_string()],
-        "{}",
-        scenario.label()
-    );
+    assert_visited(&run.visited, &["prep", "agent"], &scenario.label());
     Ok(run.state)
 }
 
@@ -402,7 +400,9 @@ async fn run_durable_scenario(scenario: Scenario, recorder: &EventRecorder) -> R
         GraphShape::DurableAdapterSubgraph => {
             run_durable_adapter_subgraph(scenario, recorder).await
         }
-        GraphShape::LegacyLinear => unreachable!("legacy scenarios use StateGraph"),
+        GraphShape::WholeStateLinear => {
+            unreachable!("whole-state scenarios run via run_whole_state_linear")
+        }
     }
 }
 
@@ -735,7 +735,7 @@ async fn generated_graph_agent_scenarios_keep_e2e_invariants() {
     for scenario in scenarios() {
         let recorder = EventRecorder::new();
         let state = match scenario.shape {
-            GraphShape::LegacyLinear => run_legacy_scenario(scenario, &recorder).await,
+            GraphShape::WholeStateLinear => run_whole_state_linear(scenario, &recorder).await,
             _ => run_durable_scenario(scenario, &recorder).await,
         }
         .unwrap_or_else(|error| panic!("{} failed: {error}", scenario.label()));

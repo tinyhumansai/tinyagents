@@ -1,26 +1,41 @@
-use tinyagents::{ChatMessage, ChatRole, ModelRequest};
+//! Serialization behavior for the harness [`Message`] model.
+
+use tinyagents::harness::message::{ContentBlock, Message, UserMessage};
 
 #[test]
-fn serializes_chat_messages() {
-    let request = ModelRequest::new(vec![
-        ChatMessage::system("You are concise."),
-        ChatMessage::user("Hello"),
-    ])
-    .temperature(0.2)
-    .max_tokens(128);
+fn serializes_messages_with_role_tags() {
+    let system = serde_json::to_value(Message::system("You are concise.")).unwrap();
+    let user = serde_json::to_value(Message::user("Hello")).unwrap();
 
-    let json = serde_json::to_value(request).unwrap();
-
-    assert_eq!(json["temperature"], 0.2);
-    assert_eq!(json["max_tokens"], 128);
-    assert_eq!(json["messages"][0]["role"], "system");
-    assert_eq!(json["messages"][1]["content"], "Hello");
+    // The `Message` enum is tagged by its snake_case variant name; each variant
+    // carries an ordered list of content blocks.
+    assert_eq!(system["system"]["content"][0]["text"], "You are concise.");
+    assert_eq!(user["user"]["content"][0]["text"], "Hello");
 }
 
 #[test]
-fn constructs_named_tool_message() {
-    let message = ChatMessage::tool("lookup", "42");
+fn message_round_trips_through_serde() {
+    let original = Message::User(UserMessage {
+        content: vec![
+            ContentBlock::Text("part one ".into()),
+            ContentBlock::Text("part two".into()),
+        ],
+    });
 
-    assert_eq!(message.role, ChatRole::Tool);
-    assert_eq!(message.name.as_deref(), Some("lookup"));
+    let json = serde_json::to_string(&original).unwrap();
+    let decoded: Message = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(decoded, original);
+    assert_eq!(decoded.text(), "part one part two");
+}
+
+#[test]
+fn constructs_correlated_tool_message() {
+    let message = Message::tool("lookup", "42");
+
+    match &message {
+        Message::Tool(tool) => assert_eq!(tool.tool_call_id, "lookup"),
+        other => panic!("expected a tool message, got {other:?}"),
+    }
+    assert_eq!(message.text(), "42");
 }

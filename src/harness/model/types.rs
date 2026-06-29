@@ -1,9 +1,8 @@
 //! Harness model layer types.
 //!
-//! These are the rich, harness-internal request/response shapes, distinct from
-//! the simple top-level [`crate::model`] types. They carry tool declarations,
-//! tool-choice policy, structured-output formats, and prompt-cache layout
-//! metadata.
+//! These are the rich, harness-internal request/response shapes. They carry
+//! tool declarations, tool-choice policy, structured-output formats, and
+//! prompt-cache layout metadata.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -484,8 +483,7 @@ pub type ModelStream = Pin<Box<dyn Stream<Item = ModelStreamItem> + Send>>;
 
 /// A provider-neutral chat model.
 ///
-/// Generic over the application `State`. Distinct from the simple top-level
-/// [`crate::model::ChatModel`].
+/// Generic over the application `State`.
 #[async_trait]
 pub trait ChatModel<State: Send + Sync>: Send + Sync {
     /// Returns the model's capability [`ModelProfile`], when known.

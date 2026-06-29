@@ -1,8 +1,7 @@
 //! Tool layer types used by the harness.
 //!
-//! These are distinct from the simple top-level [`crate::tool`] types: here a
-//! [`ToolCall`] carries a required `id` so results can be correlated back to
-//! the originating call, matching provider tool-call semantics.
+//! Here a [`ToolCall`] carries a required `id` so results can be correlated
+//! back to the originating call, matching provider tool-call semantics.
 
 use std::collections::HashMap;
 use std::sync::Arc;

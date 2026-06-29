@@ -2,15 +2,18 @@
 //!
 //! Parses `.rag` source, compiles it into a [`Blueprint`], asserts the compiled
 //! structure, exercises the parser/compiler error cases, and materialises a
-//! legacy [`StateGraph`] via a trivial [`NodeFactory`] before running it to
+//! durable [`CompiledGraph`] via a trivial [`NodeFactory`] before running it to
 //! `END`.
 
+use std::sync::Arc;
+
+use tinyagents::graph::{END, NodeFuture};
 use tinyagents::language::compiler::{
-    CapabilityResolver, NodeFactory, bind_capabilities, build_graph, compile,
+    BoxedNode, CapabilityResolver, NodeFactory, bind_capabilities, build_graph, compile,
 };
 use tinyagents::language::parser::parse_str;
-use tinyagents::language::types::{NodeSpec, Routing};
-use tinyagents::{Node, NodeOutput, Result, TinyAgentsError};
+use tinyagents::language::types::{END as LANG_END, NodeSpec, Routing};
+use tinyagents::{Command, NodeContext, NodeResult, Result, TinyAgentsError};
 
 const SUPPORT_AGENT: &str = r#"
 // A support workflow with a tool loop.
@@ -132,35 +135,47 @@ struct TraceState {
     agent_visits: u32,
 }
 
-/// A trivial factory that turns each [`NodeSpec`] into a legacy [`Node`] which
-/// records its name and follows the spec's routing. The conditional `agent`
-/// node loops once through `tools` and then ends.
+/// A trivial factory that turns each [`NodeSpec`] into a durable node handler
+/// which records its name and follows the spec's routing. The conditional
+/// `agent` node loops once through `tools` and then ends via an explicit
+/// `goto`.
 struct TraceFactory;
 
 impl NodeFactory<TraceState> for TraceFactory {
-    fn make(&self, spec: &NodeSpec) -> Result<Node<TraceState>> {
+    fn make(&self, spec: &NodeSpec) -> Result<BoxedNode<TraceState>> {
         let name = spec.name.clone();
         let routing = spec.routing.clone();
-        Ok(Node::new(name.clone(), move |mut state: TraceState| {
-            let name = name.clone();
-            let routing = routing.clone();
-            async move {
-                state.trail.push(name.clone());
-                let output = match &routing {
-                    Routing::Terminal => NodeOutput::end(state),
-                    Routing::Next(_) => NodeOutput::continue_with(state),
-                    Routing::Conditional(_) => {
-                        state.agent_visits += 1;
-                        if state.agent_visits >= 2 {
-                            NodeOutput::end(state)
-                        } else {
-                            NodeOutput::route(state, "tool_call")
+        Ok(Arc::new(
+            move |mut state: TraceState, _ctx: NodeContext| -> NodeFuture<TraceState> {
+                let name = name.clone();
+                let routing = routing.clone();
+                Box::pin(async move {
+                    state.trail.push(name.clone());
+                    let result = match &routing {
+                        // Static edges (Next/Terminal) route these.
+                        Routing::Terminal | Routing::Next(_) => NodeResult::Update(state),
+                        Routing::Conditional(routes) => {
+                            state.agent_visits += 1;
+                            let label = if state.agent_visits >= 2 {
+                                "final"
+                            } else {
+                                "tool_call"
+                            };
+                            let target = match routes
+                                .iter()
+                                .find(|(l, _)| l == label)
+                                .map(|(_, t)| t.as_str())
+                            {
+                                Some(t) if t != LANG_END => t.to_string(),
+                                _ => END.to_string(),
+                            };
+                            NodeResult::Command(Command::goto([target]).with_update(state))
                         }
-                    }
-                };
-                Ok(output)
-            }
-        }))
+                    };
+                    Ok(result)
+                })
+            },
+        ))
     }
 }
 
@@ -174,7 +189,8 @@ async fn build_graph_runs_to_end() {
 
     let run = graph.run(TraceState::default()).await.expect("graph runs");
 
-    assert_eq!(run.visited, vec!["agent", "tools", "agent"]);
+    let visited: Vec<String> = run.visited.iter().map(ToString::to_string).collect();
+    assert_eq!(visited, vec!["agent", "tools", "agent"]);
     assert_eq!(run.state.trail, vec!["agent", "tools", "agent"]);
     assert_eq!(run.state.agent_visits, 2);
 }

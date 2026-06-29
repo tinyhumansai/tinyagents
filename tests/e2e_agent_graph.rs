@@ -1,10 +1,10 @@
-//! TRUE end-to-end: a legacy [`StateGraph`] node that drives a full
-//! [`AgentHarness`] agent run.
+//! TRUE end-to-end: a durable graph node that drives a full [`AgentHarness`]
+//! agent run.
 //!
 //! This composes three subsystems that the per-module integration tests
 //! exercise in isolation:
 //!
-//! - the **graph** executor (`StateGraph` / `Node` / `NodeOutput`),
+//! - the **graph** executor (`GraphBuilder` / `NodeResult`),
 //! - the **harness** agent loop (model → tool → model), and
 //! - the **testkit** (`ScriptedModel`, `FakeTool`, `EventRecorder`,
 //!   `Trajectory`) plus a real **middleware** (`UsageAccountingMiddleware`).
@@ -27,7 +27,7 @@ use tinyagents::harness::runtime::AgentHarness;
 use tinyagents::harness::testkit::{EventRecorder, FakeTool, ScriptedModel, Trajectory};
 use tinyagents::harness::tool::ToolCall;
 use tinyagents::harness::usage::Usage;
-use tinyagents::{Node, NodeOutput};
+use tinyagents::{GraphBuilder, NodeContext, NodeResult};
 
 /// State threaded through the graph: the question to answer and the agent's
 /// final text once the `agent` node has run.
@@ -95,31 +95,35 @@ async fn graph_node_drives_harness_agent_with_tool_loop() {
         .push_middleware(usage_mw.clone());
     let harness = Arc::new(harness);
 
-    // A single graph node that runs the agent and folds the answer into state.
+    // A single graph node that runs the agent and folds the answer into the
+    // whole-state graph state.
     let node_harness = harness.clone();
     let node_recorder = recorder.clone();
-    let agent_node = Node::new("agent", move |mut state: AgentGraphState| {
-        let harness = node_harness.clone();
-        let recorder = node_recorder.clone();
-        async move {
-            // Wire the agent run's events into the shared recorder via a
-            // caller-supplied RunContext.
-            let ctx: RunContext<()> =
-                RunContext::new(RunConfig::new("agent-node-run"), ()).with_events(recorder.sink());
+    let graph = GraphBuilder::<AgentGraphState, AgentGraphState>::overwrite()
+        .add_node(
+            "agent",
+            move |mut state: AgentGraphState, _ctx: NodeContext| {
+                let harness = node_harness.clone();
+                let recorder = node_recorder.clone();
+                async move {
+                    // Wire the agent run's events into the shared recorder via a
+                    // caller-supplied RunContext.
+                    let ctx: RunContext<()> = RunContext::new(RunConfig::new("agent-node-run"), ())
+                        .with_events(recorder.sink());
 
-            let run = harness
-                .invoke_in_context(&(), ctx, vec![Message::user(state.question.clone())])
-                .await?;
+                    let run = harness
+                        .invoke_in_context(&(), ctx, vec![Message::user(state.question.clone())])
+                        .await?;
 
-            state.answer = run.text();
-            Ok(NodeOutput::end(state))
-        }
-    });
-
-    let graph = tinyagents::StateGraph::new()
-        .add_node(agent_node)
-        .set_start("agent")
-        .add_end("agent");
+                    state.answer = run.text();
+                    Ok(NodeResult::Update(state))
+                }
+            },
+        )
+        .set_entry("agent")
+        .set_finish("agent")
+        .compile()
+        .expect("graph compiles");
 
     let run = graph
         .run(AgentGraphState {
@@ -130,7 +134,8 @@ async fn graph_node_drives_harness_agent_with_tool_loop() {
         .expect("graph runs to completion");
 
     // Graph-level: the terminal node ran and the agent's answer landed in state.
-    assert_eq!(run.visited, vec!["agent"]);
+    let visited: Vec<String> = run.visited.iter().map(ToString::to_string).collect();
+    assert_eq!(visited, vec!["agent"]);
     assert_eq!(run.state.answer.as_deref(), Some("resolved via lookup"));
 
     // Harness-level via the trajectory: the tool actually fired, between two

@@ -1,5 +1,4 @@
 use super::*;
-use crate::chat::{ChatMessage, ChatRole};
 use crate::harness::tool::ToolCall;
 use crate::harness::usage::Usage;
 use serde_json::json;
@@ -41,24 +40,15 @@ fn assistant_holds_tool_calls_and_usage() {
 }
 
 #[test]
-fn bridges_from_chat_message() {
-    let chat = ChatMessage::tool("c-7", "done");
-    let msg: Message = chat.into();
+fn tool_message_carries_call_id() {
+    let msg = Message::tool("c-7", "done");
     match &msg {
-        Message::Tool(t) => assert_eq!(t.tool_call_id, "c-7"),
+        Message::Tool(t) => {
+            assert_eq!(t.tool_call_id, "c-7");
+            assert_eq!(msg.text(), "done");
+        }
         _ => panic!("expected tool message"),
     }
-}
-
-#[test]
-fn bridges_to_chat_message() {
-    let chat = Message::system("rules").to_chat();
-    assert_eq!(chat.role, ChatRole::System);
-    assert_eq!(chat.content, "rules");
-
-    let tool_chat = Message::tool("c-2", "out").to_chat();
-    assert_eq!(tool_chat.role, ChatRole::Tool);
-    assert_eq!(tool_chat.name.as_deref(), Some("c-2"));
 }
 
 #[test]

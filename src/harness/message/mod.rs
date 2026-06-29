@@ -1,12 +1,9 @@
 //! Rich internal message model.
 //!
-//! See [`types`] for definitions. This module provides ergonomic constructors,
-//! a [`Message::text`] accessor, and a bridge to and from the simple top-level
-//! [`crate::chat::ChatMessage`].
+//! See [`types`] for definitions. This module provides ergonomic constructors
+//! and a [`Message::text`] accessor.
 
 mod types;
-
-use crate::chat::{ChatMessage, ChatRole};
 
 pub use types::*;
 
@@ -69,30 +66,6 @@ impl Message {
             Message::User(m) => concat_text(&m.content),
             Message::Assistant(m) => concat_text(&m.content),
             Message::Tool(m) => concat_text(&m.content),
-        }
-    }
-
-    /// Bridges this message back to a simple top-level [`ChatMessage`].
-    ///
-    /// Tool messages carry the tool call id in the `name` field so the simple
-    /// type can still round-trip the correlation id.
-    pub fn to_chat(&self) -> ChatMessage {
-        match self {
-            Message::System(_) => ChatMessage::system(self.text()),
-            Message::User(_) => ChatMessage::user(self.text()),
-            Message::Assistant(_) => ChatMessage::assistant(self.text()),
-            Message::Tool(m) => ChatMessage::tool(m.tool_call_id.clone(), self.text()),
-        }
-    }
-}
-
-impl From<ChatMessage> for Message {
-    fn from(msg: ChatMessage) -> Self {
-        match msg.role {
-            ChatRole::System => Message::system(msg.content),
-            ChatRole::User => Message::user(msg.content),
-            ChatRole::Assistant => Message::assistant(msg.content),
-            ChatRole::Tool => Message::tool(msg.name.unwrap_or_default(), msg.content),
         }
     }
 }

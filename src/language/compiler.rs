@@ -1,5 +1,5 @@
 //! Compiler: lowers a [`Program`] AST into validated [`Blueprint`]s and wires
-//! a blueprint into a runtime [`StateGraph`].
+//! a blueprint into a durable runtime graph.
 //!
 //! The compiler has three responsibilities, each exposed as a free function or
 //! trait so callers can stop at the level of safety they need:
@@ -10,15 +10,16 @@
 //!    against an allowlist ([`CapabilityResolver`]). This is the registry
 //!    binding gate: declarative source can only reference capabilities that
 //!    Rust has already registered and allowed.
-//! 3. [`build_graph`] — materialises a blueprint into a legacy
-//!    [`StateGraph`] using a caller-supplied [`NodeFactory`]. The blueprint
+//! 3. [`build_graph`] — materialises a blueprint into a durable
+//!    [`CompiledGraph`] using a caller-supplied [`NodeFactory`]. The blueprint
 //!    describes *topology*; runnable node behaviour comes entirely from the
 //!    Rust-side factory, never from the declarative source.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::error::{Result, TinyAgentsError};
-use crate::graph::{Node, StateGraph};
+use crate::graph::{CompiledGraph, GraphBuilder, NodeHandler};
 use crate::language::parser::parse_str;
 use crate::language::types::{Blueprint, ChannelSpec, END, EdgeSpec, NodeSpec, Program, Routing};
 use crate::registry::CapabilityRegistry;
@@ -532,65 +533,86 @@ pub fn compile_source<State: Send + Sync>(
 }
 
 // ===========================================================================
-// Topology materialisation: Blueprint -> StateGraph
+// Topology materialisation: Blueprint -> CompiledGraph
 // ===========================================================================
 
-/// Builds runtime [`Node`]s from compiled [`NodeSpec`]s.
+/// A durable node handler materialised from a [`NodeSpec`].
+///
+/// Whole-state graphs use `Update == State`: the handler receives the committed
+/// state snapshot plus a [`crate::graph::NodeContext`] and returns a
+/// [`crate::graph::NodeResult`]. To continue along a static edge return
+/// [`crate::graph::NodeResult::Update`] with the next state; to take a
+/// conditional route or stop, return a
+/// [`crate::graph::Command`] carrying `goto` (the resolved target node, or the
+/// reserved [`crate::graph::END`]) and the next state via `with_update`.
+pub type BoxedNode<State> = Arc<NodeHandler<State, State>>;
+
+/// Builds runtime node handlers from compiled [`NodeSpec`]s.
 ///
 /// This is the boundary between the declarative language and executable Rust:
 /// the [`Blueprint`] describes *what* nodes exist and how they are wired, while
 /// the factory provides *how* each node behaves. Keeping behaviour on the Rust
 /// side is what stops `.rag` source from smuggling in arbitrary code.
 pub trait NodeFactory<State> {
-    /// Materialises a runnable [`Node`] for the given specification.
+    /// Materialises a runnable durable node handler for the given
+    /// specification.
+    ///
+    /// For a [`Routing::Conditional`] node the returned handler is responsible
+    /// for choosing a route: resolve the chosen label against `spec.routing` to
+    /// a target node id and return
+    /// `NodeResult::Command(Command::goto([target]).with_update(state))`. The
+    /// target may be the reserved [`crate::graph::END`] to stop the run.
     ///
     /// # Errors
     ///
     /// Implementations should return an error (typically
     /// [`TinyAgentsError::Compile`] or [`TinyAgentsError::Capability`]) when a
     /// node kind is unsupported or a required binding is missing.
-    fn make(&self, spec: &NodeSpec) -> Result<Node<State>>;
+    fn make(&self, spec: &NodeSpec) -> Result<BoxedNode<State>>;
 }
 
-/// Wires a [`Blueprint`] into a legacy [`StateGraph`] using `factory` to
-/// materialise each node.
+/// Wires a [`Blueprint`] into a durable, whole-state [`CompiledGraph`] (overwrite
+/// reducer) using `factory` to materialise each node.
 ///
-/// [`Routing`] is translated into the graph's edge model:
+/// [`Routing`] is translated into the durable graph topology:
 ///
-/// - [`Routing::Next`] -> [`StateGraph::add_edge`],
-/// - [`Routing::Conditional`] -> [`StateGraph::add_conditional_edges`].
-///   Route labels whose target is the reserved `END` are *not* added to the
-///   edge table (the legacy graph has no `END` node); instead the node's
-///   handler is expected to emit a [`crate::graph::NodeOutput::End`] for those
-///   labels. Non-terminal labels map to their target node.
-/// - [`Routing::Terminal`] -> [`StateGraph::add_end`].
+/// - [`Routing::Next`] -> [`GraphBuilder::add_edge`] (a static successor),
+/// - [`Routing::Conditional`] -> [`GraphBuilder::mark_command_routing`]. The
+///   node decides its own route at runtime by returning a
+///   [`crate::graph::Command`] `goto` (the legacy whole-state semantics, where
+///   the route label is chosen by the node, not by committed state). The
+///   factory resolves the label to a target node id — or the reserved
+///   [`crate::graph::END`] — from `spec.routing`.
+/// - [`Routing::Terminal`] -> [`GraphBuilder::set_finish`] (route to `END`).
+///
+/// The blueprint's `start` node becomes the graph entry.
 ///
 /// # Errors
 ///
-/// Propagates any error from `factory.make`.
-pub fn build_graph<State, F>(blueprint: &Blueprint, factory: &F) -> Result<StateGraph<State>>
+/// Propagates any error from `factory.make`, and any topology
+/// [`TinyAgentsError::Validation`] raised by [`GraphBuilder::compile`].
+pub fn build_graph<State, F>(
+    blueprint: &Blueprint,
+    factory: &F,
+) -> Result<CompiledGraph<State, State>>
 where
-    State: Clone + Send + 'static,
+    State: Clone + Send + Sync + 'static,
     F: NodeFactory<State>,
 {
-    let mut graph = StateGraph::new().set_start(&blueprint.start);
+    let mut builder = GraphBuilder::<State, State>::overwrite().set_entry(blueprint.start.as_str());
 
     for spec in &blueprint.nodes {
-        let node = factory.make(spec)?;
-        graph = graph.add_node(node);
+        let handler = factory.make(spec)?;
+        builder = builder.add_node(spec.name.as_str(), move |state, ctx| {
+            (handler.clone())(state, ctx)
+        });
 
-        graph = match &spec.routing {
-            Routing::Next(target) => graph.add_edge(&spec.name, target),
-            Routing::Conditional(routes) => graph.add_conditional_edges(
-                &spec.name,
-                routes
-                    .iter()
-                    .filter(|(_, target)| target != END)
-                    .map(|(label, target)| (label.clone(), target.clone())),
-            ),
-            Routing::Terminal => graph.add_end(&spec.name),
+        builder = match &spec.routing {
+            Routing::Next(target) => builder.add_edge(spec.name.as_str(), target.as_str()),
+            Routing::Conditional(_) => builder.mark_command_routing(spec.name.as_str()),
+            Routing::Terminal => builder.set_finish(spec.name.as_str()),
         };
     }
 
-    Ok(graph)
+    builder.compile()
 }

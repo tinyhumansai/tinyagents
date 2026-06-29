@@ -25,15 +25,16 @@
 use std::sync::Arc;
 
 use tinyagents::Result;
+use tinyagents::graph::{CompiledGraph, END, NodeFuture};
 use tinyagents::harness::message::Message;
 use tinyagents::harness::providers::openai::OpenAiModel;
 use tinyagents::harness::runtime::AgentHarness;
 use tinyagents::language::compiler::{
-    CapabilityResolver, NodeFactory, bind_capabilities, build_graph, compile,
+    BoxedNode, CapabilityResolver, NodeFactory, bind_capabilities, build_graph, compile,
 };
 use tinyagents::language::parser::parse_str;
 use tinyagents::language::types::{NodeSpec, Routing};
-use tinyagents::{Node, NodeOutput, StateGraph};
+use tinyagents::{Command, NodeContext, NodeResult};
 
 /// Grammar + worked example handed to the model so it emits valid `.rag`.
 const SYSTEM_PROMPT: &str = r#"
@@ -98,28 +99,36 @@ struct BlueprintState {
 
 /// A trivial node factory. Behaviour lives entirely in Rust — the `.rag` source
 /// only chooses *which* nodes exist and how they are wired. Each node records
-/// its name; routing is resolved so the run always terminates:
-/// terminal/conditional nodes end, linear nodes continue to their successor.
+/// its name; routing is resolved so the run always terminates: linear (`next`)
+/// and terminal nodes commit a whole-state update (static edges route them),
+/// and conditional nodes end immediately by routing to `END` (the demo always
+/// takes the `final -> END` route).
 struct TrailFactory;
 
 impl NodeFactory<BlueprintState> for TrailFactory {
-    fn make(&self, spec: &NodeSpec) -> Result<Node<BlueprintState>> {
+    fn make(&self, spec: &NodeSpec) -> Result<BoxedNode<BlueprintState>> {
         let name = spec.name.clone();
         let routing = spec.routing.clone();
-        Ok(Node::new(name.clone(), move |mut state: BlueprintState| {
-            let name = name.clone();
-            let routing = routing.clone();
-            async move {
-                state.trail.push(name);
-                let output = match &routing {
-                    Routing::Next(_) => NodeOutput::continue_with(state),
-                    // End on conditional/terminal nodes so the demo run always
-                    // reaches END (take the `final -> END` route).
-                    Routing::Conditional(_) | Routing::Terminal => NodeOutput::end(state),
-                };
-                Ok(output)
-            }
-        }))
+        Ok(Arc::new(
+            move |mut state: BlueprintState, _ctx: NodeContext| -> NodeFuture<BlueprintState> {
+                let name = name.clone();
+                let routing = routing.clone();
+                Box::pin(async move {
+                    state.trail.push(name);
+                    let result = match &routing {
+                        // Static edges (Next/Terminal) route these; commit the
+                        // whole-state update.
+                        Routing::Next(_) | Routing::Terminal => NodeResult::Update(state),
+                        // Conditional nodes are command-routed: end the demo run
+                        // by routing explicitly to END.
+                        Routing::Conditional(_) => {
+                            NodeResult::Command(Command::goto([END]).with_update(state))
+                        }
+                    };
+                    Ok(result)
+                })
+            },
+        ))
     }
 }
 
@@ -197,7 +206,8 @@ async fn run_pipeline(source: &str) -> Result<()> {
     }
 
     println!("\n--- stage 4: build graph + run to END ---");
-    let graph: StateGraph<BlueprintState> = build_graph(&blueprint, &TrailFactory)?;
+    let graph: CompiledGraph<BlueprintState, BlueprintState> =
+        build_graph(&blueprint, &TrailFactory)?;
     let run = graph.run(BlueprintState::default()).await?;
     println!("visited: {:?}", run.visited);
     println!("trail  : {:?}", run.state.trail);
