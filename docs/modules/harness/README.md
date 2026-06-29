@@ -54,6 +54,12 @@ Primary references:
   <https://github.com/langchain-ai/langchain/tree/master/libs/core/langchain_core/indexing>
 - LangChain runnable config, fallbacks, retry, and event streams:
   <https://github.com/langchain-ai/langchain/tree/master/libs/core/langchain_core/runnables>
+- OpenHuman PR #4261 agent graph implementation:
+  <https://github.com/tinyhumansai/openhuman/pull/4261>
+- OpenHuman PR #4261 state graph files:
+  `src/openhuman/agent_graph/graph/`, `checkpoint/`, `hitl/`,
+  `observability/`, `definitions/`, `blueprint/`, `live/`, `ops.rs`, and
+  `schemas.rs`
 - LangChain callbacks, tracers, and usage accounting:
   <https://github.com/langchain-ai/langchain/tree/master/libs/core/langchain_core/callbacks>
   and
@@ -81,6 +87,9 @@ tests for every adapter.
 - Dispatch tool calls through a registry with schema validation.
 - Expose retrievers and vector stores for retrieval-augmented context assembly.
 - Run the standard model-tool-model agent loop.
+- Represent the standard agent loop as an explicit state machine when callers
+  need inspection, checkpointing, HITL, branch/fork semantics, or graph-node
+  execution.
 - Apply middleware before and after model calls, tool calls, retries, and errors.
 - Enforce model-call limits, tool-call limits, timeouts, and retry policy.
 - Emit typed events for tracing, streaming, and tests.
@@ -103,6 +112,10 @@ tests for every adapter.
   exposing private state to model-visible schemas.
 - Support model fallback, tool retry, rate limiting, and human interruption as
   explicit policies rather than ad hoc callbacks.
+- Support durable graph runs with pause/resume, checkpoint listing, and
+  inspectable node transitions.
+- Support per-agent execution blueprints that describe how an agent runs
+  separately from what its prompt says.
 - Provide a standard conformance test suite for model, tool, store, stream, and
   middleware implementations.
 
@@ -135,6 +148,7 @@ src/harness/
   cost.rs
   embeddings.rs
   events.rs
+  graph_runtime.rs
   limits.rs
   memory.rs
   message.rs
@@ -167,6 +181,8 @@ Feature ownership:
 - `embeddings`: embedding providers, vector stores, retrievers, indexing, and
   retrieval-context records.
 - `events`: typed harness events, sinks, streams, redaction adapters.
+- `graph_runtime`: explicit state graphs, node commands, reducers,
+  checkpointing, HITL, run records, and graph execution blueprints.
 - `limits`: model-call, tool-call, concurrency, timeout, and recursion policy.
 - `memory`: short-term thread memory and long-term stores.
 - `message`: structured messages, content blocks, tool call correlation.
@@ -189,6 +205,7 @@ Feature details:
 - [Context feature](context.md)
 - [Model and provider feature](model.md)
 - [Embeddings and retrieval feature](embeddings.md)
+- [State graph runtime feature](state-graph.md)
 - [Prompt feature](prompt.md)
 - [Tool feature](tool.md)
 - [Middleware feature](middleware.md)
@@ -218,6 +235,10 @@ surface area that RustAgents should intentionally support, adapt, or reject.
 | Content translation | `libs/core/langchain_core/messages/block_translators/*.py` | Provider adapters must translate to/from the canonical RustAgents message model without losing ids, tool-call chunks, reasoning, usage, or provider metadata. |
 | Model profiles | `libs/core/langchain_core/language_models/model_profile.py` | Store model capability metadata: context limits, modalities, tool calling, tool-choice support, streaming tool chunks, structured output, reasoning output, temperature, attachments, status, and release dates. |
 | Embeddings | `libs/core/langchain_core/embeddings/embeddings.py` | Define provider-neutral embedding traits for documents and queries, with batch, async, dimensionality, provider metadata, usage, cost, cache, and fake deterministic implementations. |
+| OpenHuman agent graph | `openhuman#4261`, `src/openhuman/agent_graph/graph/*` | Add a LangGraph-style state-machine runtime: typed state reducers, async nodes, static/conditional/fork edges, Pregel super-steps, compile validation, cancellation, max-step guards, interrupts, and resume. |
+| OpenHuman checkpointer | `openhuman#4261`, `src/openhuman/agent_graph/checkpoint/*` | Persist graph runs and checkpoints through a pluggable `Checkpointer`, with in-memory tests and durable SQLite-style production storage. |
+| OpenHuman graph blueprints | `openhuman#4261`, `src/openhuman/agent_graph/blueprint/*` | Keep per-agent execution topology in `graph.rs`-style blueprints next to prompts, so "what the agent says" and "how the agent runs" are inspectable separately. |
+| OpenHuman live turn graph | `openhuman#4261`, `src/openhuman/agent_graph/live/*` and `agent/harness/engine/core.rs` | Preserve the hot-path turn contract while making phases explicit: dispatch, parse, stop check, tools, compact, loop, finalize, max-iteration checkpoint. |
 | Vector stores | `libs/core/langchain_core/vectorstores/base.py`, `in_memory.py` | Support add/update/delete/get-by-id, similarity search, score-threshold search, MMR search, metadata filters, async variants, and in-memory test stores. |
 | Retrievers and indexing | `libs/core/langchain_core/retrievers.py`, `indexing/*.py` | Treat retrievers as query-to-document components with events, tags, metadata, and record-manager-backed incremental indexing for dedupe and cleanup. |
 | Tool runtime injection | `langgraph.prebuilt.ToolRuntime` as re-exported by `libs/langchain_v1/langchain/tools/tool_node.py` | Tools should receive typed runtime context, state, store handles, stream writers, and cancellation handles through Rust parameters, not model-visible JSON schema fields. |

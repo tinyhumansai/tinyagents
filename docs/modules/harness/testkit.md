@@ -30,6 +30,7 @@ adapters can assert behavior without live providers.
 - Provide in-memory stores and event collectors.
 - Provide deterministic clocks and id generators.
 - Provide trajectory assertions for agent loops.
+- Provide graph trajectory assertions for state-graph runs.
 - Provide conformance tests for provider adapters.
 - Provide replay fixtures from recorded events.
 - Provide helpers for structured-output validation tests.
@@ -77,6 +78,10 @@ Tests should be able to assert:
 - no unexpected provider calls
 - retrieved document ids and scores
 - indexed document hashes
+- graph run status
+- graph node transition sequence
+- checkpoint labels and state snapshots
+- HITL interrupt kind/options/resume node
 
 ## Provider Conformance
 
@@ -98,6 +103,21 @@ Provider adapters should run a shared suite that covers:
 - cancellation
 - timeout
 - rate-limit error classification
+
+State-graph conformance should cover:
+
+- linear route
+- conditional route
+- fork and merge reducer
+- cycle guarded by max steps
+- cancellation
+- node error propagation
+- HITL pause/resume/reject
+- in-memory and durable checkpointer round trip
+- run list pagination and newest-first order
+- per-agent blueprint validation
+- live turn graph tool advertisement, allowlist enforcement, malformed
+  argument handling, and final output depending on actual tool execution
 - provider options passthrough
 
 Tests requiring live providers should be opt-in and documented with environment

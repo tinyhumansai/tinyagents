@@ -5,6 +5,9 @@ used by memory, events, model calls, tool calls, artifacts, web UIs, and tests.
 
 The store is not graph checkpointing. Graph checkpoints belong to the graph
 module. Harness stores record application/runtime data around LLM orchestration.
+When the harness state-graph runtime is enabled, graph checkpointers own the
+serialized graph state snapshots while harness stores can still index the run's
+events, artifacts, model calls, tool calls, and UI-facing summaries.
 
 The store may also back status and event-journal features for the harness and
 for graph integrations. That does not make those records generic memory: status
@@ -35,6 +38,8 @@ runtime injection. RustAgents should expose stores through `RunContext` and
 - Provide append-only stream storage.
 - Store messages, run records, events, tool records, model records, and artifacts.
 - Store embedding records and vector/retrieval metadata when configured.
+- Store graph run indexes, graph event journals, and graph UI summaries when
+  configured, without taking ownership of checkpoint snapshots.
 - Support in-memory tests.
 - Support JSONL local development.
 - Support MongoDB server deployments.
@@ -52,6 +57,7 @@ runtime injection. RustAgents should expose stores through `RunContext` and
 - It does not decide what enters a prompt.
 - It does not summarize memory.
 - It does not checkpoint graph execution.
+- It does not replace the graph checkpointer used for pause/resume.
 - It does not replace the registry.
 - It does not require one global database.
 
@@ -218,6 +224,8 @@ Suggested collections:
 - `memory`
 - `embeddings`
 - `retrievals`
+- `graph_runs`
+- `graph_events`
 
 Minimum indexes:
 
@@ -232,6 +240,8 @@ Minimum indexes:
 - `model_calls.run_id + model_calls.call_id`
 - `retrievals.run_id + retrievals.time`
 - `embeddings.model + embeddings.created_at`
+- `graph_runs.status + graph_runs.updated_at`
+- `graph_events.run_id + graph_events.time`
 
 ### Future Backends
 

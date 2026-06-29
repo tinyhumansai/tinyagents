@@ -30,6 +30,8 @@ RustAgents should use typed Rust events rather than stringly callback names.
 - Support durable event journals through `store`.
 - Preserve parent/root run relationships.
 - Include usage, cost, cache, retry, fallback, and timing data.
+- Include graph run ids, graph names, super-step indexes, node ids, routing
+  commands, checkpoint ids, and interrupt metadata for state-graph runs.
 
 ## Execution Status Store
 
@@ -140,6 +142,13 @@ Event kinds should include:
 - `rate_limit.waited`
 - `limit.reached`
 - `stream.closed`
+- `graph.run.started`
+- `graph.node.entered`
+- `graph.node.completed`
+- `graph.run.paused`
+- `graph.run.completed`
+- `graph.run.failed`
+- `graph.checkpoint.saved`
 
 ## Event Journal And Listener Replay
 
@@ -234,3 +243,22 @@ Redaction policies should handle:
 
 Redacted events should preserve structural fields such as ids, event kinds,
 timings, and counters so traces remain useful.
+
+## Graph Events
+
+State-graph event payloads should be rich enough for a UI to render run
+progress without loading checkpoints:
+
+- run id
+- graph name
+- step or super-step index
+- node id
+- rendered command such as `continue`, `goto:node`, `fork:[a,b]`,
+  `interrupt:approval`, or `end`
+- elapsed milliseconds
+- lifecycle status
+- interrupt kind and resume node when paused
+- error class and message when failed
+
+Graph event tests should filter by both event kind and run id. A shared global
+event bus can otherwise pick up unrelated graph events from parallel tests.

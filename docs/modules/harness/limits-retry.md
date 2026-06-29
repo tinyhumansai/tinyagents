@@ -28,6 +28,7 @@ agent loop, and graph node can share predictable behavior.
 - Enforce per-call timeouts.
 - Enforce maximum concurrency.
 - Enforce optional recursion depth.
+- Enforce graph super-step caps.
 - Support cancellation.
 - Classify retryable and non-retryable errors.
 - Support exponential backoff with jitter.
@@ -45,6 +46,7 @@ pub struct RunLimits {
     pub max_retries: usize,
     pub max_concurrency: usize,
     pub max_recursion_depth: usize,
+    pub max_graph_steps: usize,
     pub wall_clock_timeout: Option<Duration>,
     pub model_call_timeout: Option<Duration>,
     pub tool_call_timeout: Option<Duration>,
@@ -53,6 +55,10 @@ pub struct RunLimits {
 
 Limits should fail closed. When a limit is reached, the harness should stop the
 agent loop and return a classified error that includes the current counters.
+
+For graph-backed runs, max-step failures should include graph name, run id,
+current super-step, frontier nodes, and the configured cap. The run should be
+persisted as failed when a checkpointer is configured.
 
 ## Retry Policy
 

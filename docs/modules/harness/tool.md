@@ -29,6 +29,8 @@ RustAgents should make that distinction explicit in Rust types.
 - Expose model-visible JSON schemas.
 - Hide injected runtime parameters from model-visible schemas.
 - Validate model-provided arguments before execution.
+- Validate provider-supplied tool calls against the tools advertised for the
+  current turn before execution.
 - Execute tools with access to state, runtime context, stores, cancellation, and
   event streams.
 - Record tool lifecycle events.
@@ -119,6 +121,15 @@ secret exposure.
 
 Validation failures should produce a model-consumable error message when the
 agent loop can recover, and a hard error when policy forbids repair.
+
+Provider-supplied tool calls must fail closed:
+
+- unknown tool names are not executed
+- malformed JSON arguments are not replaced with empty defaults for
+  side-effecting tools
+- tool call ids are preserved in error tool messages
+- allowlist violations emit events and append repairable tool-result messages
+  only when the agent loop policy allows recovery
 
 ## Results And Artifacts
 
