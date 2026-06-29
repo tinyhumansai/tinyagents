@@ -103,9 +103,6 @@ jobs:
           perl -0pi -e 's/(\[package\][\s\S]*?\nversion = ")[^"]+(")/$1$ENV{NEXT_VERSION}$2/' Cargo.toml
           cargo update -p "$CRATE_NAME" --precise "$NEXT_VERSION"
 
-      - name: Package crate
-        run: cargo package --locked
-
       - name: Commit version bump and tag
         env:
           NEXT_VERSION: ${{ steps.version.outputs.next_version }}
@@ -116,6 +113,14 @@ jobs:
           git add Cargo.toml Cargo.lock
           git commit -m "Release ${RELEASE_TAG}"
           git tag -a "${RELEASE_TAG}" -m "Release ${RELEASE_TAG}"
+
+      - name: Package crate
+        run: cargo package --locked
+
+      - name: Push release commit and tag
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
           git push origin "HEAD:${GITHUB_REF_NAME}"
           git push origin "${RELEASE_TAG}"
 
