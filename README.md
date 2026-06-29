@@ -6,200 +6,108 @@
 TinyAgents is a Rust-native framework for building LLM agents as typed,
 inspectable workflows.
 
-The project starts from a simple belief: agent systems should not be piles of
-callbacks and hidden loops. They should be explicit programs with state, edges,
-policies, tools, model calls, checkpoints, and events that you can read, test,
-debug, serialize, and run again.
-
-TinyAgents brings that shape to Rust. It combines strongly typed application
-state, async model and tool traits, executable graph primitives, and a roadmap
-for declarative agent workflow languages that LLMs can safely author, inspect,
-compile, and run.
-
-## The Big Idea: Declarative Workflows For LLMs
-
-LLMs are good at proposing plans, but raw generated code is a dangerous
-execution boundary. TinyAgents is moving toward a safer path: an expressive,
-declarative workflow language for graph blueprints.
-
-A `.rag` workflow should describe what an agent system is allowed to do:
-
-- which models, tools, stores, and sub-agents are available
-- which nodes exist
-- how state flows between nodes
-- when work fans out in parallel
-- how child agents join back into parent state
-- which agents are blocking, optional, racing, or quorum-based
-- where checkpoints, interrupts, retries, budgets, and policies apply
-
-That means an LLM can create or modify a workflow without receiving arbitrary
-host-code execution. The generated plan becomes source, the source becomes an
-AST, the AST is validated against registries and policy, and only then does it
-compile into the same graph runtime that hand-written Rust uses.
-
-Conceptually:
-
-```tinyagents
-graph research_review {
-  start supervisor
-
-  channel messages messages
-  channel findings append
-  channel critiques append
-
-  node supervisor {
-    kind agent
-    model "default"
-    tools ["search", "read_repo"]
-
-    send [
-      research_agent { question: input.question },
-      verifier_agent { question: input.question }
-    ]
-
-    join review
-  }
-
-  node review {
-    kind sub_agent
-    agent "final_reviewer"
-    blocking true
-    next END
-  }
-}
-```
-
-This is the power TinyAgents is built around: agents can author workflows that
-spawn other agents, run branches in parallel, call blocking reviewers, fork
-context safely, and merge outputs through typed reducers while the runtime keeps
-policy and observability intact.
+It gives agent systems the shape production Rust teams expect: explicit state,
+durable graph execution, provider-neutral model adapters, typed tools,
+observable runs, and declarative workflow blueprints that can be reviewed before
+they execute.
 
 ## Why TinyAgents
 
-Python and TypeScript have mature agent frameworks. Rust developers deserve the
-same level of orchestration power without giving up Rust's clarity, type system,
-performance, and production discipline.
-
-TinyAgents is designed for teams that want to build real agent products:
+LLM applications should not be hidden loops of callbacks, prompt fragments, and
+untracked side effects. TinyAgents makes the moving parts visible:
 
 - typed state instead of unstructured runtime bags
 - explicit graph execution instead of implicit control flow
-- model and tool traits that are easy to test
-- deterministic routing around nondeterministic LLM calls
-- observable runs with room for streaming, checkpoints, interrupts, and replay
-- declarative workflow definitions that can be reviewed before execution
-- parallel agents, sub-agent fanout, context forking, and blocking child agents
-  as first-class workflow concepts
+- provider-neutral model and tool interfaces
+- deterministic routing around nondeterministic model calls
+- streaming, usage, and provider errors normalized at the harness boundary
+- registries for models, tools, agents, graphs, stores, middleware, and policy
+- `.rag` blueprints for workflows that humans and agents can inspect together
 
-The long-term goal is not just "call an LLM from Rust." The goal is to make
-Rust a serious home for durable agent runtimes.
+TinyAgents is early, but the foundation is already in place for durable graph
+runs, harness composition, provider adapters, registry-backed capabilities, and
+language-backed workflow definitions.
 
-## Current Status
+## Architecture
 
-TinyAgents is early. The crate currently provides the foundation:
+```mermaid
+flowchart LR
+    App[Application] --> Harness[Agent Harness]
+    Harness --> Models[Model Providers]
+    Harness --> Tools[Typed Tools]
+    Harness --> Events[Events and Usage]
+    App --> Graph[Durable Graph Runtime]
+    Graph --> Harness
+    Registry[Capability Registry] --> Harness
+    Registry --> Graph
+    Language[.rag Blueprints] --> Registry
+    Language --> Graph
+```
 
-- chat message primitives
-- async chat model and tool traits
-- executable state graphs with direct and conditional routing
-- graph validation, recursion limits, visited-node traces, and examples
-- extensive architecture docs for the harness, graph runtime, registry,
-  expressive language, and REPL language
+```mermaid
+flowchart TD
+    Start((START)) --> Agent[Agent Node]
+    Agent -->|needs tool| Tool[Tool Node]
+    Tool --> Agent
+    Agent -->|done| End((END))
+```
 
-The docs describe the target system in more detail than the current crate
-implements. That is intentional: the public repository is both a working Rust
-library and an open design space for the agent runtime Rust should have.
+## Features
 
-## Install
+- Rust 2024 library crate with async graph and harness primitives.
+- LangGraph-style durable graphs with `START`, `END`, nodes, edges,
+  conditional routing, commands, checkpoints, interrupts, and topology export.
+- LangChain-style harness concepts: chat models, tools, middleware, structured
+  output, streaming, usage, events, retries, test doubles, and provider
+  profiles.
+- Standardized provider specs for OpenAI, Anthropic, Ollama, DeepSeek, Groq,
+  xAI, OpenRouter, Together, Mistral, and OpenAI-compatible endpoints.
+- Focused examples for local graphs, OpenAI-backed agents, tool calling,
+  structured output, and model-authored `.rag` blueprints.
 
-Until the crate is published, use the repository directly:
+## Quick Setup
+
+Until the crate is published, depend on the repository directly:
 
 ```toml
 [dependencies]
-tinyagents = { git = "https://github.com/tinyhumansai/tinyagents" }
+tinyagents = { git = "https://github.com/tinyhumansai/rustagents" }
 ```
 
 For local development:
 
-```toml
-[dependencies]
-tinyagents = { path = "." }
-```
-
-## Quick Example
-
-```rust
-use tinyagents::{ChatMessage, Node, NodeOutput, Result, StateGraph};
-
-#[derive(Clone, Debug)]
-struct AgentState {
-    messages: Vec<ChatMessage>,
-    needs_tool: bool,
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let graph = StateGraph::new()
-        .add_node(Node::new("agent", |mut state: AgentState| async move {
-            state.messages.push(ChatMessage::assistant("I should use a tool."));
-
-            if state.needs_tool {
-                Ok(NodeOutput::route(state, "tool"))
-            } else {
-                Ok(NodeOutput::end(state))
-            }
-        }))
-        .add_node(Node::new("tool", |mut state: AgentState| async move {
-            state.messages.push(ChatMessage::tool("echo", "tool result"));
-            state.needs_tool = false;
-            Ok(NodeOutput::continue_with(state))
-        }))
-        .set_start("agent")
-        .add_conditional_edges("agent", [("tool", "tool")])
-        .add_edge("tool", "agent");
-
-    let run = graph
-        .run(AgentState {
-            messages: vec![ChatMessage::user("Can you use a tool?")],
-            needs_tool: true,
-        })
-        .await?;
-
-    println!("{:#?}", run.visited);
-    Ok(())
-}
-```
-
-Run the bundled example:
-
 ```sh
+git clone git@github.com:tinyhumansai/rustagents.git
+cd rustagents
+cargo test
 cargo run --example basic_graph
 ```
 
-## Architecture
+For hosted providers, enable the matching feature and set provider credentials:
 
-TinyAgents is organized around five major surfaces:
+```sh
+export OPENAI_API_KEY=...
+cargo run --features openai --example openai_chat
+```
 
-- **Harness**: provider-neutral models, tools, middleware, prompts, context,
-  memory, streaming, observability, retries, caching, and test doubles.
-- **Graph runtime**: typed state graphs, nodes, routing, reducers, commands,
-  parallel execution, checkpointing, interrupts, subgraphs, and sub-agents.
-- **Registry**: named models, tools, agents, graphs, stores, middleware, and
-  policies that declarative workflows can bind to safely.
-- **Expressive language**: `.rag` graph blueprints that are readable by humans,
-  authorable by agents, and compiled through the same validation path.
-- **REPL language**: `.ragsh` interactive orchestration for inspecting,
-  scripting, and controlling harness and graph runs through registered
-  capabilities.
+For local Ollama-compatible development, run Ollama's OpenAI-compatible server
+and use the provider helpers documented in the wiki.
 
-Start with the system specification:
+## Documentation
 
-- [System specification](docs/spec/README.md)
-- [Harness module](docs/modules/harness/README.md)
-- [Graph module](docs/modules/graph/README.md)
-- [Parallel agents and context forking](docs/modules/graph/parallel-agents-forking.md)
-- [Expressive language](docs/modules/expressive-language/README.md)
-- [REPL language](docs/modules/repl-language/README.md)
-- [Registry module](docs/modules/registry/README.md)
+The root README stays high level. Detailed examples, architecture notes,
+provider setup, and workflow documentation live in the GitHub wiki:
+
+- [Wiki home](https://github.com/tinyhumansai/tinyagents/wiki)
+- [Quick start](https://github.com/tinyhumansai/tinyagents/wiki/Quick-Start)
+- [Examples](https://github.com/tinyhumansai/tinyagents/wiki/Examples)
+- [Providers](https://github.com/tinyhumansai/tinyagents/wiki/Providers)
+- [Architecture](https://github.com/tinyhumansai/tinyagents/wiki/Architecture)
+- [Graph runtime](https://github.com/tinyhumansai/tinyagents/wiki/Graph-Runtime)
+
+The checked-in architecture specification remains available under
+[`docs/spec/README.md`](docs/spec/README.md) for contributors working directly
+in the repository.
 
 ## Development
 
@@ -210,17 +118,10 @@ cargo build --all-targets
 cargo test
 ```
 
-Run the example:
-
-```sh
-cargo run --example basic_graph
-```
-
 ## Contributing
 
-TinyAgents is open source and welcomes focused contributions. The highest-value
-work right now is small, well-tested improvements to the core graph API,
-harness traits, docs, examples, and the declarative language design.
+TinyAgents welcomes focused contributions that improve the graph runtime,
+harness contracts, provider adapters, tests, examples, and documentation.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
