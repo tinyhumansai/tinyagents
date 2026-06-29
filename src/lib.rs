@@ -5,8 +5,10 @@ pub mod chat;
 pub mod error;
 pub mod graph;
 pub mod harness;
+pub mod language;
 pub mod model;
 pub mod registry;
+pub mod repl;
 pub mod tool;
 
 pub use chat::{ChatMessage, ChatRole};
