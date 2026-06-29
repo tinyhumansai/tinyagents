@@ -16,6 +16,12 @@ pub use error::{Result, RustAgentsError};
 pub use model::{ChatModel, ModelRequest, ModelResponse};
 pub use tool::{Tool, ToolCall, ToolResult};
 
+// --- Harness: embeddings + retrieval ---
+pub use harness::embeddings::{
+    EmbeddingModel, InMemoryVectorStore, MockEmbeddingModel, Retriever, ScoredDoc, VectorStore,
+    cosine_similarity,
+};
+
 // --- Harness: first-class sub-agents (agent-calling-agent composition) ---
 pub use harness::subagent::{SubAgent, SubAgentTool};
 

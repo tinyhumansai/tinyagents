@@ -75,6 +75,10 @@ pub enum RustAgentsError {
     #[error("memory error: {0}")]
     Memory(String),
 
+    /// An embedding model, vector store, or retriever operation failed.
+    #[error("embedding error: {0}")]
+    Embedding(String),
+
     // --- graph durability errors ---
     /// Generic graph runtime error.
     #[error("graph error: {0}")]

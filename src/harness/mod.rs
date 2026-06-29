@@ -8,6 +8,7 @@ pub mod agent_loop;
 pub mod cache;
 pub mod context;
 pub mod cost;
+pub mod embeddings;
 pub mod events;
 pub mod ids;
 pub mod limits;
