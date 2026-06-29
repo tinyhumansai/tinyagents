@@ -5,6 +5,8 @@ include tool execution, model-generated workflow source, registry binding,
 policy checks, sandbox boundaries, prompt and context handling, stores, and
 credentials passed through runtime context.
 
+Report concerns to `contact@tinyhumans.ai`.
+
 ## Supported Versions
 
 TinyAgents is pre-1.0. Security fixes target the `main` branch until the project

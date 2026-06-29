@@ -23,4 +23,4 @@ TinyAgents should be a focused, respectful technical space.
 Maintainers may edit, hide, or remove comments; close issues; reject
 contributions; or block participants when behavior harms the project.
 
-Report conduct concerns to `opensource@tinyhumans.ai`.
+Report conduct concerns to `contact@tinyhumans.ai`.
