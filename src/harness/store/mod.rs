@@ -1,0 +1,233 @@
+//! Harness store module — long-term key-value storage backends.
+//!
+//! The store is the persistence layer for harness runtime data: events, model
+//! call records, tool call records, message history, artifacts, and memory. It
+//! is intentionally separate from graph checkpointing (which belongs to the
+//! graph module) and from prompt/model context assembly (which belongs to the
+//! model and prompt modules).
+//!
+//! # Primary types
+//! - [`Store`] — the core async trait every backend implements.
+//! - [`InMemoryStore`] — ephemeral in-process store for tests and examples.
+//! - [`FileStore`] — file-system-backed store for local development.
+//! - [`StoreRegistry`] — named bag of stores injected into `RunContext`.
+//!
+//! # Namespace convention
+//! Use slash-free, lowercase names like `"threads"`, `"events"`, `"cache"`,
+//! `"artifacts"`. The registry does not enforce a naming scheme, but
+//! consistent names make multi-store applications easier to audit.
+
+mod types;
+
+use std::collections::HashMap;
+use std::fs;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde_json::Value;
+
+pub use types::*;
+
+use crate::error::{Result, RustAgentsError};
+
+// ── InMemoryStore ─────────────────────────────────────────────────────────────
+
+impl InMemoryStore {
+    /// Creates a new, empty in-memory store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl Store for InMemoryStore {
+    async fn get(&self, namespace: &str, key: &str) -> Result<Option<Value>> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|e| RustAgentsError::Validation(format!("store lock poisoned: {e}")))?;
+        Ok(data.get(namespace).and_then(|ns| ns.get(key)).cloned())
+    }
+
+    async fn put(&self, namespace: &str, key: &str, value: Value) -> Result<()> {
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|e| RustAgentsError::Validation(format!("store lock poisoned: {e}")))?;
+        data.entry(namespace.to_string())
+            .or_default()
+            .insert(key.to_string(), value);
+        Ok(())
+    }
+
+    async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|e| RustAgentsError::Validation(format!("store lock poisoned: {e}")))?;
+        if let Some(ns) = data.get_mut(namespace) {
+            ns.remove(key);
+        }
+        Ok(())
+    }
+
+    async fn list(&self, namespace: &str) -> Result<Vec<String>> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|e| RustAgentsError::Validation(format!("store lock poisoned: {e}")))?;
+        Ok(data
+            .get(namespace)
+            .map(|ns| ns.keys().cloned().collect())
+            .unwrap_or_default())
+    }
+}
+
+// ── FileStore ─────────────────────────────────────────────────────────────────
+
+impl FileStore {
+    /// Creates a file store rooted at `root_dir`.
+    ///
+    /// The directory is created lazily on the first write, so constructing a
+    /// `FileStore` for a path that does not yet exist is not an error.
+    pub fn new(root_dir: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            root_dir: root_dir.into(),
+        }
+    }
+
+    /// Validates that `name` (a namespace or key) contains only safe
+    /// characters: ASCII alphanumerics, hyphens, underscores, and dots.
+    ///
+    /// Returns a [`RustAgentsError::Validation`] if the name is empty or
+    /// contains any other byte, preventing path-traversal attacks.
+    fn sanitize(name: &str) -> Result<()> {
+        if name.is_empty() {
+            return Err(RustAgentsError::Validation(
+                "store namespace and key must not be empty".into(),
+            ));
+        }
+        if name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+        {
+            Ok(())
+        } else {
+            Err(RustAgentsError::Validation(format!(
+                "store name contains invalid characters: {name:?} \
+                 (only ASCII alphanumerics, hyphens, underscores, dots allowed)"
+            )))
+        }
+    }
+
+    /// Returns the canonical path for `key` within `namespace`.
+    fn key_path(&self, namespace: &str, key: &str) -> std::path::PathBuf {
+        self.root_dir.join(namespace).join(format!("{key}.json"))
+    }
+}
+
+#[async_trait]
+impl Store for FileStore {
+    async fn get(&self, namespace: &str, key: &str) -> Result<Option<Value>> {
+        Self::sanitize(namespace)?;
+        Self::sanitize(key)?;
+        let path = self.key_path(namespace, key);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&path)
+            .map_err(|e| RustAgentsError::Validation(format!("store read error: {e}")))?;
+        let value: Value = serde_json::from_slice(&bytes)?;
+        Ok(Some(value))
+    }
+
+    async fn put(&self, namespace: &str, key: &str, value: Value) -> Result<()> {
+        Self::sanitize(namespace)?;
+        Self::sanitize(key)?;
+        let dir = self.root_dir.join(namespace);
+        fs::create_dir_all(&dir)
+            .map_err(|e| RustAgentsError::Validation(format!("store mkdir error: {e}")))?;
+        let path = dir.join(format!("{key}.json"));
+        let bytes = serde_json::to_vec_pretty(&value)?;
+        fs::write(&path, &bytes)
+            .map_err(|e| RustAgentsError::Validation(format!("store write error: {e}")))?;
+        Ok(())
+    }
+
+    async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
+        Self::sanitize(namespace)?;
+        Self::sanitize(key)?;
+        let path = self.key_path(namespace, key);
+        if path.exists() {
+            fs::remove_file(&path)
+                .map_err(|e| RustAgentsError::Validation(format!("store delete error: {e}")))?;
+        }
+        Ok(())
+    }
+
+    async fn list(&self, namespace: &str) -> Result<Vec<String>> {
+        Self::sanitize(namespace)?;
+        let dir = self.root_dir.join(namespace);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let entries = fs::read_dir(&dir)
+            .map_err(|e| RustAgentsError::Validation(format!("store readdir error: {e}")))?;
+        let mut keys = Vec::new();
+        for entry in entries {
+            let entry = entry
+                .map_err(|e| RustAgentsError::Validation(format!("store entry error: {e}")))?;
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if let Some(stem) = name.strip_suffix(".json") {
+                keys.push(stem.to_string());
+            }
+        }
+        Ok(keys)
+    }
+}
+
+// ── StoreRegistry ─────────────────────────────────────────────────────────────
+
+impl StoreRegistry {
+    /// Creates a registry with a built-in default in-memory store.
+    ///
+    /// Named stores can be added with [`Self::register`].
+    pub fn new() -> Self {
+        Self {
+            stores: HashMap::new(),
+            default_store: Arc::new(InMemoryStore::new()),
+        }
+    }
+
+    /// Registers `store` under `name`.
+    ///
+    /// Replaces any previously registered store with the same name. Returns
+    /// `&mut self` for convenient builder-style chaining.
+    pub fn register(&mut self, name: impl Into<String>, store: Arc<dyn Store>) -> &mut Self {
+        self.stores.insert(name.into(), store);
+        self
+    }
+
+    /// Looks up a named store by `name`, returning `None` if no store with
+    /// that name has been registered.
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Store>> {
+        self.stores.get(name).cloned()
+    }
+
+    /// Returns the built-in default in-memory store.
+    ///
+    /// This store is always available regardless of registered backends.
+    pub fn default_store(&self) -> Arc<dyn Store> {
+        Arc::clone(&self.default_store)
+    }
+}
+
+impl Default for StoreRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod test;

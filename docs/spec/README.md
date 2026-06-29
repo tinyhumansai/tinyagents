@@ -147,6 +147,8 @@ testing:
 ### Responsibilities
 
 - Register chat model providers.
+- Resolve model calls from request overrides, reusable state, model hints,
+  agent defaults, registry defaults, and fallback policy.
 - Register tools and validate tool calls against schemas.
 - Build model requests from state, prompts, memory, and runtime context.
 - Apply prompt and message templates.
@@ -169,6 +171,8 @@ testing:
 - Accept sub-agent and orchestrator steering commands from humans, parent
   agents, graph supervisors, middleware, and tests at safe loop boundaries.
 - Normalize model and tool errors into framework errors.
+- Persist resolved model identity in responses, events, usage/cost records, run
+  status, and durable agent or graph state so later calls can reuse it.
 - Provide test doubles for models, tools, stores, clocks, and ids.
 
 ### Core Types
@@ -229,6 +233,7 @@ pub trait ChatModel<State>: Send + Sync {
 
 `ModelRequest` should grow beyond the current minimal version:
 
+- model hints and reusable resolved-model policy
 - messages
 - tools available for this call
 - tool choice policy
@@ -244,6 +249,11 @@ pub trait ChatModel<State>: Send + Sync {
 - ephemeral/non-cacheable context boundaries
 - prompt layout fingerprint
 - tags and metadata
+
+`ModelResponse` and agent state should record a `ResolvedModel` with registry
+name, provider, provider model id, catalog snapshot/entry when known, resolver
+source, and fallback history. This record is the durable answer to which model
+actually ran, and it may be reused by later calls when policy allows.
 
 Provider prompt caching is different from local response caching. The harness
 must support extreme prompt caching for providers with KV-cache or

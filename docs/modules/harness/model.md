@@ -35,7 +35,8 @@ feature-gated provider crates/modules and a shared conformance suite.
 - Preserve provider response ids, raw metadata, safety/refusal metadata, and
   usage details.
 - Support invoke and stream paths with equivalent final semantics.
-- Support model aliases, default models, and dynamic model selection.
+- Support model aliases, default models, dynamic model selection, and reusable
+  resolved-model state.
 - Support feature-gated provider adapters.
 - Provide fake and replay models for tests.
 
@@ -71,7 +72,9 @@ pub trait ChatModel<State, Ctx = ()>: Send + Sync {
 }
 
 pub struct ModelRequest {
-    pub model: ModelName,
+    pub model: Option<ModelName>,
+    pub model_hints: Vec<ModelHint>,
+    pub reuse_resolved_model: bool,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDeclaration>,
     pub tool_choice: ToolChoice,
@@ -85,6 +88,7 @@ pub struct ModelRequest {
 
 pub struct ModelResponse {
     pub message: AssistantMessage,
+    pub resolved_model: ResolvedModel,
     pub usage: Option<UsageRecord>,
     pub finish_reason: Option<FinishReason>,
     pub structured: Option<serde_json::Value>,
@@ -93,6 +97,154 @@ pub struct ModelResponse {
     pub cache: Option<CacheDecision>,
 }
 ```
+
+## Model Resolution
+
+Agents and model calls should be able to define their own model preferences
+without hardcoding one provider everywhere. The harness resolves a model at the
+start of a model call, records the selected model, and makes that resolved model
+available to later calls, child agents, graph nodes, event streams, and persisted
+state.
+
+The design mirrors OpenHuman-style smart model resolution from hints: callers
+can provide candidate models and capability requirements, while the registry and
+harness choose the best registered executable model under policy.
+
+Resolution inputs:
+
+- explicit request override such as `model "anthropic/claude-sonnet"`
+- agent default model declared in agent registration or `.rag`
+- model hints from an orchestrator, task, middleware, or runtime context
+- required capabilities such as tool calling, streaming, native JSON schema,
+  vision, long context, reasoning, or prompt caching
+- cost, latency, locality, privacy, and provider-family preferences
+- previously resolved model stored in state
+- registry default model
+
+Resolution order should be explicit and configurable. A conservative default is:
+
+1. request-level explicit model override
+2. reusable model stored in the current agent/thread state, when policy allows
+3. highest-priority valid model hint
+4. agent default model
+5. registry default model
+6. configured fallback chain that satisfies required capabilities
+
+If a candidate fails capability, budget, tenant, provider-availability, or
+policy checks, the resolver should skip it and emit a diagnostic event. If no
+candidate remains, the model call fails before contacting a provider.
+
+## Resolution Types
+
+```rust
+pub struct ModelHint {
+    pub model: ModelRef,
+    pub priority: i32,
+    pub reason: Option<String>,
+    pub requirements: CapabilitySet,
+    pub preferences: ModelPreferences,
+}
+
+pub struct ModelPreferences {
+    pub prefer_local: bool,
+    pub prefer_low_latency: bool,
+    pub max_estimated_cost: Option<Money>,
+    pub provider_family: Option<String>,
+    pub privacy_tier: Option<String>,
+}
+
+pub struct ModelSelection {
+    pub requested: Option<ModelRef>,
+    pub hints: Vec<ModelHint>,
+    pub agent_default: Option<ModelRef>,
+    pub previous: Option<ResolvedModel>,
+    pub reuse_previous: bool,
+    pub required_capabilities: CapabilitySet,
+}
+
+pub struct ResolvedModel {
+    pub registry_name: ModelName,
+    pub provider: ProviderName,
+    pub provider_model_id: String,
+    pub catalog_entry_id: Option<String>,
+    pub source: ModelResolutionSource,
+    pub selected_at: SystemTime,
+    pub requirements_satisfied: CapabilitySet,
+    pub fallback_from: Vec<ModelRef>,
+    pub resolver_version: String,
+}
+
+pub enum ModelResolutionSource {
+    RequestOverride,
+    StateReuse,
+    Hint,
+    AgentDefault,
+    RegistryDefault,
+    Fallback,
+}
+```
+
+The `ResolvedModel` record is more than metadata. It is the durable binding that
+answers "which model did this agent actually use?" and "can the next step reuse
+the same model?".
+
+## Persisting Resolved Models In State
+
+Every model call should attach `ResolvedModel` to:
+
+- `ModelResponse`
+- assistant message/provider metadata
+- model lifecycle events
+- usage and cost records
+- agent run status
+- graph task metadata when graph-backed
+- checkpoint state when the graph or harness state is durable
+
+Agent state should have a standard place for reusable model resolution:
+
+```rust
+pub struct AgentModelState {
+    pub current: Option<ResolvedModel>,
+    pub history: Vec<ResolvedModelUse>,
+}
+
+pub struct ResolvedModelUse {
+    pub resolved: ResolvedModel,
+    pub run_id: RunId,
+    pub call_id: CallId,
+    pub node_id: Option<NodeId>,
+    pub usage: Option<UsageRecord>,
+}
+```
+
+The harness should update this state after successful model selection and before
+provider invocation is recorded. If the provider call fails because the selected
+model is unavailable, the failure and attempted `ResolvedModel` must still be
+observable so fallback and debugging are explainable.
+
+Reuse policy should be opt-in per agent/run. Reuse is useful for consistency,
+cost estimation, provider prompt-cache stability, and sub-agent continuity, but
+it should not override a later explicit request or a stronger policy constraint.
+
+## Agent Defaults And Per-Agent Resolution
+
+Each registered agent may declare:
+
+- default model
+- fallback models
+- model hints
+- required capabilities
+- whether to reuse the prior resolved model
+- whether children inherit its resolved model
+- whether humans or parent orchestrators may steer model choice
+
+Sub-agents may inherit a parent orchestrator's resolved model only when both
+parent and child policies allow it. Otherwise the child resolves independently
+and records its own `ResolvedModel`.
+
+Model steering should use the same steering policy as other run controls. A
+human or parent orchestrator may narrow a model set, request a cheaper/faster
+model, or force a model override only when policy grants that authority.
 
 ## Model Profiles
 

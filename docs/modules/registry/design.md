@@ -38,6 +38,7 @@ Primary code references:
 - Register compiled graphs.
 - Register tools.
 - Register model providers.
+- Register model aliases, resolver policies, and agent model defaults.
 - Register middleware and stores.
 - Register event listeners.
 - Provide lookup and discovery APIs.
@@ -282,6 +283,24 @@ Agent events:
 - `agent.child_started`
 - `agent.child_completed`
 
+Agent metadata should also declare model selection policy when the agent does
+not want to rely only on the registry default:
+
+```rust
+pub struct AgentModelPolicy {
+    pub default_model: Option<ModelRef>,
+    pub fallback_models: Vec<ModelRef>,
+    pub hints: Vec<ModelHint>,
+    pub required_capabilities: CapabilitySet,
+    pub reuse_resolved_model: bool,
+    pub inherit_parent_model: InheritancePolicy,
+}
+```
+
+The registry stores these declarations; the harness applies them during a run.
+This keeps model selection inspectable without making the registry call model
+providers.
+
 ## Graph Registration
 
 Graphs are compiled graph runtimes.
@@ -378,18 +397,69 @@ Model metadata should include:
 
 - provider
 - model id
+- catalog entry id when known
+- aliases
 - streaming support
 - tool-calling support
 - structured-output support
 - default request policy
+- resolver tags such as `fast`, `cheap`, `local`, `long_context`,
+  `reasoning`, or app-defined labels
 
 Model events:
 
 - `model.registered`
+- `model.alias_registered`
+- `model.resolution_started`
+- `model.resolution_candidate_rejected`
+- `model.resolved`
 - `model.started`
 - `model.delta`
 - `model.completed`
 - `model.failed`
+
+## Model Resolution Registry Contract
+
+The registry owns the names and metadata used by model resolution. The harness
+owns the actual selection for a run because it has request state, agent state,
+runtime policy, budget, and current context-window pressure.
+
+Registry responsibilities:
+
+- map aliases and tags to registered executable model handles
+- join executable models with model catalog metadata
+- expose resolver policies for tenants, workspaces, agents, and tests
+- validate duplicate aliases and conflicting model labels
+- expose discovery data for UIs and model pickers
+- emit model-resolution events
+
+Non-responsibilities:
+
+- it does not silently choose a model without the harness/run policy
+- it does not call providers to test availability during ordinary lookup
+- it does not mutate agent state with resolved-model records
+
+Suggested shape:
+
+```rust
+pub struct ModelResolver {
+    pub aliases: ModelAliasMap,
+    pub catalog: ModelCatalog,
+    pub policies: Vec<ModelResolverPolicy>,
+}
+
+pub struct ModelResolverPolicy {
+    pub scope: RegistryScope,
+    pub allowed_models: Vec<ModelRef>,
+    pub denied_models: Vec<ModelRef>,
+    pub fallback_order: Vec<ModelRef>,
+    pub labels: HashMap<String, Vec<ModelRef>>,
+}
+```
+
+Resolution should return both an executable handle and a durable
+`ResolvedModel` record. The handle is process-local; the record is persisted in
+state, events, checkpoints, usage, and cost rows.
 
 ## Store And Checkpointer Registration
 

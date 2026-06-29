@@ -83,6 +83,8 @@ tests for every adapter.
 - Preserve provider prompt/KV-cache stability by making stable prompt prefixes
   explicit and keeping volatile context out of those prefixes by default.
 - Dispatch model calls through provider-neutral traits.
+- Resolve each agent/model call through request overrides, reusable state,
+  model hints, agent defaults, registry defaults, and fallback policy.
 - Dispatch embedding calls through provider-neutral traits.
 - Dispatch tool calls through a registry with schema validation.
 - Expose retrievers and vector stores for retrieval-augmented context assembly.
@@ -108,6 +110,8 @@ tests for every adapter.
 - Provide deterministic test utilities.
 - Describe provider capability profiles so middleware can choose safe defaults.
 - Translate between provider-native message formats and RustAgents messages.
+- Persist resolved model identity in response metadata, run status, events,
+  usage/cost rows, and durable agent or graph state for reuse.
 - Support dynamic runtime context injection into tools and middleware without
   exposing private state to model-visible schemas.
 - Support model fallback, tool retry, rate limiting, and human interruption as
@@ -241,6 +245,7 @@ surface area that RustAgents should intentionally support, adapt, or reject.
 | Message model | `libs/core/langchain_core/messages/*.py` | Use typed content blocks for text, JSON, image, audio, file, tool call, tool result, reasoning, citations, refusal/safety, and provider extension data. |
 | Content translation | `libs/core/langchain_core/messages/block_translators/*.py` | Provider adapters must translate to/from the canonical RustAgents message model without losing ids, tool-call chunks, reasoning, usage, or provider metadata. |
 | Model profiles | `libs/core/langchain_core/language_models/model_profile.py` | Store model capability metadata: context limits, modalities, tool calling, tool-choice support, streaming tool chunks, structured output, reasoning output, temperature, attachments, status, and release dates. |
+| Model resolution | OpenHuman smart model resolution by hints | Resolve model calls from explicit overrides, prior state, hints, agent defaults, registry defaults, and fallbacks; persist the resulting provider/model identity so future calls can reuse it safely. |
 | Embeddings | `libs/core/langchain_core/embeddings/embeddings.py` | Define provider-neutral embedding traits for documents and queries, with batch, async, dimensionality, provider metadata, usage, cost, cache, and fake deterministic implementations. |
 | OpenHuman agent graph | `openhuman#4261`, `src/openhuman/agent_graph/graph/*` | Add a LangGraph-style state-machine runtime: typed state reducers, async nodes, static/conditional/fork edges, Pregel super-steps, compile validation, cancellation, max-step guards, interrupts, and resume. |
 | OpenHuman checkpointer | `openhuman#4261`, `src/openhuman/agent_graph/checkpoint/*` | Persist graph runs and checkpoints through a pluggable `Checkpointer`, with in-memory tests and durable SQLite-style production storage. |
@@ -404,6 +409,8 @@ pub trait ChatModel<State, Ctx = ()>: Send + Sync {
 `ModelRequest` should contain:
 
 - model id or registry alias
+- model hints and capability requirements for smart resolution
+- previous resolved-model reuse policy
 - messages
 - tool declarations
 - tool choice policy
@@ -424,6 +431,7 @@ pub trait ChatModel<State, Ctx = ()>: Send + Sync {
 
 `ModelResponse` should contain:
 
+- resolved model identity
 - assistant message
 - usage
 - finish reason
@@ -445,6 +453,12 @@ Every provider adapter must expose a `ModelProfile`. Middleware and builders
 should use profiles to reject impossible requests early, choose provider-native
 structured output only when supported, reserve context window budget, and decide
 whether streamed tool-call chunks can be trusted.
+
+Model selection should be explicit and reusable. The harness resolves each model
+call through request override, durable prior state, model hints, agent default,
+registry default, and fallback policy. The selected model is recorded as a
+`ResolvedModel` in the response, event stream, run status, usage/cost records,
+and durable state when configured.
 
 ## Tool Registry
 

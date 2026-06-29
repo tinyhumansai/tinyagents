@@ -20,6 +20,8 @@ rather than claiming permanent truth.
   schema, prompt caching, and reasoning support.
 - Store provider source URLs and snapshot time.
 - Provide lookup by provider/model id and registry alias.
+- Provide metadata used by model resolution, such as capability labels, context
+  limits, deprecation state, and price estimates.
 - Provide deterministic cost estimates for tests and local development.
 - Allow refresh from external sources with an auditable diff.
 - Preserve old snapshots for reproducibility when desired.
@@ -200,6 +202,16 @@ Common joins:
 - a request estimates price by resolving the model alias to a catalog entry
 - a context limiter uses `max_input_tokens` and `max_output_tokens`
 - a UI model picker lists executable aliases enriched with catalog metadata
+- a harness model resolver rejects candidates that cannot satisfy required
+  capabilities
+- a resolved-model record stores both executable registry alias and catalog
+  provider/model identity for replay
+
+Catalog metadata should never be the only durable identity. A selected model
+should be recorded as a `ResolvedModel` containing the executable registry name,
+provider id, provider model id, catalog entry id or snapshot id when known, and
+resolver source. This lets a later run decide whether it can reuse the same
+model even if aliases or catalog snapshots have changed.
 
 ## Refresh Workflow
 
