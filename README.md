@@ -1,2 +1,89 @@
-# rustagents
-A rust based LLM harness that allows agents to be defined, graphs to made and expressed in pseudo code
+# RustAgents
+
+A Rust LLM orchestration library inspired by LangChain and LangGraph.
+
+RustAgents is currently a small foundation for building agentic workflows:
+
+- chat message primitives
+- async chat model and tool traits
+- executable state graphs with direct and conditional routing
+- examples and tests for the first public API
+
+See [docs/SPEC.md](docs/SPEC.md) for the system specification across the
+harness, graph runtime, and expressive language.
+
+## Install
+
+```toml
+[dependencies]
+rustagents = { path = "." }
+```
+
+## Example
+
+```rust
+use rustagents::{ChatMessage, Node, NodeOutput, Result, StateGraph};
+
+#[derive(Clone, Debug)]
+struct AgentState {
+    messages: Vec<ChatMessage>,
+    needs_tool: bool,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let graph = StateGraph::new()
+        .add_node(Node::new("agent", |mut state: AgentState| async move {
+            state.messages.push(ChatMessage::assistant("I should use a tool."));
+
+            if state.needs_tool {
+                Ok(NodeOutput::route(state, "tool"))
+            } else {
+                Ok(NodeOutput::end(state))
+            }
+        }))
+        .add_node(Node::new("tool", |mut state: AgentState| async move {
+            state.messages.push(ChatMessage::tool("echo", "tool result"));
+            state.needs_tool = false;
+            Ok(NodeOutput::continue_with(state))
+        }))
+        .set_start("agent")
+        .add_conditional_edges("agent", [("tool", "tool")])
+        .add_edge("tool", "agent");
+
+    let run = graph
+        .run(AgentState {
+            messages: vec![ChatMessage::user("Can you use a tool?")],
+            needs_tool: true,
+        })
+        .await?;
+
+    println!("{:#?}", run.visited);
+    Ok(())
+}
+```
+
+Run the bundled example:
+
+```sh
+cargo run --example basic_graph
+```
+
+## Core Concepts
+
+`ChatModel<State>` is the provider abstraction. Implement it for OpenAI,
+Anthropic, local models, or test doubles.
+
+`Tool<State>` is the tool abstraction. Tools receive immutable access to the
+current state plus a structured `ToolCall`.
+
+`StateGraph<State>` is the LangGraph-inspired runtime. Nodes own async handlers
+that can continue to the next edge, route through conditional edges, or end the
+run with a final state.
+
+## Development
+
+```sh
+cargo fmt
+cargo test
+```
