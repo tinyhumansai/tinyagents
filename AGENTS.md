@@ -8,6 +8,13 @@ exports live in `src/lib.rs`, with core modules split across `src/chat.rs`,
 architecture work is staged under module directories such as `src/harness/`,
 `src/language/`, and `src/registry/`.
 
+Prefer small, focused modules that do one thing extremely well. New feature
+areas should live in module directories instead of accumulating broad,
+multi-purpose files. Within each module directory, keep type definitions in a
+dedicated `types.rs` file and keep module-local unit tests in a dedicated
+`test.rs` file. The module root should wire the pieces together and expose the
+smallest useful API.
+
 Integration tests are in `tests/`, currently focused on serialization behavior.
 Runnable usage examples are in `examples/`, especially
 `examples/basic_graph.rs`. Design notes and module-level specifications live in
