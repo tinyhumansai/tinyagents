@@ -15,6 +15,8 @@
 //! All public items are re-exported through [`super`] so callers import from
 //! `crate::harness::middleware` directly.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -190,6 +192,193 @@ pub trait Middleware<State: Send + Sync, Ctx: Send + Sync = ()>: Send + Sync {
     }
 }
 
+// ── Wrap (around-call) middleware ─────────────────────────────────────────────
+
+/// A pinned, boxed future producing a [`ModelResponse`].
+///
+/// This is the return type of [`ModelBaseCall::call`] and of the futures wrap
+/// middleware drive. The lifetime `'a` ties the future to the borrows it
+/// captures (the run context, application state, and the base handler).
+pub type BoxModelFuture<'a> = Pin<Box<dyn Future<Output = Result<ModelResponse>> + Send + 'a>>;
+
+/// A pinned, boxed future producing a [`ToolResult`].
+///
+/// The tool-wrap counterpart of [`BoxModelFuture`].
+pub type BoxToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolResult>> + Send + 'a>>;
+
+/// The innermost model call wrapped by the [`ModelMiddleware`] onion.
+///
+/// This is the *real* model invocation — the cache + retry + fallback core of
+/// the agent loop. The loop supplies it as the `base` of
+/// [`MiddlewareStack::run_wrapped_model`]. A wrap middleware reaches it (the
+/// innermost layer) by calling [`ModelHandler::run`], possibly more than once
+/// (for retry) or not at all (to short-circuit).
+pub trait ModelBaseCall<State: Send + Sync, Ctx: Send + Sync>: Send + Sync {
+    /// Invokes the wrapped model call with the (possibly middleware-mutated)
+    /// `request`.
+    fn call<'a>(
+        &'a self,
+        ctx: &'a mut RunContext<Ctx>,
+        state: &'a State,
+        request: ModelRequest,
+    ) -> BoxModelFuture<'a>;
+}
+
+/// The innermost tool call wrapped by the [`ToolMiddleware`] onion.
+///
+/// The tool-wrap counterpart of [`ModelBaseCall`]; the loop supplies the real
+/// tool invocation as the `base` of [`MiddlewareStack::run_wrapped_tool`].
+pub trait ToolBaseCall<State: Send + Sync, Ctx: Send + Sync>: Send + Sync {
+    /// Invokes the wrapped tool with the (possibly middleware-mutated) `call`.
+    fn call<'a>(
+        &'a self,
+        ctx: &'a mut RunContext<Ctx>,
+        state: &'a State,
+        call: ToolCall,
+    ) -> BoxToolFuture<'a>;
+}
+
+/// The outcome of a wrapped model call.
+///
+/// Carries the [`ModelResponse`] the wrapped call resolves to. A
+/// [`ModelMiddleware`] produces one by either:
+///
+/// - **proceeding** — forwarding the response returned by [`ModelHandler::run`];
+/// - **short-circuiting / replacing** — constructing a [`Self::Response`]
+///   without ever calling `next`;
+/// - **retrying** — calling `next` in a loop until it succeeds or a budget is
+///   exhausted; or
+/// - **falling back** — calling `next`, then substituting a response on error.
+///
+/// Retry and replacement are therefore expressed by *how* a middleware uses
+/// `next` rather than by distinct enum variants; the enum only needs to carry
+/// the resolved response. It is [`non_exhaustive`] so future control variants
+/// can be added without breaking callers.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum MiddlewareModelOutcome {
+    /// The response to use as the result of the wrapped model call.
+    Response(ModelResponse),
+}
+
+impl MiddlewareModelOutcome {
+    /// Unwraps the contained [`ModelResponse`].
+    pub fn into_response(self) -> ModelResponse {
+        match self {
+            Self::Response(response) => response,
+        }
+    }
+}
+
+impl From<ModelResponse> for MiddlewareModelOutcome {
+    fn from(response: ModelResponse) -> Self {
+        Self::Response(response)
+    }
+}
+
+/// The outcome of a wrapped tool call.
+///
+/// The tool-wrap counterpart of [`MiddlewareModelOutcome`]; see its docs for the
+/// proceed / replace / retry / fallback patterns. [`non_exhaustive`] for the
+/// same forward-compatibility reason.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum MiddlewareToolOutcome {
+    /// The result to use as the result of the wrapped tool call.
+    Result(ToolResult),
+}
+
+impl MiddlewareToolOutcome {
+    /// Unwraps the contained [`ToolResult`].
+    pub fn into_result(self) -> ToolResult {
+        match self {
+            Self::Result(result) => result,
+        }
+    }
+}
+
+impl From<ToolResult> for MiddlewareToolOutcome {
+    fn from(result: ToolResult) -> Self {
+        Self::Result(result)
+    }
+}
+
+/// A handle to the remainder of the model-wrap onion: the inner wrap middleware
+/// plus the innermost [`ModelBaseCall`].
+///
+/// A [`ModelMiddleware`] receives this as its `next` argument. Calling
+/// [`ModelHandler::run`] **proceeds** to the next layer (eventually the base
+/// model call); not calling it **short-circuits**; calling it repeatedly
+/// **retries**. `run` borrows `&self`, so a middleware may invoke `next` as many
+/// times as it likes.
+pub struct ModelHandler<'a, State: Send + Sync, Ctx: Send + Sync> {
+    pub(crate) remaining: &'a [Arc<dyn ModelMiddleware<State, Ctx>>],
+    pub(crate) base: &'a dyn ModelBaseCall<State, Ctx>,
+}
+
+/// A handle to the remainder of the tool-wrap onion: the inner wrap middleware
+/// plus the innermost [`ToolBaseCall`].
+///
+/// The tool-wrap counterpart of [`ModelHandler`]; see its docs.
+pub struct ToolHandler<'a, State: Send + Sync, Ctx: Send + Sync> {
+    pub(crate) remaining: &'a [Arc<dyn ToolMiddleware<State, Ctx>>],
+    pub(crate) base: &'a dyn ToolBaseCall<State, Ctx>,
+}
+
+/// Around-call ("wrap") middleware for model invocations.
+///
+/// Unlike the lifecycle [`Middleware`] hooks (which only observe/mutate values
+/// flowing past), a `ModelMiddleware` *surrounds* the inner model pipeline: it
+/// receives a [`ModelHandler`] (`next`) that runs the rest of the onion plus the
+/// real model call. This is the most powerful extension point — it can proceed,
+/// short-circuit with a replacement response, retry `next` in a loop, or fall
+/// back — all while keeping setup and teardown symmetrical around the call.
+///
+/// # Ordering
+///
+/// Wrap middleware compose as a nested onion: the first-registered middleware is
+/// the **outermost** layer (it runs first and finishes last), and the innermost
+/// layer is the real model call. See [`MiddlewareStack::run_wrapped_model`].
+#[async_trait]
+pub trait ModelMiddleware<State: Send + Sync, Ctx: Send + Sync = ()>: Send + Sync {
+    /// A short, stable label used in
+    /// `MiddlewareStarted`/`MiddlewareCompleted` events.
+    fn name(&self) -> &str;
+
+    /// Wraps the inner model pipeline. Call `next.run(ctx, state, request)` to
+    /// proceed (zero or more times), or return a [`MiddlewareModelOutcome`]
+    /// without calling it to short-circuit.
+    async fn wrap_model(
+        &self,
+        ctx: &mut RunContext<Ctx>,
+        state: &State,
+        request: ModelRequest,
+        next: ModelHandler<'_, State, Ctx>,
+    ) -> Result<MiddlewareModelOutcome>;
+}
+
+/// Around-call ("wrap") middleware for tool invocations.
+///
+/// The tool-wrap counterpart of [`ModelMiddleware`]; see its docs for the full
+/// proceed / replace / retry / fallback model and onion ordering.
+#[async_trait]
+pub trait ToolMiddleware<State: Send + Sync, Ctx: Send + Sync = ()>: Send + Sync {
+    /// A short, stable label used in
+    /// `MiddlewareStarted`/`MiddlewareCompleted` events.
+    fn name(&self) -> &str;
+
+    /// Wraps the inner tool pipeline. Call `next.run(ctx, state, call)` to
+    /// proceed (zero or more times), or return a [`MiddlewareToolOutcome`]
+    /// without calling it to short-circuit.
+    async fn wrap_tool(
+        &self,
+        ctx: &mut RunContext<Ctx>,
+        state: &State,
+        call: ToolCall,
+        next: ToolHandler<'_, State, Ctx>,
+    ) -> Result<MiddlewareToolOutcome>;
+}
+
 // ── MiddlewareStack ───────────────────────────────────────────────────────────
 
 /// An ordered collection of [`Middleware`] composed with onion semantics.
@@ -200,6 +389,12 @@ pub trait Middleware<State: Send + Sync, Ctx: Send + Sync = ()>: Send + Sync {
 /// `MiddlewareCompleted` events emitted through the [`RunContext`]. The first
 /// hook that returns `Err` short-circuits the stack: every middleware's
 /// [`Middleware::on_error`] is invoked, then the original error is returned.
+///
+/// In addition to those lifecycle hooks, the stack holds two ordered lists of
+/// **wrap** (around-call) middleware — [`ModelMiddleware`] and
+/// [`ToolMiddleware`] — composed by [`MiddlewareStack::run_wrapped_model`] and
+/// [`MiddlewareStack::run_wrapped_tool`] as a nested onion whose innermost layer
+/// is the real model/tool call.
 ///
 /// # Example
 ///
@@ -213,6 +408,8 @@ pub trait Middleware<State: Send + Sync, Ctx: Send + Sync = ()>: Send + Sync {
 /// ```
 pub struct MiddlewareStack<State: Send + Sync, Ctx: Send + Sync = ()> {
     pub(crate) middlewares: Vec<Arc<dyn Middleware<State, Ctx>>>,
+    pub(crate) model_middlewares: Vec<Arc<dyn ModelMiddleware<State, Ctx>>>,
+    pub(crate) tool_middlewares: Vec<Arc<dyn ToolMiddleware<State, Ctx>>>,
 }
 
 // ── LoggingMiddleware ─────────────────────────────────────────────────────────

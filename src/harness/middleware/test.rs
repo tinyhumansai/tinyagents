@@ -11,6 +11,7 @@ use crate::harness::events::{AgentEvent, RecordingListener};
 use crate::harness::message::{AssistantMessage, ContentBlock, Message, UserMessage};
 use crate::harness::model::{ModelRequest, ModelResponse, PromptSegment, SegmentRole};
 use crate::harness::summarization::{SummarizationPolicy, TrimStrategy};
+use crate::harness::tool::{ToolCall, ToolResult};
 use crate::harness::usage::Usage;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -400,6 +401,421 @@ async fn prompt_cache_guard_detects_prefix_change() {
     assert!(events[0].changed_prefix);
     assert_eq!(events[0].segment_ids_before, vec!["sys".to_string()]);
     assert_eq!(events[0].segment_ids_after, vec!["sys2".to_string()]);
+}
+
+// ── wrap middleware: model ────────────────────────────────────────────────────
+
+/// Builds a `ModelResponse` whose single text block is `text`.
+fn response_text(text: &str) -> ModelResponse {
+    ModelResponse {
+        message: AssistantMessage {
+            id: None,
+            content: vec![ContentBlock::Text(text.to_string())],
+            tool_calls: Vec::new(),
+            usage: None,
+        },
+        usage: None,
+        finish_reason: None,
+        raw: None,
+        resolved_model: None,
+    }
+}
+
+/// A model base that records how many times it was invoked and fails its first
+/// `fail_times` calls (with a retryable-looking error) before succeeding.
+struct CountingModelBase {
+    calls: Arc<Mutex<usize>>,
+    fail_times: usize,
+    text: &'static str,
+}
+
+impl ModelBaseCall<(), ()> for CountingModelBase {
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a mut RunContext,
+        _state: &'a (),
+        _request: ModelRequest,
+    ) -> BoxModelFuture<'a> {
+        Box::pin(async move {
+            let attempt = {
+                let mut n = self.calls.lock().unwrap();
+                *n += 1;
+                *n
+            };
+            if attempt <= self.fail_times {
+                Err(TinyAgentsError::Middleware("transient".to_string()))
+            } else {
+                Ok(response_text(self.text))
+            }
+        })
+    }
+}
+
+/// Wrap middleware that returns a canned response without calling `next`.
+struct ShortCircuitModel {
+    text: &'static str,
+}
+
+#[async_trait]
+impl ModelMiddleware<()> for ShortCircuitModel {
+    fn name(&self) -> &str {
+        "short_circuit_model"
+    }
+
+    async fn wrap_model(
+        &self,
+        _ctx: &mut RunContext,
+        _state: &(),
+        _request: ModelRequest,
+        _next: ModelHandler<'_, (), ()>,
+    ) -> Result<MiddlewareModelOutcome> {
+        Ok(MiddlewareModelOutcome::Response(response_text(self.text)))
+    }
+}
+
+/// Wrap middleware that calls `next` then mutates the resulting response.
+struct MutateAfterModel;
+
+#[async_trait]
+impl ModelMiddleware<()> for MutateAfterModel {
+    fn name(&self) -> &str {
+        "mutate_after_model"
+    }
+
+    async fn wrap_model(
+        &self,
+        ctx: &mut RunContext,
+        state: &(),
+        request: ModelRequest,
+        next: ModelHandler<'_, (), ()>,
+    ) -> Result<MiddlewareModelOutcome> {
+        let mut response = next.run(ctx, state, request).await?.into_response();
+        response.finish_reason = Some("mutated".to_string());
+        Ok(response.into())
+    }
+}
+
+/// Wrap middleware that retries `next` up to `max` times until it succeeds.
+struct RetryModel {
+    max: usize,
+}
+
+#[async_trait]
+impl ModelMiddleware<()> for RetryModel {
+    fn name(&self) -> &str {
+        "retry_model"
+    }
+
+    async fn wrap_model(
+        &self,
+        ctx: &mut RunContext,
+        state: &(),
+        request: ModelRequest,
+        next: ModelHandler<'_, (), ()>,
+    ) -> Result<MiddlewareModelOutcome> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match next.run(ctx, state, request.clone()).await {
+                Ok(outcome) => return Ok(outcome),
+                Err(_) if attempt < self.max => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn wrap_model_short_circuits_without_calling_base() {
+    let calls = Arc::new(Mutex::new(0));
+    let base = CountingModelBase {
+        calls: calls.clone(),
+        fail_times: 0,
+        text: "from-base",
+    };
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_model_middleware(Arc::new(ShortCircuitModel { text: "canned" }));
+
+    let mut c = ctx();
+    let response = stack
+        .run_wrapped_model(&mut c, &(), ModelRequest::default(), &base)
+        .await
+        .unwrap()
+        .into_response();
+
+    assert_eq!(response.text(), "canned");
+    // Base was never invoked because the wrap middleware short-circuited.
+    assert_eq!(*calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn wrap_model_calls_next_then_mutates_response() {
+    let calls = Arc::new(Mutex::new(0));
+    let base = CountingModelBase {
+        calls: calls.clone(),
+        fail_times: 0,
+        text: "from-base",
+    };
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_model_middleware(Arc::new(MutateAfterModel));
+
+    let mut c = ctx();
+    let response = stack
+        .run_wrapped_model(&mut c, &(), ModelRequest::default(), &base)
+        .await
+        .unwrap()
+        .into_response();
+
+    // Forwarded the base response, then mutated it.
+    assert_eq!(response.text(), "from-base");
+    assert_eq!(response.finish_reason.as_deref(), Some("mutated"));
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn wrap_model_retries_next_until_success() {
+    let calls = Arc::new(Mutex::new(0));
+    // Fails twice, succeeds on the third attempt.
+    let base = CountingModelBase {
+        calls: calls.clone(),
+        fail_times: 2,
+        text: "eventually",
+    };
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_model_middleware(Arc::new(RetryModel { max: 5 }));
+
+    let mut c = ctx();
+    let response = stack
+        .run_wrapped_model(&mut c, &(), ModelRequest::default(), &base)
+        .await
+        .unwrap()
+        .into_response();
+
+    assert_eq!(response.text(), "eventually");
+    // Two failures + one success = three base invocations.
+    assert_eq!(*calls.lock().unwrap(), 3);
+}
+
+#[tokio::test]
+async fn wrap_model_onion_orders_outer_to_inner() {
+    let calls = Arc::new(Mutex::new(0));
+    let base = CountingModelBase {
+        calls: calls.clone(),
+        fail_times: 0,
+        text: "base",
+    };
+    // Outer = mutate-after (sees the canned response from the inner layer and
+    // stamps finish_reason); inner = short-circuit (never reaches base).
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_model_middleware(Arc::new(MutateAfterModel));
+    stack.push_model_middleware(Arc::new(ShortCircuitModel { text: "canned" }));
+
+    let mut c = ctx();
+    let response = stack
+        .run_wrapped_model(&mut c, &(), ModelRequest::default(), &base)
+        .await
+        .unwrap()
+        .into_response();
+
+    assert_eq!(response.text(), "canned");
+    assert_eq!(response.finish_reason.as_deref(), Some("mutated"));
+    // Inner layer short-circuited, so the base call never ran.
+    assert_eq!(*calls.lock().unwrap(), 0);
+    assert_eq!(stack.model_middleware_len(), 2);
+}
+
+// ── wrap middleware: tool ───────────────────────────────────────────────────--
+
+/// A tool base that records invocations and fails its first `fail_times` calls.
+struct CountingToolBase {
+    calls: Arc<Mutex<usize>>,
+    fail_times: usize,
+    content: &'static str,
+}
+
+impl ToolBaseCall<(), ()> for CountingToolBase {
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a mut RunContext,
+        _state: &'a (),
+        call: ToolCall,
+    ) -> BoxToolFuture<'a> {
+        Box::pin(async move {
+            let attempt = {
+                let mut n = self.calls.lock().unwrap();
+                *n += 1;
+                *n
+            };
+            if attempt <= self.fail_times {
+                Err(TinyAgentsError::Middleware("transient".to_string()))
+            } else {
+                Ok(ToolResult {
+                    call_id: call.id,
+                    name: call.name,
+                    content: self.content.to_string(),
+                    raw: None,
+                    error: None,
+                    elapsed_ms: 0,
+                })
+            }
+        })
+    }
+}
+
+fn tool_call() -> ToolCall {
+    ToolCall {
+        id: "call-1".to_string(),
+        name: "fake".to_string(),
+        arguments: serde_json::Value::Null,
+    }
+}
+
+/// Wrap middleware that returns a canned result without calling `next`.
+struct ShortCircuitTool {
+    content: &'static str,
+}
+
+#[async_trait]
+impl ToolMiddleware<()> for ShortCircuitTool {
+    fn name(&self) -> &str {
+        "short_circuit_tool"
+    }
+
+    async fn wrap_tool(
+        &self,
+        _ctx: &mut RunContext,
+        _state: &(),
+        call: ToolCall,
+        _next: ToolHandler<'_, (), ()>,
+    ) -> Result<MiddlewareToolOutcome> {
+        Ok(MiddlewareToolOutcome::Result(ToolResult {
+            call_id: call.id,
+            name: call.name,
+            content: self.content.to_string(),
+            raw: None,
+            error: None,
+            elapsed_ms: 0,
+        }))
+    }
+}
+
+/// Wrap middleware that calls `next` then mutates the resulting result.
+struct MutateAfterTool;
+
+#[async_trait]
+impl ToolMiddleware<()> for MutateAfterTool {
+    fn name(&self) -> &str {
+        "mutate_after_tool"
+    }
+
+    async fn wrap_tool(
+        &self,
+        ctx: &mut RunContext,
+        state: &(),
+        call: ToolCall,
+        next: ToolHandler<'_, (), ()>,
+    ) -> Result<MiddlewareToolOutcome> {
+        let mut result = next.run(ctx, state, call).await?.into_result();
+        result.content = format!("{}!", result.content);
+        Ok(result.into())
+    }
+}
+
+/// Wrap middleware that retries `next` up to `max` times until it succeeds.
+struct RetryTool {
+    max: usize,
+}
+
+#[async_trait]
+impl ToolMiddleware<()> for RetryTool {
+    fn name(&self) -> &str {
+        "retry_tool"
+    }
+
+    async fn wrap_tool(
+        &self,
+        ctx: &mut RunContext,
+        state: &(),
+        call: ToolCall,
+        next: ToolHandler<'_, (), ()>,
+    ) -> Result<MiddlewareToolOutcome> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match next.run(ctx, state, call.clone()).await {
+                Ok(outcome) => return Ok(outcome),
+                Err(_) if attempt < self.max => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn wrap_tool_short_circuits_without_calling_base() {
+    let calls = Arc::new(Mutex::new(0));
+    let base = CountingToolBase {
+        calls: calls.clone(),
+        fail_times: 0,
+        content: "from-base",
+    };
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_tool_middleware(Arc::new(ShortCircuitTool { content: "canned" }));
+
+    let mut c = ctx();
+    let result = stack
+        .run_wrapped_tool(&mut c, &(), tool_call(), &base)
+        .await
+        .unwrap()
+        .into_result();
+
+    assert_eq!(result.content, "canned");
+    assert_eq!(*calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn wrap_tool_calls_next_then_mutates_result() {
+    let calls = Arc::new(Mutex::new(0));
+    let base = CountingToolBase {
+        calls: calls.clone(),
+        fail_times: 0,
+        content: "ok",
+    };
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_tool_middleware(Arc::new(MutateAfterTool));
+
+    let mut c = ctx();
+    let result = stack
+        .run_wrapped_tool(&mut c, &(), tool_call(), &base)
+        .await
+        .unwrap()
+        .into_result();
+
+    assert_eq!(result.content, "ok!");
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn wrap_tool_retries_next_until_success() {
+    let calls = Arc::new(Mutex::new(0));
+    let base = CountingToolBase {
+        calls: calls.clone(),
+        fail_times: 2,
+        content: "eventually",
+    };
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_tool_middleware(Arc::new(RetryTool { max: 5 }));
+
+    let mut c = ctx();
+    let result = stack
+        .run_wrapped_tool(&mut c, &(), tool_call(), &base)
+        .await
+        .unwrap()
+        .into_result();
+
+    assert_eq!(result.content, "eventually");
+    assert_eq!(*calls.lock().unwrap(), 3);
+    assert_eq!(stack.tool_middleware_len(), 1);
 }
 
 #[tokio::test]

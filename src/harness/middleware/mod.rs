@@ -74,13 +74,39 @@ impl<State: Send + Sync, Ctx: Send + Sync> MiddlewareStack<State, Ctx> {
     pub fn new() -> Self {
         Self {
             middlewares: Vec::new(),
+            model_middlewares: Vec::new(),
+            tool_middlewares: Vec::new(),
         }
     }
 
-    /// Appends a middleware to the stack. Registration order is the onion
-    /// order: the first pushed middleware is the outermost layer.
+    /// Appends a lifecycle [`Middleware`] to the stack. Registration order is the
+    /// onion order: the first pushed middleware is the outermost layer.
     pub fn push(&mut self, middleware: Arc<dyn Middleware<State, Ctx>>) {
         self.middlewares.push(middleware);
+    }
+
+    /// Appends a [`ModelMiddleware`] (around-model wrap hook). Registration order
+    /// is the onion order: the first pushed wrap middleware is the **outermost**
+    /// layer and the real model call is the innermost.
+    pub fn push_model_middleware(&mut self, middleware: Arc<dyn ModelMiddleware<State, Ctx>>) {
+        self.model_middlewares.push(middleware);
+    }
+
+    /// Appends a [`ToolMiddleware`] (around-tool wrap hook). Registration order
+    /// is the onion order: the first pushed wrap middleware is the **outermost**
+    /// layer and the real tool call is the innermost.
+    pub fn push_tool_middleware(&mut self, middleware: Arc<dyn ToolMiddleware<State, Ctx>>) {
+        self.tool_middlewares.push(middleware);
+    }
+
+    /// Returns the number of registered [`ModelMiddleware`] wrap hooks.
+    pub fn model_middleware_len(&self) -> usize {
+        self.model_middlewares.len()
+    }
+
+    /// Returns the number of registered [`ToolMiddleware`] wrap hooks.
+    pub fn tool_middleware_len(&self) -> usize {
+        self.tool_middlewares.len()
     }
 
     /// Returns the number of registered middleware.
@@ -331,6 +357,115 @@ impl<State: Send + Sync, Ctx: Send + Sync> MiddlewareStack<State, Ctx> {
             });
         }
         Ok(())
+    }
+
+    /// Runs the registered [`ModelMiddleware`] wrap hooks as a nested onion
+    /// around `base` (the real model call) and returns the resolved
+    /// [`MiddlewareModelOutcome`].
+    ///
+    /// The first-registered wrap middleware is the outermost layer; `base` is
+    /// the innermost. With no wrap middleware registered this simply runs `base`
+    /// and wraps its response. Each layer is bracketed by
+    /// `MiddlewareStarted`/`MiddlewareCompleted` events.
+    pub async fn run_wrapped_model(
+        &self,
+        ctx: &mut RunContext<Ctx>,
+        state: &State,
+        request: ModelRequest,
+        base: &dyn ModelBaseCall<State, Ctx>,
+    ) -> Result<MiddlewareModelOutcome> {
+        let handler = ModelHandler {
+            remaining: &self.model_middlewares,
+            base,
+        };
+        handler.run(ctx, state, request).await
+    }
+
+    /// Runs the registered [`ToolMiddleware`] wrap hooks as a nested onion around
+    /// `base` (the real tool call) and returns the resolved
+    /// [`MiddlewareToolOutcome`].
+    ///
+    /// The tool-wrap counterpart of [`Self::run_wrapped_model`].
+    pub async fn run_wrapped_tool(
+        &self,
+        ctx: &mut RunContext<Ctx>,
+        state: &State,
+        call: ToolCall,
+        base: &dyn ToolBaseCall<State, Ctx>,
+    ) -> Result<MiddlewareToolOutcome> {
+        let handler = ToolHandler {
+            remaining: &self.tool_middlewares,
+            base,
+        };
+        handler.run(ctx, state, call).await
+    }
+}
+
+// ── Wrap onion handlers ───────────────────────────────────────────────────────
+
+impl<State: Send + Sync, Ctx: Send + Sync> ModelHandler<'_, State, Ctx> {
+    /// Advances the model-wrap onion one layer: invokes the next
+    /// [`ModelMiddleware`] (bracketed by start/completed events), or the base
+    /// model call when no wrap middleware remain.
+    ///
+    /// Borrows `&self`, so a wrap middleware may call `run` zero times
+    /// (short-circuit), once (proceed), or many times (retry).
+    pub async fn run(
+        &self,
+        ctx: &mut RunContext<Ctx>,
+        state: &State,
+        request: ModelRequest,
+    ) -> Result<MiddlewareModelOutcome> {
+        match self.remaining.split_first() {
+            Some((head, tail)) => {
+                let next = ModelHandler {
+                    remaining: tail,
+                    base: self.base,
+                };
+                ctx.emit(AgentEvent::MiddlewareStarted {
+                    name: head.name().to_string(),
+                });
+                let outcome = head.wrap_model(ctx, state, request, next).await?;
+                ctx.emit(AgentEvent::MiddlewareCompleted {
+                    name: head.name().to_string(),
+                });
+                Ok(outcome)
+            }
+            None => Ok(MiddlewareModelOutcome::Response(
+                self.base.call(ctx, state, request).await?,
+            )),
+        }
+    }
+}
+
+impl<State: Send + Sync, Ctx: Send + Sync> ToolHandler<'_, State, Ctx> {
+    /// Advances the tool-wrap onion one layer. The tool-wrap counterpart of
+    /// [`ModelHandler::run`].
+    pub async fn run(
+        &self,
+        ctx: &mut RunContext<Ctx>,
+        state: &State,
+        call: ToolCall,
+    ) -> Result<MiddlewareToolOutcome> {
+        match self.remaining.split_first() {
+            Some((head, tail)) => {
+                let next = ToolHandler {
+                    remaining: tail,
+                    base: self.base,
+                };
+                ctx.emit(AgentEvent::MiddlewareStarted {
+                    name: head.name().to_string(),
+                });
+                let outcome = head.wrap_tool(ctx, state, call, next).await?;
+                ctx.emit(AgentEvent::MiddlewareCompleted {
+                    name: head.name().to_string(),
+                });
+                Ok(outcome)
+            }
+            None => Ok(MiddlewareToolOutcome::Result(
+                self.base.call(ctx, state, call).await?,
+            )),
+        }
     }
 }
 

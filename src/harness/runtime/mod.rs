@@ -27,7 +27,7 @@ pub use types::*;
 use std::sync::Arc;
 
 use crate::harness::cache::ResponseCache;
-use crate::harness::middleware::{Middleware, MiddlewareStack};
+use crate::harness::middleware::{Middleware, MiddlewareStack, ModelMiddleware, ToolMiddleware};
 use crate::harness::model::{ChatModel, ModelRegistry};
 use crate::harness::tool::{Tool, ToolRegistry};
 
@@ -69,10 +69,33 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         self
     }
 
-    /// Appends a middleware to the stack. Registration order is the onion
-    /// order: the first pushed middleware is the outermost layer.
+    /// Appends a lifecycle middleware to the stack. Registration order is the
+    /// onion order: the first pushed middleware is the outermost layer.
     pub fn push_middleware(&mut self, middleware: Arc<dyn Middleware<State, Ctx>>) -> &mut Self {
         self.middleware.push(middleware);
+        self
+    }
+
+    /// Appends an around-model wrap middleware ([`ModelMiddleware`]). The
+    /// first-registered wrap middleware is the outermost layer; the real model
+    /// call (cache + retry + fallback core) is the innermost. Returns
+    /// `&mut Self` for chaining.
+    pub fn push_model_middleware(
+        &mut self,
+        middleware: Arc<dyn ModelMiddleware<State, Ctx>>,
+    ) -> &mut Self {
+        self.middleware.push_model_middleware(middleware);
+        self
+    }
+
+    /// Appends an around-tool wrap middleware ([`ToolMiddleware`]). The
+    /// first-registered wrap middleware is the outermost layer; the real tool
+    /// call is the innermost. Returns `&mut Self` for chaining.
+    pub fn push_tool_middleware(
+        &mut self,
+        middleware: Arc<dyn ToolMiddleware<State, Ctx>>,
+    ) -> &mut Self {
+        self.middleware.push_tool_middleware(middleware);
         self
     }
 

@@ -69,7 +69,7 @@ use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::events::{AgentEvent, HarnessRunStatus};
 use crate::harness::ids::{CallId, ComponentId, HarnessPhase};
 use crate::harness::message::{Message, MessageDelta};
-use crate::harness::middleware::AgentRun;
+use crate::harness::middleware::{AgentRun, BoxModelFuture, BoxToolFuture, ModelBaseCall, ToolBaseCall};
 use crate::harness::model::{
     ChatModel, ModelDelta, ModelRequest, ModelResolutionSource, ModelResponse, ModelStreamItem,
     ResolvedModel, ResolvedModelBinding, ResponseFormat, StreamAccumulator, ToolChoice,
@@ -77,7 +77,7 @@ use crate::harness::model::{
 use crate::harness::retry::is_retryable;
 use crate::harness::runtime::AgentHarness;
 use crate::harness::structured::{StructuredExtractor, StructuredStrategy};
-use crate::harness::tool::ToolSchema;
+use crate::harness::tool::{Tool, ToolCall, ToolSchema};
 use futures::StreamExt;
 use serde_json::Value;
 
@@ -417,9 +417,23 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             });
             status.set_last_event(record.id);
 
+            // The real model call (cache + retry + fallback core) is the
+            // innermost base of the model-wrap onion. Lifecycle `before_model`
+            // already ran above; the wrap onion runs here; lifecycle
+            // `after_model` runs below — so ordering is:
+            // before_model -> wrap onion (outer..inner..base) -> after_model.
+            let base = ModelCallBase {
+                harness: self,
+                call_id: call_id.clone(),
+                resolved: binding.resolved,
+                model: binding.model,
+                streaming,
+            };
             let mut response = self
-                .invoke_model_with_retry(state, ctx, &request, &call_id, binding, streaming)
-                .await?;
+                .middleware
+                .run_wrapped_model(ctx, state, request, &base)
+                .await?
+                .into_response();
 
             status.mark_running(HarnessPhase::Middleware);
             self.middleware
@@ -512,7 +526,16 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 });
                 status.set_last_event(record.id);
 
-                let mut result = tool.call(state, call).await?;
+                // The real tool call is the innermost base of the tool-wrap
+                // onion (same before -> wrap -> after ordering as the model
+                // path): lifecycle `before_tool` ran above, the wrap onion runs
+                // here, and lifecycle `after_tool` runs below.
+                let base = ToolCallBase { tool };
+                let mut result = self
+                    .middleware
+                    .run_wrapped_tool(ctx, state, call, &base)
+                    .await?
+                    .into_result();
 
                 self.middleware
                     .run_after_tool(ctx, state, &mut result)
@@ -863,6 +886,62 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         }
 
         accumulator.finish()
+    }
+}
+
+/// The innermost model call wrapped by the model-wrap onion.
+///
+/// Implements [`ModelBaseCall`] over the harness's cache + retry + fallback core
+/// ([`AgentHarness::invoke_model_with_retry`]) so a [`crate::harness::middleware::ModelMiddleware`]
+/// can proceed, short-circuit, retry, or fall back around the *whole* real model
+/// call. The resolved binding is rebuilt per invocation so a wrap middleware
+/// that retries `next` issues a fresh provider call each time.
+struct ModelCallBase<'h, State: Send + Sync, Ctx: Send + Sync> {
+    harness: &'h AgentHarness<State, Ctx>,
+    call_id: CallId,
+    resolved: ResolvedModel,
+    model: Arc<dyn ChatModel<State>>,
+    streaming: bool,
+}
+
+impl<State: Send + Sync, Ctx: Send + Sync> ModelBaseCall<State, Ctx>
+    for ModelCallBase<'_, State, Ctx>
+{
+    fn call<'a>(
+        &'a self,
+        ctx: &'a mut RunContext<Ctx>,
+        state: &'a State,
+        request: ModelRequest,
+    ) -> BoxModelFuture<'a> {
+        Box::pin(async move {
+            let binding = ResolvedModelBinding {
+                resolved: self.resolved.clone(),
+                model: Arc::clone(&self.model),
+            };
+            self.harness
+                .invoke_model_with_retry(state, ctx, &request, &self.call_id, binding, self.streaming)
+                .await
+        })
+    }
+}
+
+/// The innermost tool call wrapped by the tool-wrap onion.
+///
+/// Implements [`ToolBaseCall`] over a single resolved [`Tool`] so a
+/// [`crate::harness::middleware::ToolMiddleware`] can wrap the real tool
+/// invocation.
+struct ToolCallBase<State: Send + Sync> {
+    tool: Arc<dyn Tool<State>>,
+}
+
+impl<State: Send + Sync, Ctx: Send + Sync> ToolBaseCall<State, Ctx> for ToolCallBase<State> {
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a mut RunContext<Ctx>,
+        state: &'a State,
+        call: ToolCall,
+    ) -> BoxToolFuture<'a> {
+        Box::pin(async move { self.tool.call(state, call).await })
     }
 }
 
