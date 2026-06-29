@@ -43,6 +43,12 @@ where
     pub(crate) models: HashMap<String, Arc<dyn ChatModel<State>>>,
     pub(crate) tools: HashMap<String, Arc<dyn Tool<State>>>,
     pub(crate) graphs: HashMap<String, Blueprint>,
+    /// Executable harness agents, keyed by registered name. Resolved by a
+    /// [`crate::graph::subagent_node::SubAgentNode`] to delegate a graph step to
+    /// a model-driven agent loop. Agents are state-decoupled (they receive a
+    /// mapped prompt, not the registry's `State`), so this map is independent of
+    /// the `State` generic.
+    pub(crate) agents: HashMap<String, Arc<dyn crate::graph::subagent_node::HarnessAgent>>,
     /// Presence + discovery metadata, keyed by `(kind, canonical name)`.
     pub(crate) meta: HashMap<(ComponentKind, String), ComponentMetadata>,
     /// Alias map, keyed by `(kind, alias)` -> canonical name.

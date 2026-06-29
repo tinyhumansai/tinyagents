@@ -25,9 +25,11 @@ pub mod command;
 pub mod compiled;
 pub mod export;
 pub mod observability;
+pub mod recursion;
 pub mod reducer;
 pub mod status;
 pub mod stream;
+pub mod subagent_node;
 pub mod subgraph;
 
 // --- Durable execution model ---
@@ -48,12 +50,16 @@ pub use checkpoint::{
 pub use command::{Command, Interrupt, NodeResult, RouteTarget, Send};
 pub use compiled::{CompiledGraph, GraphExecution, ResumeTarget, StateSnapshot};
 pub use export::{
-    ChannelInfo, ConditionalEdgeInfo, EdgeInfo, GraphTopology, NodeInfo, RouteInfo,
-    blueprint_to_json, blueprint_to_mermaid, blueprint_to_topology, from_json, to_json, to_mermaid,
+    ChannelInfo, ConditionalEdgeInfo, EdgeInfo, GraphPolicySummary, GraphTopology, NodeInfo,
+    NodePolicySummary, RouteInfo, ValidationReport, WaitingEdgeInfo, blueprint_to_json,
+    blueprint_to_mermaid, blueprint_to_topology, from_json, to_json, to_mermaid,
 };
 pub use observability::{
     GraphEventJournal, GraphObservation, GraphStatusStore, InMemoryGraphEventJournal,
     InMemoryGraphStatusStore, JournalGraphSink, StoreGraphEventJournal,
+};
+pub use recursion::{
+    ChildRun, ChildRunSink, RecursionFrame, RecursionPolicy, RecursionStack, RunTree,
 };
 pub use reducer::{
     AppendReducer, ClosureReducer, ClosureStateReducer, MaxReducer, MinReducer, OverwriteReducer,
@@ -61,4 +67,8 @@ pub use reducer::{
 };
 pub use status::GraphRunStatus;
 pub use stream::{CollectingSink, GraphEvent, GraphEventSink, NoopSink, StreamMode};
+pub use subagent_node::{
+    HarnessAgent, HarnessSubAgent, InputMapper, OutputMapper, SubAgentBudget, SubAgentInput,
+    SubAgentNode, SubAgentOutput, SubAgentPolicy, subagent_node,
+};
 pub use subgraph::{adapter_subgraph_node, shared_subgraph_node};

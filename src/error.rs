@@ -56,6 +56,19 @@ pub enum TinyAgentsError {
     #[error("sub-agent recursion exceeded the maximum depth of {0}")]
     SubAgentDepth(usize),
 
+    /// A single graph node was activated more times within one run than the
+    /// [`crate::graph::RecursionPolicy`]'s `max_visits_per_node` allows (an
+    /// unbounded node-loop). This is node-loop recursion, tracked separately
+    /// from [`TinyAgentsError::RecursionLimit`] (total super-steps) and
+    /// [`TinyAgentsError::SubAgentDepth`] (run-tree depth).
+    #[error("node `{node}` exceeded its visit limit of {limit}")]
+    NodeVisitLimit {
+        /// The node that was over-visited.
+        node: String,
+        /// The configured per-node visit cap.
+        limit: usize,
+    },
+
     /// A model provider call failed (transport error, non-2xx status, or a
     /// malformed response). The payload is a human-readable, provider-normalized
     /// description.

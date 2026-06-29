@@ -38,6 +38,7 @@ impl<State: Send + Sync> CapabilityRegistry<State> {
             models: std::collections::HashMap::new(),
             tools: std::collections::HashMap::new(),
             graphs: std::collections::HashMap::new(),
+            agents: std::collections::HashMap::new(),
             meta: std::collections::HashMap::new(),
             aliases: std::collections::HashMap::new(),
         }
@@ -166,7 +167,53 @@ impl<State: Send + Sync> CapabilityRegistry<State> {
     }
 
     // -----------------------------------------------------------------------
-    // Registration: name-only descriptors (routers, reducers, stores, agents)
+    // Registration: executable agents
+    // -----------------------------------------------------------------------
+
+    /// Registers an executable harness `agent` under its
+    /// [`HarnessAgent::name`](crate::graph::subagent_node::HarnessAgent::name).
+    ///
+    /// Resolved by a
+    /// [`SubAgentNode`](crate::graph::subagent_node::SubAgentNode) to delegate a
+    /// graph step to the agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TinyAgentsError::DuplicateComponent`] if an agent with the same
+    /// name is already registered. Use [`replace_agent`](Self::replace_agent) to
+    /// overwrite intentionally.
+    pub fn register_agent(
+        &mut self,
+        agent: Arc<dyn crate::graph::subagent_node::HarnessAgent>,
+    ) -> Result<&mut Self> {
+        let name = agent.name().to_owned();
+        self.ensure_absent(ComponentKind::Agent, &name)?;
+        self.record_meta(ComponentKind::Agent, &name);
+        self.agents.insert(name, agent);
+        Ok(self)
+    }
+
+    /// Registers or overwrites an executable agent under its
+    /// [`HarnessAgent::name`](crate::graph::subagent_node::HarnessAgent::name),
+    /// preserving any existing metadata.
+    pub fn replace_agent(
+        &mut self,
+        agent: Arc<dyn crate::graph::subagent_node::HarnessAgent>,
+    ) -> &mut Self {
+        let name = agent.name().to_owned();
+        self.record_meta(ComponentKind::Agent, &name);
+        self.agents.insert(name, agent);
+        self
+    }
+
+    /// Looks up a registered executable agent by name or alias.
+    pub fn agent(&self, name: &str) -> Option<Arc<dyn crate::graph::subagent_node::HarnessAgent>> {
+        let canonical = self.resolve_name(ComponentKind::Agent, name)?;
+        self.agents.get(&canonical).cloned()
+    }
+
+    // -----------------------------------------------------------------------
+    // Registration: name-only descriptors (routers, reducers, stores)
     // -----------------------------------------------------------------------
 
     /// Registers a router (conditional-routing function) by name.

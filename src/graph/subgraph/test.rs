@@ -24,6 +24,9 @@ fn ctx_for(id: &str) -> NodeContext {
         resume: None,
         fork: None,
         send_arg: None,
+        root_run_id: None,
+        recursion_frames: Vec::new(),
+        child_runs: None,
     }
 }
 
@@ -191,4 +194,143 @@ async fn namespaced_children_persist_under_isolated_namespaces() {
         list.iter()
             .any(|m| m.namespace == vec!["branch_b".to_string()])
     );
+}
+
+#[tokio::test]
+async fn subgraph_child_run_distinct_and_shares_root() {
+    // A parent embedding one child: the parent run records exactly one child run
+    // whose run id differs from the parent's, and whose root run id equals the
+    // parent's (the child preserves the root of the recursion tree).
+    let child = child_add_ten();
+    let parent = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("child", shared_subgraph_node(child))
+        .set_entry("child")
+        .set_finish("child")
+        .compile()
+        .unwrap();
+
+    let run = parent.run(0).await.unwrap();
+    assert_eq!(run.state, 10);
+
+    // Exactly one child run, keyed by the embedding node.
+    assert_eq!(run.child_runs.len(), 1);
+    let child_run = &run.child_runs[0];
+    assert_eq!(child_run.node.as_str(), "child");
+    // Distinct child run id, shared root.
+    assert_ne!(child_run.run_id, run.run_id);
+    assert_eq!(child_run.root_run_id, run.run_id);
+    assert_eq!(run.root_run_id, run.run_id);
+    assert!(run.parent_run_id.is_none());
+
+    // The run tree mirrors the execution's lineage.
+    let tree = run.run_tree();
+    assert!(tree.is_root());
+    assert_eq!(tree.children.len(), 1);
+    assert_eq!(tree.children[0].run_id, child_run.run_id);
+}
+
+#[tokio::test]
+async fn nested_subgraphs_produce_distinct_ids_sharing_one_root() {
+    // grandchild adds 10; child embeds grandchild then is itself embedded in the
+    // parent, so the run tree is three deep: parent -> child -> grandchild.
+    let grandchild = child_add_ten();
+    let child = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("grandchild", shared_subgraph_node(grandchild))
+        .set_entry("grandchild")
+        .set_finish("grandchild")
+        .compile()
+        .unwrap();
+    let parent = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("child", shared_subgraph_node(child))
+        .set_entry("child")
+        .set_finish("child")
+        .compile()
+        .unwrap();
+
+    let run = parent.run(0).await.unwrap();
+    // 0 -> child -> grandchild(+10) = 10
+    assert_eq!(run.state, 10);
+
+    // Parent records the child run; that child's run shares the parent's root.
+    assert_eq!(run.child_runs.len(), 1);
+    let child_run = &run.child_runs[0];
+    assert_eq!(child_run.node.as_str(), "child");
+    assert_eq!(child_run.root_run_id, run.run_id);
+
+    // All three run ids are distinct (parent, child, grandchild). The grandchild
+    // is recorded on the child run's own child_runs, but the top-level parent
+    // sees only its direct child; we assert direct-child distinctness here.
+    assert_ne!(child_run.run_id, run.run_id);
+}
+
+#[tokio::test]
+async fn parent_frames_balanced_after_subgraph_returns() {
+    // Two sibling subgraph nodes run in sequence under one parent. Because each
+    // child runs on its own seeded recursion stack, the parent's depth is never
+    // mutated by a child returning, so both child runs see depth-consistent
+    // lineage: each is a direct child of the parent and shares its root.
+    let parent = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("a", shared_subgraph_node(child_add_ten()))
+        .add_node("b", shared_subgraph_node(child_add_ten()))
+        .set_entry("a")
+        .add_edge("a", "b")
+        .set_finish("b")
+        .compile()
+        .unwrap();
+
+    let run = parent.run(0).await.unwrap();
+    // 0 -> a(+10) -> b(+10) = 20
+    assert_eq!(run.state, 20);
+
+    assert_eq!(run.child_runs.len(), 2);
+    let nodes: Vec<&str> = run.child_runs.iter().map(|c| c.node.as_str()).collect();
+    assert_eq!(nodes, vec!["a", "b"]);
+    // Both children share the parent's root and have distinct run ids.
+    for c in &run.child_runs {
+        assert_eq!(c.root_run_id, run.run_id);
+        assert_ne!(c.run_id, run.run_id);
+    }
+    assert_ne!(run.child_runs[0].run_id, run.child_runs[1].run_id);
+}
+
+#[tokio::test]
+async fn child_runs_recorded_in_checkpoint_metadata() {
+    // With a checkpointer + thread, the boundary checkpoint that committed the
+    // subgraph node carries a `child_runs` array in its metadata keyed by node.
+    let ckpt = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let parent = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("child", shared_subgraph_node(child_add_ten()))
+        .set_entry("child")
+        .set_finish("child")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt.clone());
+
+    let run = parent.run_with_thread("t", 0).await.unwrap();
+    assert_eq!(run.child_runs.len(), 1);
+
+    // Walk every persisted checkpoint's raw metadata for the `child_runs` array
+    // naming the embedding node.
+    let list = ckpt.list("t").await.unwrap();
+    let mut found = false;
+    for meta in &list {
+        let checkpoint = ckpt
+            .get("t", Some(&meta.checkpoint_id))
+            .await
+            .unwrap()
+            .unwrap();
+        if checkpoint
+            .metadata
+            .get("child_runs")
+            .and_then(|v| v.as_array())
+            .is_some_and(|arr| {
+                arr.iter()
+                    .any(|c| c.get("node").and_then(|n| n.as_str()) == Some("child"))
+            })
+        {
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "child_runs not found in any checkpoint metadata");
 }

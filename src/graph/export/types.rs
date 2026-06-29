@@ -15,6 +15,8 @@
 //! [`crate::language::Blueprint`] via
 //! [`crate::graph::export::blueprint_to_topology`].
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// A serializable, behavior-free description of a graph's structure.
@@ -28,6 +30,10 @@ use serde::{Deserialize, Serialize};
 pub struct GraphTopology {
     /// The graph identifier.
     pub graph_id: String,
+    /// The optional human-readable graph name (descriptive; `graph_id` remains
+    /// the stable identifier).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The entry node (the target of the virtual `START` node), if known.
     pub entry: Option<String>,
     /// Maximum number of supersteps the graph may execute (0 when unknown,
@@ -43,11 +49,22 @@ pub struct GraphTopology {
     pub edges: Vec<EdgeInfo>,
     /// Conditional (router-driven) edges, sorted by source node id.
     pub conditional_edges: Vec<ConditionalEdgeInfo>,
+    /// Barrier / waiting (fan-in) edges, sorted by target node id. A target's
+    /// predecessor set must *all* complete before it activates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting_edges: Vec<WaitingEdgeInfo>,
     /// Nodes that route directly to the virtual `END` node, sorted.
     pub finish_nodes: Vec<String>,
     /// State channel / reducer bindings, when available (populated from a
     /// `.rag` blueprint; empty for compiled whole-state graphs).
     pub channels: Vec<ChannelInfo>,
+    /// Graph-level execution policy summary (recursion limit, concurrency,
+    /// per-node timeout).
+    #[serde(default)]
+    pub policy: GraphPolicySummary,
+    /// Structural validation report computed over this topology.
+    #[serde(default)]
+    pub validation: ValidationReport,
 }
 
 /// A single graph node's structural metadata.
@@ -62,6 +79,93 @@ pub struct NodeInfo {
     /// than static or conditional edges.
     #[serde(default, skip_serializing_if = "is_false")]
     pub command_routing: bool,
+    /// True when this node embeds and runs a child graph (a subgraph node).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub subgraph: bool,
+    /// True when this node is an interrupt point that can pause the run.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub interrupt: bool,
+    /// True when this node is a deferred join (activates after the frontier
+    /// drains).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub deferred: bool,
+    /// Declared `goto` destination hints for a command-routing node, sorted.
+    /// Advisory only — the runtime resolves the real target at runtime.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_destinations: Vec<String>,
+    /// Free-form, sorted key/value annotations carried from the builder.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
+    /// A compact, derived summary of this node's routing/behavior policy.
+    #[serde(default)]
+    pub policy: NodePolicySummary,
+}
+
+/// A barrier / waiting (fan-in) edge: `target` only activates once every node
+/// in `predecessors` has completed, possibly across supersteps.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct WaitingEdgeInfo {
+    /// The join node that waits on its predecessors.
+    pub target: String,
+    /// The predecessor nodes that must all complete first, sorted.
+    pub predecessors: Vec<String>,
+}
+
+/// Graph-level execution policy, summarized for export.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphPolicySummary {
+    /// Maximum number of supersteps the graph may execute (0 when unknown).
+    pub recursion_limit: usize,
+    /// Whether the active node set of a superstep runs concurrently.
+    pub parallel: bool,
+    /// Upper bound on branches run concurrently per step (`None` = unbounded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<usize>,
+    /// Default per-node handler timeout in milliseconds (`None` = no timeout).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_timeout_ms: Option<u128>,
+}
+
+/// A derived, per-node summary of how a node routes and what role it plays.
+///
+/// Every field is computed from the topology itself, so it stays in sync with
+/// the structural fields and is safe to snapshot in tests.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodePolicySummary {
+    /// The node's routing discipline: one of `static`, `conditional`,
+    /// `command`, `terminal`, or `unrouted`.
+    pub routing: String,
+    /// True when the node is a barrier/waiting (fan-in) join target.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub barrier: bool,
+    /// True when the node is an interrupt point.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub interrupt: bool,
+    /// True when the node is a deferred join.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub deferred: bool,
+    /// True when the node embeds a subgraph.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub subgraph: bool,
+}
+
+/// A structural validation report computed over a [`GraphTopology`].
+///
+/// `errors` are structural defects that would make the graph invalid (a missing
+/// entry, a dangling edge/route/barrier target). `warnings` are non-fatal
+/// observations (unreachable nodes, dead-end nodes). A compiled graph is already
+/// validated, so its report is typically clean; a builder-stage topology may
+/// surface in-progress issues.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationReport {
+    /// True when there are no errors.
+    pub ok: bool,
+    /// Structural defects, sorted and deduplicated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+    /// Non-fatal observations, sorted and deduplicated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// A direct, unconditional edge from one node to another.

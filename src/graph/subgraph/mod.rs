@@ -25,7 +25,8 @@ use std::pin::Pin;
 use crate::Result;
 use crate::graph::builder::NodeContext;
 use crate::graph::command::NodeResult;
-use crate::graph::compiled::CompiledGraph;
+use crate::graph::compiled::{CompiledGraph, GraphExecution};
+use crate::graph::recursion::ChildRun;
 
 type Handler<S, U> = Box<
     dyn Fn(S, NodeContext) -> Pin<Box<dyn Future<Output = Result<NodeResult<U>>> + Send>>
@@ -44,9 +45,11 @@ where
     State: Clone + Send + Sync + 'static,
 {
     Box::new(move |state: State, ctx: NodeContext| {
-        let child = namespaced(&child, &ctx);
+        let child = child_for(&child, &ctx);
+        let recorder = ChildRunRecorder::new(&ctx);
         Box::pin(async move {
             let execution = child.run(state).await?;
+            recorder.record(&execution);
             Ok(NodeResult::Update(execution.state))
         })
     })
@@ -71,12 +74,14 @@ where
     FromChild: Fn(&P, C) -> PU + Send + Sync + Clone + 'static,
 {
     Box::new(move |state: P, ctx: NodeContext| {
-        let child = namespaced(&child, &ctx);
+        let child = child_for(&child, &ctx);
+        let recorder = ChildRunRecorder::new(&ctx);
         let to_child = to_child.clone();
         let from_child = from_child.clone();
         Box::pin(async move {
             let child_input = to_child(&state);
             let execution = child.run(child_input).await?;
+            recorder.record(&execution);
             let update = from_child(&state, execution.state);
             Ok(NodeResult::Update(update))
         })
@@ -89,6 +94,48 @@ fn namespaced<S, U>(child: &CompiledGraph<S, U>, ctx: &NodeContext) -> CompiledG
     let mut namespace = child.namespace().to_vec();
     namespace.push(ctx.node_id.to_string());
     child.clone().with_namespace(namespace)
+}
+
+/// Prepares an embedded `child` graph for a subgraph run: extends its checkpoint
+/// namespace with the embedding node id (so nested checkpoints never collide),
+/// seeds it with the enclosing run's live recursion frames (so the child run
+/// extends the parent's recursion tree rather than starting a fresh one), and
+/// records the embedding node so the child's root frame names it.
+fn child_for<S, U>(child: &CompiledGraph<S, U>, ctx: &NodeContext) -> CompiledGraph<S, U> {
+    namespaced(child, ctx)
+        .with_recursion_frames(ctx.recursion_frames.clone())
+        .with_recursion_node(ctx.node_id.clone())
+}
+
+/// Captures the enclosing run's child-run sink and lineage so a subgraph node can
+/// report the child run it spawned (its distinct run id sharing the parent's
+/// root) back to the executor after the embedded graph returns.
+struct ChildRunRecorder {
+    node: crate::harness::ids::NodeId,
+    sink: Option<crate::graph::recursion::ChildRunSink>,
+}
+
+impl ChildRunRecorder {
+    fn new(ctx: &NodeContext) -> Self {
+        Self {
+            node: ctx.node_id.clone(),
+            sink: ctx.child_runs.clone(),
+        }
+    }
+
+    /// Records the embedded run's id (keyed by the embedding node) into the
+    /// enclosing run's sink, when one is attached.
+    fn record<S>(&self, execution: &GraphExecution<S>) {
+        if let Some(sink) = &self.sink {
+            sink.record(ChildRun {
+                node: self.node.clone(),
+                graph_id: execution.graph_id.clone(),
+                run_id: execution.run_id.clone(),
+                root_run_id: execution.root_run_id.clone(),
+                usage: crate::harness::usage::UsageTotals::default(),
+            });
+        }
+    }
 }
 
 #[cfg(test)]

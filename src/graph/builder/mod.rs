@@ -13,7 +13,7 @@
 
 mod types;
 
-pub(crate) use types::{Branch, BuilderNode};
+pub(crate) use types::{Branch, BuilderNode, NodeMeta};
 pub use types::{
     END, ForkId, GraphBuilder, GraphDefaults, NodeContext, NodeFuture, NodeHandler, Route,
     RouterFn, START,
@@ -49,6 +49,7 @@ where
     pub fn new() -> Self {
         Self {
             graph_id: GraphId::new(format!("graph-{}", crate::graph::compiled::next_seq())),
+            name: None,
             nodes: HashMap::new(),
             edges: HashMap::new(),
             branches: HashMap::new(),
@@ -59,6 +60,7 @@ where
             parallel: false,
             max_concurrency: None,
             node_timeout: None,
+            node_meta: HashMap::new(),
         }
     }
 
@@ -118,6 +120,14 @@ where
     /// Overrides the graph id.
     pub fn with_graph_id(mut self, id: impl Into<GraphId>) -> Self {
         self.graph_id = id.into();
+        self
+    }
+
+    /// Sets an optional human-readable graph name surfaced by the topology
+    /// export. The `graph_id` remains the stable identifier; the name is purely
+    /// descriptive (e.g. for diagrams a model authored).
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
         self
     }
 
@@ -244,6 +254,66 @@ where
         self
     }
 
+    /// Records the declared `goto` destination hints for a command-routing node.
+    ///
+    /// These are advisory only — the runtime always resolves the real successor
+    /// from the [`crate::graph::Command`] a node emits — but they let the
+    /// [topology export](crate::graph::export) draw and validate the set of
+    /// nodes a command node may jump to. Implies [`Self::mark_command_routing`].
+    pub fn with_command_destinations<I, N>(mut self, node: impl Into<NodeId>, destinations: I) -> Self
+    where
+        I: IntoIterator<Item = N>,
+        N: Into<NodeId>,
+    {
+        let node = node.into();
+        self.command_nodes.insert(node.clone());
+        let dests = destinations.into_iter().map(Into::into).collect();
+        self.node_meta.entry(node).or_default().command_destinations = dests;
+        self
+    }
+
+    /// Sets a human-readable kind for `node` (e.g. `model`, `tool`, `subgraph`)
+    /// surfaced as [`crate::graph::NodeInfo::kind`] in the export.
+    pub fn with_node_kind(mut self, node: impl Into<NodeId>, kind: impl Into<String>) -> Self {
+        self.node_meta.entry(node.into()).or_default().kind = Some(kind.into());
+        self
+    }
+
+    /// Records a sorted, free-form `key=value` annotation on `node`, carried
+    /// verbatim into [`crate::graph::NodeInfo::metadata`].
+    pub fn with_node_metadata(
+        mut self,
+        node: impl Into<NodeId>,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.node_meta
+            .entry(node.into())
+            .or_default()
+            .metadata
+            .insert(key.into(), value.into());
+        self
+    }
+
+    /// Marks `node` as a subgraph-embedding node for the export (an introspection
+    /// marker only; it does not change how the node executes).
+    pub fn mark_subgraph(mut self, node: impl Into<NodeId>) -> Self {
+        self.node_meta.entry(node.into()).or_default().subgraph = true;
+        self
+    }
+
+    /// Marks `node` as an interrupt point for the export.
+    pub fn mark_interrupt(mut self, node: impl Into<NodeId>) -> Self {
+        self.node_meta.entry(node.into()).or_default().interrupt = true;
+        self
+    }
+
+    /// Marks `node` as a deferred join for the export.
+    pub fn mark_deferred(mut self, node: impl Into<NodeId>) -> Self {
+        self.node_meta.entry(node.into()).or_default().deferred = true;
+        self
+    }
+
     /// Validates topology and freezes the graph into a [`CompiledGraph`].
     pub fn compile(self) -> Result<CompiledGraph<State, Update>> {
         if self.reducer.is_none() {
@@ -320,6 +390,7 @@ where
 
         let Self {
             graph_id,
+            name,
             nodes,
             edges,
             branches,
@@ -330,10 +401,12 @@ where
             parallel,
             max_concurrency,
             node_timeout,
+            node_meta,
         } = self;
 
         Ok(CompiledGraph::from_parts(
             graph_id,
+            name,
             nodes,
             edges,
             branches,
@@ -345,6 +418,7 @@ where
             parallel,
             max_concurrency,
             node_timeout,
+            node_meta,
         ))
     }
 

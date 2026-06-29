@@ -47,11 +47,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use crate::graph::builder::{Branch, BuilderNode, END, ForkId, NodeContext, NodeFuture};
+use crate::graph::builder::{Branch, BuilderNode, END, ForkId, NodeContext, NodeFuture, NodeMeta};
 use crate::graph::checkpoint::{
     Checkpoint, CheckpointConfig, CheckpointTuple, Checkpointer, DurabilityMode,
 };
 use crate::graph::command::{Command, Interrupt, NodeResult, RouteTarget};
+use crate::graph::recursion::{
+    ChildRun, ChildRunSink, RecursionFrame, RecursionPolicy, RecursionStack,
+};
 use crate::graph::reducer::StateReducer;
 use crate::graph::status::GraphRunStatus;
 use crate::graph::stream::{GraphEvent, GraphEventSink};
@@ -137,8 +140,10 @@ fn activation_nodes(active: &[Activation]) -> Vec<NodeId> {
 impl<State, Update> CompiledGraph<State, Update> {
     /// Internal constructor used by the builder.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         graph_id: GraphId,
+        name: Option<String>,
         nodes: HashMap<NodeId, BuilderNode<State, Update>>,
         edges: HashMap<NodeId, NodeId>,
         branches: HashMap<NodeId, Branch<State>>,
@@ -150,17 +155,23 @@ impl<State, Update> CompiledGraph<State, Update> {
         parallel: bool,
         max_concurrency: Option<usize>,
         node_timeout: Option<Duration>,
+        node_meta: HashMap<NodeId, NodeMeta>,
     ) -> Self {
         Self {
             graph_id,
+            name,
             nodes: Arc::new(nodes),
             edges: Arc::new(edges),
             branches: Arc::new(branches),
             command_nodes: Arc::new(command_nodes),
             waiting: Arc::new(waiting),
+            node_meta: Arc::new(node_meta),
             entry,
             reducer,
             recursion_limit,
+            recursion_policy: crate::graph::recursion::RecursionPolicy::default(),
+            recursion_frames: Vec::new(),
+            recursion_node: None,
             checkpointer: None,
             event_sink: None,
             journal: None,
@@ -176,6 +187,12 @@ impl<State, Update> CompiledGraph<State, Update> {
     /// The graph id.
     pub fn graph_id(&self) -> &GraphId {
         &self.graph_id
+    }
+
+    /// The optional human-readable graph name, if one was set via
+    /// [`GraphBuilder::with_name`](crate::graph::GraphBuilder::with_name).
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     /// The checkpoint namespace (empty for top-level graphs).
@@ -215,6 +232,40 @@ impl<State, Update> CompiledGraph<State, Update> {
     /// Sets the checkpoint namespace (used by subgraph wrappers).
     pub fn with_namespace(mut self, namespace: Vec<String>) -> Self {
         self.namespace = namespace;
+        self
+    }
+
+    /// Sets the [`RecursionPolicy`] enforced while this graph runs.
+    ///
+    /// The policy bounds three independently-tracked recursion dimensions:
+    /// run-tree depth (`max_depth`), per-node activations within a run
+    /// (`max_visits_per_node`), and total super-steps per run
+    /// (`max_total_steps`). The effective per-run step cap is the smaller of
+    /// the policy's `max_total_steps` and the builder's recursion limit, so
+    /// configuring a policy never *loosens* an existing limit.
+    pub fn with_recursion_policy(mut self, policy: RecursionPolicy) -> Self {
+        self.recursion_policy = policy;
+        self
+    }
+
+    /// Seeds the inherited recursion frames of an enclosing run.
+    ///
+    /// A subgraph or sub-agent wrapper passes the parent run's frame stack so
+    /// this run extends the parent's recursion tree (its root frame's `depth`
+    /// and `parent` continue from the caller) rather than starting a fresh tree
+    /// at depth zero. Top-level graphs leave this empty.
+    pub fn with_recursion_frames(mut self, frames: Vec<RecursionFrame>) -> Self {
+        self.recursion_frames = frames;
+        self
+    }
+
+    /// Sets the hosting node id used as this run's root recursion-frame node.
+    ///
+    /// A subgraph wrapper sets this to the embedding node id so the child run's
+    /// frame (and the parent/child [`RunTree`](crate::graph::RunTree)) names the
+    /// node that ran the embedded graph. Top-level graphs leave this unset.
+    pub fn with_recursion_node(mut self, node: NodeId) -> Self {
+        self.recursion_node = Some(node);
         self
     }
 
@@ -620,6 +671,53 @@ where
         let mut steps = 0usize;
         let mut last_checkpoint: Option<CheckpointId> = None;
         let mut parent_checkpoint: Option<String> = None;
+
+        // Build this run's recursion stack from the inherited parent frames and
+        // push the frame for this graph call. A push that would exceed
+        // `max_depth` fails the run with a clear recursion error before any
+        // node executes. Graph-call depth (the stack) is tracked separately
+        // from node-loop visits (`node_visits`, below).
+        let mut recursion =
+            RecursionStack::with_frames(self.recursion_frames.clone(), self.recursion_policy);
+        // Run lineage: the root is the first inherited frame's run (the top of
+        // the recursion tree) or this run when top-level; the parent is the
+        // enclosing run, if any.
+        let root_run_id = self
+            .recursion_frames
+            .first()
+            .map(|f| f.run_id.clone())
+            .unwrap_or_else(|| run_id.clone());
+        let parent_run_id = self.recursion_frames.last().map(|f| f.run_id.clone());
+        let this_frame = RecursionFrame {
+            graph_id: self.graph_id.clone(),
+            node_id: self.recursion_node.clone(),
+            run_id: run_id.clone(),
+            task_id: None,
+            namespace: self.namespace.clone(),
+            depth: recursion.depth(),
+            parent: parent_run_id.clone(),
+        };
+        if let Err(err) = recursion.push(this_frame) {
+            self.emit(GraphEvent::RunStarted {
+                run_id: run_id.clone(),
+            });
+            self.fail_run(&run_id, &thread_id, started_at, steps, &err)
+                .await;
+            return Err(err);
+        }
+        // Serialized once per run for embedding in every checkpoint's metadata.
+        let recursion_meta =
+            serde_json::to_value(recursion.frames()).unwrap_or(serde_json::Value::Null);
+        // The live frame stack handed to node contexts so a subgraph node can
+        // seed an embedded child with this run's recursion path, plus the
+        // per-run sink the node reports its spawned child run into.
+        let live_frames = recursion.frames().to_vec();
+        let child_sink = ChildRunSink::new();
+        // Accumulates every child run spawned across all supersteps for the
+        // final `GraphExecution::child_runs`.
+        let mut all_child_runs: Vec<ChildRun> = Vec::new();
+        // Per-node activation counts for `max_visits_per_node` enforcement.
+        let mut node_visits: HashMap<NodeId, usize> = HashMap::new();
         let mut active: Vec<Activation> = dedupe(initial_active)
             .into_iter()
             .map(|node| Activation {
@@ -634,17 +732,36 @@ where
         self.emit(GraphEvent::RunStarted {
             run_id: run_id.clone(),
         });
+        // Surface this run's recursion depth so observers can attribute nested
+        // runs without reconstructing the tree from logs.
+        self.emit(GraphEvent::RecursionDepthChanged {
+            depth: recursion.depth(),
+        });
         // Record the run as live before the first superstep is scheduled.
         let mut running = self.base_status(&run_id, &thread_id, started_at);
         running.active_nodes = activation_nodes(&active);
         self.save_status(running).await;
 
         while !active.is_empty() {
-            if steps >= self.recursion_limit {
-                let err = TinyAgentsError::RecursionLimit(self.recursion_limit);
+            // The effective step cap is the smaller of the builder's recursion
+            // limit and the policy's `max_total_steps`, so a policy never
+            // loosens an existing limit. Both surface a `RecursionLimit`.
+            let step_limit = self
+                .recursion_limit
+                .min(self.recursion_policy.max_total_steps);
+            if steps >= step_limit {
+                let err = TinyAgentsError::RecursionLimit(step_limit);
                 self.fail_run(&run_id, &thread_id, started_at, steps, &err)
                     .await;
                 return Err(err);
+            }
+            // Node-loop recursion: enforce `max_visits_per_node` per activation.
+            for activation in &active {
+                if let Err(err) = recursion.record_node_visit(&mut node_visits, &activation.node) {
+                    self.fail_run(&run_id, &thread_id, started_at, steps, &err)
+                        .await;
+                    return Err(err);
+                }
             }
             steps += 1;
             self.emit(GraphEvent::StepStarted {
@@ -661,6 +778,9 @@ where
                     steps,
                     &mut resume_map,
                     &mut visited,
+                    &root_run_id,
+                    &live_frames,
+                    &child_sink,
                 )
                 .await
             } else {
@@ -672,6 +792,9 @@ where
                     steps,
                     &mut resume_map,
                     &mut visited,
+                    &root_run_id,
+                    &live_frames,
+                    &child_sink,
                 )
                 .await
             };
@@ -693,6 +816,14 @@ where
                 state = self.reducer.apply(state, update)?;
             }
 
+            // Collect any child runs spawned by subgraph nodes this step. They
+            // are embedded into this boundary's checkpoint metadata (keyed by
+            // node) and accumulated onto the final `GraphExecution`.
+            let step_child_runs = child_sink.drain();
+            all_child_runs.extend(step_child_runs.iter().cloned());
+            let child_runs_meta =
+                serde_json::to_value(&step_child_runs).unwrap_or(serde_json::Value::Null);
+
             // Interrupt: persist a checkpoint whose next nodes are the
             // not-yet-completed members of this step (interrupted node first),
             // then return control to the caller.
@@ -710,6 +841,8 @@ where
                         parent_checkpoint.clone(),
                         steps,
                         "loop",
+                        &recursion_meta,
+                        &child_runs_meta,
                     )
                     .await?;
 
@@ -723,6 +856,11 @@ where
 
                 return Ok(GraphExecution {
                     state,
+                    run_id: run_id.clone(),
+                    graph_id: self.graph_id.clone(),
+                    root_run_id: root_run_id.clone(),
+                    parent_run_id: parent_run_id.clone(),
+                    child_runs: all_child_runs,
                     visited,
                     steps,
                     interrupts: vec![emitted],
@@ -796,6 +934,8 @@ where
                     parent_checkpoint.clone(),
                     steps,
                     "loop",
+                    &recursion_meta,
+                    &child_runs_meta,
                 )
                 .await?
             } else {
@@ -823,6 +963,11 @@ where
 
         Ok(GraphExecution {
             state,
+            run_id: run_id.clone(),
+            graph_id: self.graph_id.clone(),
+            root_run_id,
+            parent_run_id,
+            child_runs: all_child_runs,
             visited,
             steps,
             interrupts: Vec::new(),
@@ -868,6 +1013,9 @@ where
         resume_map: &mut HashMap<NodeId, serde_json::Value>,
         fork: Option<ForkId>,
         send_arg: Option<serde_json::Value>,
+        root_run_id: &RunId,
+        frames: &[RecursionFrame],
+        child_runs: &ChildRunSink,
     ) -> NodeContext {
         NodeContext {
             node_id: node_id.clone(),
@@ -877,6 +1025,9 @@ where
             resume: resume_map.remove(node_id),
             fork,
             send_arg,
+            root_run_id: Some(root_run_id.clone()),
+            recursion_frames: frames.to_vec(),
+            child_runs: Some(child_runs.clone()),
         }
     }
 
@@ -964,6 +1115,9 @@ where
         step: usize,
         resume_map: &mut HashMap<NodeId, serde_json::Value>,
         visited: &mut Vec<NodeId>,
+        root_run_id: &RunId,
+        frames: &[RecursionFrame],
+        child_runs: &ChildRunSink,
     ) -> Result<StepRun<Update>> {
         let mut updates: Vec<Update> = Vec::new();
         let mut goto_map: HashMap<NodeId, Vec<RouteTarget>> = HashMap::new();
@@ -993,6 +1147,9 @@ where
                 resume_map,
                 None,
                 activation.send_arg.clone(),
+                root_run_id,
+                frames,
+                child_runs,
             );
             let result = match self
                 .run_node_future(node_id, (node.handler)(state.clone(), ctx))
@@ -1052,6 +1209,9 @@ where
         step: usize,
         resume_map: &mut HashMap<NodeId, serde_json::Value>,
         visited: &mut Vec<NodeId>,
+        root_run_id: &RunId,
+        frames: &[RecursionFrame],
+        child_runs: &ChildRunSink,
     ) -> Result<StepRun<Update>> {
         let timeout = self.node_timeout;
         // Build one forked context + future per branch. Node lookup and resume
@@ -1087,6 +1247,9 @@ where
                 resume_map,
                 fork,
                 activation.send_arg.clone(),
+                root_run_id,
+                frames,
+                child_runs,
             );
             let raw = (node.handler)(state.clone(), ctx);
             let owned_node = node_id.clone();
@@ -1202,6 +1365,8 @@ where
         parent: Option<String>,
         step: usize,
         source: &str,
+        recursion: &serde_json::Value,
+        child_runs: &serde_json::Value,
     ) -> Result<Option<CheckpointId>> {
         let (Some(checkpointer), Some(thread)) = (&self.checkpointer, thread_id) else {
             return Ok(None);
@@ -1218,7 +1383,12 @@ where
             completed_tasks: completed_tasks.to_vec(),
             pending_writes: Vec::new(),
             interrupts,
-            metadata: serde_json::json!({ "source": source, "step": step }),
+            metadata: serde_json::json!({
+                "source": source,
+                "step": step,
+                "recursion": recursion,
+                "child_runs": child_runs,
+            }),
         };
         let id = checkpointer.put(checkpoint).await?;
         self.emit(GraphEvent::CheckpointSaved {
