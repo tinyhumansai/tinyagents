@@ -42,6 +42,8 @@ explicit and typed at the Rust boundary.
 - Execute small scripts with a persistent namespace.
 - Expose registered models, agents, graphs, tools, stores, and context as
   capability-bound functions.
+- Let sessions draft, validate, inspect, diff, compile, and optionally register
+  graph blueprints through the expressive-language compiler.
 - Support model-driven CodeAct loops where model output contains fenced REPL
   blocks.
 - Capture stdout, return values, state changes, model calls, tool calls, graph
@@ -61,6 +63,8 @@ explicit and typed at the Rust boundary.
 - It does not own model provider logic.
 - It does not own graph topology or checkpointing.
 - It does not allow scripts to call unregistered tools or models.
+- It does not install model-generated graph topology directly into the runtime;
+  generated graphs must pass through the `.rag` compiler and policy checks.
 
 ## Why Rhai First
 
@@ -135,6 +139,7 @@ pub struct ReplCapabilities<State, Ctx = ()> {
     pub graphs: GraphRegistry<State, Ctx>,
     pub agents: AgentRegistry<State, Ctx>,
     pub stores: StoreRegistry,
+    pub language: Option<LanguageCompiler<State, Ctx>>,
 }
 
 pub struct ReplPolicy {
@@ -145,9 +150,11 @@ pub struct ReplPolicy {
     pub max_model_calls: usize,
     pub max_tool_calls: usize,
     pub max_graph_calls: usize,
+    pub max_graph_definitions: usize,
     pub max_depth: usize,
     pub timeout: Option<Duration>,
     pub max_concurrency: usize,
+    pub generated_graphs_require_review: bool,
 }
 ```
 
@@ -187,6 +194,11 @@ Reserved names:
 - `agent_query_batched`
 - `graph_run`
 - `graph_run_batched`
+- `graph_define`
+- `graph_validate`
+- `graph_compile`
+- `graph_diff`
+- `graph_register`
 - `tool_call`
 - `tool_call_batched`
 - `emit`
@@ -293,6 +305,117 @@ graph_run(...) -> CompiledGraph::run/resume -> GraphRun
 Use this when the subtask has explicit topology, routing, interrupts, or
 checkpointing.
 
+### `graph_define`
+
+Create a graph blueprint from `.rag` source without installing it.
+
+```rhai
+let draft = graph_define(#{
+  name: "candidate_support_flow",
+  source: `
+graph candidate_support_flow {
+  start agent
+
+  node agent {
+    kind agent
+    model "default"
+    tools ["lookup_user"]
+    routes {
+      tool_call -> tools
+      final -> END
+    }
+  }
+
+  node tools {
+    kind tool_executor
+    next agent
+  }
+}
+`
+});
+```
+
+Lowering:
+
+```text
+graph_define(...) -> LanguageCompiler::parse -> GraphBlueprint
+```
+
+Requirements:
+
+- preserves source spans
+- records generated-by provenance
+- does not compile, register, or run the graph
+- counts against `max_graph_definitions`
+- rejects source that exceeds policy limits
+
+### `graph_validate`
+
+Parse and resolve a graph blueprint against the current capability allowlist.
+
+```rhai
+let diagnostics = graph_validate(draft);
+```
+
+Requirements:
+
+- validates syntax, duplicate ids, routes, node kinds, and policies
+- checks model, tool, agent, graph, reducer, store, middleware, and script
+  references against registries
+- returns structured diagnostics that can be shown to the model or user
+- does not mutate graph registry state
+
+### `graph_compile`
+
+Compile a validated blueprint into a `CompiledGraph` value under policy.
+
+```rhai
+let compiled = graph_compile(draft);
+```
+
+Requirements:
+
+- uses the same expressive-language compiler as file-backed `.rag` source
+- applies parent run capability allowlists
+- marks generated graphs as untrusted unless policy says otherwise
+- requires review when `generated_graphs_require_review` is true
+- emits compiler and graph blueprint events
+
+### `graph_diff`
+
+Compare two graph blueprints or a blueprint and a registered graph.
+
+```rhai
+let diff = graph_diff("support_flow", draft);
+```
+
+Requirements:
+
+- reports node, edge, channel, policy, capability, and metadata differences
+- preserves source locations where available
+- redacts prompt or metadata fields according to event policy
+- is deterministic for tests and review UIs
+
+### `graph_register`
+
+Register a compiled graph under a name only when policy permits it.
+
+```rhai
+graph_register(#{
+  name: "candidate_support_flow",
+  graph: compiled,
+  review_id: "approval_123"
+});
+```
+
+Requirements:
+
+- never accepts raw source directly
+- requires a compiled graph
+- requires a review token when policy says generated graphs need approval
+- emits registry events
+- does not grant capabilities beyond the compiled graph's validated bindings
+
 ### `tool_call`
 
 Call a registered tool by name.
@@ -353,6 +476,7 @@ Python's unsafe local execution model.
 | `rlm_query` | `agent_query` or `repl_query` |
 | `rlm_query_batched` | `agent_query_batched` or `repl_query_batched` |
 | custom Python tools | registered Rust tool capabilities |
+| generated Python programs | `.ragsh` cells plus generated `.rag` graph blueprints |
 | `SHOW_VARS()` | `show_vars()` |
 | `answer["ready"] = True` | `answer(...)` |
 | max iterations | `ReplPolicy::max_iterations` for CodeAct loops |
@@ -380,6 +504,12 @@ A model-driven REPL agent has this lifecycle:
 This loop is a harness feature. When used inside a graph node, the graph still
 owns node routing, checkpointing, interrupts, recursion depth, and failure
 policy.
+
+If the model writes `.rag` source, the loop should treat it as a graph proposal.
+The REPL may validate, diff, compile, and run that proposal only through the
+expressive-language compiler and the graph registry policy. This is how an
+agent can define its own graph without acquiring arbitrary topology mutation or
+host-code execution privileges.
 
 ## Example Session
 
@@ -548,6 +678,10 @@ pub enum ReplEvent {
     VariableChanged { cell_id: CellId, name: String },
     CapabilityCallStarted { cell_id: CellId, call_id: CallId, name: String },
     CapabilityCallCompleted { cell_id: CellId, call_id: CallId },
+    GraphBlueprintDefined { cell_id: CellId, graph_name: String },
+    GraphBlueprintValidated { cell_id: CellId, graph_name: String },
+    GraphBlueprintCompiled { cell_id: CellId, graph_name: String },
+    GraphBlueprintRegistered { cell_id: CellId, graph_name: String },
     FinalAnswer { cell_id: CellId, content: String },
     SessionCompleted { session_id: SessionId },
     SessionFailed { session_id: SessionId, error: String },
@@ -575,6 +709,10 @@ Required errors:
 - unknown model
 - unknown tool
 - unknown graph
+- invalid graph source
+- graph compilation failed
+- generated graph review required
+- graph registration denied
 - invalid arguments
 - unsupported value type
 - operation limit exceeded
@@ -647,8 +785,11 @@ help: did you mean `lookup_user`?
 ### R5: Graph Capability
 
 - add `graph_run`
+- add `graph_define`, `graph_validate`, `graph_compile`, `graph_diff`, and
+  `graph_register`
 - support graph-node `kind repl_agent`
 - preserve node id, parent run id, and depth in child events
+- require generated-graph review gates when policy enables them
 
 ### R6: CodeAct Loop
 

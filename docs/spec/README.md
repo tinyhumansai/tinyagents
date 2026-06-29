@@ -14,6 +14,37 @@ The goal is to make agent systems easy to define, inspect, run, test, and
 eventually serialize without hiding the Rust types that make production systems
 reliable.
 
+## Reference Positioning
+
+RustAgents should synthesize the reference systems rather than clone any one of
+them:
+
+- LangGraph contributes the durable execution model: explicit state graphs,
+  virtual `START` and `END`, Pregel-style supersteps, reducers/channels,
+  commands, `Send` fanout, checkpointing, interrupts, subgraphs, streaming, and
+  time travel.
+- LangChain contributes the harness model: provider-neutral models, tools,
+  middleware, runtime context, memory, retrieval, structured output, tracing,
+  usage, cost, and conformance tests for integrations.
+- `rust-langgraph` shows the Rust-facing precedent for a stateful graph runtime
+  with nodes, conditional edges, checkpoints, streaming, optional model
+  adapters, and ReAct/tool helpers. RustAgents should go deeper on typed state,
+  harness composition, registries, and language-backed graph definitions.
+- OpenHuman PR #4261 contributes the closest product-shaped precedent: a
+  harness-decoupled graph engine, persistent checkpoints, HITL, graph
+  observability, blueprints, JSON-RPC run control, and a behavior-preserving
+  cutover from an implicit turn loop to an explicit phase machine.
+- RLM contributes the REPL/code-act model: context and prompts as runtime
+  values, recursive sub-model or sub-agent calls as functions, persistent
+  session variables, trajectory logging, and sandbox choices.
+
+The target architecture is therefore layered: the harness owns model/tool
+execution and policies, the graph owns deterministic state transition and
+durability, the registry owns named capabilities, `.rag` owns serializable graph
+blueprints, and `.ragsh` owns capability-bound interactive orchestration. No
+layer should bypass another layer's safety, policy, observability, or test
+contracts.
+
 ## Detailed Module Docs
 
 - [Harness module](../modules/harness/README.md)
@@ -75,8 +106,12 @@ it.
   definitions.
 - Support a capability-bound REPL language for interactive graph and harness
   orchestration.
+- Allow agents to author, inspect, compile, and run graph blueprints through the
+  same registry-bound compiler path used by human-authored `.rag` files.
 - Prefer deterministic state transitions around inherently nondeterministic LLM
   calls.
+- Keep every generated or hand-authored graph explainable as topology,
+  capabilities, policies, state channels, checkpoints, and events.
 
 ## Module 1: Harness
 
@@ -855,6 +890,11 @@ This language is not meant to replace Rust. It is a workflow definition layer fo
 fast iteration, examples, documentation, and eventually user-authored agent
 plans.
 
+It is also the safe boundary for agent-authored graph plans. A REPL or model may
+propose `.rag` source, but that source must pass through the same parser,
+diagnostics, registry binding, allowlist checks, review gates, and graph
+compiler as human-authored source before it can run.
+
 ### Goals
 
 - Make common agent graphs readable at a glance.
@@ -862,6 +902,10 @@ plans.
 - Compile into explicit RustAgents structures.
 - Preserve source locations for helpful errors.
 - Avoid embedding arbitrary code in the first version.
+- Describe state channels, reducers, policies, subgraphs, sub-agents,
+  interrupts, joins, and fanout as declarative graph primitives.
+- Produce inspectable blueprints that can be reviewed, diffed, registered, and
+  tested.
 
 ### Non-Goals
 
@@ -869,24 +913,36 @@ plans.
 - It is not a prompt templating language by itself.
 - It should not execute untrusted code.
 - It should not bypass Rust type checks for stateful logic.
+- It should not install model-generated topology directly into the graph
+  runtime.
 
 ### Initial Syntax Sketch
 
 ```rustagents
 graph support_agent {
+  defaults {
+    recursion_limit 50
+    checkpoint inherit
+  }
+
   start agent
 
+  channel messages messages
+  channel tool_calls append
+
   node agent {
+    kind agent
     model "default"
     prompt "You are a concise support agent."
+    tools ["lookup_user", "create_ticket"]
     routes {
       tool_call -> tools
-      final -> end
+      final -> END
     }
   }
 
   node tools {
-    tool_choice auto
+    kind tool_executor
     next agent
   }
 }
@@ -897,18 +953,28 @@ graph support_agent {
 ```text
 program       = graph_decl*
 graph_decl    = "graph" ident "{" graph_item* "}"
-graph_item    = start_decl | node_decl | edge_decl
+graph_item    = start_decl | defaults_decl | channel_decl | node_decl | edge_decl
 start_decl    = "start" ident
+defaults_decl = "defaults" object
+channel_decl  = "channel" ident reducer_ref
 node_decl     = "node" ident "{" node_item* "}"
-node_item     = model_decl | prompt_decl | next_decl | routes_decl | tool_decl
+node_item     = kind_decl | model_decl | prompt_decl | tools_decl | next_decl | routes_decl
+kind_decl     = "kind" ident
 model_decl    = "model" string
 prompt_decl   = "prompt" string
+tools_decl    = "tools" "[" string_list? "]"
 next_decl     = "next" ident
 routes_decl   = "routes" "{" route_decl* "}"
-route_decl    = ident "->" (ident | "end")
-tool_decl     = "tool_choice" ident
+route_decl    = ident "->" (ident | "END")
 edge_decl     = ident "->" ident
 ```
+
+The full language target is broader than this minimal grammar. It should grow
+toward commands, `Send` fanout, joins/barriers, subgraphs, sub-agents,
+`repl_agent` nodes, interrupts, registered route functions, graph defaults,
+capability allowlists, blueprint provenance, and deterministic graph diffs. See
+[the expressive language module](../modules/expressive-language/README.md) for
+the canonical target.
 
 ### Compilation Pipeline
 
@@ -942,6 +1008,14 @@ source -> parser -> AST -> compiler -> StateGraph<State> + Harness bindings
 
 The graph runtime should not know whether a graph came from Rust builders or the
 expressive language.
+
+For generated source, the runtime relationship is:
+
+```text
+REPL/model proposal -> .rag source or AST -> parser -> diagnostics -> resolver
+  -> policy/review gate -> compiler -> GraphBuilder + Harness bindings
+  -> CompiledGraph -> optional registry registration
+```
 
 ## Package Layout
 

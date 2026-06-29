@@ -25,6 +25,8 @@ system, recursion policy, or run limits.
 - Execute small scripts with a persistent namespace.
 - Expose registered models, agents, graphs, tools, stores, and context as
   capability-bound functions.
+- Let sessions draft, validate, inspect, diff, compile, and optionally register
+  graph blueprints through the expressive-language compiler.
 - Support model-driven CodeAct loops where model output contains fenced REPL
   blocks.
 - Capture stdout, return values, state changes, model calls, tool calls, graph
@@ -44,6 +46,8 @@ system, recursion policy, or run limits.
 - It does not own model provider logic.
 - It does not own graph topology or checkpointing.
 - It does not allow scripts to call unregistered tools or models.
+- It does not install model-generated graph topology directly into the runtime;
+  generated graphs must pass through the `.rag` compiler and policy checks.
 
 ## Recommended Direction
 

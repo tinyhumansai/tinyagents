@@ -8,6 +8,12 @@ The language compiles into the same harness and graph runtime structures as
 hand-written Rust. The graph runtime should not know whether a graph came from
 Rust builders or a source file.
 
+The language is also the safe serialization boundary for agent-authored graph
+plans. If a REPL agent proposes a new workflow, that proposal should become
+`.rag` source or an equivalent AST, then pass through the same parser, resolver,
+registry binding, policy checks, and graph compiler as a human-authored file.
+Generated topology must never be installed directly into the runtime.
+
 This module is intentionally declarative. Interactive scripting and
 CodeAct-style recursive execution belong to the
 [REPL language module](../repl-language/README.md). A `.rag` file defines graph topology
@@ -20,8 +26,18 @@ graph calls through capability-bound functions.
 - Validate syntax, names, routes, and references.
 - Compile graph topology into graph builder calls.
 - Bind model and tool references through the harness.
+- Bind agents, subgraphs, route functions, reducers, stores, middleware, and
+  node templates through registries.
+- Declare graph input/output shape, state channels, reducer policies, and
+  checkpoint/interrupt policy when the compiled graph supports them.
+- Declare commands, fanout sends, joins, subgraphs, sub-agents, and REPL-backed
+  nodes without embedding arbitrary executable code.
+- Produce inspectable blueprints for registries, UIs, documentation, tests, and
+  generated workflow review.
 - Preserve source spans for clear errors.
 - Provide a safe declarative subset for agent workflows.
+- Accept both file-backed source and model-generated source through the same
+  validation path.
 - Support examples, docs, and eventually user-authored workflows.
 
 ## Non-Responsibilities
@@ -31,6 +47,10 @@ graph calls through capability-bound functions.
 - It does not replace typed Rust state logic.
 - It does not implement model providers.
 - It does not own graph execution.
+- It does not grant generated source new tools, models, stores, routes, or
+  subgraphs that were not already registered and allowed by policy.
+- It does not make model-generated graph source trusted merely because a model
+  produced it.
 
 ## Package Shape
 
@@ -77,12 +97,59 @@ The docs can still describe the language as RustAgents source.
 - Source spans should survive every compiler phase.
 - The first version should avoid arbitrary expressions.
 - Any future expression support should be pure and deterministic.
+- Generated source should be reviewable as a blueprint before it is compiled,
+  registered, or run.
+- The language should prefer declarative graph primitives over callback names
+  whenever the graph runtime has a typed primitive, such as `command`, `send`,
+  `interrupt`, `join`, `subgraph`, or `repl_agent`.
+- Escape hatches should bind to named Rust capabilities, never inline host code.
+
+## Expressiveness Targets
+
+The long-term language should cover the graph concepts proven useful in
+LangGraph, LangChain agent graphs, OpenHuman's state-machine harness, and RLM
+style orchestration:
+
+- graph defaults: recursion limits, timeouts, checkpointing, durability,
+  streaming modes, cache policy, and concurrency
+- capabilities: allowed models, tools, agents, graphs, stores, middleware,
+  retrievers, route functions, node templates, and REPL scripts
+- state channels: messages, scratch state, tool calls, artifacts, candidates,
+  usage/cost deltas, interrupt payloads, and custom app fields
+- reducers: last value, append, aggregate, topic, messages-by-id, barrier,
+  named barrier, delta, and custom registered reducers
+- routing: direct edges, conditional routes, typed route labels, command goto,
+  `Send` fanout, joins/barriers, parent graph handoff, and terminal output
+- execution nodes: model, agent loop, tool executor, subgraph, sub-agent,
+  interrupt, router, map/fanout, join, and REPL agent
+- observability: source name, graph id, node ids, tags, metadata, event stream
+  projections, generated-by provenance, and blueprint version
+- safety: source size limits, policy allowlists, review gates for generated
+  graphs, and deterministic diagnostics
+
+The first parser does not need to implement all of this at once. The syntax and
+AST should leave room for these primitives so early examples do not paint the
+runtime into a callback-only design.
 
 ## Initial Syntax
 
 ```rustagents
 graph support_agent {
+  metadata {
+    description: "Support workflow with tool loop and optional review."
+  }
+
+  defaults {
+    recursion_limit 50
+    timeout 60s
+    checkpoint inherit
+  }
+
   start agent
+
+  channel messages messages
+  channel tool_calls append
+  channel review overwrite
 
   node agent {
     kind agent
@@ -129,10 +196,21 @@ graph support_agent {
 program        = graph_decl*
 graph_decl     = "graph" ident graph_body
 graph_body     = "{" graph_item* "}"
-graph_item     = start_decl | node_decl | edge_decl | metadata_decl
+graph_item     = start_decl
+               | defaults_decl
+               | capability_decl
+               | channel_decl
+               | node_decl
+               | edge_decl
+               | join_decl
+               | metadata_decl
 
 start_decl     = "start" ident
+defaults_decl  = "defaults" object
+capability_decl = "allow" capability_kind "[" string_list? "]"
+channel_decl   = "channel" ident reducer_ref
 edge_decl      = ident "->" node_ref
+join_decl      = "join" "[" ident_list "]" "->" ident
 metadata_decl  = "metadata" object
 
 node_decl      = "node" ident node_body
@@ -144,8 +222,11 @@ node_item      = kind_decl
                | tools_decl
                | next_decl
                | routes_decl
+               | command_decl
+               | sends_decl
                | retry_decl
                | timeout_decl
+               | checkpoint_decl
                | metadata_decl
 
 kind_decl      = "kind" ident
@@ -156,8 +237,11 @@ tools_decl     = "tools" "[" string_list? "]"
 next_decl      = "next" node_ref
 routes_decl    = "routes" "{" route_decl* "}"
 route_decl     = ident "->" node_ref
+command_decl   = "command" object
+sends_decl     = "sends" "[" send_decl* "]"
 retry_decl     = "retry" object
 timeout_decl   = "timeout" duration
+checkpoint_decl = "checkpoint" ident
 
 node_ref       = ident | "END"
 ```
@@ -177,8 +261,12 @@ pub struct GraphDecl {
 
 pub enum GraphItem {
     Start(StartDecl),
+    Defaults(DefaultsDecl),
+    Capability(CapabilityDecl),
+    Channel(ChannelDecl),
     Node(NodeDecl),
     Edge(EdgeDecl),
+    Join(JoinDecl),
     Metadata(MetadataDecl),
 }
 
@@ -196,8 +284,11 @@ pub enum NodeItem {
     Tools(Vec<StringLit>),
     Next(NodeRef),
     Routes(Vec<RouteDecl>),
+    Command(ObjectLit),
+    Sends(Vec<SendDecl>),
     Retry(ObjectLit),
     Timeout(DurationLit),
+    Checkpoint(Ident),
     Metadata(ObjectLit),
 }
 ```
@@ -264,6 +355,16 @@ Required errors:
 - invalid timeout
 - duplicate route
 - incompatible node items
+- unknown graph
+- unknown agent
+- unknown route function
+- unknown reducer
+- unknown store
+- disallowed generated graph capability
+- generated graph requires review
+- checkpoint policy incompatible with interrupts
+- state channel missing reducer
+- send target missing input mapping
 
 Example diagnostic:
 
@@ -338,6 +439,54 @@ Supported fields:
 - `next`
 - `routes`
 
+### `subagent`
+
+Calls a registered harness agent as a graph node.
+
+Supported fields:
+
+- `agent`
+- `input`
+- `next`
+- `routes`
+- `retry`
+- `timeout`
+
+### `repl_agent`
+
+Runs a registered REPL script or model-driven CodeAct loop through the harness
+REPL runtime.
+
+Supported fields:
+
+- `model`
+- `script`
+- `tools`
+- `routes`
+- `retry`
+- `timeout`
+
+### `interrupt`
+
+Emits a resumable human-in-the-loop interrupt.
+
+Supported fields:
+
+- `prompt`
+- `options`
+- `routes`
+- `metadata`
+
+### `join`
+
+Waits for named upstream nodes or barrier channels before continuing.
+
+Supported fields:
+
+- `sources`
+- `next`
+- `timeout`
+
 ## Binding To Rust
 
 The language should not define arbitrary Rust closures. Instead, it should bind
@@ -355,22 +504,44 @@ Registries:
 
 - model registry
 - tool registry
+- agent registry
 - node template registry
 - route function registry
 - reducer registry
 - graph registry for subgraphs
+- store registry
+- middleware registry
+- REPL script registry
+
+When a graph is generated by a REPL session, the session may call the compiler
+with source text or an AST, but the compiler must use the same registries and
+policy checks. Generated source can request capabilities only from the allowed
+set attached to the parent run or registry namespace.
 
 This keeps source files declarative and prevents unsafe dynamic execution.
 
 ## State Model
 
 Version 1 should keep state Rust-owned. The language can refer to standard
-channels by convention:
+channels by convention and bind them to registered reducers:
 
 - `messages`
 - `tool_calls`
 - `structured_response`
 - `metadata`
+- `artifacts`
+- `candidates`
+- `usage`
+- `interrupts`
+
+Example:
+
+```rustagents
+channel messages messages
+channel candidates append
+channel usage aggregate "usage_delta"
+channel review overwrite
+```
 
 Future versions may add state schema declarations:
 
@@ -595,7 +766,21 @@ The formatter can come after parser and diagnostics.
 - bind subgraphs
 - compile node policies
 
-### L6: Formatter
+### L6: Channels, Commands, And Fanout
+
+- parse channel declarations
+- bind reducer registry entries
+- lower `command` and `sends`
+- compile join/barrier nodes
+
+### L7: Agent-Authored Graphs
+
+- compile generated source under parent run policy
+- require review gates when policy marks generated graphs as untrusted
+- store generated blueprint provenance
+- expose graph diff and preview diagnostics
+
+### L8: Formatter
 
 - stable formatting
 - golden tests
