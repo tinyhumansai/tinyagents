@@ -37,6 +37,63 @@ pub enum RustAgentsError {
     #[error("structured output error: {0}")]
     StructuredOutput(String),
 
+    // --- run/limit/policy errors ---
+    /// A configured run limit (model calls, tool calls, wall clock) was exceeded.
+    #[error("limit exceeded: {0}")]
+    LimitExceeded(String),
+
+    /// The run exceeded its wall-clock deadline.
+    #[error("run timed out: {0}")]
+    Timeout(String),
+
+    /// The run was cancelled before completion.
+    #[error("run cancelled")]
+    Cancelled,
+
+    /// A middleware hook reported a failure.
+    #[error("middleware error: {0}")]
+    Middleware(String),
+
+    /// A memory backend operation failed.
+    #[error("memory error: {0}")]
+    Memory(String),
+
+    // --- graph durability errors ---
+    /// Generic graph runtime error.
+    #[error("graph error: {0}")]
+    Graph(String),
+
+    /// Execution was interrupted (human-in-the-loop / external approval).
+    #[error("graph interrupted at node `{node}`: {message}")]
+    Interrupted { node: String, message: String },
+
+    /// A checkpoint could not be written, read, or located.
+    #[error("checkpoint error: {0}")]
+    Checkpoint(String),
+
+    /// Resume was requested but checkpointing was not configured or no
+    /// checkpoint was found.
+    #[error("cannot resume: {0}")]
+    Resume(String),
+
+    // --- language / blueprint errors ---
+    /// A `.rag`/`.ragsh` source could not be tokenised or parsed.
+    #[error("parse error at line {line}, column {column}: {message}")]
+    Parse {
+        message: String,
+        line: usize,
+        column: usize,
+    },
+
+    /// Lowering a parsed blueprint into graph/harness structures failed.
+    #[error("compile error: {0}")]
+    Compile(String),
+
+    /// A capability (model, tool, route fn) referenced by source is not
+    /// registered or is not allowlisted.
+    #[error("capability error: {0}")]
+    Capability(String),
+
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 }
