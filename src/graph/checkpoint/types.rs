@@ -12,16 +12,143 @@
 //! scopes nested subgraph checkpoints so a parent run and the child graphs it
 //! embeds never overwrite each other.
 
+use std::fmt;
+
 use crate::graph::command::Interrupt;
 use crate::harness::ids::NodeId;
 
-/// A persisted snapshot of a graph run at a superstep boundary.
+/// Why a checkpoint was written.
+///
+/// Mirrors the documented metadata `source` taxonomy: a checkpoint is produced
+/// by the initial graph `input`, a normal superstep `loop` boundary, a manual
+/// `update` (a state write attributed through the reducers), or a `fork` that
+/// branches a thread for time-travel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckpointSource {
+    /// The initial state supplied when a run starts.
+    Input,
+    /// A normal superstep boundary in the execution loop.
+    Loop,
+    /// A manual state update written through the channel reducers.
+    Update,
+    /// A fork that branches a thread for time-travel/replay.
+    Fork,
+}
+
+impl CheckpointSource {
+    /// The lowercase wire/string form used in checkpoint metadata.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CheckpointSource::Input => "input",
+            CheckpointSource::Loop => "loop",
+            CheckpointSource::Update => "update",
+            CheckpointSource::Fork => "fork",
+        }
+    }
+
+    /// Parses a source string, returning `None` for unknown values.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "input" => Some(CheckpointSource::Input),
+            "loop" => Some(CheckpointSource::Loop),
+            "update" => Some(CheckpointSource::Update),
+            "fork" => Some(CheckpointSource::Fork),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for CheckpointSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// When committed checkpoints are persisted relative to graph execution.
+///
+/// The default is [`DurabilityMode::Sync`], which preserves today's behavior.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DurabilityMode {
+    /// Persist a checkpoint before the next step starts. The boundary state is
+    /// durable before any successor node runs — the strongest guarantee.
+    #[default]
+    Sync,
+    /// Persist after the step's state is committed, conceptually while the next
+    /// step executes. Currently treated like [`DurabilityMode::Sync`]: the
+    /// checkpoint is written at the boundary, but the mode documents the intent
+    /// to move persistence off the critical path.
+    Async,
+    /// Persist only the final checkpoint when the graph exits (or pauses on an
+    /// interrupt). Intermediate boundaries are not written, trading
+    /// resumability granularity for fewer writes.
+    Exit,
+}
+
+/// Coordinates that address a checkpoint within a thread.
+///
+/// `checkpoint_id` of `None` selects the latest checkpoint for the thread;
+/// `namespace` scopes nested subgraph checkpoints so a parent run and its
+/// embedded child graphs never collide.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CheckpointConfig {
+    /// Thread lineage key.
+    pub thread_id: String,
+    /// Specific checkpoint to address, or `None` for the latest.
+    pub checkpoint_id: Option<String>,
+    /// Namespace scoping for nested subgraph checkpoints.
+    pub namespace: Vec<String>,
+}
+
+impl CheckpointConfig {
+    /// Builds a config addressing the latest checkpoint of `thread_id` at the
+    /// root namespace.
+    pub fn latest(thread_id: impl Into<String>) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+            checkpoint_id: None,
+            namespace: Vec::new(),
+        }
+    }
+}
+
+/// The documented core persistence unit: a checkpoint together with its config,
+/// the config of its parent, and the per-task pending writes preserved with it.
+///
+/// Backends compose this from `get` + `list` via
+/// [`Checkpointer::get_tuple`](crate::graph::Checkpointer::get_tuple).
 #[derive(Clone, Debug)]
+pub struct CheckpointTuple<State> {
+    /// Config that addresses this checkpoint.
+    pub config: CheckpointConfig,
+    /// The checkpoint record itself.
+    pub checkpoint: Checkpoint<State>,
+    /// Config addressing the parent checkpoint, when one exists.
+    pub parent_config: Option<CheckpointConfig>,
+    /// Pending writes carried by the checkpoint.
+    pub pending_writes: Vec<PendingWrite>,
+}
+
+/// A persisted snapshot of a graph run at a superstep boundary.
+///
+/// Derives `Serialize`/`Deserialize` with serde's conditional bounds: a
+/// `Checkpoint<State>` is (de)serializable exactly when `State` is, which is
+/// what lets file-backed backends such as
+/// [`FileCheckpointer`](crate::graph::FileCheckpointer) round-trip whole records
+/// through JSON. The in-memory path never needs it.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Checkpoint<State> {
     /// Checkpoint lineage key for a conversation/workflow/tenant run series.
     pub thread_id: String,
     /// This checkpoint's id within the thread.
     pub checkpoint_id: String,
+    /// The run that produced this checkpoint, when known.
+    ///
+    /// Optional and back-compatible: pre-existing records and manual snapshots
+    /// may leave it `None`. The executor stamps it so checkpoints can be deleted
+    /// by run id via [`Checkpointer::delete_by_run`](crate::graph::Checkpointer::delete_by_run).
+    pub run_id: Option<String>,
     /// The previous checkpoint id in the thread lineage.
     pub parent_checkpoint_id: Option<String>,
     /// Namespace scoping for nested subgraph checkpoints.
@@ -38,6 +165,41 @@ pub struct Checkpoint<State> {
     pub interrupts: Vec<Interrupt>,
     /// Free-form metadata (source, step, etc.).
     pub metadata: serde_json::Value,
+}
+
+impl<State> Checkpoint<State> {
+    /// Builds the lightweight [`CheckpointMetadata`] summary for this checkpoint.
+    ///
+    /// The single source of truth for projecting a stored checkpoint onto its
+    /// listing record: it parses the `source`/`step` out of the free-form
+    /// `metadata` (falling back to [`CheckpointSource::Loop`]/`0`) and copies the
+    /// lineage fields. Both `Checkpointer::list` and the state-inspection API
+    /// (`get_state`/`get_state_history`) use it so a snapshot's metadata always
+    /// matches what listing reports.
+    pub fn to_metadata(&self) -> CheckpointMetadata {
+        let source = self
+            .metadata
+            .get("source")
+            .and_then(|v| v.as_str())
+            .and_then(CheckpointSource::parse)
+            .unwrap_or(CheckpointSource::Loop);
+        let step = self
+            .metadata
+            .get("step")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        CheckpointMetadata {
+            thread_id: self.thread_id.clone(),
+            checkpoint_id: self.checkpoint_id.clone(),
+            run_id: self.run_id.clone(),
+            parent_checkpoint_id: self.parent_checkpoint_id.clone(),
+            namespace: self.namespace.clone(),
+            next_nodes: self.next_nodes.clone(),
+            has_interrupts: !self.interrupts.is_empty(),
+            source,
+            step,
+        }
+    }
 }
 
 /// A partial write produced by a completed task, preserved across reruns.
@@ -59,6 +221,8 @@ pub struct CheckpointMetadata {
     pub thread_id: String,
     /// Checkpoint id.
     pub checkpoint_id: String,
+    /// The run that produced this checkpoint, when known.
+    pub run_id: Option<String>,
     /// Parent checkpoint id.
     pub parent_checkpoint_id: Option<String>,
     /// Namespace scoping.
@@ -68,7 +232,7 @@ pub struct CheckpointMetadata {
     /// Whether the checkpoint carries pending interrupts.
     pub has_interrupts: bool,
     /// Checkpoint source: `input`, `loop`, `update`, or `fork`.
-    pub source: String,
+    pub source: CheckpointSource,
     /// The superstep number that produced the checkpoint.
     pub step: usize,
 }

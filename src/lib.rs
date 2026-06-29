@@ -111,11 +111,14 @@ pub use harness::observability::{
 // Re-exported with explicit names so the durable API is discoverable at the
 // crate root. The `harness::stream::StreamMode` and `graph::stream::StreamMode`
 // types intentionally stay behind their module paths to avoid a name clash.
+#[cfg(feature = "sqlite")]
+pub use graph::SqliteCheckpointer;
 pub use graph::{
-    Checkpoint, CheckpointMetadata, Checkpointer, ClosureReducer, ClosureStateReducer, Command,
-    CompiledGraph, END, ForkId, GraphBuilder, GraphDefaults, GraphEvent, GraphExecution,
-    GraphRunStatus, InMemoryCheckpointer, Interrupt, NodeContext, NodeResult, Reducer, Route,
-    RouteTarget, START, StateReducer,
+    Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource, CheckpointTuple,
+    Checkpointer, ClosureReducer, ClosureStateReducer, Command, CompiledGraph, DurabilityMode, END,
+    FileCheckpointer, ForkId, GraphBuilder, GraphDefaults, GraphEvent, GraphExecution,
+    GraphRunStatus, InMemoryCheckpointer, Interrupt, NodeContext, NodeResult, Reducer,
+    ResumeTarget, Route, RouteTarget, START, StateReducer, StateSnapshot,
 };
 
 // --- Graph: channel-per-field state model (additive; see state-channels.md) ---

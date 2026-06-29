@@ -3,3 +3,4 @@
 
 # Local secrets — never commit; copy .env.example to .env
 .env
+.DS_Store

@@ -39,11 +39,14 @@ pub use channel::{
     Barrier, BinaryAggregate, Channel, ChannelSet, ChannelState, ChannelUpdate, Delta, Ephemeral,
     LastValue, Messages, NamedBarrier, Topic, Untracked,
 };
+#[cfg(feature = "sqlite")]
+pub use checkpoint::SqliteCheckpointer;
 pub use checkpoint::{
-    Checkpoint, CheckpointMetadata, Checkpointer, InMemoryCheckpointer, PendingWrite,
+    Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource, CheckpointTuple,
+    Checkpointer, DurabilityMode, FileCheckpointer, InMemoryCheckpointer, PendingWrite,
 };
 pub use command::{Command, Interrupt, NodeResult, RouteTarget, Send};
-pub use compiled::{CompiledGraph, GraphExecution};
+pub use compiled::{CompiledGraph, GraphExecution, ResumeTarget, StateSnapshot};
 pub use export::{
     ChannelInfo, ConditionalEdgeInfo, EdgeInfo, GraphTopology, NodeInfo, RouteInfo,
     blueprint_to_json, blueprint_to_mermaid, blueprint_to_topology, from_json, to_json, to_mermaid,

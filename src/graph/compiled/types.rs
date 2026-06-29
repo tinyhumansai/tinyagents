@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::graph::builder::{Branch, BuilderNode};
-use crate::graph::checkpoint::Checkpointer;
+use crate::graph::checkpoint::{
+    CheckpointConfig, CheckpointMetadata, Checkpointer, DurabilityMode,
+};
 use crate::graph::command::Interrupt;
 use crate::graph::observability::{GraphEventJournal, GraphStatusStore};
 use crate::graph::reducer::StateReducer;
@@ -44,6 +46,9 @@ pub struct CompiledGraph<State, Update> {
     pub(crate) max_concurrency: Option<usize>,
     /// Default per-node handler timeout (`None` = no timeout).
     pub(crate) node_timeout: Option<std::time::Duration>,
+    /// When checkpoints are persisted relative to execution (default
+    /// [`DurabilityMode::Sync`]).
+    pub(crate) durability: DurabilityMode,
 }
 
 impl<State, Update> std::fmt::Debug for CompiledGraph<State, Update> {
@@ -79,6 +84,7 @@ impl<State, Update> Clone for CompiledGraph<State, Update> {
             parallel: self.parallel,
             max_concurrency: self.max_concurrency,
             node_timeout: self.node_timeout,
+            durability: self.durability,
         }
     }
 }
@@ -109,4 +115,45 @@ impl<State> GraphExecution<State> {
     pub fn is_interrupted(&self) -> bool {
         !self.interrupts.is_empty()
     }
+}
+
+/// A point-in-time view of a thread's checkpointed state, returned by
+/// [`CompiledGraph::get_state`](crate::graph::CompiledGraph::get_state) and
+/// [`CompiledGraph::get_state_history`](crate::graph::CompiledGraph::get_state_history).
+///
+/// This is the state-inspection / time-travel surface: it bundles the committed
+/// channel values at a checkpoint with everything a caller needs to reason about
+/// or resume from that point — the next nodes that would run, the config that
+/// addresses this snapshot, the config of its parent (for walking the lineage),
+/// the checkpoint metadata (source/step/run id), and any pending interrupts.
+#[derive(Clone, Debug)]
+pub struct StateSnapshot<State> {
+    /// Committed graph state (channel values) at the snapshot's checkpoint.
+    pub values: State,
+    /// Nodes that would run if execution resumed from this snapshot.
+    pub next_nodes: Vec<NodeId>,
+    /// Tasks scheduled for the next superstep (mirrors `next_nodes`).
+    pub tasks: Vec<NodeId>,
+    /// Config that addresses this snapshot's checkpoint.
+    pub config: CheckpointConfig,
+    /// Lightweight metadata for the snapshot's checkpoint (source, step, run id).
+    pub metadata: CheckpointMetadata,
+    /// Config addressing the parent checkpoint, when one exists.
+    pub parent_config: Option<CheckpointConfig>,
+    /// Interrupts that paused the run at this checkpoint, if any.
+    pub pending_interrupts: Vec<Interrupt>,
+}
+
+/// Selects which checkpoint a time-travel resume starts from.
+///
+/// [`CompiledGraph::resume`](crate::graph::CompiledGraph::resume) is shorthand
+/// for [`ResumeTarget::Latest`]; [`CompiledGraph::resume_from`](crate::graph::CompiledGraph::resume_from)
+/// accepts an explicit target so a run can be replayed from an older checkpoint
+/// config (time travel) without mutating the original record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResumeTarget {
+    /// Resume from the thread's most recent checkpoint.
+    Latest,
+    /// Resume from a specific checkpoint id within the thread.
+    Checkpoint(String),
 }

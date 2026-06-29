@@ -40,7 +40,7 @@
 
 mod types;
 
-pub use types::{CompiledGraph, GraphExecution};
+pub use types::{CompiledGraph, GraphExecution, ResumeTarget, StateSnapshot};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -48,7 +48,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use crate::graph::builder::{Branch, BuilderNode, END, ForkId, NodeContext, NodeFuture};
-use crate::graph::checkpoint::{Checkpoint, Checkpointer};
+use crate::graph::checkpoint::{
+    Checkpoint, CheckpointConfig, CheckpointTuple, Checkpointer, DurabilityMode,
+};
 use crate::graph::command::{Command, Interrupt, NodeResult, RouteTarget};
 use crate::graph::reducer::StateReducer;
 use crate::graph::status::GraphRunStatus;
@@ -67,6 +69,30 @@ pub(crate) fn next_seq() -> u64 {
 
 fn next_id(prefix: &str) -> String {
     format!("{prefix}-{}", next_seq())
+}
+
+/// Projects a loaded [`CheckpointTuple`] onto a [`StateSnapshot`] for the
+/// state-inspection API. The checkpoint's listing metadata is derived through
+/// [`Checkpoint::to_metadata`](crate::graph::Checkpoint::to_metadata) so a
+/// snapshot's `metadata` always matches what `Checkpointer::list` reports.
+fn snapshot_from_tuple<State>(tuple: CheckpointTuple<State>) -> StateSnapshot<State> {
+    let CheckpointTuple {
+        config,
+        checkpoint,
+        parent_config,
+        ..
+    } = tuple;
+    let metadata = checkpoint.to_metadata();
+    let next_nodes = checkpoint.next_nodes.clone();
+    StateSnapshot {
+        values: checkpoint.state,
+        tasks: next_nodes.clone(),
+        next_nodes,
+        config,
+        metadata,
+        parent_config,
+        pending_interrupts: checkpoint.interrupts,
+    }
 }
 
 /// The folded result of running a superstep's active node set, ready to apply
@@ -143,6 +169,7 @@ impl<State, Update> CompiledGraph<State, Update> {
             parallel,
             max_concurrency,
             node_timeout,
+            durability: crate::graph::checkpoint::DurabilityMode::default(),
         }
     }
 
@@ -168,6 +195,20 @@ impl<State, Update> CompiledGraph<State, Update> {
     /// Attaches an event sink for low-level streaming/observability.
     pub fn with_event_sink(mut self, sink: Arc<dyn GraphEventSink>) -> Self {
         self.event_sink = Some(sink);
+        self
+    }
+
+    /// Sets the [`DurabilityMode`] that governs when boundary checkpoints are
+    /// persisted.
+    ///
+    /// The default is [`DurabilityMode::Sync`] (persist before the next step).
+    /// [`DurabilityMode::Async`] is currently treated like `Sync` — it persists
+    /// the boundary state once committed — and documents the intent to move
+    /// persistence off the critical path. [`DurabilityMode::Exit`] persists only
+    /// the terminal checkpoint (and any interrupt boundary, which is required
+    /// for resume), skipping intermediate boundaries.
+    pub fn with_durability(mut self, durability: DurabilityMode) -> Self {
+        self.durability = durability;
         self
     }
 
@@ -247,17 +288,47 @@ where
         thread_id: impl Into<ThreadId>,
         command: Command<Update>,
     ) -> Result<GraphExecution<State>> {
+        self.resume_from(thread_id, ResumeTarget::Latest, command)
+            .await
+    }
+
+    /// Resumes a run from a specific checkpoint (time-travel resume).
+    ///
+    /// [`ResumeTarget::Latest`] behaves exactly like [`CompiledGraph::resume`];
+    /// [`ResumeTarget::Checkpoint`] replays forward from an older checkpoint's
+    /// config — re-running its pending nodes (and applying `command`'s resume
+    /// value to any interrupted node) without mutating the original record. The
+    /// addressed checkpoint is read-only; the replay appends new boundary
+    /// checkpoints to the thread rather than rewriting history.
+    ///
+    /// Requires a checkpointer and a matching checkpoint with pending nodes;
+    /// otherwise returns [`TinyAgentsError::Resume`].
+    pub async fn resume_from(
+        &self,
+        thread_id: impl Into<ThreadId>,
+        target: ResumeTarget,
+        command: Command<Update>,
+    ) -> Result<GraphExecution<State>> {
         let checkpointer = self
             .checkpointer
             .as_ref()
             .ok_or_else(|| TinyAgentsError::Resume("no checkpointer configured".to_string()))?;
         let thread_id = thread_id.into();
 
+        let checkpoint_id = match &target {
+            ResumeTarget::Latest => None,
+            ResumeTarget::Checkpoint(id) => Some(id.as_str()),
+        };
         let checkpoint = checkpointer
-            .get(thread_id.as_str(), None)
+            .get(thread_id.as_str(), checkpoint_id)
             .await?
-            .ok_or_else(|| {
-                TinyAgentsError::Resume(format!("no checkpoint found for thread `{thread_id}`"))
+            .ok_or_else(|| match &target {
+                ResumeTarget::Latest => {
+                    TinyAgentsError::Resume(format!("no checkpoint found for thread `{thread_id}`"))
+                }
+                ResumeTarget::Checkpoint(id) => TinyAgentsError::Resume(format!(
+                    "no checkpoint `{id}` found for thread `{thread_id}`"
+                )),
             })?;
         self.emit(GraphEvent::CheckpointSaved {
             checkpoint_id: CheckpointId::new(checkpoint.checkpoint_id.clone()),
@@ -279,6 +350,209 @@ where
 
         self.execute(checkpoint.state, active, Some(thread_id), resume_map)
             .await
+    }
+
+    // ---- State inspection & time travel ------------------------------------
+
+    /// Returns the configured checkpointer or a [`TinyAgentsError::Checkpoint`]
+    /// when inspection is attempted on a graph without durability.
+    fn require_checkpointer(&self) -> Result<&Arc<dyn Checkpointer<State>>> {
+        self.checkpointer
+            .as_ref()
+            .ok_or_else(|| TinyAgentsError::Checkpoint("no checkpointer configured".to_string()))
+    }
+
+    /// Builds a [`CheckpointConfig`] addressing `checkpoint_id` (or the latest
+    /// when `None`) under this graph's namespace.
+    fn config_for(&self, thread_id: &str, checkpoint_id: Option<&str>) -> CheckpointConfig {
+        CheckpointConfig {
+            thread_id: thread_id.to_string(),
+            checkpoint_id: checkpoint_id.map(str::to_string),
+            namespace: self.namespace.clone(),
+        }
+    }
+
+    /// Loads a [`StateSnapshot`] for a thread.
+    ///
+    /// With `checkpoint_id == None` the thread's latest checkpoint is returned;
+    /// otherwise the specific checkpoint is addressed. Returns `Ok(None)` when no
+    /// matching checkpoint exists. Requires a configured checkpointer.
+    pub async fn get_state(
+        &self,
+        thread_id: &str,
+        checkpoint_id: Option<&str>,
+    ) -> Result<Option<StateSnapshot<State>>> {
+        let checkpointer = self.require_checkpointer()?;
+        let config = self.config_for(thread_id, checkpoint_id);
+        Ok(checkpointer
+            .get_tuple(config)
+            .await?
+            .map(snapshot_from_tuple))
+    }
+
+    /// Returns a thread's state history newest-first, walking the
+    /// `parent_checkpoint_id` lineage from the latest checkpoint backwards.
+    ///
+    /// `limit` caps the number of snapshots returned (the most recent ones).
+    /// Requires a configured checkpointer.
+    pub async fn get_state_history(
+        &self,
+        thread_id: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<StateSnapshot<State>>> {
+        let checkpointer = self.require_checkpointer()?;
+        let mut out: Vec<StateSnapshot<State>> = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            if let Some(limit) = limit
+                && out.len() >= limit
+            {
+                break;
+            }
+            let config = self.config_for(thread_id, cursor.as_deref());
+            let Some(tuple) = checkpointer.get_tuple(config).await? else {
+                break;
+            };
+            let parent = tuple.checkpoint.parent_checkpoint_id.clone();
+            out.push(snapshot_from_tuple(tuple));
+            match parent {
+                Some(parent) => cursor = Some(parent),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
+    /// Applies a manual state write to a thread, producing a new checkpoint with
+    /// source `update`.
+    ///
+    /// The write is a genuine graph write: `update` is folded through the same
+    /// [`StateReducer`](crate::graph::StateReducer) the executor uses, on top of
+    /// the thread's latest committed state. When `as_node` is supplied it must
+    /// name a real node (else [`TinyAgentsError::MissingNode`]); the write is
+    /// attributed to that node and the new checkpoint's pending nodes become that
+    /// node's routing successors (so a subsequent resume continues from after the
+    /// attributed node). With `as_node == None` the latest pending node set is
+    /// preserved. Requires a configured checkpointer and an existing checkpoint
+    /// for the thread.
+    pub async fn update_state(
+        &self,
+        thread_id: &str,
+        update: Update,
+        as_node: Option<NodeId>,
+    ) -> Result<CheckpointConfig> {
+        let checkpointer = self.require_checkpointer()?;
+        if let Some(node) = &as_node
+            && !self.nodes.contains_key(node)
+        {
+            return Err(TinyAgentsError::MissingNode(node.to_string()));
+        }
+
+        let base = checkpointer.get(thread_id, None).await?.ok_or_else(|| {
+            TinyAgentsError::Checkpoint(format!(
+                "cannot update state: no checkpoint exists for thread `{thread_id}`"
+            ))
+        })?;
+        let parent_step = base.to_metadata().step;
+        let parent_id = base.checkpoint_id.clone();
+        let new_state = self.reducer.apply(base.state, update)?;
+
+        // Pending nodes: the attributed node's successors, or the inherited set.
+        let next_nodes: Vec<NodeId> = match &as_node {
+            Some(node) => self
+                .route(node, &HashMap::new(), &new_state)?
+                .into_iter()
+                .map(|t| t.node().clone())
+                .filter(|n| n.as_str() != END)
+                .collect(),
+            None => base.next_nodes.clone(),
+        };
+        let completed_tasks: Vec<NodeId> = as_node.iter().cloned().collect();
+
+        let checkpoint_id = next_id("ckpt");
+        let config = self.config_for(thread_id, Some(&checkpoint_id));
+        let checkpoint = Checkpoint {
+            thread_id: thread_id.to_string(),
+            checkpoint_id,
+            run_id: None,
+            parent_checkpoint_id: Some(parent_id),
+            namespace: self.namespace.clone(),
+            state: new_state,
+            next_nodes,
+            completed_tasks,
+            pending_writes: Vec::new(),
+            interrupts: Vec::new(),
+            metadata: serde_json::json!({ "source": "update", "step": parent_step + 1 }),
+        };
+        let id = checkpointer.put(checkpoint).await?;
+        self.emit(GraphEvent::CheckpointSaved { checkpoint_id: id });
+        Ok(config)
+    }
+
+    /// Applies a sequence of manual writes as successive `update` checkpoints,
+    /// returning the config of the last one written.
+    ///
+    /// Each `(update, as_node)` pair is applied with [`CompiledGraph::update_state`]
+    /// in order, so every step layers on the previous one's committed state and
+    /// produces its own checkpoint. Returns [`TinyAgentsError::Checkpoint`] when
+    /// the iterator is empty (there is no resulting config to return).
+    pub async fn bulk_update_state(
+        &self,
+        thread_id: &str,
+        updates: impl IntoIterator<Item = (Update, Option<NodeId>)>,
+    ) -> Result<CheckpointConfig> {
+        let mut last: Option<CheckpointConfig> = None;
+        for (update, as_node) in updates {
+            last = Some(self.update_state(thread_id, update, as_node).await?);
+        }
+        last.ok_or_else(|| {
+            TinyAgentsError::Checkpoint("bulk_update_state received no updates".to_string())
+        })
+    }
+
+    /// Forks a checkpoint into a new thread, producing a fresh root checkpoint
+    /// with source `fork`.
+    ///
+    /// Copies the addressed source checkpoint's committed state, pending nodes,
+    /// completed tasks, pending writes, and interrupts into `target_thread` under
+    /// a brand-new checkpoint id with no parent (the root of the new thread). The
+    /// source record is read with `get` and never mutated, so time-travel forks
+    /// are non-destructive. With `source_checkpoint_id == None` the source
+    /// thread's latest checkpoint is forked. Requires a configured checkpointer.
+    pub async fn fork_state(
+        &self,
+        source_thread: &str,
+        source_checkpoint_id: Option<&str>,
+        target_thread: &str,
+    ) -> Result<CheckpointConfig> {
+        let checkpointer = self.require_checkpointer()?;
+        let source = checkpointer
+            .get(source_thread, source_checkpoint_id)
+            .await?
+            .ok_or_else(|| {
+                TinyAgentsError::Checkpoint(format!(
+                    "cannot fork: no checkpoint found for thread `{source_thread}`"
+                ))
+            })?;
+        let step = source.to_metadata().step;
+        let checkpoint_id = next_id("ckpt");
+        let config = self.config_for(target_thread, Some(&checkpoint_id));
+        let forked = Checkpoint {
+            thread_id: target_thread.to_string(),
+            checkpoint_id,
+            run_id: None,
+            parent_checkpoint_id: None,
+            namespace: source.namespace.clone(),
+            state: source.state.clone(),
+            next_nodes: source.next_nodes.clone(),
+            completed_tasks: source.completed_tasks.clone(),
+            pending_writes: source.pending_writes.clone(),
+            interrupts: source.interrupts.clone(),
+            metadata: serde_json::json!({ "source": "fork", "step": step }),
+        };
+        let id = checkpointer.put(forked).await?;
+        self.emit(GraphEvent::CheckpointSaved { checkpoint_id: id });
+        Ok(config)
     }
 
     async fn execute(
@@ -428,6 +702,7 @@ where
                 let checkpoint_id = self
                     .persist_checkpoint(
                         &thread_id,
+                        &run_id,
                         &state,
                         &pending,
                         &activation_nodes(&active[..index]),
@@ -500,12 +775,20 @@ where
                 }
             }
 
-            // Persist a boundary checkpoint (node-keyed records).
+            // Persist a boundary checkpoint (node-keyed records). Under
+            // `Exit` durability only the terminal boundary (the step that
+            // empties the active set) is written; `Sync`/`Async` persist every
+            // boundary.
             let completed_nodes = activation_nodes(&completed);
             let next_nodes = activation_nodes(&next);
-            let checkpoint_id = self
-                .persist_checkpoint(
+            let persist_now = match self.durability {
+                DurabilityMode::Exit => next.is_empty(),
+                DurabilityMode::Sync | DurabilityMode::Async => true,
+            };
+            let checkpoint_id = if persist_now {
+                self.persist_checkpoint(
                     &thread_id,
+                    &run_id,
                     &state,
                     &next_nodes,
                     &completed_nodes,
@@ -514,7 +797,10 @@ where
                     steps,
                     "loop",
                 )
-                .await?;
+                .await?
+            } else {
+                None
+            };
             if let Some(id) = &checkpoint_id {
                 last_checkpoint = Some(id.clone());
                 parent_checkpoint = Some(id.to_string());
@@ -908,6 +1194,7 @@ where
     async fn persist_checkpoint(
         &self,
         thread_id: &Option<ThreadId>,
+        run_id: &RunId,
         state: &State,
         next_nodes: &[NodeId],
         completed_tasks: &[NodeId],
@@ -923,6 +1210,7 @@ where
         let checkpoint = Checkpoint {
             thread_id: thread.to_string(),
             checkpoint_id,
+            run_id: Some(run_id.to_string()),
             parent_checkpoint_id: parent,
             namespace: self.namespace.clone(),
             state: state.clone(),

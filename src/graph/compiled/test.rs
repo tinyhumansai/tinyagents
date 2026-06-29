@@ -193,6 +193,37 @@ async fn checkpoints_persist_at_boundaries() {
 }
 
 #[tokio::test]
+async fn exit_durability_persists_only_terminal_checkpoint() {
+    use crate::graph::checkpoint::DurabilityMode;
+
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("a", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .add_node("b", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .set_entry("a")
+        .add_edge("a", "b")
+        .set_finish("b")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone())
+        .with_durability(DurabilityMode::Exit);
+
+    let run = graph.run_with_thread("t1", 0).await.unwrap();
+    assert_eq!(run.state, 2);
+    // Only the terminal boundary is persisted under Exit durability.
+    assert_eq!(cp.count("t1"), 1);
+    assert!(run.checkpoint_id.is_some());
+    let list = cp.list("t1").await.unwrap();
+    assert_eq!(list.len(), 1);
+    // The single record is the terminal boundary: no pending next nodes.
+    assert!(list[0].next_nodes.is_empty());
+}
+
+#[tokio::test]
 async fn interrupt_then_resume_reruns_node() {
     let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
     let graph = GraphBuilder::<i32, i32>::overwrite()
@@ -283,6 +314,221 @@ async fn events_are_emitted() {
             .iter()
             .any(|e| matches!(e, GraphEvent::StepCompleted { .. }))
     );
+}
+
+// --- State inspection & time travel ----------------------------------------
+
+/// A linear `a -> b -> c` counter graph (each node `+1`) wired to `cp`, used by
+/// the inspection/time-travel tests.
+fn chain_graph(cp: Arc<InMemoryCheckpointer<i32>>) -> CompiledGraph<i32, i32> {
+    GraphBuilder::<i32, i32>::overwrite()
+        .add_node("a", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .add_node("b", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .add_node("c", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .set_entry("a")
+        .add_edge("a", "b")
+        .add_edge("b", "c")
+        .set_finish("c")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp)
+}
+
+#[tokio::test]
+async fn get_state_and_history_walk_the_lineage() {
+    use crate::graph::CheckpointSource;
+
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let graph = chain_graph(cp.clone());
+    graph.run_with_thread("t", 0).await.unwrap();
+
+    // Latest snapshot is the terminal boundary: state 3, no pending nodes.
+    let latest = graph.get_state("t", None).await.unwrap().unwrap();
+    assert_eq!(latest.values, 3);
+    assert!(latest.next_nodes.is_empty());
+    assert_eq!(latest.metadata.source, CheckpointSource::Loop);
+
+    // History is newest-first along the parent chain: 3 boundaries.
+    let history = graph.get_state_history("t", None).await.unwrap();
+    assert_eq!(
+        history.iter().map(|s| s.values).collect::<Vec<_>>(),
+        vec![3, 2, 1]
+    );
+    // The oldest snapshot has no parent; younger ones chain to their parent.
+    assert!(history.last().unwrap().parent_config.is_none());
+    assert_eq!(
+        history[0].parent_config.as_ref().unwrap().checkpoint_id,
+        history[1].config.checkpoint_id,
+    );
+
+    // limit caps to the most recent snapshots.
+    let limited = graph.get_state_history("t", Some(2)).await.unwrap();
+    assert_eq!(limited.len(), 2);
+    assert_eq!(limited[0].values, 3);
+
+    // Unknown thread / missing checkpointer behave as documented.
+    assert!(graph.get_state("missing", None).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn update_state_goes_through_the_reducer() {
+    use crate::graph::CheckpointSource;
+
+    let cp = Arc::new(InMemoryCheckpointer::<Counter>::new());
+    let graph = adding_graph().with_checkpointer(cp.clone());
+    graph
+        .run_with_thread(
+            "t",
+            Counter {
+                value: 0,
+                log: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+    // Manual write: the reducer adds 10 and records a log entry (proving it is
+    // not a raw overwrite).
+    let config = graph.update_state("t", 10, None).await.unwrap();
+    let snap = graph
+        .get_state("t", Some(&config.checkpoint_id.unwrap()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snap.values.value, 12);
+    assert_eq!(snap.values.log, vec!["+1", "+1", "+10"]);
+    assert_eq!(snap.metadata.source, CheckpointSource::Update);
+
+    // Attributing to a missing node is rejected.
+    let err = graph
+        .update_state("t", 1, Some("nope".into()))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, TinyAgentsError::MissingNode(_)));
+}
+
+#[tokio::test]
+async fn update_state_as_node_sets_successor_pending_nodes() {
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let graph = chain_graph(cp.clone());
+    graph.run_with_thread("t", 0).await.unwrap();
+
+    // Attribute a write to `a`: the new checkpoint's pending nodes become a's
+    // successor (`b`), so a resume continues from there.
+    let config = graph.update_state("t", 5, Some("a".into())).await.unwrap();
+    let snap = graph
+        .get_state("t", Some(&config.checkpoint_id.unwrap()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        snap.next_nodes
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>(),
+        vec!["b".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn bulk_update_state_applies_successive_updates() {
+    use crate::graph::CheckpointSource;
+
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let graph = chain_graph(cp.clone());
+    graph.run_with_thread("t", 0).await.unwrap();
+    let before = cp.count("t");
+
+    let last = graph
+        .bulk_update_state("t", [(10, None), (100, None)])
+        .await
+        .unwrap();
+    // Two new update checkpoints were appended.
+    assert_eq!(cp.count("t"), before + 2);
+    let snap = graph
+        .get_state("t", Some(&last.checkpoint_id.unwrap()))
+        .await
+        .unwrap()
+        .unwrap();
+    // overwrite reducer: 3 -> 10 -> 100 (last write wins each step).
+    assert_eq!(snap.values, 100);
+    assert_eq!(snap.metadata.source, CheckpointSource::Update);
+
+    // Empty bulk is rejected (no resulting config).
+    let err = graph.bulk_update_state("t", []).await.unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Checkpoint(_)));
+}
+
+#[tokio::test]
+async fn fork_state_does_not_mutate_source() {
+    use crate::graph::CheckpointSource;
+
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let graph = chain_graph(cp.clone());
+    graph.run_with_thread("src", 0).await.unwrap();
+    let src_before = cp.count("src");
+    let src_latest = graph.get_state("src", None).await.unwrap().unwrap();
+
+    let forked = graph.fork_state("src", None, "dst").await.unwrap();
+    // Source thread is untouched: same count, same latest state/source.
+    assert_eq!(cp.count("src"), src_before);
+    let src_after = graph.get_state("src", None).await.unwrap().unwrap();
+    assert_eq!(src_after.values, src_latest.values);
+    assert_eq!(src_after.metadata.source, src_latest.metadata.source);
+
+    // Target carries the forked state as a fresh root (no parent), source=fork.
+    let dst = graph
+        .get_state("dst", Some(&forked.checkpoint_id.unwrap()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(dst.values, src_latest.values);
+    assert_eq!(dst.metadata.source, CheckpointSource::Fork);
+    assert!(dst.parent_config.is_none());
+}
+
+#[tokio::test]
+async fn resume_from_older_checkpoint_replays_forward() {
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let graph = chain_graph(cp.clone());
+    graph.run_with_thread("t", 0).await.unwrap();
+
+    // The first boundary (after `a`) has state 1 and pending node `b`.
+    let list = cp.list("t").await.unwrap();
+    let after_a = &list[0];
+    assert_eq!(
+        after_a
+            .next_nodes
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>(),
+        vec!["b".to_string()]
+    );
+
+    // Time-travel resume from that older checkpoint replays b -> c forward.
+    let replayed = graph
+        .resume_from(
+            "t",
+            ResumeTarget::Checkpoint(after_a.checkpoint_id.clone()),
+            Command::new(),
+        )
+        .await
+        .unwrap();
+    assert!(!replayed.is_interrupted());
+    assert_eq!(replayed.state, 3);
+
+    // Resuming an unknown checkpoint id errors.
+    let err = graph
+        .resume_from("t", ResumeTarget::Checkpoint("nope".into()), Command::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Resume(_)));
 }
 
 // --- Parallel (fan-out / fan-in) execution ---------------------------------
