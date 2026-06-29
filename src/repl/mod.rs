@@ -56,7 +56,7 @@ mod test;
 ///
 /// # Errors
 ///
-/// Returns [`crate::error::RustAgentsError::Parse`] for:
+/// Returns [`crate::error::TinyAgentsError::Parse`] for:
 ///
 /// * empty input
 /// * unknown verb
@@ -129,10 +129,10 @@ pub fn parse_command(line: &str) -> crate::error::Result<ReplCommand> {
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-/// Build a [`crate::error::RustAgentsError::Parse`] with the given message and
+/// Build a [`crate::error::TinyAgentsError::Parse`] with the given message and
 /// optional source position.
-fn parse_err(message: &str, line: usize, column: usize) -> crate::error::RustAgentsError {
-    crate::error::RustAgentsError::Parse {
+fn parse_err(message: &str, line: usize, column: usize) -> crate::error::TinyAgentsError {
+    crate::error::TinyAgentsError::Parse {
         message: message.to_string(),
         line,
         column,
@@ -203,7 +203,7 @@ fn split_token(s: &str) -> crate::error::Result<(String, &str)> {
     }
 }
 
-/// Like [`split_token`] but returns a [`crate::error::RustAgentsError::Parse`]
+/// Like [`split_token`] but returns a [`crate::error::TinyAgentsError::Parse`]
 /// mentioning the expected usage if the remaining input is empty.
 fn require_token<'a>(s: &'a str, usage: &str) -> crate::error::Result<(String, &'a str)> {
     let s = s.trim_start();

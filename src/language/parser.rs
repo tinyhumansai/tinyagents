@@ -6,7 +6,7 @@
 //! blocks); *semantic* validation (duplicate names, unknown targets, …) is the
 //! job of [`crate::language::compiler`].
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::language::types::{
     ChannelDecl, EdgeDecl, GraphDecl, Literal, NodeDecl, Program, RouteDecl, Span, SpannedToken,
     Token,
@@ -16,7 +16,7 @@ use crate::language::types::{
 ///
 /// # Errors
 ///
-/// Returns [`RustAgentsError::Parse`] for any lexical or structural error.
+/// Returns [`TinyAgentsError::Parse`] for any lexical or structural error.
 pub fn parse_str(source: &str) -> Result<Program> {
     let tokens = crate::language::lexer::tokenize(source)?;
     parse(&tokens)
@@ -26,7 +26,7 @@ pub fn parse_str(source: &str) -> Result<Program> {
 ///
 /// # Errors
 ///
-/// Returns [`RustAgentsError::Parse`] when the token stream does not match the
+/// Returns [`TinyAgentsError::Parse`] when the token stream does not match the
 /// grammar, with the span of the offending token.
 pub fn parse(tokens: &[SpannedToken]) -> Result<Program> {
     Parser { tokens, pos: 0 }.parse_program()
@@ -62,8 +62,8 @@ impl Parser<'_> {
         tok
     }
 
-    fn error(&self, message: impl Into<String>, span: Span) -> RustAgentsError {
-        RustAgentsError::Parse {
+    fn error(&self, message: impl Into<String>, span: Span) -> TinyAgentsError {
+        TinyAgentsError::Parse {
             message: message.into(),
             line: span.line,
             column: span.column,

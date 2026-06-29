@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use super::*;
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::events::{AgentEvent, RecordingListener};
 use crate::harness::message::{AssistantMessage, ContentBlock, Message, UserMessage};
@@ -102,7 +102,7 @@ impl Middleware<()> for FailingMiddleware {
         _state: &(),
         _request: &mut ModelRequest,
     ) -> Result<()> {
-        Err(RustAgentsError::Middleware("boom".to_string()))
+        Err(TinyAgentsError::Middleware("boom".to_string()))
     }
 }
 
@@ -156,7 +156,7 @@ async fn error_short_circuits_and_invokes_on_error() {
     let mut request = ModelRequest::default();
     let result = stack.run_before_model(&mut c, &(), &mut request).await;
 
-    assert!(matches!(result, Err(RustAgentsError::Middleware(_))));
+    assert!(matches!(result, Err(TinyAgentsError::Middleware(_))));
     // on_error fanned out to the whole stack, so the first logging mw saw it.
     assert_eq!(logging.counts().on_error, 1);
     // The first logging mw's before_model ran; the one after the failure did not.

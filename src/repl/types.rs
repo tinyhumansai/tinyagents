@@ -138,7 +138,7 @@ pub enum ReplOutcome {
 /// By default nothing is allowed.  Use [`CapabilityPolicy::allow`] or
 /// [`CapabilityPolicy::from_list`] to grant access.  Attempting to invoke a
 /// capability that is not on the list produces a
-/// [`crate::error::RustAgentsError::Capability`] error.
+/// [`crate::error::TinyAgentsError::Capability`] error.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CapabilityPolicy {
     allowed: HashSet<String>,
@@ -197,7 +197,7 @@ impl CapabilityPolicy {
 /// Side-effect-free commands (`Set`, `Get`, `Show`, `Help`, `Quit`) run fully
 /// inside `execute`.  Commands that need live harness/graph integration
 /// (`Load`, `Compile`, `Run`, `Call`) are policy-checked first — a
-/// [`crate::error::RustAgentsError::Capability`] error is returned immediately
+/// [`crate::error::TinyAgentsError::Capability`] error is returned immediately
 /// if the operation is not on the allowlist — and, when allowed, the method
 /// returns [`ReplOutcome::Planned`] describing the intended action without
 /// performing it.  The wiring to the live runtime is a follow-up milestone
@@ -261,9 +261,9 @@ impl ReplSession {
     ///
     /// # Errors
     ///
-    /// * [`crate::error::RustAgentsError::Capability`] — the command requires
+    /// * [`crate::error::TinyAgentsError::Capability`] — the command requires
     ///   a capability that is not on the allowlist.
-    /// * [`crate::error::RustAgentsError::Serialization`] — an internal
+    /// * [`crate::error::TinyAgentsError::Serialization`] — an internal
     ///   serialization step failed (e.g. serialising variables for `show vars`).
     pub fn execute(&mut self, cmd: ReplCommand) -> crate::error::Result<ReplOutcome> {
         self.history.push(cmd.clone());
@@ -362,7 +362,7 @@ impl ReplSession {
         if self.policy.is_allowed(name) {
             Ok(())
         } else {
-            Err(crate::error::RustAgentsError::Capability(format!(
+            Err(crate::error::TinyAgentsError::Capability(format!(
                 "capability `{name}` is not in the session allowlist"
             )))
         }

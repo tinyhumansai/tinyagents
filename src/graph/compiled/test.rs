@@ -130,7 +130,7 @@ async fn recursion_limit_is_deterministic() {
         .unwrap();
 
     let err = graph.run(0).await.unwrap_err();
-    assert!(matches!(err, RustAgentsError::RecursionLimit(3)));
+    assert!(matches!(err, TinyAgentsError::RecursionLimit(3)));
 }
 
 #[tokio::test]
@@ -246,7 +246,7 @@ async fn resume_without_checkpointer_errors() {
         .resume("t", Command::resume(json!(null)))
         .await
         .unwrap_err();
-    assert!(matches!(err, RustAgentsError::Resume(_)));
+    assert!(matches!(err, TinyAgentsError::Resume(_)));
 }
 
 #[tokio::test]
@@ -480,7 +480,7 @@ async fn recursion_limit_is_deterministic_in_parallel() {
         .unwrap();
 
     let err = graph.run(0).await.unwrap_err();
-    assert!(matches!(err, RustAgentsError::RecursionLimit(3)));
+    assert!(matches!(err, TinyAgentsError::RecursionLimit(3)));
 }
 
 #[tokio::test]

@@ -253,7 +253,7 @@ fn parses_text_only_response_without_usage_details() {
 fn parse_response_errors_on_empty_choices() {
     let body = json!({ "id": "x", "choices": [] });
     let err = parse_response(body).unwrap_err();
-    assert!(matches!(err, RustAgentsError::Model(_)));
+    assert!(matches!(err, TinyAgentsError::Model(_)));
 }
 
 #[test]
@@ -300,5 +300,5 @@ fn from_env_errors_when_api_key_missing() {
         }
     }
 
-    assert!(matches!(result, Err(RustAgentsError::Validation(_))));
+    assert!(matches!(result, Err(TinyAgentsError::Validation(_))));
 }

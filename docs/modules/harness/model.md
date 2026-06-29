@@ -335,7 +335,7 @@ pub enum ModelStreamItem {
     UsageDelta(UsageDelta),
     ProviderEvent(serde_json::Value),
     Completed(ModelResponse),
-    Failed(RustAgentsError),
+    Failed(TinyAgentsError),
 }
 ```
 

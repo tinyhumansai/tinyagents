@@ -12,7 +12,20 @@ pub mod repl;
 pub mod tool;
 
 pub use chat::{ChatMessage, ChatRole};
-pub use error::{Result, RustAgentsError};
+pub use error::{Result, TinyAgentsError};
+
+// --- Registry: named capability catalog (.rag/.ragsh binding by name) ---
+pub use registry::{CapabilityRegistry, ComponentId, ComponentKind, ComponentMetadata};
+
+// --- Language: registry → blueprint binding façade ---
+// The strict, registry-backed entry points the REPL and orchestrators use to
+// turn `.rag`/`.ragsh` source into validated blueprints. `compile_source` runs
+// parse -> compile -> registry-bind in one call.
+pub use language::compiler::{
+    CapabilityResolver, bind_capabilities, bind_capabilities_with_registry, compile, compile_source,
+};
+pub use language::types::Blueprint;
+
 pub use model::{ChatModel, ModelRequest, ModelResponse};
 pub use tool::{Tool, ToolCall, ToolResult};
 

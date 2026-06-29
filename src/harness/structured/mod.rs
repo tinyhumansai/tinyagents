@@ -42,7 +42,7 @@ pub use types::*;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::harness::model::{ModelResponse, ResponseFormat};
 
 // ---------------------------------------------------------------------------
@@ -59,11 +59,11 @@ impl StructuredOutput {
     ///
     /// # Errors
     ///
-    /// Returns [`RustAgentsError::StructuredOutput`] when the value cannot be
+    /// Returns [`TinyAgentsError::StructuredOutput`] when the value cannot be
     /// deserialised into `T`.
     pub fn parse<T: DeserializeOwned>(&self) -> Result<T> {
         serde_json::from_value(self.value.clone())
-            .map_err(|e| RustAgentsError::StructuredOutput(format!("deserialisation failed: {e}")))
+            .map_err(|e| TinyAgentsError::StructuredOutput(format!("deserialisation failed: {e}")))
     }
 }
 
@@ -106,12 +106,12 @@ impl StructuredExtractor {
     ///
     /// * **[`StructuredStrategy::ProviderSchema`]** – calls
     ///   [`ModelResponse::text`] and parses the result as JSON.  Returns
-    ///   [`RustAgentsError::StructuredOutput`] when the text is not valid JSON.
+    ///   [`TinyAgentsError::StructuredOutput`] when the text is not valid JSON.
     ///
     /// * **[`StructuredStrategy::ToolCall`]** – scans the response's tool
     ///   calls for the first one whose `name` matches
     ///   [`StructuredExtractor::schema_name`] and returns its `arguments` as
-    ///   the structured value.  Returns [`RustAgentsError::Validation`] when no
+    ///   the structured value.  Returns [`TinyAgentsError::Validation`] when no
     ///   matching call is found.
     ///
     /// # Errors
@@ -129,7 +129,7 @@ impl StructuredExtractor {
     fn extract_provider_schema(&self, response: &ModelResponse) -> Result<StructuredOutput> {
         let raw = response.text();
         let value: Value = serde_json::from_str(&raw).map_err(|e| {
-            RustAgentsError::StructuredOutput(format!(
+            TinyAgentsError::StructuredOutput(format!(
                 "schema '{}': response text is not valid JSON: {e}",
                 self.schema_name
             ))
@@ -146,7 +146,7 @@ impl StructuredExtractor {
             .iter()
             .find(|tc| tc.name == self.schema_name)
             .ok_or_else(|| {
-                RustAgentsError::Validation(format!(
+                TinyAgentsError::Validation(format!(
                     "schema '{}': no tool call with that name found in response",
                     self.schema_name
                 ))

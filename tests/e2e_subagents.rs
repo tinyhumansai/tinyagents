@@ -9,14 +9,14 @@
 //!
 //! A second test exercises the deterministic recursion-depth guard: nesting a
 //! sub-agent past the harness's `max_depth` fails fast with
-//! [`RustAgentsError::SubAgentDepth`] *before* any model call, both through the
+//! [`TinyAgentsError::SubAgentDepth`] *before* any model call, both through the
 //! direct invoke path and through the tool path.
 
 use std::sync::Arc;
 
 use serde_json::json;
 
-use tinyagents::error::RustAgentsError;
+use tinyagents::error::TinyAgentsError;
 use tinyagents::harness::context::{RunConfig, RunContext};
 use tinyagents::harness::limits::RunLimits;
 use tinyagents::harness::message::{AssistantMessage, ContentBlock, Message};
@@ -165,7 +165,7 @@ async fn nesting_past_max_depth_is_a_deterministic_error() {
         .await
         .expect_err("child depth 2 exceeds the cap");
     assert!(
-        matches!(err, RustAgentsError::SubAgentDepth(1)),
+        matches!(err, TinyAgentsError::SubAgentDepth(1)),
         "expected SubAgentDepth(1), got {err:?}"
     );
 
@@ -177,7 +177,7 @@ async fn nesting_past_max_depth_is_a_deterministic_error() {
         .await
         .expect_err("the tool surfaces the same depth error");
     assert!(
-        matches!(tool_err, RustAgentsError::SubAgentDepth(1)),
+        matches!(tool_err, TinyAgentsError::SubAgentDepth(1)),
         "expected SubAgentDepth(1) from the tool path, got {tool_err:?}"
     );
 }

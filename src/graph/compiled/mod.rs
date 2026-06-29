@@ -6,7 +6,7 @@
 //! checkpoint at the boundary (when a checkpointer is configured), then select
 //! the next active set. The loop stops when the active set empties, every
 //! branch reaches [`END`], an interrupt pauses the run, or the recursion limit
-//! is hit (a deterministic [`RustAgentsError::RecursionLimit`]).
+//! is hit (a deterministic [`TinyAgentsError::RecursionLimit`]).
 //!
 //! By default execution is sequential within a step. When the graph is compiled
 //! with [`crate::graph::GraphBuilder::with_parallel`], a step with more than one
@@ -49,7 +49,7 @@ use crate::graph::stream::{GraphEvent, GraphEventSink};
 use crate::harness::ids::{
     CheckpointId, ExecutionStatus, GraphId, InterruptId, NodeId, RunId, ThreadId,
 };
-use crate::{Result, RustAgentsError};
+use crate::{Result, TinyAgentsError};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -183,7 +183,7 @@ where
     /// interrupted node(s) with the resume value supplied by `command`.
     ///
     /// Requires a checkpointer and an existing checkpoint for the thread;
-    /// otherwise returns [`RustAgentsError::Resume`].
+    /// otherwise returns [`TinyAgentsError::Resume`].
     pub async fn resume(
         &self,
         thread_id: impl Into<ThreadId>,
@@ -192,14 +192,14 @@ where
         let checkpointer = self
             .checkpointer
             .as_ref()
-            .ok_or_else(|| RustAgentsError::Resume("no checkpointer configured".to_string()))?;
+            .ok_or_else(|| TinyAgentsError::Resume("no checkpointer configured".to_string()))?;
         let thread_id = thread_id.into();
 
         let checkpoint = checkpointer
             .get(thread_id.as_str(), None)
             .await?
             .ok_or_else(|| {
-                RustAgentsError::Resume(format!("no checkpoint found for thread `{thread_id}`"))
+                TinyAgentsError::Resume(format!("no checkpoint found for thread `{thread_id}`"))
             })?;
         self.emit(GraphEvent::CheckpointSaved {
             checkpoint_id: CheckpointId::new(checkpoint.checkpoint_id.clone()),
@@ -207,7 +207,7 @@ where
 
         let active = checkpoint.next_nodes.clone();
         if active.is_empty() {
-            return Err(RustAgentsError::Resume(
+            return Err(TinyAgentsError::Resume(
                 "checkpoint has no pending nodes to resume".to_string(),
             ));
         }
@@ -240,7 +240,7 @@ where
 
         while !active.is_empty() {
             if steps >= self.recursion_limit {
-                return Err(RustAgentsError::RecursionLimit(self.recursion_limit));
+                return Err(TinyAgentsError::RecursionLimit(self.recursion_limit));
             }
             steps += 1;
             self.emit(GraphEvent::StepStarted {
@@ -473,7 +473,7 @@ where
             let node = self
                 .nodes
                 .get(node_id)
-                .ok_or_else(|| RustAgentsError::MissingNode(node_id.to_string()))?;
+                .ok_or_else(|| TinyAgentsError::MissingNode(node_id.to_string()))?;
 
             self.emit(GraphEvent::TaskScheduled {
                 node: node_id.clone(),
@@ -545,7 +545,7 @@ where
             let node = self
                 .nodes
                 .get(node_id)
-                .ok_or_else(|| RustAgentsError::MissingNode(node_id.to_string()))?;
+                .ok_or_else(|| TinyAgentsError::MissingNode(node_id.to_string()))?;
 
             self.emit(GraphEvent::TaskScheduled {
                 node: node_id.clone(),
@@ -619,7 +619,7 @@ where
         if let Some(branch) = self.branches.get(node_id) {
             let route = (branch.router)(state);
             let target = branch.routes.get(&route).cloned().ok_or_else(|| {
-                RustAgentsError::MissingRoute {
+                TinyAgentsError::MissingRoute {
                     node: node_id.to_string(),
                     route,
                 }

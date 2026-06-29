@@ -18,7 +18,7 @@ smallest useful API.
 Integration tests are in `tests/`, currently focused on serialization behavior.
 Runnable usage examples are in `examples/`, especially
 `examples/basic_graph.rs`. Design notes and module-level specifications live in
-`docs/`, with `docs/SPEC.md` as the top-level architecture reference.
+`docs/`, with `docs/spec/README.md` as the top-level architecture reference.
 
 ## Build, Test, and Development Commands
 
@@ -57,10 +57,16 @@ untested edge case in the PR description.
 ## Documentation Expectations
 
 Write thorough documentation for public APIs, architecture decisions, examples,
-and non-obvious behavior. Keep `README.md`, `docs/SPEC.md`, and module docs in
-`docs/modules/` aligned with code changes. Prefer concrete examples over vague
-descriptions, especially for graph execution, model abstractions, and tool
-integration.
+and non-obvious behavior. Keep `README.md`, `docs/spec/README.md`, and module
+docs in `docs/modules/` aligned with code changes. Prefer concrete examples
+over vague descriptions, especially for graph execution, model abstractions,
+and tool integration.
+
+Keep every Markdown file, including `AGENTS.md`, at 500 lines or fewer. When a
+topic grows past that limit, split it into focused files and link them from the
+module's `README.md`. Complex modules must always include a module-level
+`README.md` that explains the design, public surface, and important operational
+constraints.
 
 ## Commit & Pull Request Guidelines
 

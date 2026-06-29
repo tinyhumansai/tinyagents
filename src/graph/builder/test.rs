@@ -1,5 +1,5 @@
 use super::*;
-use crate::RustAgentsError;
+use crate::TinyAgentsError;
 use crate::graph::command::NodeResult;
 
 type S = i32;
@@ -13,7 +13,7 @@ fn compile_requires_reducer() {
         .set_entry("a")
         .compile()
         .unwrap_err();
-    assert!(matches!(err, RustAgentsError::Validation(_)));
+    assert!(matches!(err, TinyAgentsError::Validation(_)));
 }
 
 #[test]
@@ -24,7 +24,7 @@ fn compile_requires_start() {
         })
         .compile()
         .unwrap_err();
-    assert!(matches!(err, RustAgentsError::MissingStart));
+    assert!(matches!(err, TinyAgentsError::MissingStart));
 }
 
 #[test]
@@ -37,7 +37,7 @@ fn compile_rejects_missing_edge_target() {
         .add_edge("a", "missing")
         .compile()
         .unwrap_err();
-    assert!(matches!(err, RustAgentsError::MissingNode(n) if n == "missing"));
+    assert!(matches!(err, TinyAgentsError::MissingNode(n) if n == "missing"));
 }
 
 #[test]
@@ -55,7 +55,7 @@ fn compile_rejects_command_routing_with_edges() {
         .mark_command_routing("a")
         .compile()
         .unwrap_err();
-    assert!(matches!(err, RustAgentsError::Validation(_)));
+    assert!(matches!(err, TinyAgentsError::Validation(_)));
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn compile_rejects_static_and_conditional_on_same_node() {
         .set_finish("b")
         .compile()
         .unwrap_err();
-    assert!(matches!(err, RustAgentsError::Validation(_)));
+    assert!(matches!(err, TinyAgentsError::Validation(_)));
 }
 
 #[test]

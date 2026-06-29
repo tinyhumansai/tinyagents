@@ -7,7 +7,7 @@
 //! - [`FallbackPolicy`] — ordered list of model names to try in sequence.
 //! - [`RateLimiter`] — token-bucket limiter for pacing provider calls.
 //!
-//! A free function [`is_retryable`] classifies a [`RustAgentsError`] so callers
+//! A free function [`is_retryable`] classifies a [`TinyAgentsError`] so callers
 //! can decide whether to retry or propagate immediately.
 //!
 //! # Testability note
@@ -23,7 +23,7 @@ pub use types::*;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::error::RustAgentsError;
+use crate::error::TinyAgentsError;
 
 // ── RetryPolicy ──────────────────────────────────────────────────────────────
 
@@ -104,7 +104,7 @@ impl RetryPolicy {
 
 // ── is_retryable ─────────────────────────────────────────────────────────────
 
-/// Classifies a [`RustAgentsError`] as retryable or not.
+/// Classifies a [`TinyAgentsError`] as retryable or not.
 ///
 /// ## Heuristic
 ///
@@ -118,8 +118,8 @@ impl RetryPolicy {
 /// | `MissingStart` / `MissingNode` / `MissingEdgeTarget` / `MissingRoute` | **no** | Graph configuration errors; not transient. |
 /// | `ToolNotFound` / `ModelNotFound` | **no** | Registry errors; not transient. |
 /// | `StructuredOutput` | **no** | Schema mismatch; retrying the same call will likely fail again. |
-pub fn is_retryable(err: &RustAgentsError) -> bool {
-    matches!(err, RustAgentsError::Model(_) | RustAgentsError::Tool(_))
+pub fn is_retryable(err: &TinyAgentsError) -> bool {
+    matches!(err, TinyAgentsError::Model(_) | TinyAgentsError::Tool(_))
 }
 
 // ── FallbackPolicy ───────────────────────────────────────────────────────────

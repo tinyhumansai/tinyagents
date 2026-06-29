@@ -4,7 +4,7 @@
 //! - a parent harness whose scripted [`MockModel`] calls a [`SubAgentTool`],
 //!   driving a child harness and composing the child's answer,
 //! - direct [`SubAgent::invoke`] returning the child [`AgentRun`] at depth 1,
-//! - the depth guard producing [`RustAgentsError::SubAgentDepth`] when nested
+//! - the depth guard producing [`TinyAgentsError::SubAgentDepth`] when nested
 //!   too deep (both via direct invoke and via the tool path),
 //! - sub-agent lifecycle events emitted onto a shared sink.
 
@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::error::RustAgentsError;
+use crate::error::TinyAgentsError;
 use crate::harness::events::{AgentEvent, EventSink, RecordingListener};
 use crate::harness::limits::RunLimits;
 use crate::harness::message::{AssistantMessage, ContentBlock, Message};
@@ -156,7 +156,7 @@ async fn invoke_at_max_depth_errors() {
         .invoke(&(), (), 1, "too deep")
         .await
         .expect_err("depth 2 exceeds cap");
-    assert!(matches!(err, RustAgentsError::SubAgentDepth(1)));
+    assert!(matches!(err, TinyAgentsError::SubAgentDepth(1)));
 }
 
 #[tokio::test]
@@ -173,7 +173,7 @@ async fn tool_path_enforces_depth_limit() {
         .call(&(), ToolCall::new("c1", "deep", json!({ "input": "x" })))
         .await
         .expect_err("tool surfaces the depth error");
-    assert!(matches!(err, RustAgentsError::SubAgentDepth(1)));
+    assert!(matches!(err, TinyAgentsError::SubAgentDepth(1)));
 }
 
 #[tokio::test]

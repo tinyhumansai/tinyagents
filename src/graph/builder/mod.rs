@@ -16,7 +16,7 @@ use crate::graph::command::NodeResult;
 use crate::graph::compiled::CompiledGraph;
 use crate::graph::reducer::{OverwriteStateReducer, StateReducer};
 use crate::harness::ids::{GraphId, NodeId};
-use crate::{Result, RustAgentsError};
+use crate::{Result, TinyAgentsError};
 
 impl<State, Update> Default for GraphBuilder<State, Update>
 where
@@ -158,7 +158,7 @@ where
     /// Validates topology and freezes the graph into a [`CompiledGraph`].
     pub fn compile(self) -> Result<CompiledGraph<State, Update>> {
         if self.reducer.is_none() {
-            return Err(RustAgentsError::Validation(
+            return Err(TinyAgentsError::Validation(
                 "no state reducer set; call set_reducer (or GraphBuilder::overwrite)".to_string(),
             ));
         }
@@ -168,9 +168,9 @@ where
             .edges
             .get(&NodeId::from(START))
             .cloned()
-            .ok_or(RustAgentsError::MissingStart)?;
+            .ok_or(TinyAgentsError::MissingStart)?;
         if entry.as_str() == END {
-            return Err(RustAgentsError::Validation(
+            return Err(TinyAgentsError::Validation(
                 "START cannot route directly to END".to_string(),
             ));
         }
@@ -185,12 +185,12 @@ where
                 self.require_node(to)?;
             }
             if to.as_str() == START {
-                return Err(RustAgentsError::Validation(
+                return Err(TinyAgentsError::Validation(
                     "START cannot be an edge target".to_string(),
                 ));
             }
             if from.as_str() == END {
-                return Err(RustAgentsError::Validation(
+                return Err(TinyAgentsError::Validation(
                     "END cannot be an edge source".to_string(),
                 ));
             }
@@ -200,7 +200,7 @@ where
         for (from, branch) in &self.branches {
             self.require_node(from)?;
             if self.edges.contains_key(from) {
-                return Err(RustAgentsError::Validation(format!(
+                return Err(TinyAgentsError::Validation(format!(
                     "node `{from}` has both a static edge and conditional edges"
                 )));
             }
@@ -215,7 +215,7 @@ where
         for node in &self.command_nodes {
             self.require_node(node)?;
             if self.edges.contains_key(node) || self.branches.contains_key(node) {
-                return Err(RustAgentsError::Validation(format!(
+                return Err(TinyAgentsError::Validation(format!(
                     "node `{node}` declares command routing but also has static/conditional edges"
                 )));
             }
@@ -249,7 +249,7 @@ where
         if self.nodes.contains_key(id) {
             Ok(())
         } else {
-            Err(RustAgentsError::MissingNode(id.to_string()))
+            Err(TinyAgentsError::MissingNode(id.to_string()))
         }
     }
 }

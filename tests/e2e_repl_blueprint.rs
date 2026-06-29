@@ -8,7 +8,7 @@
 //! REPL's plan corresponds to a real, compilable blueprint rather than an
 //! arbitrary string.
 
-use tinyagents::RustAgentsError;
+use tinyagents::TinyAgentsError;
 use tinyagents::language::compiler::compile;
 use tinyagents::language::parser::parse_str;
 use tinyagents::repl::{CapabilityPolicy, ReplCommand, ReplOutcome, ReplSession, parse_command};
@@ -123,7 +123,7 @@ fn disallowed_capability_is_rejected_by_the_session() {
         .expect_err("run is not permitted");
 
     match err {
-        RustAgentsError::Capability(msg) => {
+        TinyAgentsError::Capability(msg) => {
             assert!(
                 msg.contains("run"),
                 "error should name the capability: {msg}"

@@ -12,7 +12,7 @@ use tinyagents::harness::message::Message;
 use tinyagents::harness::runtime::AgentHarness;
 use tinyagents::harness::testkit::{EventRecorder, ScriptedModel, Trajectory};
 use tinyagents::{
-    RustAgentsError, SteeringCommand, SteeringCommandKind, SteeringHandle, SteeringPolicy,
+    SteeringCommand, SteeringCommandKind, SteeringHandle, SteeringPolicy, TinyAgentsError,
 };
 
 /// Builds a harness whose only model is a `ScriptedModel`; returns both the
@@ -82,7 +82,7 @@ async fn cancel_terminates_the_run() {
         .await;
 
     assert!(
-        matches!(result, Err(RustAgentsError::Cancelled)),
+        matches!(result, Err(TinyAgentsError::Cancelled)),
         "Cancel steers the run to terminate with Cancelled, got {result:?}"
     );
 }
@@ -130,7 +130,7 @@ async fn disallowed_command_is_rejected_by_policy() {
         .await;
 
     assert!(
-        matches!(result, Err(RustAgentsError::Steering(_))),
+        matches!(result, Err(TinyAgentsError::Steering(_))),
         "a command outside the policy allowlist is rejected, got {result:?}"
     );
     // The rejection is observable (a Steered event with accepted = false).

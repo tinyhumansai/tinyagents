@@ -31,7 +31,7 @@ pub use types::*;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::harness::message::{AssistantMessage, ContentBlock, Message};
 use crate::harness::model::{ChatModel, ModelRequest, ModelResponse, ResponseFormat, ToolChoice};
 use crate::harness::tool::ToolCall;
@@ -91,14 +91,14 @@ impl OpenAiModel {
     ///
     /// # Errors
     ///
-    /// Returns [`RustAgentsError::Validation`] when `OPENAI_API_KEY` is missing
+    /// Returns [`TinyAgentsError::Validation`] when `OPENAI_API_KEY` is missing
     /// or empty.
     pub fn from_env() -> Result<Self> {
         let api_key = std::env::var("OPENAI_API_KEY")
             .ok()
             .filter(|k| !k.trim().is_empty())
             .ok_or_else(|| {
-                RustAgentsError::Validation(
+                TinyAgentsError::Validation(
                     "OPENAI_API_KEY is not set; export it or add it to a .env file".to_string(),
                 )
             })?;
@@ -354,14 +354,14 @@ fn translate_response_format(format: &ResponseFormat) -> Option<Value> {
 ///
 /// # Errors
 ///
-/// Returns [`RustAgentsError::Serialization`] if the value does not match the
-/// expected response shape, or [`RustAgentsError::Model`] when no choices are
+/// Returns [`TinyAgentsError::Serialization`] if the value does not match the
+/// expected response shape, or [`TinyAgentsError::Model`] when no choices are
 /// present.
 fn parse_response(value: Value) -> Result<ModelResponse> {
     let parsed: ChatCompletionResponse = serde_json::from_value(value.clone())?;
 
     let choice = parsed.choices.into_iter().next().ok_or_else(|| {
-        RustAgentsError::Model("openai response contained no choices".to_string())
+        TinyAgentsError::Model("openai response contained no choices".to_string())
     })?;
 
     let mut content = Vec::new();
@@ -416,9 +416,9 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
     ///
     /// # Errors
     ///
-    /// Returns [`RustAgentsError::Model`] on transport failure or a non-2xx
+    /// Returns [`TinyAgentsError::Model`] on transport failure or a non-2xx
     /// status (the message includes the status code and response body), and
-    /// [`RustAgentsError::Serialization`] when the response cannot be decoded.
+    /// [`TinyAgentsError::Serialization`] when the response cannot be decoded.
     async fn invoke(&self, _state: &State, request: ModelRequest) -> Result<ModelResponse> {
         let body = self.translate_request(&request)?;
         let url = format!("{}/chat/completions", self.base_url);
@@ -430,15 +430,15 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             .json(&body)
             .send()
             .await
-            .map_err(|e| RustAgentsError::Model(format!("openai request to {url} failed: {e}")))?;
+            .map_err(|e| TinyAgentsError::Model(format!("openai request to {url} failed: {e}")))?;
 
         let status = response.status();
         let text = response.text().await.map_err(|e| {
-            RustAgentsError::Model(format!("openai response body read failed: {e}"))
+            TinyAgentsError::Model(format!("openai response body read failed: {e}"))
         })?;
 
         if !status.is_success() {
-            return Err(RustAgentsError::Model(format!(
+            return Err(TinyAgentsError::Model(format!(
                 "openai returned HTTP {status}: {text}"
             )));
         }

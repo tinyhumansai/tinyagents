@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
-use tinyagents::{InMemoryVectorStore, MockEmbeddingModel, Retriever};
 use serde_json::json;
+use tinyagents::{InMemoryVectorStore, MockEmbeddingModel, Retriever};
 
 /// Builds a retriever over a small, topically-distinct corpus.
 async fn indexed_retriever() -> Retriever {

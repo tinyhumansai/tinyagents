@@ -36,7 +36,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::Result;
-use crate::error::RustAgentsError;
+use crate::error::TinyAgentsError;
 use crate::harness::message::{AssistantMessage, ContentBlock, Message};
 use crate::harness::model::{ChatModel, ModelDelta, ModelRequest, ModelResponse};
 use crate::harness::tool::ToolCall;
@@ -151,7 +151,7 @@ impl<State: Send + Sync> ChatModel<State> for MockModel {
             let mut inner = self
                 .inner
                 .lock()
-                .map_err(|e| RustAgentsError::Model(format!("MockModel lock poisoned: {e}")))?;
+                .map_err(|e| TinyAgentsError::Model(format!("MockModel lock poisoned: {e}")))?;
             inner.call_count += 1;
             inner.call_count
         };
@@ -190,7 +190,7 @@ impl<State: Send + Sync> ChatModel<State> for MockModel {
             MockBehavior::Scripted(responses) => {
                 let index = {
                     let mut inner = self.inner.lock().map_err(|e| {
-                        RustAgentsError::Model(format!("MockModel lock poisoned: {e}"))
+                        TinyAgentsError::Model(format!("MockModel lock poisoned: {e}"))
                     })?;
                     // We already incremented call_count above; derive index from
                     // call_count - 1 (0-based) cycling over the response list.

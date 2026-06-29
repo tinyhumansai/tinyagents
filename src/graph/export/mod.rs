@@ -282,7 +282,7 @@ pub fn to_json(topology: &GraphTopology) -> String {
 }
 
 /// Deserializes a [`GraphTopology`] from a JSON document produced by
-/// [`to_json`]. Returns [`crate::error::RustAgentsError::Serialization`] on
+/// [`to_json`]. Returns [`crate::error::TinyAgentsError::Serialization`] on
 /// malformed input.
 pub fn from_json(json: &str) -> Result<GraphTopology> {
     Ok(serde_json::from_str(json)?)

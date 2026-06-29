@@ -1,9 +1,9 @@
 use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, RustAgentsError>;
+pub type Result<T> = std::result::Result<T, TinyAgentsError>;
 
 #[derive(Debug, Error)]
-pub enum RustAgentsError {
+pub enum TinyAgentsError {
     #[error("graph start node is not configured")]
     MissingStart,
 
@@ -22,7 +22,7 @@ pub enum RustAgentsError {
     /// A sub-agent invocation would exceed the configured maximum recursion
     /// depth. The payload is the `max_depth` cap that was reached.
     ///
-    /// This is distinct from [`RustAgentsError::RecursionLimit`], which counts
+    /// This is distinct from [`TinyAgentsError::RecursionLimit`], which counts
     /// graph *super-steps*; `SubAgentDepth` counts nested run-tree *levels*
     /// (parent → child → grandchild …) so the two limits can be reasoned about
     /// and surfaced independently.

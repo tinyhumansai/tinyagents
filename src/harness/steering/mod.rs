@@ -50,7 +50,7 @@ pub use types::*;
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::harness::context::RunContext;
 use crate::harness::events::AgentEvent;
 use crate::harness::message::Message;
@@ -168,7 +168,7 @@ impl SteeringHandle {
 /// - Every drained command is checked against the handle's
 ///   [`SteeringPolicy`]. A disallowed command emits an
 ///   [`AgentEvent::Steered`] with `accepted = false` and returns
-///   [`RustAgentsError::Steering`], aborting the run; no later command in the
+///   [`TinyAgentsError::Steering`], aborting the run; no later command in the
 ///   batch is applied.
 /// - [`SteeringCommand::Cancel`] takes precedence: it is applied (emitting an
 ///   accepted event) and the function returns [`SteeringOutcome::Cancel`]
@@ -181,7 +181,7 @@ impl SteeringHandle {
 ///
 /// # Errors
 ///
-/// Returns [`RustAgentsError::Steering`] when a drained command is not
+/// Returns [`TinyAgentsError::Steering`] when a drained command is not
 /// permitted by the run's [`SteeringPolicy`].
 pub fn apply_pending_steering<Ctx>(
     ctx: &mut RunContext<Ctx>,
@@ -206,7 +206,7 @@ pub fn apply_pending_steering<Ctx>(
                 command_kind: kind.as_str().to_string(),
                 accepted: false,
             });
-            return Err(RustAgentsError::Steering(format!(
+            return Err(TinyAgentsError::Steering(format!(
                 "steering command `{}` is not permitted by the run policy",
                 kind.as_str()
             )));

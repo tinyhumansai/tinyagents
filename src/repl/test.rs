@@ -1,7 +1,7 @@
 //! Tests for the `.ragsh` REPL skeleton.
 
 use super::{CapabilityPolicy, ReplCommand, ReplOutcome, ReplSession, parse_command};
-use crate::error::RustAgentsError;
+use crate::error::TinyAgentsError;
 
 // ── Parser tests ──────────────────────────────────────────────────────────────
 
@@ -185,7 +185,7 @@ fn parses_call_with_json_null() {
 fn error_on_unknown_verb() {
     let err = parse_command("frobnicate something").unwrap_err();
     match err {
-        RustAgentsError::Parse { message, .. } => {
+        TinyAgentsError::Parse { message, .. } => {
             assert!(
                 message.contains("frobnicate"),
                 "expected verb in message: {message}"
@@ -204,26 +204,26 @@ fn error_on_empty_input() {
 #[test]
 fn error_on_missing_load_argument() {
     let err = parse_command("load").unwrap_err();
-    assert!(matches!(err, RustAgentsError::Parse { .. }));
+    assert!(matches!(err, TinyAgentsError::Parse { .. }));
 }
 
 #[test]
 fn error_on_missing_run_input() {
     let err = parse_command("run my_graph").unwrap_err();
-    assert!(matches!(err, RustAgentsError::Parse { .. }));
+    assert!(matches!(err, TinyAgentsError::Parse { .. }));
 }
 
 #[test]
 fn error_on_call_missing_json() {
     let err = parse_command("call my_cap").unwrap_err();
-    assert!(matches!(err, RustAgentsError::Parse { .. }));
+    assert!(matches!(err, TinyAgentsError::Parse { .. }));
 }
 
 #[test]
 fn error_on_call_invalid_json() {
     let err = parse_command("call my_cap not-valid-json").unwrap_err();
     match err {
-        RustAgentsError::Parse { message, .. } => {
+        TinyAgentsError::Parse { message, .. } => {
             assert!(message.contains("JSON"), "expected JSON mention: {message}");
         }
         other => panic!("expected Parse error, got {other:?}"),
@@ -233,7 +233,7 @@ fn error_on_call_invalid_json() {
 #[test]
 fn error_on_unterminated_quoted_string() {
     let err = parse_command(r#"load "unclosed"#).unwrap_err();
-    assert!(matches!(err, RustAgentsError::Parse { .. }));
+    assert!(matches!(err, TinyAgentsError::Parse { .. }));
 }
 
 #[test]
@@ -449,7 +449,7 @@ fn call_disallowed_capability_returns_error() {
         .unwrap_err();
 
     match err {
-        RustAgentsError::Capability(msg) => {
+        TinyAgentsError::Capability(msg) => {
             assert!(
                 msg.contains("secret_tool"),
                 "error should name the capability: {msg}"
@@ -489,7 +489,7 @@ fn load_disallowed_returns_capability_error() {
             path: "x.rag".to_string(),
         })
         .unwrap_err();
-    assert!(matches!(err, RustAgentsError::Capability(_)));
+    assert!(matches!(err, TinyAgentsError::Capability(_)));
 }
 
 #[test]
@@ -519,7 +519,7 @@ fn run_disallowed_returns_capability_error() {
             input: "{}".to_string(),
         })
         .unwrap_err();
-    assert!(matches!(err, RustAgentsError::Capability(_)));
+    assert!(matches!(err, TinyAgentsError::Capability(_)));
 }
 
 #[test]

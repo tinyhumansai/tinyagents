@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::limits::RunLimits;
 use crate::harness::message::{AssistantMessage, ContentBlock, Message};
@@ -123,7 +123,7 @@ struct FailingModel {
 impl ChatModel<()> for FailingModel {
     async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
         *self.attempts.lock().unwrap() += 1;
-        Err(RustAgentsError::Model("transient boom".to_string()))
+        Err(TinyAgentsError::Model("transient boom".to_string()))
     }
 }
 
@@ -193,7 +193,7 @@ async fn max_model_calls_limit_triggers_limit_exceeded() {
         .await
         .expect_err("limit should be exceeded");
     assert!(
-        matches!(err, RustAgentsError::LimitExceeded(_)),
+        matches!(err, TinyAgentsError::LimitExceeded(_)),
         "got {err:?}"
     );
 }
@@ -218,7 +218,7 @@ async fn max_tool_calls_limit_triggers_limit_exceeded() {
         .await
         .expect_err("tool limit should be exceeded");
     assert!(
-        matches!(err, RustAgentsError::LimitExceeded(_)),
+        matches!(err, TinyAgentsError::LimitExceeded(_)),
         "got {err:?}"
     );
 }
@@ -275,7 +275,7 @@ async fn tool_not_found_errors() {
         .await
         .expect_err("tool should be missing");
     match err {
-        RustAgentsError::ToolNotFound(name) => assert_eq!(name, "missing"),
+        TinyAgentsError::ToolNotFound(name) => assert_eq!(name, "missing"),
         other => panic!("expected ToolNotFound, got {other:?}"),
     }
 }
@@ -313,7 +313,7 @@ async fn no_model_registered_errors() {
         .await
         .expect_err("no model");
     assert!(
-        matches!(err, RustAgentsError::ModelNotFound(_)),
+        matches!(err, TinyAgentsError::ModelNotFound(_)),
         "got {err:?}"
     );
 }
@@ -361,7 +361,7 @@ async fn non_retryable_or_exhausted_without_fallback_errors() {
         .invoke_default(&(), vec![Message::user("hi")])
         .await
         .expect_err("no fallback, error propagates");
-    assert!(matches!(err, RustAgentsError::Model(_)), "got {err:?}");
+    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
 }
 
 #[tokio::test]

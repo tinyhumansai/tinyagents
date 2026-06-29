@@ -631,7 +631,7 @@ pub trait Middleware<State, Ctx = ()>: Send + Sync {
         &self,
         state: &State,
         ctx: &mut RunContext<Ctx>,
-        error: &RustAgentsError,
+        error: &TinyAgentsError,
     ) -> Result<()>;
 }
 ```

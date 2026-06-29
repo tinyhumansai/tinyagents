@@ -32,9 +32,9 @@
 //!
 //! Model and tool caps come from [`RunPolicy::limits`][crate::harness::runtime::RunPolicy]
 //! and are enforced *before* each call, returning
-//! [`RustAgentsError::LimitExceeded`]. The wall-clock deadline (from the run
+//! [`TinyAgentsError::LimitExceeded`]. The wall-clock deadline (from the run
 //! config) is checked each iteration and surfaces as
-//! [`RustAgentsError::Timeout`]. The run context's own [`crate::harness::limits::LimitTracker`]
+//! [`TinyAgentsError::Timeout`]. The run context's own [`crate::harness::limits::LimitTracker`]
 //! is also advanced so its counters stay consistent.
 //!
 //! # Backoff
@@ -49,7 +49,7 @@ mod types;
 
 pub use types::*;
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::events::{AgentEvent, HarnessRunStatus};
 use crate::harness::ids::{CallId, ComponentId, HarnessPhase};
@@ -73,10 +73,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     ///
     /// # Errors
     ///
-    /// Returns [`RustAgentsError::LimitExceeded`] when the model- or tool-call
-    /// cap is reached, [`RustAgentsError::Timeout`] when the wall-clock deadline
-    /// elapses, [`RustAgentsError::ModelNotFound`] when no model can be
-    /// resolved, [`RustAgentsError::ToolNotFound`] when the model calls an
+    /// Returns [`TinyAgentsError::LimitExceeded`] when the model- or tool-call
+    /// cap is reached, [`TinyAgentsError::Timeout`] when the wall-clock deadline
+    /// elapses, [`TinyAgentsError::ModelNotFound`] when no model can be
+    /// resolved, [`TinyAgentsError::ToolNotFound`] when the model calls an
     /// unregistered tool, or any error surfaced by a model, tool, middleware,
     /// or structured-output extraction.
     pub async fn invoke(
@@ -226,7 +226,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // model call. Cancel terminates the run; Pause short-circuits it.
             match crate::harness::steering::apply_pending_steering(ctx, &mut messages)? {
                 crate::harness::steering::SteeringOutcome::Cancel => {
-                    return Err(RustAgentsError::Cancelled);
+                    return Err(TinyAgentsError::Cancelled);
                 }
                 crate::harness::steering::SteeringOutcome::Pause => break,
                 crate::harness::steering::SteeringOutcome::Continue => {}
@@ -234,13 +234,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
 
             // Fail-closed limit and deadline checks before each model call.
             ctx.check_deadline().map_err(|_| {
-                RustAgentsError::Timeout(format!(
+                TinyAgentsError::Timeout(format!(
                     "run `{}` exceeded its wall-clock deadline",
                     ctx.run_id()
                 ))
             })?;
             if run.model_calls >= self.policy.limits.max_model_calls {
-                return Err(RustAgentsError::LimitExceeded(format!(
+                return Err(TinyAgentsError::LimitExceeded(format!(
                     "max model calls ({}) reached",
                     self.policy.limits.max_model_calls
                 )));
@@ -262,7 +262,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // Record against the context tracker too (keeps its counters
             // consistent); map its error onto the deterministic limit error.
             ctx.record_model_call().map_err(|_| {
-                RustAgentsError::LimitExceeded(format!(
+                TinyAgentsError::LimitExceeded(format!(
                     "max model calls ({}) reached",
                     self.policy.limits.max_model_calls
                 ))
@@ -273,7 +273,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 .models
                 .resolve_request(&request, None, None)
                 .ok_or_else(|| {
-                    RustAgentsError::ModelNotFound(
+                    TinyAgentsError::ModelNotFound(
                         request
                             .model
                             .clone()
@@ -339,19 +339,19 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             status.mark_running(HarnessPhase::Tools);
             for mut call in tool_calls {
                 ctx.check_deadline().map_err(|_| {
-                    RustAgentsError::Timeout(format!(
+                    TinyAgentsError::Timeout(format!(
                         "run `{}` exceeded its wall-clock deadline",
                         ctx.run_id()
                     ))
                 })?;
                 if run.tool_calls >= self.policy.limits.max_tool_calls {
-                    return Err(RustAgentsError::LimitExceeded(format!(
+                    return Err(TinyAgentsError::LimitExceeded(format!(
                         "max tool calls ({}) reached",
                         self.policy.limits.max_tool_calls
                     )));
                 }
                 ctx.record_tool_call().map_err(|_| {
-                    RustAgentsError::LimitExceeded(format!(
+                    TinyAgentsError::LimitExceeded(format!(
                         "max tool calls ({}) reached",
                         self.policy.limits.max_tool_calls
                     ))
@@ -364,7 +364,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 let tool = self
                     .tools
                     .get(&call.name)
-                    .ok_or_else(|| RustAgentsError::ToolNotFound(call.name.clone()))?;
+                    .ok_or_else(|| TinyAgentsError::ToolNotFound(call.name.clone()))?;
 
                 let tool_call_id = CallId::new(call.id.clone());
                 let tool_name = call.name.clone();

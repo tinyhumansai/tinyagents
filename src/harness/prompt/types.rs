@@ -32,7 +32,7 @@ pub enum TemplateRole {
 /// * `{{` – literal `{`.
 /// * `}}` – literal `}`.
 ///
-/// Rendering fails with [`crate::error::RustAgentsError::Validation`] if a
+/// Rendering fails with [`crate::error::TinyAgentsError::Validation`] if a
 /// `{name}` placeholder is present in the template but `name` is not found in
 /// the provided variable map, or if a placeholder is left unclosed.
 ///

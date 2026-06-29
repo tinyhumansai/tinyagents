@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::events::AgentEvent;
 use crate::harness::message::Message;
@@ -240,7 +240,7 @@ fn disallowed_command_is_rejected_with_steering_error_and_event() {
     let mut messages = Vec::new();
 
     let err = apply_pending_steering(&mut ctx, &mut messages).unwrap_err();
-    assert!(matches!(err, RustAgentsError::Steering(_)), "got {err:?}");
+    assert!(matches!(err, TinyAgentsError::Steering(_)), "got {err:?}");
     assert_eq!(
         recorder.events(),
         vec![AgentEvent::Steered {
@@ -335,7 +335,7 @@ async fn cancel_terminates_the_run() {
         .await
         .expect_err("run should be cancelled");
 
-    assert!(matches!(err, RustAgentsError::Cancelled), "got {err:?}");
+    assert!(matches!(err, TinyAgentsError::Cancelled), "got {err:?}");
 
     // No model call ever happened and the cancel + failure are observable.
     let trajectory = Trajectory::from_events(recorder.events());
@@ -366,7 +366,7 @@ async fn disallowed_command_fails_the_run() {
         .await
         .expect_err("run should fail on disallowed steering");
 
-    assert!(matches!(err, RustAgentsError::Steering(_)), "got {err:?}");
+    assert!(matches!(err, TinyAgentsError::Steering(_)), "got {err:?}");
     assert!(recorder.events().iter().any(|e| matches!(
         e,
         AgentEvent::Steered { command_kind, accepted: false } if command_kind == "inject_message"

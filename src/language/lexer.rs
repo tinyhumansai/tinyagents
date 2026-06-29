@@ -8,10 +8,10 @@
 //! - punctuation: `{ } [ ] ,` and the arrow `->`
 //! - `//` line comments (skipped)
 //!
-//! Lexical errors surface as [`RustAgentsError::Parse`] with the offending
+//! Lexical errors surface as [`TinyAgentsError::Parse`] with the offending
 //! line and column.
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::language::types::{Span, SpannedToken, Token};
 
 /// Tokenises `source` into a vector of [`SpannedToken`]s terminated by a
@@ -22,7 +22,7 @@ use crate::language::types::{Span, SpannedToken, Token};
 ///
 /// # Errors
 ///
-/// Returns [`RustAgentsError::Parse`] for an unterminated string, an invalid
+/// Returns [`TinyAgentsError::Parse`] for an unterminated string, an invalid
 /// escape sequence, a malformed number, a lone `-` not forming `->` or a
 /// number, or any otherwise unrecognised character.
 pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>> {
@@ -50,8 +50,8 @@ impl Lexer {
         Span::new(self.line, self.column)
     }
 
-    fn error(&self, message: impl Into<String>, span: Span) -> RustAgentsError {
-        RustAgentsError::Parse {
+    fn error(&self, message: impl Into<String>, span: Span) -> TinyAgentsError {
+        TinyAgentsError::Parse {
             message: message.into(),
             line: span.line,
             column: span.column,

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::harness::cache::CacheLayoutEvent;
 use crate::harness::context::RunContext;
 use crate::harness::model::{ModelDelta, ModelRequest, ModelResponse};
@@ -180,7 +180,7 @@ pub trait Middleware<State: Send + Sync, Ctx: Send + Sync = ()>: Send + Sync {
     /// to log, redact, or react to the failure. The original error is still
     /// returned to the caller after this runs; errors from `on_error` itself
     /// are ignored so they cannot mask the root cause.
-    async fn on_error(&self, _ctx: &mut RunContext<Ctx>, _error: &RustAgentsError) -> Result<()> {
+    async fn on_error(&self, _ctx: &mut RunContext<Ctx>, _error: &TinyAgentsError) -> Result<()> {
         Ok(())
     }
 }

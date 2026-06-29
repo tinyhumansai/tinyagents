@@ -26,7 +26,7 @@ use serde_json::Value;
 
 pub use types::*;
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::harness::model::{ModelRequest, ModelResponse};
 
 // ── Deterministic hash ────────────────────────────────────────────────────────
@@ -106,7 +106,7 @@ impl ResponseCache for InMemoryResponseCache {
         let data = self
             .data
             .lock()
-            .map_err(|e| RustAgentsError::Validation(format!("cache lock poisoned: {e}")))?;
+            .map_err(|e| TinyAgentsError::Validation(format!("cache lock poisoned: {e}")))?;
         Ok(data.get(key).cloned())
     }
 
@@ -114,7 +114,7 @@ impl ResponseCache for InMemoryResponseCache {
         let mut data = self
             .data
             .lock()
-            .map_err(|e| RustAgentsError::Validation(format!("cache lock poisoned: {e}")))?;
+            .map_err(|e| TinyAgentsError::Validation(format!("cache lock poisoned: {e}")))?;
         data.insert(key.to_string(), value);
         Ok(())
     }

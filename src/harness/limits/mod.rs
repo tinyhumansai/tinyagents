@@ -22,7 +22,7 @@ pub use types::*;
 
 use std::time::Instant;
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 
 impl RunLimits {
     /// Sets the maximum number of model calls allowed per run.
@@ -94,7 +94,7 @@ impl LimitTracker {
     pub fn record_model_call(&mut self) -> Result<()> {
         self.model_calls += 1;
         if self.model_calls > self.limits.max_model_calls {
-            return Err(RustAgentsError::Validation(format!(
+            return Err(TinyAgentsError::Validation(format!(
                 "max model calls ({}) exceeded",
                 self.limits.max_model_calls
             )));
@@ -106,7 +106,7 @@ impl LimitTracker {
     pub fn record_tool_call(&mut self) -> Result<()> {
         self.tool_calls += 1;
         if self.tool_calls > self.limits.max_tool_calls {
-            return Err(RustAgentsError::Validation(format!(
+            return Err(TinyAgentsError::Validation(format!(
                 "max tool calls ({}) exceeded",
                 self.limits.max_tool_calls
             )));
@@ -117,13 +117,13 @@ impl LimitTracker {
     /// Checks whether the run has exceeded the configured wall-clock deadline.
     ///
     /// Returns `Ok(())` when no deadline is configured or the deadline has not
-    /// been reached. Returns a [`Validation`][crate::error::RustAgentsError::Validation]
+    /// been reached. Returns a [`Validation`][crate::error::TinyAgentsError::Validation]
     /// error otherwise.
     pub fn check_wall_clock(&self) -> Result<()> {
         if let Some(max_ms) = self.limits.max_wall_clock_ms {
             let elapsed_ms = self.started_at.elapsed().as_millis() as u64;
             if elapsed_ms > max_ms {
-                return Err(RustAgentsError::Validation(format!(
+                return Err(TinyAgentsError::Validation(format!(
                     "wall-clock limit ({max_ms} ms) exceeded after {elapsed_ms} ms"
                 )));
             }

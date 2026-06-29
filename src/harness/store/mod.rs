@@ -28,7 +28,7 @@ use serde_json::Value;
 
 pub use types::*;
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 
 // ── InMemoryStore ─────────────────────────────────────────────────────────────
 
@@ -45,7 +45,7 @@ impl Store for InMemoryStore {
         let data = self
             .data
             .lock()
-            .map_err(|e| RustAgentsError::Validation(format!("store lock poisoned: {e}")))?;
+            .map_err(|e| TinyAgentsError::Validation(format!("store lock poisoned: {e}")))?;
         Ok(data.get(namespace).and_then(|ns| ns.get(key)).cloned())
     }
 
@@ -53,7 +53,7 @@ impl Store for InMemoryStore {
         let mut data = self
             .data
             .lock()
-            .map_err(|e| RustAgentsError::Validation(format!("store lock poisoned: {e}")))?;
+            .map_err(|e| TinyAgentsError::Validation(format!("store lock poisoned: {e}")))?;
         data.entry(namespace.to_string())
             .or_default()
             .insert(key.to_string(), value);
@@ -64,7 +64,7 @@ impl Store for InMemoryStore {
         let mut data = self
             .data
             .lock()
-            .map_err(|e| RustAgentsError::Validation(format!("store lock poisoned: {e}")))?;
+            .map_err(|e| TinyAgentsError::Validation(format!("store lock poisoned: {e}")))?;
         if let Some(ns) = data.get_mut(namespace) {
             ns.remove(key);
         }
@@ -75,7 +75,7 @@ impl Store for InMemoryStore {
         let data = self
             .data
             .lock()
-            .map_err(|e| RustAgentsError::Validation(format!("store lock poisoned: {e}")))?;
+            .map_err(|e| TinyAgentsError::Validation(format!("store lock poisoned: {e}")))?;
         Ok(data
             .get(namespace)
             .map(|ns| ns.keys().cloned().collect())
@@ -99,11 +99,11 @@ impl FileStore {
     /// Validates that `name` (a namespace or key) contains only safe
     /// characters: ASCII alphanumerics, hyphens, underscores, and dots.
     ///
-    /// Returns a [`RustAgentsError::Validation`] if the name is empty or
+    /// Returns a [`TinyAgentsError::Validation`] if the name is empty or
     /// contains any other byte, preventing path-traversal attacks.
     fn sanitize(name: &str) -> Result<()> {
         if name.is_empty() {
-            return Err(RustAgentsError::Validation(
+            return Err(TinyAgentsError::Validation(
                 "store namespace and key must not be empty".into(),
             ));
         }
@@ -111,7 +111,7 @@ impl FileStore {
         // is joined onto `root_dir` without a suffix, so `".."` would resolve to
         // the parent directory and escape the store root (path traversal).
         if name.bytes().all(|b| b == b'.') {
-            return Err(RustAgentsError::Validation(format!(
+            return Err(TinyAgentsError::Validation(format!(
                 "store name must not be all dots: {name:?} (path-traversal guard)"
             )));
         }
@@ -121,7 +121,7 @@ impl FileStore {
         {
             Ok(())
         } else {
-            Err(RustAgentsError::Validation(format!(
+            Err(TinyAgentsError::Validation(format!(
                 "store name contains invalid characters: {name:?} \
                  (only ASCII alphanumerics, hyphens, underscores, dots allowed)"
             )))
@@ -144,7 +144,7 @@ impl Store for FileStore {
             return Ok(None);
         }
         let bytes = fs::read(&path)
-            .map_err(|e| RustAgentsError::Validation(format!("store read error: {e}")))?;
+            .map_err(|e| TinyAgentsError::Validation(format!("store read error: {e}")))?;
         let value: Value = serde_json::from_slice(&bytes)?;
         Ok(Some(value))
     }
@@ -154,11 +154,11 @@ impl Store for FileStore {
         Self::sanitize(key)?;
         let dir = self.root_dir.join(namespace);
         fs::create_dir_all(&dir)
-            .map_err(|e| RustAgentsError::Validation(format!("store mkdir error: {e}")))?;
+            .map_err(|e| TinyAgentsError::Validation(format!("store mkdir error: {e}")))?;
         let path = dir.join(format!("{key}.json"));
         let bytes = serde_json::to_vec_pretty(&value)?;
         fs::write(&path, &bytes)
-            .map_err(|e| RustAgentsError::Validation(format!("store write error: {e}")))?;
+            .map_err(|e| TinyAgentsError::Validation(format!("store write error: {e}")))?;
         Ok(())
     }
 
@@ -168,7 +168,7 @@ impl Store for FileStore {
         let path = self.key_path(namespace, key);
         if path.exists() {
             fs::remove_file(&path)
-                .map_err(|e| RustAgentsError::Validation(format!("store delete error: {e}")))?;
+                .map_err(|e| TinyAgentsError::Validation(format!("store delete error: {e}")))?;
         }
         Ok(())
     }
@@ -180,11 +180,11 @@ impl Store for FileStore {
             return Ok(Vec::new());
         }
         let entries = fs::read_dir(&dir)
-            .map_err(|e| RustAgentsError::Validation(format!("store readdir error: {e}")))?;
+            .map_err(|e| TinyAgentsError::Validation(format!("store readdir error: {e}")))?;
         let mut keys = Vec::new();
         for entry in entries {
             let entry = entry
-                .map_err(|e| RustAgentsError::Validation(format!("store entry error: {e}")))?;
+                .map_err(|e| TinyAgentsError::Validation(format!("store entry error: {e}")))?;
             let file_name = entry.file_name();
             let name = file_name.to_string_lossy();
             if let Some(stem) = name.strip_suffix(".json") {

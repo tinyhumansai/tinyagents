@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::harness::events::{AgentEvent, EventSink, RecordingListener};
 use crate::harness::model::{ChatModel, ModelRequest, ModelResponse};
 use crate::harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
@@ -38,7 +38,7 @@ impl ScriptedModel {
     ///
     /// The first element is returned on the first `invoke`, the second on the
     /// second call, and so on. When the queue is drained, subsequent calls
-    /// return [`RustAgentsError::Model`].
+    /// return [`TinyAgentsError::Model`].
     pub fn new(responses: Vec<ModelResponse>) -> Self {
         Self {
             queue: Mutex::new(VecDeque::from(responses)),
@@ -75,7 +75,7 @@ impl ScriptedModel {
 impl<State: Send + Sync> ChatModel<State> for ScriptedModel {
     /// Pops the next response from the queue and records the received request.
     ///
-    /// Returns [`RustAgentsError::Model`] when the queue is exhausted so the
+    /// Returns [`TinyAgentsError::Model`] when the queue is exhausted so the
     /// test gets a clear message rather than a thread panic.
     async fn invoke(&self, _state: &State, request: ModelRequest) -> Result<ModelResponse> {
         self.received
@@ -88,7 +88,7 @@ impl<State: Send + Sync> ChatModel<State> for ScriptedModel {
             .expect("ScriptedModel queue lock poisoned")
             .pop_front()
             .ok_or_else(|| {
-                RustAgentsError::Model(
+                TinyAgentsError::Model(
                     "ScriptedModel: response queue is exhausted; no more scripted responses"
                         .to_string(),
                 )
@@ -126,7 +126,7 @@ impl FakeTool {
     }
 
     /// Creates a `FakeTool` that always returns
-    /// `Err(`[`RustAgentsError::Tool`]`(message))`.
+    /// `Err(`[`TinyAgentsError::Tool`]`(message))`.
     pub fn failing(name: impl Into<String>, message: impl Into<String>) -> Self {
         let name = name.into();
         Self {
@@ -178,7 +178,7 @@ impl<State: Send + Sync> Tool<State> for FakeTool {
             FakeToolBehavior::Return(content) => {
                 Ok(ToolResult::text(call.id, call.name, content.clone()))
             }
-            FakeToolBehavior::Fail(message) => Err(RustAgentsError::Tool(message.clone())),
+            FakeToolBehavior::Fail(message) => Err(TinyAgentsError::Tool(message.clone())),
         }
     }
 }
@@ -399,14 +399,14 @@ impl Trajectory {
     /// The check is a *subsequence* match: there may be other events between
     /// the matched ones.
     ///
-    /// Returns [`RustAgentsError::Validation`] with a descriptive message on
+    /// Returns [`TinyAgentsError::Validation`] with a descriptive message on
     /// failure.
     pub fn assert_order(&self, labels: &[&str]) -> Result<()> {
         let mut event_iter = self.events.iter();
         for &label in labels {
             let found = event_iter.any(|e| Self::event_matches_label(e, label));
             if !found {
-                return Err(RustAgentsError::Validation(format!(
+                return Err(TinyAgentsError::Validation(format!(
                     "Trajectory: expected label '{label}' in order but it was not found after the \
                      previous matched label"
                 )));

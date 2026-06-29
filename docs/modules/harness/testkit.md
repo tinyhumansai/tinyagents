@@ -47,7 +47,7 @@ pub struct ScriptedModel {
 pub enum ModelScriptStep {
     Respond(AssistantMessage),
     Stream(Vec<ModelStreamItem>),
-    Fail(RustAgentsError),
+    Fail(TinyAgentsError),
 }
 
 pub struct EventCollector {

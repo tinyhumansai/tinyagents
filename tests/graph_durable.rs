@@ -11,7 +11,7 @@ use serde_json::json;
 use tinyagents::graph::ClosureStateReducer;
 use tinyagents::{
     Checkpointer, Command, GraphBuilder, InMemoryCheckpointer, Interrupt, NodeContext, NodeResult,
-    RustAgentsError,
+    TinyAgentsError,
 };
 
 /// Running counter plus an audit log, used to prove partial updates are merged
@@ -72,7 +72,7 @@ async fn recursion_limit_is_deterministic() {
 
     let err = graph.run(0).await.expect_err("the loop never terminates");
     assert!(
-        matches!(err, RustAgentsError::RecursionLimit(3)),
+        matches!(err, TinyAgentsError::RecursionLimit(3)),
         "got {err:?}"
     );
 }

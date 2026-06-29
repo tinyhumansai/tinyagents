@@ -10,7 +10,7 @@ use tinyagents::language::compiler::{
 };
 use tinyagents::language::parser::parse_str;
 use tinyagents::language::types::{NodeSpec, Routing};
-use tinyagents::{Node, NodeOutput, Result, RustAgentsError};
+use tinyagents::{Node, NodeOutput, Result, TinyAgentsError};
 
 const SUPPORT_AGENT: &str = r#"
 // A support workflow with a tool loop.
@@ -93,7 +93,7 @@ fn bind_capabilities_rejects_unknown_tool() {
 
     let err = bind_capabilities(&blueprint, &resolver).expect_err("create_ticket is not allowed");
     match err {
-        RustAgentsError::Capability(msg) => assert!(msg.contains("create_ticket"), "{msg}"),
+        TinyAgentsError::Capability(msg) => assert!(msg.contains("create_ticket"), "{msg}"),
         other => panic!("expected Capability error, got {other:?}"),
     }
 }
@@ -102,7 +102,7 @@ fn bind_capabilities_rejects_unknown_tool() {
 fn missing_start_is_a_compile_error() {
     let program = parse_str("graph no_start { node a { kind model } }").expect("parses");
     let err = compile(&program).expect_err("a graph without `start` cannot compile");
-    assert!(matches!(err, RustAgentsError::Compile(_)), "got {err:?}");
+    assert!(matches!(err, TinyAgentsError::Compile(_)), "got {err:?}");
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn duplicate_node_is_a_compile_error() {
     let program = parse_str(src).expect("parses");
     let err = compile(&program).expect_err("duplicate node names cannot compile");
     match err {
-        RustAgentsError::Compile(msg) => assert!(msg.contains("duplicate"), "{msg}"),
+        TinyAgentsError::Compile(msg) => assert!(msg.contains("duplicate"), "{msg}"),
         other => panic!("expected Compile error, got {other:?}"),
     }
 }
@@ -121,7 +121,7 @@ fn unknown_route_target_is_a_compile_error() {
     let src = "graph bad_route { start a node a { routes { go -> ghost } } }";
     let program = parse_str(src).expect("parses");
     let err = compile(&program).expect_err("routing to a missing node cannot compile");
-    assert!(matches!(err, RustAgentsError::Compile(_)), "got {err:?}");
+    assert!(matches!(err, TinyAgentsError::Compile(_)), "got {err:?}");
 }
 
 /// Application state used to trace the path taken through the materialised

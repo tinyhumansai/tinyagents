@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use crate::harness::ids::CheckpointId;
-use crate::{Result, RustAgentsError};
+use crate::{Result, TinyAgentsError};
 
 /// Persists and retrieves graph checkpoints keyed by thread.
 #[async_trait]
@@ -74,8 +74,8 @@ impl<State> Clone for InMemoryCheckpointer<State> {
     }
 }
 
-fn lock_err() -> RustAgentsError {
-    RustAgentsError::Checkpoint("in-memory checkpointer lock poisoned".to_string())
+fn lock_err() -> TinyAgentsError {
+    TinyAgentsError::Checkpoint("in-memory checkpointer lock poisoned".to_string())
 }
 
 fn metadata_of<State>(c: &Checkpoint<State>) -> CheckpointMetadata {

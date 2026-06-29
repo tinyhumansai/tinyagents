@@ -114,7 +114,7 @@ impl InMemoryVectorStore {
 impl VectorStore for InMemoryVectorStore {
     async fn add(&self, id: String, vector: Vec<f32>, metadata: Value) -> Result<()> {
         let mut entries = self.entries.lock().map_err(|e| {
-            crate::error::RustAgentsError::Embedding(format!("vector store lock poisoned: {e}"))
+            crate::error::TinyAgentsError::Embedding(format!("vector store lock poisoned: {e}"))
         })?;
         // Replace an existing entry with the same id so re-indexing updates it.
         if let Some(existing) = entries.iter_mut().find(|e| e.id == id) {
@@ -135,7 +135,7 @@ impl VectorStore for InMemoryVectorStore {
             return Ok(Vec::new());
         }
         let entries = self.entries.lock().map_err(|e| {
-            crate::error::RustAgentsError::Embedding(format!("vector store lock poisoned: {e}"))
+            crate::error::TinyAgentsError::Embedding(format!("vector store lock poisoned: {e}"))
         })?;
         let mut scored: Vec<ScoredDoc> = entries
             .iter()
@@ -213,7 +213,7 @@ mod openai {
     use serde_json::{Value, json};
 
     use super::EmbeddingModel;
-    use crate::error::{Result, RustAgentsError};
+    use crate::error::{Result, TinyAgentsError};
 
     /// Default OpenAI embedding model id.
     const DEFAULT_MODEL: &str = "text-embedding-3-small";
@@ -289,14 +289,14 @@ mod openai {
         /// (optional), and `OPENAI_BASE_URL` (optional).
         ///
         /// # Errors
-        /// Returns [`RustAgentsError::Validation`] when `OPENAI_API_KEY` is
+        /// Returns [`TinyAgentsError::Validation`] when `OPENAI_API_KEY` is
         /// missing or empty.
         pub fn from_env() -> Result<Self> {
             let api_key = std::env::var("OPENAI_API_KEY")
                 .ok()
                 .filter(|k| !k.trim().is_empty())
                 .ok_or_else(|| {
-                    RustAgentsError::Validation(
+                    TinyAgentsError::Validation(
                         "OPENAI_API_KEY is not set; export it or add it to a .env file".to_string(),
                     )
                 })?;
@@ -336,17 +336,17 @@ mod openai {
                 .send()
                 .await
                 .map_err(|e| {
-                    RustAgentsError::Embedding(format!(
+                    TinyAgentsError::Embedding(format!(
                         "openai embeddings request to {url} failed: {e}"
                     ))
                 })?;
 
             let status = response.status();
             let text = response.text().await.map_err(|e| {
-                RustAgentsError::Embedding(format!("openai embeddings body read failed: {e}"))
+                TinyAgentsError::Embedding(format!("openai embeddings body read failed: {e}"))
             })?;
             if !status.is_success() {
-                return Err(RustAgentsError::Embedding(format!(
+                return Err(TinyAgentsError::Embedding(format!(
                     "openai embeddings returned HTTP {status}: {text}"
                 )));
             }
@@ -356,7 +356,7 @@ mod openai {
                 .get("data")
                 .and_then(|d| d.as_array())
                 .ok_or_else(|| {
-                    RustAgentsError::Embedding(
+                    TinyAgentsError::Embedding(
                         "openai embeddings response missing `data` array".into(),
                     )
                 })?;
@@ -366,7 +366,7 @@ mod openai {
                     .get("embedding")
                     .and_then(|e| e.as_array())
                     .ok_or_else(|| {
-                        RustAgentsError::Embedding(
+                        TinyAgentsError::Embedding(
                             "openai embeddings response missing `embedding` array".into(),
                         )
                     })?;

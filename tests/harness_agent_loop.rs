@@ -14,7 +14,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
-use tinyagents::RustAgentsError;
+use tinyagents::TinyAgentsError;
 use tinyagents::harness::context::RunContext;
 use tinyagents::harness::events::RecordingListener;
 use tinyagents::harness::limits::RunLimits;
@@ -168,7 +168,7 @@ async fn max_model_calls_limit_returns_limit_exceeded() {
         .expect_err("the model-call cap should be exceeded");
 
     assert!(
-        matches!(err, RustAgentsError::LimitExceeded(_)),
+        matches!(err, TinyAgentsError::LimitExceeded(_)),
         "got {err:?}"
     );
 }

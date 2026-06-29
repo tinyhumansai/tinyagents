@@ -16,7 +16,7 @@
 //! (default [`RunLimits::DEFAULT_MAX_DEPTH`][crate::harness::limits::RunLimits::DEFAULT_MAX_DEPTH],
 //! i.e. `8`), read from the child harness's [`RunPolicy`][crate::harness::runtime::RunPolicy].
 //! If the child depth would exceed the cap, the invocation fails fast with
-//! [`RustAgentsError::SubAgentDepth`] *before* any model call — a deterministic,
+//! [`TinyAgentsError::SubAgentDepth`] *before* any model call — a deterministic,
 //! cheap guard against unbounded recursion.
 //!
 //! # Observability
@@ -44,7 +44,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::events::{AgentEvent, EventSink};
 use crate::harness::message::Message;
@@ -104,13 +104,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
     /// Builds the child [`RunConfig`] for an invocation at `parent_depth`,
     /// enforcing the depth cap.
     ///
-    /// Returns [`RustAgentsError::SubAgentDepth`] when the child depth
+    /// Returns [`TinyAgentsError::SubAgentDepth`] when the child depth
     /// (`parent_depth + 1`) would exceed the harness policy's `max_depth`.
     fn child_config(&self, parent_depth: usize) -> Result<RunConfig> {
         let max_depth = self.harness.policy().limits.max_depth;
         let child_depth = parent_depth + 1;
         if child_depth > max_depth {
-            return Err(RustAgentsError::SubAgentDepth(max_depth));
+            return Err(TinyAgentsError::SubAgentDepth(max_depth));
         }
         Ok(RunConfig::new(format!("{}-d{child_depth}", self.name))
             .with_depth(child_depth)
@@ -127,7 +127,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
     ///
     /// # Errors
     ///
-    /// Returns [`RustAgentsError::SubAgentDepth`] if the child depth would
+    /// Returns [`TinyAgentsError::SubAgentDepth`] if the child depth would
     /// exceed the configured `max_depth`, or any error surfaced by the child
     /// agent loop.
     pub async fn invoke(

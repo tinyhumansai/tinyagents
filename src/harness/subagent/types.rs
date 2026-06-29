@@ -36,7 +36,7 @@ pub const SUBAGENT_INPUT_FIELD: &str = "input";
 /// caller's depth. The harness's [`crate::harness::limits::RunLimits::max_depth`]
 /// cap bounds how deep nested sub-agents may recurse; an invocation whose child
 /// depth would exceed the cap fails with
-/// [`crate::error::RustAgentsError::SubAgentDepth`].
+/// [`crate::error::TinyAgentsError::SubAgentDepth`].
 ///
 /// `SubAgent` is cheap to clone-share via `Arc`; wrap it in an `Arc` to expose
 /// the same child agent through several [`SubAgentTool`]s.

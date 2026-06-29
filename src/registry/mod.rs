@@ -5,9 +5,13 @@
 //! of provider model prices, context windows, and capabilities for deterministic
 //! local lookup.
 
+pub mod capability;
 pub mod catalog;
+pub mod component;
 
+pub use capability::CapabilityRegistry;
 pub use catalog::{
     ModelCapabilities, ModelCatalog, ModelCatalogEntry, ModelCatalogSnapshot, ModelCatalogSource,
     ModelPricing,
 };
+pub use component::{ComponentId, ComponentKind, ComponentMetadata};

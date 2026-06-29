@@ -31,7 +31,7 @@ pub use types::*;
 
 use async_trait::async_trait;
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::harness::message::Message;
 use crate::harness::store::Store;
 
@@ -50,7 +50,7 @@ impl ChatHistory for InMemoryChatHistory {
         let threads = self
             .threads
             .lock()
-            .map_err(|e| RustAgentsError::Memory(format!("chat history lock poisoned: {e}")))?;
+            .map_err(|e| TinyAgentsError::Memory(format!("chat history lock poisoned: {e}")))?;
         Ok(threads.get(thread_id).cloned().unwrap_or_default())
     }
 
@@ -58,7 +58,7 @@ impl ChatHistory for InMemoryChatHistory {
         let mut threads = self
             .threads
             .lock()
-            .map_err(|e| RustAgentsError::Memory(format!("chat history lock poisoned: {e}")))?;
+            .map_err(|e| TinyAgentsError::Memory(format!("chat history lock poisoned: {e}")))?;
         threads
             .entry(thread_id.to_string())
             .or_default()
@@ -70,7 +70,7 @@ impl ChatHistory for InMemoryChatHistory {
         let mut threads = self
             .threads
             .lock()
-            .map_err(|e| RustAgentsError::Memory(format!("chat history lock poisoned: {e}")))?;
+            .map_err(|e| TinyAgentsError::Memory(format!("chat history lock poisoned: {e}")))?;
         threads.remove(thread_id);
         Ok(())
     }

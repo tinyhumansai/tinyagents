@@ -26,7 +26,7 @@ pub use types::*;
 
 use std::sync::Arc;
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::harness::cache::{CacheLayoutEvent, PromptCacheLayout};
 use crate::harness::context::RunContext;
 use crate::harness::events::AgentEvent;
@@ -86,7 +86,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> MiddlewareStack<State, Ctx> {
     /// Fans `on_error` out to every middleware, ignoring their results so the
     /// original error is never masked. No start/completed events are emitted on
     /// this internal recovery path.
-    async fn fan_out_on_error(&self, ctx: &mut RunContext<Ctx>, error: &RustAgentsError) {
+    async fn fan_out_on_error(&self, ctx: &mut RunContext<Ctx>, error: &TinyAgentsError) {
         for mw in self.middlewares.iter() {
             let _ = mw.on_error(ctx, error).await;
         }
@@ -309,7 +309,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> MiddlewareStack<State, Ctx> {
     pub async fn run_on_error(
         &self,
         ctx: &mut RunContext<Ctx>,
-        error: &RustAgentsError,
+        error: &TinyAgentsError,
     ) -> Result<()> {
         for mw in self.middlewares.iter() {
             ctx.emit(AgentEvent::MiddlewareStarted {
@@ -457,7 +457,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for LoggingMid
         Ok(())
     }
 
-    async fn on_error(&self, _ctx: &mut RunContext<Ctx>, _error: &RustAgentsError) -> Result<()> {
+    async fn on_error(&self, _ctx: &mut RunContext<Ctx>, _error: &TinyAgentsError) -> Result<()> {
         self.counts.lock().expect("counts mutex poisoned").on_error += 1;
         Ok(())
     }

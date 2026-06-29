@@ -5,7 +5,7 @@
 //! [`ReplSession`] through `set`/`get`/`show`, and enforcing the
 //! [`CapabilityPolicy`] allowlist on `call`.
 
-use tinyagents::RustAgentsError;
+use tinyagents::TinyAgentsError;
 use tinyagents::repl::{CapabilityPolicy, ReplCommand, ReplOutcome, ReplSession, parse_command};
 
 #[test]
@@ -114,7 +114,7 @@ fn disallowed_capability_call_is_rejected() {
         .unwrap_err();
 
     match err {
-        RustAgentsError::Capability(msg) => {
+        TinyAgentsError::Capability(msg) => {
             assert!(
                 msg.contains("secret_tool"),
                 "error should name the capability: {msg}"

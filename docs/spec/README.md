@@ -389,7 +389,7 @@ pub trait Middleware<State, Ctx = ()>: Send + Sync {
     async fn before_tool(&self, ctx: &mut RunContext<Ctx>, state: &State, call: &mut ToolCall) -> Result<()>;
     async fn on_tool_delta(&self, ctx: &mut RunContext<Ctx>, state: &State, delta: &mut ToolDelta) -> Result<()>;
     async fn after_tool(&self, ctx: &mut RunContext<Ctx>, state: &State, result: &mut ToolResult) -> Result<()>;
-    async fn on_error(&self, ctx: &mut RunContext<Ctx>, error: &RustAgentsError) -> Result<()>;
+    async fn on_error(&self, ctx: &mut RunContext<Ctx>, error: &TinyAgentsError) -> Result<()>;
 }
 ```
 

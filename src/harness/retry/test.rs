@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use super::{FallbackPolicy, RateLimiter, RetryPolicy, is_retryable};
-use crate::error::RustAgentsError;
+use crate::error::TinyAgentsError;
 
 #[test]
 fn smoke_retry_policy_compiles() {
@@ -11,8 +11,8 @@ fn smoke_retry_policy_compiles() {
     assert!(policy.should_retry(0));
     assert!(!policy.should_retry(3));
 
-    assert!(is_retryable(&RustAgentsError::Model("timeout".into())));
-    assert!(!is_retryable(&RustAgentsError::Validation(
+    assert!(is_retryable(&TinyAgentsError::Model("timeout".into())));
+    assert!(!is_retryable(&TinyAgentsError::Validation(
         "bad input".into()
     )));
 }
@@ -100,14 +100,14 @@ fn should_retry_boundary_at_max_attempts() {
 
 #[test]
 fn is_retryable_classification() {
-    assert!(is_retryable(&RustAgentsError::Model("5xx".into())));
-    assert!(is_retryable(&RustAgentsError::Tool("transient".into())));
+    assert!(is_retryable(&TinyAgentsError::Model("5xx".into())));
+    assert!(is_retryable(&TinyAgentsError::Tool("transient".into())));
 
-    assert!(!is_retryable(&RustAgentsError::Validation("bad".into())));
-    assert!(!is_retryable(&RustAgentsError::RecursionLimit(10)));
+    assert!(!is_retryable(&TinyAgentsError::Validation("bad".into())));
+    assert!(!is_retryable(&TinyAgentsError::RecursionLimit(10)));
 
     let serde_err = serde_json::from_str::<i32>("not-json").unwrap_err();
-    assert!(!is_retryable(&RustAgentsError::Serialization(serde_err)));
+    assert!(!is_retryable(&TinyAgentsError::Serialization(serde_err)));
 }
 
 // ── FallbackPolicy::next_after ────────────────────────────────────────────────

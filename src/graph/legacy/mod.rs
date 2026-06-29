@@ -10,7 +10,7 @@ pub use types::{BoxNodeFuture, Edge, GraphRun, Node, NodeFn, NodeOutput, StateGr
 
 use std::{collections::HashMap, future::Future, sync::Arc};
 
-use crate::{Result, RustAgentsError};
+use crate::{Result, TinyAgentsError};
 
 impl<State> Node<State>
 where
@@ -128,7 +128,7 @@ where
 
     /// Validates the topology before execution.
     pub fn validate(&self) -> Result<()> {
-        let start = self.start.as_ref().ok_or(RustAgentsError::MissingStart)?;
+        let start = self.start.as_ref().ok_or(TinyAgentsError::MissingStart)?;
         self.require_node(start)?;
 
         for (from, edge) in &self.edges {
@@ -154,7 +154,7 @@ where
         self.validate()?;
 
         let mut state = initial_state;
-        let mut current = self.start.clone().ok_or(RustAgentsError::MissingStart)?;
+        let mut current = self.start.clone().ok_or(TinyAgentsError::MissingStart)?;
         let mut visited = Vec::new();
 
         for _ in 0..self.recursion_limit {
@@ -185,14 +185,14 @@ where
             }
         }
 
-        Err(RustAgentsError::RecursionLimit(self.recursion_limit))
+        Err(TinyAgentsError::RecursionLimit(self.recursion_limit))
     }
 
     fn next_direct_node(&self, node: &str) -> Result<Option<String>> {
         match self.edges.get(node) {
             Some(Edge::Direct(next)) => Ok(Some(next.clone())),
             Some(Edge::End) | None => Ok(None),
-            Some(Edge::Conditional(_)) => Err(RustAgentsError::MissingRoute {
+            Some(Edge::Conditional(_)) => Err(TinyAgentsError::MissingRoute {
                 node: node.to_string(),
                 route: "continue".to_string(),
             }),
@@ -205,12 +205,12 @@ where
                 routes
                     .get(route)
                     .cloned()
-                    .ok_or_else(|| RustAgentsError::MissingRoute {
+                    .ok_or_else(|| TinyAgentsError::MissingRoute {
                         node: node.to_string(),
                         route: route.to_string(),
                     })
             }
-            _ => Err(RustAgentsError::MissingRoute {
+            _ => Err(TinyAgentsError::MissingRoute {
                 node: node.to_string(),
                 route: route.to_string(),
             }),
@@ -220,7 +220,7 @@ where
     fn require_node(&self, name: &str) -> Result<&Node<State>> {
         self.nodes
             .get(name)
-            .ok_or_else(|| RustAgentsError::MissingNode(name.to_string()))
+            .ok_or_else(|| TinyAgentsError::MissingNode(name.to_string()))
     }
 }
 

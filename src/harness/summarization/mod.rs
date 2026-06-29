@@ -15,7 +15,7 @@ mod types;
 
 pub use types::*;
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::harness::message::Message;
 use async_trait::async_trait;
 
@@ -161,7 +161,7 @@ impl Summarizer for ConcatSummarizer {
     /// that a `ConcatSummarizer` was used.
     async fn summarize(&self, messages: &[Message]) -> Result<SummaryRecord> {
         if messages.is_empty() {
-            return Err(RustAgentsError::Validation(
+            return Err(TinyAgentsError::Validation(
                 "cannot summarize an empty message list".into(),
             ));
         }

@@ -23,7 +23,7 @@ use crate::harness::message::Message;
 /// by the agent loop at the next safe checkpoint. Each command is gated by the
 /// run's [`SteeringPolicy`]; a command whose [`SteeringCommandKind`] is not in
 /// the allowlist is rejected with
-/// [`crate::error::RustAgentsError::Steering`].
+/// [`crate::error::TinyAgentsError::Steering`].
 ///
 /// `SteeringCommand` is `Serialize`/`Deserialize` so steering can be described,
 /// logged, transported across a control channel, and replayed.
@@ -41,7 +41,7 @@ pub enum SteeringCommand {
 
     /// Terminate the run cooperatively at the next checkpoint. Cancel takes
     /// precedence over every other command in the same batch and surfaces as
-    /// [`crate::error::RustAgentsError::Cancelled`].
+    /// [`crate::error::TinyAgentsError::Cancelled`].
     Cancel,
 
     /// Inject a structured instruction into the running agent's working
@@ -129,7 +129,7 @@ impl SteeringCommandKind {
 /// The policy is conservative by default: [`SteeringPolicy::new`] permits
 /// nothing, so a run that opts into steering must explicitly grant the kinds it
 /// trusts. The agent loop consults the policy for every drained command and
-/// rejects disallowed ones with [`crate::error::RustAgentsError::Steering`].
+/// rejects disallowed ones with [`crate::error::TinyAgentsError::Steering`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SteeringPolicy {
     /// The set of permitted command kinds.

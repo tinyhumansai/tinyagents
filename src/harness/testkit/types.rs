@@ -20,7 +20,7 @@ use crate::harness::tool::ToolCall;
 ///
 /// Responses are consumed from the front of the queue one per `invoke` call.
 /// When the queue is exhausted `invoke` returns
-/// [`crate::error::RustAgentsError::Model`] rather than panicking so tests get
+/// [`crate::error::TinyAgentsError::Model`] rather than panicking so tests get
 /// a clear error instead of a thread panic.
 ///
 /// # Example
@@ -46,7 +46,7 @@ pub struct ScriptedModel {
 pub(crate) enum FakeToolBehavior {
     /// Return a fixed text content string.
     Return(String),
-    /// Return `Err(RustAgentsError::Tool(...))` with the provided message.
+    /// Return `Err(TinyAgentsError::Tool(...))` with the provided message.
     Fail(String),
 }
 
@@ -56,7 +56,7 @@ pub(crate) enum FakeToolBehavior {
 ///
 /// - [`FakeTool::new`] — returns an empty string result.
 /// - [`FakeTool::returning`] — returns a fixed text content.
-/// - [`FakeTool::failing`] — returns a [`crate::error::RustAgentsError::Tool`] error.
+/// - [`FakeTool::failing`] — returns a [`crate::error::TinyAgentsError::Tool`] error.
 ///
 /// Every received [`ToolCall`] is recorded and available via
 /// [`FakeTool::calls`].

@@ -33,7 +33,7 @@ use std::hash::{Hash, Hasher};
 
 use serde_json::{Map, Value};
 
-use crate::error::{Result, RustAgentsError};
+use crate::error::{Result, TinyAgentsError};
 use crate::harness::message::Message;
 use crate::harness::model::{ModelRequest, PromptSegment, ResponseFormat, SegmentRole};
 use crate::harness::tool::ToolSchema;
@@ -57,7 +57,7 @@ impl PromptTemplate {
     ///
     /// # Errors
     ///
-    /// Returns [`RustAgentsError::Validation`] when:
+    /// Returns [`TinyAgentsError::Validation`] when:
     ///
     /// * a `{name}` references a key absent from `vars`, or
     /// * a placeholder is opened but never closed.
@@ -304,7 +304,7 @@ impl PromptBuilder {
 /// * `}}` → literal `}`
 /// * `{name}` → `vars["name"]` (JSON string coerced; other types via Display)
 ///
-/// Returns [`RustAgentsError::Validation`] on an unknown or unclosed
+/// Returns [`TinyAgentsError::Validation`] on an unknown or unclosed
 /// placeholder.
 fn render_template(template: &str, vars: &Map<String, Value>) -> Result<String> {
     let mut result = String::with_capacity(template.len());
@@ -329,7 +329,7 @@ fn render_template(template: &str, vars: &Map<String, Value>) -> Result<String> 
                         name.push(nc);
                     }
                     if !closed {
-                        return Err(RustAgentsError::Validation(format!(
+                        return Err(TinyAgentsError::Validation(format!(
                             "unclosed placeholder '{{{name}'"
                         )));
                     }
@@ -337,7 +337,7 @@ fn render_template(template: &str, vars: &Map<String, Value>) -> Result<String> 
                         Some(Value::String(s)) => result.push_str(s),
                         Some(v) => result.push_str(&v.to_string()),
                         None => {
-                            return Err(RustAgentsError::Validation(format!(
+                            return Err(TinyAgentsError::Validation(format!(
                                 "unknown placeholder '{{{name}}}'"
                             )));
                         }
