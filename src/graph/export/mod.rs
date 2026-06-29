@@ -290,7 +290,10 @@ fn validate(
     }
     for cond in conditional {
         if !known(&cond.from) {
-            errors.push(format!("conditional source `{}` is not declared", cond.from));
+            errors.push(format!(
+                "conditional source `{}` is not declared",
+                cond.from
+            ));
         }
         for route in &cond.routes {
             if !known(&route.target) {
@@ -334,10 +337,7 @@ fn validate(
     if let Some(entry) = entry {
         let mut successors: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
         for edge in direct {
-            successors
-                .entry(&edge.from)
-                .or_default()
-                .insert(&edge.to);
+            successors.entry(&edge.from).or_default().insert(&edge.to);
         }
         for cond in conditional {
             let entry_set = successors.entry(&cond.from).or_default();
@@ -419,7 +419,12 @@ where
                 interrupt: m.is_some_and(|m| m.interrupt),
                 deferred: m.is_some_and(|m| m.deferred),
                 command_destinations: m
-                    .map(|m| m.command_destinations.iter().map(|d| d.to_string()).collect())
+                    .map(|m| {
+                        m.command_destinations
+                            .iter()
+                            .map(|d| d.to_string())
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 metadata: m.map(|m| m.metadata.clone()).unwrap_or_default(),
             }
@@ -728,9 +733,7 @@ fn emit_marker_class(
     if matching.is_empty() {
         return;
     }
-    out.push_str(&format!(
-        "    classDef {class} stroke-dasharray: 4 2;\n"
-    ));
+    out.push_str(&format!("    classDef {class} stroke-dasharray: 4 2;\n"));
     for node in matching {
         out.push_str(&format!("    class {} {class}\n", mermaid_id(&node.id)));
     }

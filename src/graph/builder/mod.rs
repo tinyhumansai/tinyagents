@@ -260,7 +260,11 @@ where
     /// from the [`crate::graph::Command`] a node emits — but they let the
     /// [topology export](crate::graph::export) draw and validate the set of
     /// nodes a command node may jump to. Implies [`Self::mark_command_routing`].
-    pub fn with_command_destinations<I, N>(mut self, node: impl Into<NodeId>, destinations: I) -> Self
+    pub fn with_command_destinations<I, N>(
+        mut self,
+        node: impl Into<NodeId>,
+        destinations: I,
+    ) -> Self
     where
         I: IntoIterator<Item = N>,
         N: Into<NodeId>,
