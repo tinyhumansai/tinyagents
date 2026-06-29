@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::harness::cancel::CancellationToken;
 use crate::harness::events::EventSink;
 use crate::harness::ids::{RunId, ThreadId};
 use crate::harness::limits::LimitTracker;
@@ -110,4 +111,15 @@ pub struct RunContext<Ctx = ()> {
     /// model call via
     /// [`crate::harness::steering::apply_pending_steering`].
     pub steering: Option<SteeringHandle>,
+    /// Cooperative cancellation token for this run.
+    ///
+    /// Defaults to a fresh, never-cancelled [`CancellationToken`], so a run is
+    /// only cancellable if a caller installs a shared token via
+    /// [`RunContext::with_cancellation`]. The agent loop polls
+    /// [`CancellationToken::is_cancelled`] at the same safe checkpoints used for
+    /// steering — before each model call and before each tool call — and the
+    /// streaming pipeline races [`CancellationToken::cancelled`] against the
+    /// provider stream. On observing cancellation the run ends with
+    /// [`crate::error::TinyAgentsError::Cancelled`].
+    pub cancellation: CancellationToken,
 }

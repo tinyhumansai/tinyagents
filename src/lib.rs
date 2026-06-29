@@ -43,6 +43,9 @@ pub use harness::steering::{
     SteeringCommand, SteeringCommandKind, SteeringHandle, SteeringOutcome, SteeringPolicy,
 };
 
+// --- Cooperative run cancellation ---
+pub use harness::cancel::CancellationToken;
+
 // --- Graph: legacy sequential API (milestone 1) ---
 pub use graph::{Edge, GraphRun, Node, NodeOutput, StateGraph};
 

@@ -333,6 +333,81 @@ fn provider_failed_stream_item_finishes_as_model_error() {
     assert!(error.contains("groq provider error (rate_limit): too many requests"));
 }
 
+#[tokio::test]
+async fn sse_stream_parses_text_tool_calls_and_usage() {
+    use futures::StreamExt;
+
+    // Two text fragments, a tool-call split across chunks, then usage + [DONE].
+    // Chunk boundaries deliberately split a `data:` line so the buffer-join path
+    // is exercised.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"lookup\",\"arg".to_vec(),
+        b"uments\":\"{\\\"q\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"42}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3,\"total_tokens\":8}}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let bytes = futures::stream::iter(raw.into_iter().map(Ok::<Vec<u8>, TinyAgentsError>));
+
+    let state = SseState {
+        bytes: Box::pin(bytes),
+        buf: String::new(),
+        pending: std::collections::VecDeque::new(),
+        acc: OpenAiStreamAcc::default(),
+        provider: "openai".to_string(),
+        model: "gpt-4.1-mini".to_string(),
+        started: false,
+        finished: false,
+        terminal_emitted: false,
+    };
+    let items: Vec<ModelStreamItem> = futures::stream::unfold(state, sse_next).collect().await;
+
+    // First item is Started; last is Completed.
+    assert!(matches!(items.first(), Some(ModelStreamItem::Started)));
+    assert!(matches!(items.last(), Some(ModelStreamItem::Completed(_))));
+
+    // Two text message deltas reconstruct "Hello".
+    let text: String = items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "Hello");
+
+    // Tool-call argument fragments streamed as ToolCallDelta items.
+    let tool_deltas = items
+        .iter()
+        .filter(|item| matches!(item, ModelStreamItem::ToolCallDelta(_)))
+        .count();
+    assert_eq!(tool_deltas, 2);
+
+    // A usage delta was emitted.
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, ModelStreamItem::UsageDelta(_)))
+    );
+
+    // The merged final response carries the reassembled tool call and usage.
+    let merged = StreamAccumulator::new();
+    let mut merged = merged;
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "Hello");
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "call-1");
+    assert_eq!(calls[0].name, "lookup");
+    assert_eq!(calls[0].arguments, json!({ "q": 42 }));
+    assert_eq!(response.finish_reason.as_deref(), Some("tool_calls"));
+    assert_eq!(response.usage.unwrap().total_tokens, 8);
+}
+
 #[test]
 fn from_env_errors_when_api_key_missing() {
     // Snapshot and clear the key so the missing-key path is exercised

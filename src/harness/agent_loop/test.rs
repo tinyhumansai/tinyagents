@@ -573,3 +573,103 @@ async fn invoke_streaming_emits_model_delta_events() {
         .count();
     assert_eq!(delta_events, 2, "one model.delta event per streamed delta");
 }
+
+// ── Cooperative cancellation ──────────────────────────────────────────────────
+
+use crate::harness::cancel::CancellationToken;
+
+/// A model that records how many times it was invoked and always asks for a
+/// tool, so the loop only stops via a limit or cancellation.
+struct CountingToolModel {
+    name: &'static str,
+    invocations: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl ChatModel<()> for CountingToolModel {
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+        *self.invocations.lock().unwrap() += 1;
+        Ok(tool_call_response("call-1", self.name, json!({})))
+    }
+}
+
+/// A tool that cancels the run's token the first time it is called, then
+/// returns a fixed reply.
+struct CancelOnCallTool {
+    token: CancellationToken,
+}
+
+#[async_trait]
+impl Tool<()> for CancelOnCallTool {
+    fn name(&self) -> &str {
+        "cancel_me"
+    }
+    fn description(&self) -> &str {
+        "cancels the run"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new("cancel_me", "cancels the run", json!({"type": "object"}))
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        self.token.cancel();
+        Ok(ToolResult::text(call.id, "cancel_me", "cancelled"))
+    }
+}
+
+#[tokio::test]
+async fn token_cancelled_before_run_yields_cancelled() {
+    let invocations = Arc::new(Mutex::new(0usize));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(CountingToolModel {
+            name: "cancel_me",
+            invocations: invocations.clone(),
+        }),
+    );
+
+    // Pre-cancel the token before the run starts.
+    let token = CancellationToken::new();
+    token.cancel();
+    let ctx = RunContext::new(RunConfig::new("cancel-run"), ()).with_cancellation(token);
+
+    let err = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect_err("a pre-cancelled run must not complete");
+
+    assert!(matches!(err, TinyAgentsError::Cancelled), "got {err:?}");
+    // The model was never invoked: cancellation is observed at the first
+    // checkpoint, before any model call.
+    assert_eq!(*invocations.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn cancelled_mid_run_stops_before_next_model_call() {
+    let invocations = Arc::new(Mutex::new(0usize));
+    let token = CancellationToken::new();
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(CountingToolModel {
+            name: "cancel_me",
+            invocations: invocations.clone(),
+        }),
+    );
+    harness.register_tool(Arc::new(CancelOnCallTool {
+        token: token.clone(),
+    }));
+
+    let ctx = RunContext::new(RunConfig::new("cancel-mid"), ()).with_cancellation(token);
+
+    let err = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("go")])
+        .await
+        .expect_err("cancellation during a tool call must stop the run");
+
+    assert!(matches!(err, TinyAgentsError::Cancelled), "got {err:?}");
+    // Exactly one model call happened (the turn that requested the tool); the
+    // tool cancelled the run, so the loop unwound before the second model call.
+    assert_eq!(*invocations.lock().unwrap(), 1);
+}

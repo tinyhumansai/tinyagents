@@ -184,6 +184,8 @@ Feature ownership:
 - `agent_loop`: default model-tool-model loop.
 - `cache`: prompt, provider prompt/KV-cache, response, summary, and artifact
   cache policy.
+- `cancel`: cooperative `CancellationToken` observed at agent-loop checkpoints
+  (before each model and tool call) and in the streaming/retry paths.
 - `context`: `RunConfig`, `RunContext`, inherited metadata, runtime values.
 - `cost`: model pricing, budget policy, and cost rollups.
 - `embeddings`: embedding providers, vector stores, retrievers, indexing, and

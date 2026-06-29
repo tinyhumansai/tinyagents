@@ -41,6 +41,9 @@ openai = ["dep:reqwest"]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 # `.env` loading for the runnable examples.
 dotenvy = "0.15"
+# Stream combinators (`StreamExt::next`) for integration tests that drive a
+# `ModelStream` directly.
+futures = "0.3"
 
 # --- OpenAI-backed examples (require a network call + OPENAI_API_KEY) ---
 # Gated behind the `openai` feature so the default build/test stays offline.

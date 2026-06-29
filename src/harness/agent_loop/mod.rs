@@ -295,6 +295,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         self.middleware.run_before_agent(ctx, state).await?;
 
         loop {
+            // Safe cancellation checkpoint: if an orchestrator requested
+            // cooperative cancellation, stop before doing any further work
+            // (steering, request build, or model call) for this turn.
+            if ctx.cancellation.is_cancelled() {
+                return Err(TinyAgentsError::Cancelled);
+            }
+
             // Safe steering checkpoint: drain any orchestrator/human steering
             // commands and apply the policy-permitted ones before the next
             // model call. Cancel terminates the run; Pause short-circuits it.
@@ -450,6 +457,11 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // Execute requested tools serially.
             status.mark_running(HarnessPhase::Tools);
             for mut call in tool_calls {
+                // Safe cancellation checkpoint: stop before invoking the next
+                // (side-effecting) tool if cancellation was requested.
+                if ctx.cancellation.is_cancelled() {
+                    return Err(TinyAgentsError::Cancelled);
+                }
                 ctx.check_deadline().map_err(|_| {
                     TinyAgentsError::Timeout(format!(
                         "run `{}` exceeded its wall-clock deadline",
@@ -547,6 +559,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // Retry loop for the current model.
             let mut attempt = 0usize;
             let outcome = loop {
+                // Observe cancellation before (re)issuing a model attempt so a
+                // cancel requested during a retry/rate-limit wait stops the run
+                // promptly instead of firing another provider call or falling
+                // through to the fallback chain.
+                if ctx.cancellation.is_cancelled() {
+                    return Err(TinyAgentsError::Cancelled);
+                }
                 let attempt_result = if streaming {
                     self.invoke_model_streaming_once(state, ctx, &model, request, call_id)
                         .await
@@ -627,7 +646,26 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         let mut stream = model.stream(state, request.clone()).await?;
         let mut accumulator = StreamAccumulator::new();
 
-        while let Some(item) = stream.next().await {
+        // Clone the cheap token so the cancellation future does not borrow
+        // `ctx` for the duration of the stream loop (the body still needs
+        // `&mut ctx` for events and middleware).
+        let cancellation = ctx.cancellation.clone();
+
+        loop {
+            // Race the next provider chunk against cooperative cancellation. If
+            // cancellation wins we drop the partially consumed stream and unwind
+            // with `Cancelled`; the `cancelled()` future is cancel-safe.
+            let item = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    return Err(TinyAgentsError::Cancelled);
+                }
+                next = stream.next() => match next {
+                    Some(item) => item,
+                    None => break,
+                },
+            };
+
             // Surface incremental message/tool-call fragments through events and
             // the `on_model_delta` middleware hook before merging them.
             let message_delta = match &item {

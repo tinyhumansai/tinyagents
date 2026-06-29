@@ -53,6 +53,43 @@ pub struct ContextWindow {
 }
 ```
 
+## Cooperative Cancellation
+
+`RunContext` carries a `CancellationToken` (`harness::cancel`, re-exported at the
+crate root). It is a cheap, clonable handle over an `Arc<AtomicBool>` plus a
+`tokio::sync::Notify` — no extra dependency beyond the `tokio` `sync` feature
+already in the tree.
+
+```rust
+let token = CancellationToken::new();
+assert!(!token.is_cancelled());
+token.cancel();              // latching: never un-cancels
+assert!(token.is_cancelled());
+token.clone().cancelled().await; // resolves once cancelled (cancel-safe)
+```
+
+API: `new()`, `cancel()`, `is_cancelled()`, and the async `cancelled().await`
+future (usable in a `select!` arm). Cloning is `O(1)` and every clone shares one
+state, so cancelling any clone cancels them all.
+
+Wiring:
+
+- A fresh `RunContext` carries a never-cancelled token, so cancellation is
+  strictly opt-in. Install a shared token with
+  `RunContext::with_cancellation(token)`.
+- The agent loop polls `ctx.cancellation.is_cancelled()` at the same safe
+  checkpoints used for steering: **before each model call** and **before each
+  (side-effecting) tool call**. On observing cancellation it unwinds the run with
+  `TinyAgentsError::Cancelled`.
+- The streaming path races `cancellation.cancelled()` against each provider
+  chunk in a `select!`, dropping the partial stream and returning `Cancelled`.
+- The retry / fallback path checks the token before issuing each model attempt,
+  so a cancel requested during a retry wait stops the run instead of firing
+  another provider call or advancing the fallback chain.
+
+Cancellation is cooperative, never preemptive: a token is never observed
+mid-tool or mid-chunk, only at well-defined checkpoints.
+
 ## Context Pressure
 
 Before every model call, the harness estimates whether the request fits. If not,

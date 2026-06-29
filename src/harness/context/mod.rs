@@ -31,6 +31,7 @@ mod types;
 pub use types::*;
 
 use crate::error::Result;
+use crate::harness::cancel::CancellationToken;
 use crate::harness::events::{AgentEvent, EventRecord, EventSink};
 use crate::harness::ids::{RunId, ThreadId};
 use crate::harness::limits::{LimitTracker, RunLimits};
@@ -154,7 +155,22 @@ impl<Ctx> RunContext<Ctx> {
             events: EventSink::new(),
             limits,
             steering: None,
+            cancellation: CancellationToken::new(),
         }
+    }
+
+    /// Attaches a [`CancellationToken`] so an orchestrator can request that this
+    /// run stop cooperatively at its next safe checkpoint.
+    ///
+    /// The agent loop polls [`CancellationToken::is_cancelled`] before each
+    /// model call and before each tool call (alongside steering), and the
+    /// streaming pipeline races [`CancellationToken::cancelled`] against the
+    /// provider stream. When the token is cancelled the run ends with
+    /// [`crate::error::TinyAgentsError::Cancelled`]. Without this, the run
+    /// carries a fresh token that is never cancelled.
+    pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
     }
 
     /// Replaces the store registry with a (possibly shared) `stores`.
