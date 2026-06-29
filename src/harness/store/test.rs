@@ -1,7 +1,8 @@
-//! Tests added in a later pass.
+//! Tests for the harness store backends.
 //!
-//! Smoke test confirming that [`super::InMemoryStore`] round-trips a single
-//! key and that [`super::StoreRegistry`] provides a working default store.
+//! Cover [`super::InMemoryStore`] put/get/delete/list round-tripping and that
+//! [`super::StoreRegistry`] provides a working default store plus named
+//! registration and lookup.
 
 use std::sync::Arc;
 

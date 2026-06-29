@@ -1,9 +1,8 @@
-//! Tests added in a later pass.
+//! Tests for the harness streaming projections.
 //!
-//! This file contains minimal smoke tests to verify that the stream module
-//! compiles and that mode filtering, push/drain, and the `stream()` helper
-//! all behave correctly. Comprehensive integration tests are tracked for a
-//! later pass.
+//! Cover [`StreamSink`] mode filtering, push/drain/peek, enable/disable of
+//! active modes, the all-modes and empty-modes sinks, [`StreamChunk::mode`]
+//! variant mapping, and the standalone [`stream`] filter helper.
 
 use serde_json::json;
 
