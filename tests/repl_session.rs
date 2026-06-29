@@ -5,10 +5,8 @@
 //! [`ReplSession`] through `set`/`get`/`show`, and enforcing the
 //! [`CapabilityPolicy`] allowlist on `call`.
 
-use rustagents::repl::{
-    CapabilityPolicy, ReplCommand, ReplOutcome, ReplSession, parse_command,
-};
 use rustagents::RustAgentsError;
+use rustagents::repl::{CapabilityPolicy, ReplCommand, ReplOutcome, ReplSession, parse_command};
 
 #[test]
 fn parses_representative_commands() {
@@ -72,7 +70,10 @@ fn session_runs_set_get_and_show() {
             key: "env".to_string(),
         })
         .unwrap();
-    assert_eq!(get_outcome, ReplOutcome::Value(serde_json::json!("production")));
+    assert_eq!(
+        get_outcome,
+        ReplOutcome::Value(serde_json::json!("production"))
+    );
 
     // `show vars` reflects everything in the namespace.
     let show_vars = session
@@ -114,7 +115,10 @@ fn disallowed_capability_call_is_rejected() {
 
     match err {
         RustAgentsError::Capability(msg) => {
-            assert!(msg.contains("secret_tool"), "error should name the capability: {msg}");
+            assert!(
+                msg.contains("secret_tool"),
+                "error should name the capability: {msg}"
+            );
         }
         other => panic!("expected Capability error, got {other:?}"),
     }

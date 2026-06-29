@@ -119,15 +119,59 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         config: RunConfig,
         input: Vec<Message>,
     ) -> Result<AgentLoopResult> {
-        let run_id = config.run_id.clone();
-        let thread_id = config.thread_id.clone();
+        let ctx = RunContext::new(config, ctx_data);
+        self.drive(state, ctx, input).await
+    }
+
+    /// Runs the default agent loop inside a caller-supplied [`RunContext`],
+    /// returning the accumulated [`AgentRun`].
+    ///
+    /// Use this when you need to control the run's dependencies — for example
+    /// to attach your own [`crate::harness::events::EventSink`] (so an external
+    /// listener or [`crate::harness::testkit::EventRecorder`] receives every
+    /// event), inject a custom [`crate::harness::store::StoreRegistry`], or carry
+    /// pre-populated `Ctx` data. The context's [`RunConfig`] supplies the run
+    /// identity and limits, exactly as for [`AgentHarness::invoke`].
+    ///
+    /// # Errors
+    ///
+    /// Identical to [`AgentHarness::invoke`].
+    pub async fn invoke_in_context(
+        &self,
+        state: &State,
+        ctx: RunContext<Ctx>,
+        input: Vec<Message>,
+    ) -> Result<AgentRun> {
+        self.drive(state, ctx, input).await.map(|result| result.run)
+    }
+
+    /// Like [`AgentHarness::invoke_in_context`] but also returns the compact
+    /// [`HarnessRunStatus`] snapshot.
+    pub async fn invoke_in_context_with_status(
+        &self,
+        state: &State,
+        ctx: RunContext<Ctx>,
+        input: Vec<Message>,
+    ) -> Result<AgentLoopResult> {
+        self.drive(state, ctx, input).await
+    }
+
+    /// Shared driver: runs the loop inside `ctx` and owns lifecycle
+    /// bookkeeping (status transitions plus `RunFailed`/`on_error` on error).
+    async fn drive(
+        &self,
+        state: &State,
+        mut ctx: RunContext<Ctx>,
+        input: Vec<Message>,
+    ) -> Result<AgentLoopResult> {
+        let run_id = ctx.config.run_id.clone();
+        let thread_id = ctx.config.thread_id.clone();
 
         let mut status = HarnessRunStatus::new(run_id.clone(), ComponentId::new("agent_loop"));
         if let Some(thread) = thread_id {
             status = status.with_thread(thread);
         }
 
-        let mut ctx = RunContext::new(config, ctx_data);
         let mut run = AgentRun::new();
 
         match self

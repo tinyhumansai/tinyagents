@@ -25,11 +25,13 @@ struct Counter {
 #[tokio::test]
 async fn reducer_merges_partial_updates_into_final_state() {
     let graph = GraphBuilder::<Counter, i64>::new()
-        .set_reducer(ClosureStateReducer::new(|mut state: Counter, update: i64| {
-            state.value += update;
-            state.log.push(format!("+{update}"));
-            Ok(state)
-        }))
+        .set_reducer(ClosureStateReducer::new(
+            |mut state: Counter, update: i64| {
+                state.value += update;
+                state.log.push(format!("+{update}"));
+                Ok(state)
+            },
+        ))
         .add_node("seed", |_s: Counter, _c: NodeContext| async move {
             Ok(NodeResult::Update(1))
         })
@@ -69,7 +71,10 @@ async fn recursion_limit_is_deterministic() {
         .expect("graph compiles");
 
     let err = graph.run(0).await.expect_err("the loop never terminates");
-    assert!(matches!(err, RustAgentsError::RecursionLimit(3)), "got {err:?}");
+    assert!(
+        matches!(err, RustAgentsError::RecursionLimit(3)),
+        "got {err:?}"
+    );
 }
 
 #[tokio::test]

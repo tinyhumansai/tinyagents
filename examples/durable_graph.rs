@@ -34,11 +34,13 @@ async fn main() -> Result<()> {
     // State = Counter, Update = i64. The reducer merges each partial update into
     // the counter and records it in the log.
     let graph = GraphBuilder::<Counter, i64>::new()
-        .set_reducer(ClosureStateReducer::new(|mut state: Counter, update: i64| {
-            state.value += update;
-            state.log.push(format!("+{update} => {}", state.value));
-            Ok(state)
-        }))
+        .set_reducer(ClosureStateReducer::new(
+            |mut state: Counter, update: i64| {
+                state.value += update;
+                state.log.push(format!("+{update} => {}", state.value));
+                Ok(state)
+            },
+        ))
         .add_node("seed", |_s: Counter, _c: NodeContext| async move {
             Ok(NodeResult::Update(1))
         })
@@ -56,7 +58,9 @@ async fn main() -> Result<()> {
         .compile()?
         .with_checkpointer(checkpointer.clone());
 
-    let run = graph.run_with_thread("thread-1", Counter::default()).await?;
+    let run = graph
+        .run_with_thread("thread-1", Counter::default())
+        .await?;
 
     println!("=== Durable graph run ===");
     println!("final value: {}", run.state.value);

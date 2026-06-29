@@ -52,8 +52,16 @@ impl Tool<()> for CalculatorTool {
     }
 
     async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
-        let a = call.arguments.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let b = call.arguments.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let a = call
+            .arguments
+            .get("a")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let b = call
+            .arguments
+            .get("b")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         let sum = a + b;
         Ok(ToolResult::text(call.id, "add", format!("{sum}")))
     }

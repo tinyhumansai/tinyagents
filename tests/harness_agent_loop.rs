@@ -151,7 +151,10 @@ async fn max_model_calls_limit_returns_limit_exceeded() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     // A model that always asks for a tool would loop forever without a cap.
     harness
-        .register_model("mock", Arc::new(MockModel::with_tool_call("spin", json!({}))))
+        .register_model(
+            "mock",
+            Arc::new(MockModel::with_tool_call("spin", json!({}))),
+        )
         .set_default_model("mock")
         .register_tool(Arc::new(FakeTool::returning("spin", "again")))
         .with_policy(RunPolicy {
@@ -164,7 +167,10 @@ async fn max_model_calls_limit_returns_limit_exceeded() {
         .await
         .expect_err("the model-call cap should be exceeded");
 
-    assert!(matches!(err, RustAgentsError::LimitExceeded(_)), "got {err:?}");
+    assert!(
+        matches!(err, RustAgentsError::LimitExceeded(_)),
+        "got {err:?}"
+    );
 }
 
 #[tokio::test]
