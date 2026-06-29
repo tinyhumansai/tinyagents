@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::Result;
 use crate::graph::command::NodeResult;
@@ -75,6 +76,11 @@ pub struct NodeContext {
     /// The branch identity when this node runs as one fork of a concurrent
     /// (fan-out) superstep; `None` in sequential mode or single-node steps.
     pub fork: Option<ForkId>,
+    /// The per-invocation argument when this activation was scheduled by a
+    /// [`crate::graph::Send`] packet; `None` for normal edge/`goto` activations.
+    /// This is how map-reduce / search-fanout branches receive custom input that
+    /// differs from the graph's shared committed state.
+    pub send_arg: Option<serde_json::Value>,
 }
 
 /// A compiled-in node: id plus its handler.
@@ -91,6 +97,56 @@ impl<State, Update> Clone for BuilderNode<State, Update> {
             handler: self.handler.clone(),
         }
     }
+}
+
+/// A small newtype wrapper for a conditional-route label.
+///
+/// Routers may return any `impl ToString` label (a plain `&str`/`String`, or a
+/// user-defined route enum that implements `Display`). `Route` is an optional
+/// ergonomic helper for building route tables and for routers that prefer to
+/// return a typed value instead of a bare string; it stringifies via
+/// [`ToString`] at the route-table boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Route(pub String);
+
+impl Route {
+    /// Wraps any `impl ToString` (e.g. a route enum with `Display`) as a label.
+    pub fn new(label: impl ToString) -> Self {
+        Self(label.to_string())
+    }
+
+    /// The label as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Route {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Tunable per-graph defaults applied to a [`GraphBuilder`] in one call via
+/// [`GraphBuilder::set_defaults`].
+///
+/// Every field is optional; only the `Some` fields override the builder's
+/// current configuration, so partial defaults compose with explicit
+/// `with_*` calls. All fields are opt-in and additive — an unset
+/// [`GraphDefaults`] (the [`Default`]) changes nothing.
+#[derive(Clone, Debug, Default)]
+pub struct GraphDefaults {
+    /// Maximum number of supersteps before [`crate::TinyAgentsError::RecursionLimit`].
+    pub recursion_limit: Option<usize>,
+    /// Whether the active node set of a superstep runs concurrently.
+    pub parallel: Option<bool>,
+    /// Upper bound on the number of branches run concurrently within one step
+    /// (only meaningful when `parallel` is enabled). `None` means unbounded.
+    pub max_concurrency: Option<usize>,
+    /// Default wall-clock timeout applied to every node handler; on elapse the
+    /// run fails with [`crate::TinyAgentsError::Timeout`]. `None` means no
+    /// per-node timeout.
+    pub node_timeout: Option<Duration>,
 }
 
 /// Conditional routing for a node: a router function plus its route table.
@@ -120,8 +176,15 @@ pub struct GraphBuilder<State, Update> {
     pub(crate) edges: HashMap<NodeId, NodeId>,
     pub(crate) branches: HashMap<NodeId, Branch<State>>,
     pub(crate) command_nodes: HashSet<NodeId>,
+    /// Barrier/waiting edges: target node -> set of predecessor nodes that must
+    /// all have completed (across steps) before the target activates.
+    pub(crate) waiting: HashMap<NodeId, HashSet<NodeId>>,
     pub(crate) reducer: Option<Arc<dyn StateReducer<State, Update>>>,
     pub(crate) recursion_limit: usize,
     /// When true, active nodes in a superstep run concurrently (fan-out).
     pub(crate) parallel: bool,
+    /// Upper bound on concurrently-running branches per step (`None` = unbounded).
+    pub(crate) max_concurrency: Option<usize>,
+    /// Default per-node handler timeout (`None` = no timeout).
+    pub(crate) node_timeout: Option<Duration>,
 }

@@ -12,7 +12,7 @@
 
 mod types;
 
-pub use types::{Command, Interrupt, NodeResult};
+pub use types::{Command, Interrupt, NodeResult, RouteTarget, Send};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -30,11 +30,25 @@ impl<Update> Command<Update> {
         }
     }
 
-    /// Creates a command that routes to one or more explicit targets.
+    /// Creates a command that routes to one or more explicit node targets.
     pub fn goto(targets: impl IntoIterator<Item = impl Into<NodeId>>) -> Self {
         Self {
             update: None,
-            goto: targets.into_iter().map(Into::into).collect(),
+            goto: targets
+                .into_iter()
+                .map(|t| RouteTarget::Node(t.into()))
+                .collect(),
+            resume: None,
+        }
+    }
+
+    /// Creates a command that fans out to one or more [`Send`] packets, each
+    /// delivering a custom per-invocation argument to its target node. This is
+    /// the map-reduce / per-branch-custom-input primitive; targets may repeat.
+    pub fn send(sends: impl IntoIterator<Item = Send>) -> Self {
+        Self {
+            update: None,
+            goto: sends.into_iter().map(RouteTarget::Send).collect(),
             resume: None,
         }
     }
@@ -63,9 +77,16 @@ impl<Update> Command<Update> {
         self
     }
 
-    /// Appends explicit routing targets to this command.
+    /// Appends explicit node routing targets to this command.
     pub fn with_goto(mut self, targets: impl IntoIterator<Item = impl Into<NodeId>>) -> Self {
-        self.goto.extend(targets.into_iter().map(Into::into));
+        self.goto
+            .extend(targets.into_iter().map(|t| RouteTarget::Node(t.into())));
+        self
+    }
+
+    /// Appends [`Send`] fanout packets to this command's routing targets.
+    pub fn with_sends(mut self, sends: impl IntoIterator<Item = Send>) -> Self {
+        self.goto.extend(sends.into_iter().map(RouteTarget::Send));
         self
     }
 

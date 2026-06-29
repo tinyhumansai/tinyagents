@@ -86,9 +86,16 @@ pub enum RouteTarget {
 pub struct Send {
     pub node: NodeId,
     pub arg: serde_json::Value,
-    pub timeout: Option<TimeoutPolicy>,
 }
 ```
+
+`Command::goto([..])` (plain node activations) and `Command::send([Send::new(node,
+arg), ..])` (per-invocation fanout) both populate `Command::goto:
+Vec<RouteTarget>`; `with_goto`/`with_sends` append to it. A `Send`-scheduled node
+receives its `arg` on `NodeContext::send_arg` (`None` for normal activations);
+many `Send`s may target the *same* node, producing one parallel activation each
+(map-reduce). Plain activations are deduplicated by node; `Send` activations are
+not.
 
 Use `Command` for:
 

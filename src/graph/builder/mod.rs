@@ -14,7 +14,10 @@
 mod types;
 
 pub(crate) use types::{Branch, BuilderNode};
-pub use types::{END, ForkId, GraphBuilder, NodeContext, NodeFuture, NodeHandler, RouterFn, START};
+pub use types::{
+    END, ForkId, GraphBuilder, GraphDefaults, NodeContext, NodeFuture, NodeHandler, Route,
+    RouterFn, START,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -50,10 +53,49 @@ where
             edges: HashMap::new(),
             branches: HashMap::new(),
             command_nodes: HashSet::new(),
+            waiting: HashMap::new(),
             reducer: None,
             recursion_limit: 50,
             parallel: false,
+            max_concurrency: None,
+            node_timeout: None,
         }
+    }
+
+    /// Applies a bundle of [`GraphDefaults`] in one call. Only the `Some` fields
+    /// override the builder's current configuration, so this composes with
+    /// explicit `with_*` calls regardless of ordering.
+    pub fn set_defaults(mut self, defaults: GraphDefaults) -> Self {
+        if let Some(limit) = defaults.recursion_limit {
+            self.recursion_limit = limit;
+        }
+        if let Some(parallel) = defaults.parallel {
+            self.parallel = parallel;
+        }
+        if let Some(max) = defaults.max_concurrency {
+            self.max_concurrency = Some(max);
+        }
+        if let Some(timeout) = defaults.node_timeout {
+            self.node_timeout = Some(timeout);
+        }
+        self
+    }
+
+    /// Bounds the number of branches run concurrently within a single superstep
+    /// (only meaningful with [`Self::with_parallel`] enabled). The executor runs
+    /// the active set in chunks of at most `n` futures, so at most `n` node
+    /// handlers are in flight at once. `0` is treated as unbounded.
+    pub fn with_max_concurrency(mut self, n: usize) -> Self {
+        self.max_concurrency = (n > 0).then_some(n);
+        self
+    }
+
+    /// Sets a default wall-clock timeout applied to every node handler. A node
+    /// whose future does not resolve within `timeout` fails the run with
+    /// [`crate::TinyAgentsError::Timeout`].
+    pub fn with_node_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.node_timeout = Some(timeout);
+        self
     }
 
     /// Enables or disables concurrent execution of the active node set within a
@@ -118,6 +160,37 @@ where
         self
     }
 
+    /// Adds a chain of direct edges over the given nodes: `add_sequence([a, b,
+    /// c])` is equivalent to `add_edge(a, b).add_edge(b, c)`. The nodes must
+    /// already have been added with [`Self::add_node`]; this only wires edges. A
+    /// sequence of fewer than two nodes adds no edges.
+    pub fn add_sequence<I, N>(mut self, nodes: I) -> Self
+    where
+        I: IntoIterator<Item = N>,
+        N: Into<NodeId>,
+    {
+        let nodes: Vec<NodeId> = nodes.into_iter().map(Into::into).collect();
+        for pair in nodes.windows(2) {
+            self.edges.insert(pair[0].clone(), pair[1].clone());
+        }
+        self
+    }
+
+    /// Adds a barrier/waiting edge `from -> to`: like [`Self::add_edge`] but `to`
+    /// only activates once *all* of its registered predecessors (every `from`
+    /// declared via `add_waiting_edge`) have completed — possibly across
+    /// different supersteps. This is the join/fan-in primitive for diamond
+    /// topologies where several branches must finish before a synthesis node
+    /// runs. Calling it repeatedly with the same `to` accumulates the required
+    /// predecessor set.
+    pub fn add_waiting_edge(mut self, from: impl Into<NodeId>, to: impl Into<NodeId>) -> Self {
+        let from = from.into();
+        let to = to.into();
+        self.edges.insert(from.clone(), to.clone());
+        self.waiting.entry(to).or_default().insert(from);
+        self
+    }
+
     /// Sets the entry node, i.e. `add_edge(START, node)`.
     pub fn set_entry(self, node: impl Into<NodeId>) -> Self {
         self.add_edge(START, node)
@@ -129,26 +202,34 @@ where
     }
 
     /// Adds conditional edges: a router closure mapped against a label table.
-    pub fn add_conditional_edges<F, I, K, V>(
+    ///
+    /// Both the router's return value and the route-table labels are
+    /// `impl ToString`, so a user-defined route enum that implements `Display`
+    /// (or the [`Route`] newtype) can be used directly without manual
+    /// `.to_string()` calls. Plain `&str`/`String` labels still work unchanged —
+    /// the label is resolved against the table by its string form at the step
+    /// boundary.
+    pub fn add_conditional_edges<F, R, I, K, V>(
         mut self,
         from: impl Into<NodeId>,
         router: F,
         routes: I,
     ) -> Self
     where
-        F: Fn(&State) -> String + Send + Sync + 'static,
+        F: Fn(&State) -> R + Send + Sync + 'static,
+        R: ToString,
         I: IntoIterator<Item = (K, V)>,
-        K: Into<String>,
+        K: ToString,
         V: Into<NodeId>,
     {
         let routes = routes
             .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
+            .map(|(k, v)| (k.to_string(), v.into()))
             .collect();
         self.branches.insert(
             from.into(),
             Branch {
-                router: Arc::new(router),
+                router: Arc::new(move |state| router(state).to_string()),
                 routes,
             },
         );
@@ -219,6 +300,14 @@ where
             }
         }
 
+        // barrier/waiting edges: every source and target must exist
+        for (to, froms) in &self.waiting {
+            self.require_node(to)?;
+            for from in froms {
+                self.require_node(from)?;
+            }
+        }
+
         // command-routing nodes must not also have static/conditional edges
         for node in &self.command_nodes {
             self.require_node(node)?;
@@ -235,9 +324,12 @@ where
             edges,
             branches,
             command_nodes,
+            waiting,
             reducer,
             recursion_limit,
             parallel,
+            max_concurrency,
+            node_timeout,
         } = self;
 
         Ok(CompiledGraph::from_parts(
@@ -246,10 +338,13 @@ where
             edges,
             branches,
             command_nodes,
+            waiting,
             entry,
             reducer.expect("reducer presence checked above"),
             recursion_limit,
             parallel,
+            max_concurrency,
+            node_timeout,
         ))
     }
 

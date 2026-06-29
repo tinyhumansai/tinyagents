@@ -23,6 +23,9 @@ pub struct CompiledGraph<State, Update> {
     pub(crate) branches: Arc<HashMap<NodeId, Branch<State>>>,
     #[allow(dead_code)]
     pub(crate) command_nodes: Arc<HashSet<NodeId>>,
+    /// Barrier/waiting edges: target -> the predecessor set that must all
+    /// complete (across steps) before the target activates.
+    pub(crate) waiting: Arc<HashMap<NodeId, HashSet<NodeId>>>,
     pub(crate) entry: NodeId,
     pub(crate) reducer: Arc<dyn StateReducer<State, Update>>,
     pub(crate) recursion_limit: usize,
@@ -37,6 +40,10 @@ pub struct CompiledGraph<State, Update> {
     pub(crate) namespace: Vec<String>,
     /// When true, the active node set of a superstep is executed concurrently.
     pub(crate) parallel: bool,
+    /// Upper bound on concurrently-running branches per step (`None` = unbounded).
+    pub(crate) max_concurrency: Option<usize>,
+    /// Default per-node handler timeout (`None` = no timeout).
+    pub(crate) node_timeout: Option<std::time::Duration>,
 }
 
 impl<State, Update> std::fmt::Debug for CompiledGraph<State, Update> {
@@ -60,6 +67,7 @@ impl<State, Update> Clone for CompiledGraph<State, Update> {
             edges: self.edges.clone(),
             branches: self.branches.clone(),
             command_nodes: self.command_nodes.clone(),
+            waiting: self.waiting.clone(),
             entry: self.entry.clone(),
             reducer: self.reducer.clone(),
             recursion_limit: self.recursion_limit,
@@ -69,6 +77,8 @@ impl<State, Update> Clone for CompiledGraph<State, Update> {
             status_store: self.status_store.clone(),
             namespace: self.namespace.clone(),
             parallel: self.parallel,
+            max_concurrency: self.max_concurrency,
+            node_timeout: self.node_timeout,
         }
     }
 }

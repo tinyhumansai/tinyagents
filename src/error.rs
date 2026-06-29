@@ -126,6 +126,17 @@ pub enum TinyAgentsError {
     #[error("graph interrupted at node `{node}`: {message}")]
     Interrupted { node: String, message: String },
 
+    /// Two or more concurrent branches in a single superstep wrote the same
+    /// non-aggregate channel (for example a [`crate::graph::channel::LastValue`]
+    /// channel), so the merge cannot pick a single deterministic winner. Use an
+    /// aggregate channel (one whose
+    /// [`crate::graph::channel::Channel::allows_concurrent`] is `true`, such as
+    /// [`crate::graph::channel::Topic`] or
+    /// [`crate::graph::channel::BinaryAggregate`]) when fan-out branches must
+    /// write the same key. The payload describes the offending channel.
+    #[error("invalid concurrent update: {0}")]
+    InvalidConcurrentUpdate(String),
+
     /// A checkpoint could not be written, read, or located.
     #[error("checkpoint error: {0}")]
     Checkpoint(String),

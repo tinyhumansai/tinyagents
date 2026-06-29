@@ -11,7 +11,37 @@ The builder supports:
 - `set_conditional_entry_point`
 - `set_finish_point`
 - `set_node_defaults`
+- `set_defaults`
+- `with_max_concurrency`
+- `with_node_timeout`
 - `compile`
+
+`add_conditional_edges` accepts route labels and a router return value that are
+any `impl ToString`, so a user-defined route enum that implements `Display` (or
+the `Route` newtype) can label edges directly; plain `&str`/`String` labels keep
+working unchanged.
+
+`add_sequence([a, b, c])` is convenience sugar for a chain of direct edges
+(`add_edge(a, b).add_edge(b, c)`). `add_waiting_edge(from, to)` is a barrier edge:
+`to` activates only once *all* of its registered predecessors have completed,
+even across supersteps.
+
+Graph defaults are settable in one call:
+
+```rust
+pub struct GraphDefaults {
+    pub recursion_limit: Option<usize>,
+    pub parallel: Option<bool>,
+    pub max_concurrency: Option<usize>,
+    pub node_timeout: Option<Duration>,
+}
+```
+
+`set_defaults(GraphDefaults { .. })` applies only the `Some` fields.
+`with_max_concurrency(n)` bounds the number of node handlers in flight per
+parallel superstep (the active set runs in chunks of at most `n`).
+`with_node_timeout(d)` fails the run with `TinyAgentsError::Timeout` if any node
+handler does not resolve within `d`.
 
 Compile-time options:
 

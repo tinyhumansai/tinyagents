@@ -23,6 +23,7 @@ fn ctx_for(id: &str) -> NodeContext {
         step: 1,
         resume: None,
         fork: None,
+        send_arg: None,
     }
 }
 

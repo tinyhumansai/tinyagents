@@ -19,6 +19,7 @@
 //! `mod.rs` (implementations), and `test.rs` (unit tests).
 
 pub mod builder;
+pub mod channel;
 pub mod checkpoint;
 pub mod command;
 pub mod compiled;
@@ -31,12 +32,17 @@ pub mod subgraph;
 
 // --- Durable execution model ---
 pub use builder::{
-    END, ForkId, GraphBuilder, NodeContext, NodeFuture, NodeHandler, RouterFn, START,
+    END, ForkId, GraphBuilder, GraphDefaults, NodeContext, NodeFuture, NodeHandler, Route,
+    RouterFn, START,
+};
+pub use channel::{
+    Barrier, BinaryAggregate, Channel, ChannelSet, ChannelState, ChannelUpdate, Delta, Ephemeral,
+    LastValue, Messages, NamedBarrier, Topic, Untracked,
 };
 pub use checkpoint::{
     Checkpoint, CheckpointMetadata, Checkpointer, InMemoryCheckpointer, PendingWrite,
 };
-pub use command::{Command, Interrupt, NodeResult};
+pub use command::{Command, Interrupt, NodeResult, RouteTarget, Send};
 pub use compiled::{CompiledGraph, GraphExecution};
 pub use export::{
     ChannelInfo, ConditionalEdgeInfo, EdgeInfo, GraphTopology, NodeInfo, RouteInfo,

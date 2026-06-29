@@ -45,11 +45,11 @@ pub use types::{CompiledGraph, GraphExecution};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-use crate::graph::builder::{Branch, BuilderNode, END, ForkId, NodeContext};
+use crate::graph::builder::{Branch, BuilderNode, END, ForkId, NodeContext, NodeFuture};
 use crate::graph::checkpoint::{Checkpoint, Checkpointer};
-use crate::graph::command::{Command, Interrupt, NodeResult};
+use crate::graph::command::{Command, Interrupt, NodeResult, RouteTarget};
 use crate::graph::reducer::StateReducer;
 use crate::graph::status::GraphRunStatus;
 use crate::graph::stream::{GraphEvent, GraphEventSink};
@@ -74,10 +74,24 @@ fn next_id(prefix: &str) -> String {
 struct StepRun<Update> {
     /// Branch updates in deterministic active-set index order.
     updates: Vec<Update>,
-    /// Explicit `goto` routing keyed by the node that produced it.
-    goto_map: HashMap<NodeId, Vec<NodeId>>,
+    /// Explicit routing (plain `goto` nodes and/or [`Send`] packets) keyed by the
+    /// node that produced it.
+    goto_map: HashMap<NodeId, Vec<RouteTarget>>,
     /// The lowest-index branch interrupt, if any (its active-set index + value).
     interrupt: Option<(usize, Interrupt)>,
+}
+
+/// One scheduled activation in the active set: the node plus an optional
+/// per-invocation [`Send`] argument delivered via [`NodeContext::send_arg`].
+///
+/// Plain edge/`goto`/conditional activations carry `send_arg == None`; a
+/// [`crate::graph::Send`] packet carries `Some(arg)`. Multiple activations may
+/// target the same node within a step (map-reduce fanout), so the active set is
+/// a `Vec` of these rather than a deduplicated node set.
+#[derive(Clone)]
+struct Activation {
+    node: NodeId,
+    send_arg: Option<serde_json::Value>,
 }
 
 fn dedupe(nodes: Vec<NodeId>) -> Vec<NodeId> {
@@ -86,6 +100,12 @@ fn dedupe(nodes: Vec<NodeId>) -> Vec<NodeId> {
         .into_iter()
         .filter(|n| seen.insert(n.clone()))
         .collect()
+}
+
+/// Maps an [`Activation`] slice to its node ids (for events, status, and
+/// checkpoint records, which are node-keyed).
+fn activation_nodes(active: &[Activation]) -> Vec<NodeId> {
+    active.iter().map(|a| a.node.clone()).collect()
 }
 
 impl<State, Update> CompiledGraph<State, Update> {
@@ -97,10 +117,13 @@ impl<State, Update> CompiledGraph<State, Update> {
         edges: HashMap<NodeId, NodeId>,
         branches: HashMap<NodeId, Branch<State>>,
         command_nodes: HashSet<NodeId>,
+        waiting: HashMap<NodeId, HashSet<NodeId>>,
         entry: NodeId,
         reducer: Arc<dyn StateReducer<State, Update>>,
         recursion_limit: usize,
         parallel: bool,
+        max_concurrency: Option<usize>,
+        node_timeout: Option<Duration>,
     ) -> Self {
         Self {
             graph_id,
@@ -108,6 +131,7 @@ impl<State, Update> CompiledGraph<State, Update> {
             edges: Arc::new(edges),
             branches: Arc::new(branches),
             command_nodes: Arc::new(command_nodes),
+            waiting: Arc::new(waiting),
             entry,
             reducer,
             recursion_limit,
@@ -117,6 +141,8 @@ impl<State, Update> CompiledGraph<State, Update> {
             status_store: None,
             namespace: Vec::new(),
             parallel,
+            max_concurrency,
+            node_timeout,
         }
     }
 
@@ -320,14 +346,23 @@ where
         let mut steps = 0usize;
         let mut last_checkpoint: Option<CheckpointId> = None;
         let mut parent_checkpoint: Option<String> = None;
-        let mut active = dedupe(initial_active);
+        let mut active: Vec<Activation> = dedupe(initial_active)
+            .into_iter()
+            .map(|node| Activation {
+                node,
+                send_arg: None,
+            })
+            .collect();
+        // Barrier/waiting-edge arrivals accumulate across supersteps: a waiting
+        // node only activates once every required predecessor has arrived.
+        let mut barrier_arrivals: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
 
         self.emit(GraphEvent::RunStarted {
             run_id: run_id.clone(),
         });
         // Record the run as live before the first superstep is scheduled.
         let mut running = self.base_status(&run_id, &thread_id, started_at);
-        running.active_nodes = active.clone();
+        running.active_nodes = activation_nodes(&active);
         self.save_status(running).await;
 
         while !active.is_empty() {
@@ -340,7 +375,7 @@ where
             steps += 1;
             self.emit(GraphEvent::StepStarted {
                 step: steps,
-                active: active.clone(),
+                active: activation_nodes(&active),
             });
 
             let run_result = if self.parallel && active.len() > 1 {
@@ -388,14 +423,14 @@ where
             // not-yet-completed members of this step (interrupted node first),
             // then return control to the caller.
             if let Some((index, emitted)) = interrupt {
-                let pending: Vec<NodeId> = active[index..].to_vec();
+                let pending: Vec<NodeId> = activation_nodes(&active[index..]);
                 let interrupt_id = InterruptId::new(emitted.id.clone());
                 let checkpoint_id = self
                     .persist_checkpoint(
                         &thread_id,
                         &state,
                         &pending,
-                        &active[..index],
+                        &activation_nodes(&active[..index]),
                         vec![emitted.clone()],
                         parent_checkpoint.clone(),
                         steps,
@@ -424,29 +459,56 @@ where
             // Select the next active set from commands or static/conditional
             // edges, evaluated against the freshly-committed state.
             let completed = active.clone();
-            let mut next: Vec<NodeId> = Vec::new();
-            for node_id in &completed {
+            let mut next: Vec<Activation> = Vec::new();
+            let mut next_seen: HashSet<NodeId> = HashSet::new();
+            for activation in &completed {
+                let node_id = &activation.node;
                 let targets = self.route(node_id, &goto_map, &state)?;
                 for target in targets {
-                    if target.as_str() == END {
+                    let tnode = target.node().clone();
+                    if tnode.as_str() == END {
                         continue;
                     }
                     self.emit(GraphEvent::RouteSelected {
                         node: node_id.clone(),
-                        target: target.clone(),
+                        target: tnode.clone(),
                     });
-                    next.push(target);
+                    // Barrier gating: hold a waiting node until every required
+                    // predecessor has arrived (possibly across supersteps).
+                    if let Some(required) = self.waiting.get(&tnode) {
+                        let arrived = barrier_arrivals.entry(tnode.clone()).or_default();
+                        arrived.insert(node_id.clone());
+                        if !required.is_subset(arrived) {
+                            continue;
+                        }
+                        barrier_arrivals.remove(&tnode);
+                    }
+                    // `Send` activations may repeat the same node (each carries
+                    // its own arg); plain activations are deduplicated by node.
+                    let send_arg = target.send_arg().cloned();
+                    if send_arg.is_some() {
+                        next.push(Activation {
+                            node: tnode,
+                            send_arg,
+                        });
+                    } else if next_seen.insert(tnode.clone()) {
+                        next.push(Activation {
+                            node: tnode,
+                            send_arg: None,
+                        });
+                    }
                 }
             }
-            let next = dedupe(next);
 
-            // Persist a boundary checkpoint.
+            // Persist a boundary checkpoint (node-keyed records).
+            let completed_nodes = activation_nodes(&completed);
+            let next_nodes = activation_nodes(&next);
             let checkpoint_id = self
                 .persist_checkpoint(
                     &thread_id,
                     &state,
-                    &next,
-                    &completed,
+                    &next_nodes,
+                    &completed_nodes,
                     Vec::new(),
                     parent_checkpoint.clone(),
                     steps,
@@ -510,6 +572,7 @@ where
     /// `fork` carries the branch identity in a concurrent step (`None` in
     /// sequential mode or single-node steps). The resume value for the node is
     /// consumed from `resume_map`.
+    #[allow(clippy::too_many_arguments)]
     fn node_context(
         &self,
         node_id: &NodeId,
@@ -518,6 +581,7 @@ where
         step: usize,
         resume_map: &mut HashMap<NodeId, serde_json::Value>,
         fork: Option<ForkId>,
+        send_arg: Option<serde_json::Value>,
     ) -> NodeContext {
         NodeContext {
             node_id: node_id.clone(),
@@ -526,6 +590,25 @@ where
             step,
             resume: resume_map.remove(node_id),
             fork,
+            send_arg,
+        }
+    }
+
+    /// Wraps a node future in the configured per-node timeout (if any), mapping
+    /// an elapsed deadline onto [`TinyAgentsError::Timeout`].
+    async fn run_node_future(
+        &self,
+        node_id: &NodeId,
+        fut: NodeFuture<Update>,
+    ) -> Result<NodeResult<Update>> {
+        match self.node_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, fut).await {
+                Ok(result) => result,
+                Err(_) => Err(TinyAgentsError::Timeout(format!(
+                    "node `{node_id}` exceeded its {timeout:?} timeout"
+                ))),
+            },
+            None => fut.await,
         }
     }
 
@@ -543,7 +626,7 @@ where
         step: usize,
         result: NodeResult<Update>,
         updates: &mut Vec<Update>,
-        goto_map: &mut HashMap<NodeId, Vec<NodeId>>,
+        goto_map: &mut HashMap<NodeId, Vec<RouteTarget>>,
         visited: &mut Vec<NodeId>,
     ) -> Option<(usize, Interrupt)> {
         visited.push(node_id.clone());
@@ -588,7 +671,7 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn run_active_sequential(
         &self,
-        active: &[NodeId],
+        active: &[Activation],
         state: &State,
         run_id: &RunId,
         thread_id: &Option<ThreadId>,
@@ -597,10 +680,11 @@ where
         visited: &mut Vec<NodeId>,
     ) -> Result<StepRun<Update>> {
         let mut updates: Vec<Update> = Vec::new();
-        let mut goto_map: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut goto_map: HashMap<NodeId, Vec<RouteTarget>> = HashMap::new();
         let mut interrupt: Option<(usize, Interrupt)> = None;
 
-        for (index, node_id) in active.iter().enumerate() {
+        for (index, activation) in active.iter().enumerate() {
+            let node_id = &activation.node;
             let node = self
                 .nodes
                 .get(node_id)
@@ -615,8 +699,19 @@ where
                 step,
             });
 
-            let ctx = self.node_context(node_id, run_id, thread_id, step, resume_map, None);
-            let result = match (node.handler)(state.clone(), ctx).await {
+            let ctx = self.node_context(
+                node_id,
+                run_id,
+                thread_id,
+                step,
+                resume_map,
+                None,
+                activation.send_arg.clone(),
+            );
+            let result = match self
+                .run_node_future(node_id, (node.handler)(state.clone(), ctx))
+                .await
+            {
                 Ok(result) => result,
                 Err(error) => {
                     self.emit(GraphEvent::NodeFailed {
@@ -651,17 +746,20 @@ where
 
     /// Runs the active node set concurrently (opt-in via `with_parallel`).
     ///
-    /// Every branch starts before any is awaited and all are driven to
-    /// completion via [`futures::future::join_all`]; each branch executes on its
-    /// own cloned `State` snapshot and a distinct [`ForkId`]. Results are then
-    /// folded in active-set index order — the reducer is the join/fan-in — so the
-    /// merged state is reproducible regardless of completion order. The
-    /// lowest-index branch that errors or interrupts is the step's terminal
-    /// outcome; lower-index successful branches still contribute their updates.
+    /// Each branch executes on its own cloned `State` snapshot and a distinct
+    /// [`ForkId`], optionally with the [`Send`] argument that scheduled it. With
+    /// no `max_concurrency` bound every branch starts before any is awaited and
+    /// all are driven via [`futures::future::join_all`]; with a bound the active
+    /// set is run in chunks of at most that many futures, so at most that many
+    /// node handlers are in flight at once. Results are folded in active-set
+    /// index order — the reducer is the join/fan-in — so the merged state is
+    /// reproducible regardless of completion order. The lowest-index branch that
+    /// errors or interrupts is the step's terminal outcome; lower-index
+    /// successful branches still contribute their updates.
     #[allow(clippy::too_many_arguments)]
     async fn run_active_parallel(
         &self,
-        active: &[NodeId],
+        active: &[Activation],
         state: &State,
         run_id: &RunId,
         thread_id: &Option<ThreadId>,
@@ -669,10 +767,12 @@ where
         resume_map: &mut HashMap<NodeId, serde_json::Value>,
         visited: &mut Vec<NodeId>,
     ) -> Result<StepRun<Update>> {
+        let timeout = self.node_timeout;
         // Build one forked context + future per branch. Node lookup and resume
         // consumption happen up front so the futures borrow nothing local.
         let mut futures = Vec::with_capacity(active.len());
-        for (index, node_id) in active.iter().enumerate() {
+        for (index, activation) in active.iter().enumerate() {
+            let node_id = &activation.node;
             let node = self
                 .nodes
                 .get(node_id)
@@ -693,19 +793,54 @@ where
                 step,
             });
             let fork = Some(ForkId::new(index, node_id.clone()));
-            let ctx = self.node_context(node_id, run_id, thread_id, step, resume_map, fork);
-            futures.push((node.handler)(state.clone(), ctx));
+            let ctx = self.node_context(
+                node_id,
+                run_id,
+                thread_id,
+                step,
+                resume_map,
+                fork,
+                activation.send_arg.clone(),
+            );
+            let raw = (node.handler)(state.clone(), ctx);
+            let owned_node = node_id.clone();
+            futures.push(async move {
+                match timeout {
+                    Some(d) => match tokio::time::timeout(d, raw).await {
+                        Ok(result) => result,
+                        Err(_) => Err(TinyAgentsError::Timeout(format!(
+                            "node `{owned_node}` exceeded its {d:?} timeout"
+                        ))),
+                    },
+                    None => raw.await,
+                }
+            });
         }
 
-        // Drive all branches concurrently to completion.
-        let results = futures::future::join_all(futures).await;
+        // Drive branches to completion, bounding in-flight count when configured.
+        let results = match self.max_concurrency {
+            Some(limit) if limit < futures.len() => {
+                let mut out = Vec::with_capacity(futures.len());
+                let mut iter = futures.into_iter();
+                loop {
+                    let chunk: Vec<_> = iter.by_ref().take(limit).collect();
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    out.extend(futures::future::join_all(chunk).await);
+                }
+                out
+            }
+            _ => futures::future::join_all(futures).await,
+        };
 
         // Fold in deterministic active-set index order.
         let mut updates: Vec<Update> = Vec::new();
-        let mut goto_map: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut goto_map: HashMap<NodeId, Vec<RouteTarget>> = HashMap::new();
         let mut interrupt: Option<(usize, Interrupt)> = None;
 
-        for (index, (node_id, result)) in active.iter().zip(results).enumerate() {
+        for (index, (activation, result)) in active.iter().zip(results).enumerate() {
+            let node_id = &activation.node;
             let result = match result {
                 Ok(result) => result,
                 Err(error) => {
@@ -739,18 +874,21 @@ where
         })
     }
 
-    /// Resolves the next-node targets for `node_id`.
+    /// Resolves the next routing targets for `node_id`.
+    ///
+    /// Command `goto` (which may include [`Send`] packets) wins over static and
+    /// conditional edges; edge/conditional targets are plain node activations.
     fn route(
         &self,
         node_id: &NodeId,
-        goto_map: &HashMap<NodeId, Vec<NodeId>>,
+        goto_map: &HashMap<NodeId, Vec<RouteTarget>>,
         state: &State,
-    ) -> Result<Vec<NodeId>> {
+    ) -> Result<Vec<RouteTarget>> {
         if let Some(targets) = goto_map.get(node_id) {
             return Ok(targets.clone());
         }
         if let Some(target) = self.edges.get(node_id) {
-            return Ok(vec![target.clone()]);
+            return Ok(vec![RouteTarget::Node(target.clone())]);
         }
         if let Some(branch) = self.branches.get(node_id) {
             let route = (branch.router)(state);
@@ -760,7 +898,7 @@ where
                     route,
                 }
             })?;
-            return Ok(vec![target]);
+            return Ok(vec![RouteTarget::Node(target)]);
         }
         // Sink: no outgoing routing, the branch ends here.
         Ok(Vec::new())

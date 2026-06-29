@@ -51,3 +51,43 @@ Why channel-level reducers matter:
 
 The graph should support both root state and object state. A single root channel
 is useful for scalar workflows; multi-key state is the default for agent graphs.
+
+## Implemented additive model (`graph::channel`)
+
+The channel model is shipped **additively**: the monolithic `State` +
+`StateReducer` path is unchanged, and channels are an opt-in alternative that
+runs on the *existing* executor. The implementation lives in
+`src/graph/channel/` and is `serde_json::Value`-backed for generality.
+
+- `Channel` (object-safe trait): per-key `merge(current, incoming) -> value`
+  plus `allows_concurrent`, `is_ephemeral`, `is_tracked`, and `is_ready`
+  (barrier) hooks. Concrete channels: `LastValue` (overwrite), `Topic`
+  (append into an array), `Delta` (numeric accumulate), `Messages` (merge by
+  `id`), `Ephemeral` (overwrite, cleared next step), `Untracked` (overwrite,
+  excluded from snapshots), `Barrier`/`NamedBarrier` (count/name fan-in with
+  readiness), and `BinaryAggregate` (fold via a closure or any
+  `Reducer<Value>`).
+- `ChannelSet`: a named map of `Box<dyn Channel>` plus their current values,
+  with `add_channel`/`with_channel`, `apply_update(name, value)`, `get`,
+  `is_ready`, and `snapshot()` (the tracked, durable view).
+- `ChannelState`: a graph `State` wrapping a `ChannelSet`. It implements
+  `StateReducer<ChannelState, ChannelUpdate>` for itself (the `&self` reducer
+  receiver is unused; merge rules travel inside the running state), so a
+  channel graph is built directly with
+  `GraphBuilder::<ChannelState, ChannelUpdate>::new().set_reducer(ChannelState::new())`.
+- `ChannelUpdate`: a batch of `(name, value)` writes a node returns
+  (`ChannelUpdate::new().set(..).set(..)`). Stamp it with the producing node's
+  superstep via `.at_step(ctx.step)`.
+
+### Concurrent-write conflict detection
+
+The executor folds a step's branch updates one at a time. Stamping each
+`ChannelUpdate` with `ctx.step` lets the reducer group a step's writes: when the
+step number advances it resets its per-step bookkeeping and clears `Ephemeral`
+channels. A second same-step write to a non-aggregate channel (`LastValue`,
+`Ephemeral`, `Untracked` — `allows_concurrent == false`) raises
+`TinyAgentsError::InvalidConcurrentUpdate`; aggregate channels
+(`allows_concurrent == true`) merge both writes in deterministic active-set
+index order. Cross-step overwrites and repeated writes inside one update are
+last-wins, not conflicts. Unstamped updates are treated as independent steps
+(no conflict detection, no ephemeral clearing), preserving the simplest path.

@@ -113,8 +113,17 @@ pub use harness::observability::{
 // types intentionally stay behind their module paths to avoid a name clash.
 pub use graph::{
     Checkpoint, CheckpointMetadata, Checkpointer, ClosureReducer, ClosureStateReducer, Command,
-    CompiledGraph, END, ForkId, GraphBuilder, GraphEvent, GraphExecution, GraphRunStatus,
-    InMemoryCheckpointer, Interrupt, NodeContext, NodeResult, Reducer, START, StateReducer,
+    CompiledGraph, END, ForkId, GraphBuilder, GraphDefaults, GraphEvent, GraphExecution,
+    GraphRunStatus, InMemoryCheckpointer, Interrupt, NodeContext, NodeResult, Reducer, Route,
+    RouteTarget, START, StateReducer,
+};
+
+// --- Graph: channel-per-field state model (additive; see state-channels.md) ---
+// An opt-in alternative to the monolithic State + StateReducer path: state is
+// split into independently-merged named channels.
+pub use graph::{
+    Barrier, BinaryAggregate, Channel, ChannelSet, ChannelState, ChannelUpdate, Delta, Ephemeral,
+    LastValue, Messages, NamedBarrier, Topic, Untracked,
 };
 
 // --- Graph: durable observability (journals, status stores, journaling sink) ---
