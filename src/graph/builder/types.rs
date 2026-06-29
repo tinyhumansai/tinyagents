@@ -1,6 +1,6 @@
 //! Builder types for the durable graph.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -81,6 +81,44 @@ pub struct NodeContext {
     /// This is how map-reduce / search-fanout branches receive custom input that
     /// differs from the graph's shared committed state.
     pub send_arg: Option<serde_json::Value>,
+    /// The root run id of the recursion tree this node executes within. For a
+    /// top-level run this equals `run_id`; for a subgraph/sub-agent child run it
+    /// is the shared ancestor, so a child a node spawns can preserve the root.
+    pub root_run_id: Option<RunId>,
+    /// The enclosing run's live recursion stack (root-first). A subgraph node
+    /// seeds an embedded child graph with these frames so the child extends the
+    /// parent's recursion tree instead of starting a fresh one.
+    pub recursion_frames: Vec<crate::graph::recursion::RecursionFrame>,
+    /// A per-run collector the executor provides so a subgraph node can report
+    /// the [`ChildRun`](crate::graph::ChildRun) it spawned back to the enclosing
+    /// run; `None` when no executor sink is attached (e.g. a hand-built context).
+    pub child_runs: Option<crate::graph::recursion::ChildRunSink>,
+}
+
+/// Behavior-free, introspectable metadata attached to a node by the builder.
+///
+/// Markers and free-form metadata recorded here never affect execution; they
+/// exist so the [topology export](crate::graph::export) can describe what a node
+/// *is* (a subgraph embedding, an interrupt point, a deferred join, …) without
+/// inspecting the node's opaque handler closure. All fields are optional and
+/// additive: an unset [`NodeMeta`] (the [`Default`]) contributes nothing.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct NodeMeta {
+    /// A human-readable node kind (e.g. `model`, `tool`, `subgraph`).
+    pub(crate) kind: Option<String>,
+    /// The node pauses the run before/at execution (an interrupt point).
+    pub(crate) interrupt: bool,
+    /// The node is a deferred join — it activates only after the rest of the
+    /// active frontier has drained (a barrier-style synthesis node).
+    pub(crate) deferred: bool,
+    /// The node embeds and runs a child graph (a subgraph node).
+    pub(crate) subgraph: bool,
+    /// Declared `goto` destination hints for a command-routing node, in the
+    /// order they were registered. Purely advisory: the runtime resolves the
+    /// real target from the emitted [`crate::graph::Command`] at runtime.
+    pub(crate) command_destinations: Vec<NodeId>,
+    /// Arbitrary, sorted key/value annotations carried into the export.
+    pub(crate) metadata: BTreeMap<String, String>,
 }
 
 /// A compiled-in node: id plus its handler.
@@ -172,6 +210,9 @@ impl<State> Clone for Branch<State> {
 /// [`super::GraphBuilder::overwrite`]).
 pub struct GraphBuilder<State, Update> {
     pub(crate) graph_id: GraphId,
+    /// Optional human-readable graph name carried into the topology export
+    /// (the `graph_id` remains the stable identifier).
+    pub(crate) name: Option<String>,
     pub(crate) nodes: HashMap<NodeId, BuilderNode<State, Update>>,
     pub(crate) edges: HashMap<NodeId, NodeId>,
     pub(crate) branches: HashMap<NodeId, Branch<State>>,
@@ -187,4 +228,6 @@ pub struct GraphBuilder<State, Update> {
     pub(crate) max_concurrency: Option<usize>,
     /// Default per-node handler timeout (`None` = no timeout).
     pub(crate) node_timeout: Option<Duration>,
+    /// Behavior-free per-node markers/metadata surfaced by the topology export.
+    pub(crate) node_meta: HashMap<NodeId, NodeMeta>,
 }

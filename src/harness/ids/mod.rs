@@ -58,6 +58,7 @@ impl_string_id!(EventId);
 impl_string_id!(ComponentId);
 impl_string_id!(GraphId);
 impl_string_id!(NodeId);
+impl_string_id!(TaskId);
 impl_string_id!(CheckpointId);
 impl_string_id!(InterruptId);
 

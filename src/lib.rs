@@ -115,10 +115,17 @@ pub use harness::observability::{
 pub use graph::SqliteCheckpointer;
 pub use graph::{
     Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource, CheckpointTuple,
-    Checkpointer, ClosureReducer, ClosureStateReducer, Command, CompiledGraph, DurabilityMode, END,
-    FileCheckpointer, ForkId, GraphBuilder, GraphDefaults, GraphEvent, GraphExecution,
-    GraphRunStatus, InMemoryCheckpointer, Interrupt, NodeContext, NodeResult, Reducer,
-    ResumeTarget, Route, RouteTarget, START, StateReducer, StateSnapshot,
+    Checkpointer, ChildRun, ChildRunSink, ClosureReducer, ClosureStateReducer, Command,
+    CompiledGraph, DurabilityMode, END, FileCheckpointer, ForkId, GraphBuilder, GraphDefaults,
+    GraphEvent, GraphExecution, GraphRunStatus, InMemoryCheckpointer, Interrupt, NodeContext,
+    NodeResult, RecursionFrame, RecursionPolicy, RecursionStack, Reducer, ResumeTarget, Route,
+    RouteTarget, RunTree, START, StateReducer, StateSnapshot,
+};
+
+// --- Graph: sub-agent nodes (delegate a graph step to a registered agent) ---
+pub use graph::{
+    HarnessAgent, HarnessSubAgent, SubAgentBudget, SubAgentInput, SubAgentNode, SubAgentOutput,
+    SubAgentPolicy, subagent_node,
 };
 
 // --- Graph: channel-per-field state model (additive; see state-channels.md) ---
@@ -140,4 +147,18 @@ pub use graph::{
 // --- Graph: export / visualization ---
 // Topology types are surfaced at the crate root; the `to_json`/`to_mermaid`
 // free functions stay behind `graph::export::` to avoid generic-name clashes.
-pub use graph::{ChannelInfo, ConditionalEdgeInfo, EdgeInfo, GraphTopology, NodeInfo, RouteInfo};
+pub use graph::{
+    ChannelInfo, ConditionalEdgeInfo, EdgeInfo, GraphPolicySummary, GraphTopology, NodeInfo,
+    NodePolicySummary, RouteInfo, ValidationReport, WaitingEdgeInfo,
+};
+
+// --- Graph: testkit (deterministic node doubles + run assertions) ---
+// The fluent `assert_graph` builder and node-double constructors stay behind
+// `graph::testkit::` (and are re-exported here) so downstream crates can test
+// graphs without a live model. Names are graph-test specific to avoid clashing
+// with the harness `testkit`.
+pub use graph::testkit::{
+    GraphAssertions, GraphEventRecorder, GraphRun, RetryCountingNode, StreamCollector,
+    assert_graph, failing_node, fanout_node, interrupting_node, noop_node, run_recorded,
+    scripted_route_node, scripted_update_node, subagent_fake_node, subgraph_test_node,
+};

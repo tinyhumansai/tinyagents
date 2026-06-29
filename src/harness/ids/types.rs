@@ -42,6 +42,16 @@ pub struct GraphId(pub(crate) String);
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub(crate) String);
 
+/// Identifies a unit of scheduled graph work (a node activation or a `Send`
+/// fanout task) within a run.
+///
+/// A `TaskId` distinguishes the individual recursive tasks a graph schedules —
+/// for example each child task produced by a `Send` fanout — so a
+/// [`crate::graph::recursion::RecursionFrame`] can name the exact task a nested
+/// call descends from, independent of the [`NodeId`] it ran.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TaskId(pub(crate) String);
+
 /// Identifies a persisted graph checkpoint.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CheckpointId(pub(crate) String);

@@ -35,7 +35,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 # Optional embedded SQLite checkpointer backend (`graph::checkpoint::sqlite`).
 # `bundled` compiles SQLite from vendored C source so no system library is
 # required; the dependency is pulled in only by the `sqlite` feature.
-rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 
 [features]
 default = []
