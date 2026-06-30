@@ -26,14 +26,114 @@ mod types;
 
 pub use types::*;
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::harness::events::{AgentEvent, EventListener, EventRecord, HarnessRunStatus};
-use crate::harness::ids::RunId;
+use crate::harness::ids::{CallId, RunId};
 use crate::harness::store::{AppendStore, JsonlAppendStore};
+
+// ---------------------------------------------------------------------------
+// AgentLatencyMetrics
+// ---------------------------------------------------------------------------
+
+impl AgentLatencyMetrics {
+    /// Builds latency rollups from durable observations for one agent run.
+    ///
+    /// Observations can contain redacted payload strings, but structural ids
+    /// must be preserved. Incomplete calls are ignored because there is no
+    /// terminal timestamp to measure against.
+    pub fn from_observations(observations: &[AgentObservation]) -> Self {
+        let mut metrics = Self::default();
+        let mut run_start: Option<u64> = None;
+        let mut model_starts: HashMap<CallId, (String, u64)> = HashMap::new();
+        let mut tool_starts: HashMap<CallId, (String, u64)> = HashMap::new();
+
+        for obs in observations {
+            match &obs.event {
+                AgentEvent::RunStarted { .. } => {
+                    if run_start.is_none() {
+                        run_start = Some(obs.ts_ms);
+                    }
+                }
+                AgentEvent::RunCompleted { .. } | AgentEvent::RunFailed { .. } => {
+                    if metrics.run_elapsed_ms.is_none()
+                        && let Some(start) = run_start
+                    {
+                        metrics.run_elapsed_ms = Some(obs.ts_ms.saturating_sub(start));
+                    }
+                }
+                AgentEvent::ModelStarted { call_id, model } => {
+                    model_starts.insert(call_id.clone(), (model.clone(), obs.ts_ms));
+                }
+                AgentEvent::ModelCompleted { call_id, .. } => {
+                    if let Some((name, start)) = model_starts.remove(call_id) {
+                        metrics.record_model_call(AgentCallLatency {
+                            call_id: call_id.clone(),
+                            kind: "model".to_string(),
+                            name,
+                            elapsed_ms: obs.ts_ms.saturating_sub(start),
+                        });
+                    }
+                }
+                AgentEvent::ToolStarted { call_id, tool_name } => {
+                    tool_starts.insert(call_id.clone(), (tool_name.clone(), obs.ts_ms));
+                }
+                AgentEvent::ToolCompleted { call_id, .. } => {
+                    if let Some((name, start)) = tool_starts.remove(call_id) {
+                        metrics.record_tool_call(AgentCallLatency {
+                            call_id: call_id.clone(),
+                            kind: "tool".to_string(),
+                            name,
+                            elapsed_ms: obs.ts_ms.saturating_sub(start),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        metrics
+    }
+
+    /// Builds a run-level latency summary from a compact status snapshot.
+    ///
+    /// Status snapshots do not contain per-call timings, but they do carry
+    /// started/updated/ended timestamps for end-to-end elapsed time.
+    pub fn from_status(status: &HarnessRunStatus) -> Self {
+        let end = status.ended_at.unwrap_or(status.updated_at);
+        Self {
+            run_elapsed_ms: duration_ms(status.started_at, end),
+            ..Self::default()
+        }
+    }
+
+    /// Average model-call latency for completed calls.
+    pub fn average_model_ms(&self) -> Option<u64> {
+        average(self.total_model_ms, self.model_calls.len())
+    }
+
+    /// Average tool-call latency for completed calls.
+    pub fn average_tool_ms(&self) -> Option<u64> {
+        average(self.total_tool_ms, self.tool_calls.len())
+    }
+
+    fn record_model_call(&mut self, latency: AgentCallLatency) {
+        self.total_model_ms = self.total_model_ms.saturating_add(latency.elapsed_ms);
+        self.max_model_ms = self.max_model_ms.max(latency.elapsed_ms);
+        self.model_calls.push(latency);
+    }
+
+    fn record_tool_call(&mut self, latency: AgentCallLatency) {
+        self.total_tool_ms = self.total_tool_ms.saturating_add(latency.elapsed_ms);
+        self.max_tool_ms = self.max_tool_ms.max(latency.elapsed_ms);
+        self.tool_calls.push(latency);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // InMemoryEventJournal
@@ -362,6 +462,16 @@ impl EventListener for JsonlSink {
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+fn average(total: u64, count: usize) -> Option<u64> {
+    (count > 0).then_some(total / count as u64)
+}
+
+fn duration_ms(start: SystemTime, end: SystemTime) -> Option<u64> {
+    end.duration_since(start)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
+}
 
 /// Builds a uniform poisoned-lock validation error for the in-memory backends.
 fn poisoned<E: std::fmt::Display>(what: &str, err: E) -> crate::error::TinyAgentsError {

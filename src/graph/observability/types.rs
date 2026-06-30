@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::graph::status::GraphRunStatus;
 use crate::graph::stream::{GraphEvent, GraphEventSink};
-use crate::harness::ids::{CheckpointId, EventId, GraphId, RunId, ThreadId};
+use crate::harness::ids::{CheckpointId, EventId, GraphId, NodeId, RunId, ThreadId};
 use crate::harness::store::AppendStore;
 
 // ---------------------------------------------------------------------------
@@ -79,6 +79,73 @@ pub struct GraphObservation {
 
     /// The typed event payload.
     pub event: GraphEvent,
+}
+
+// ---------------------------------------------------------------------------
+// Graph latency metrics
+// ---------------------------------------------------------------------------
+
+/// Latency for one graph superstep.
+///
+/// Derived by correlating `step.started` and `step.completed` observations with
+/// the same `step` value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphStepLatency {
+    /// 1-based graph superstep.
+    pub step: usize,
+
+    /// Wall-clock elapsed time between step start and completion.
+    pub elapsed_ms: u64,
+}
+
+/// Latency for one node handler execution.
+///
+/// Derived by correlating `node.started` with either `node.completed` or
+/// `node.failed` for the same node and step. The `failed` flag distinguishes
+/// successful and failed terminal observations while keeping both in the same
+/// latency rollup.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphNodeLatency {
+    /// Node whose handler ran.
+    pub node: NodeId,
+
+    /// 1-based graph superstep.
+    pub step: usize,
+
+    /// Wall-clock elapsed time between node start and terminal observation.
+    pub elapsed_ms: u64,
+
+    /// True when the node ended with `node.failed`.
+    pub failed: bool,
+}
+
+/// Summarized latency metrics for a single graph run.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphLatencyMetrics {
+    /// End-to-end graph run latency, when both run start and terminal events
+    /// exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_elapsed_ms: Option<u64>,
+
+    /// Per-superstep latencies in completion order.
+    #[serde(default)]
+    pub steps: Vec<GraphStepLatency>,
+
+    /// Per-node handler latencies in terminal-event order.
+    #[serde(default)]
+    pub nodes: Vec<GraphNodeLatency>,
+
+    /// Sum of completed superstep latency.
+    pub total_step_ms: u64,
+
+    /// Slowest completed superstep.
+    pub max_step_ms: u64,
+
+    /// Sum of completed node-handler latency.
+    pub total_node_ms: u64,
+
+    /// Slowest completed node handler.
+    pub max_node_ms: u64,
 }
 
 // ---------------------------------------------------------------------------

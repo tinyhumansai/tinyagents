@@ -40,7 +40,7 @@
 
 mod types;
 
-pub use types::{CompiledGraph, GraphExecution, ResumeTarget, StateSnapshot};
+pub use types::{CompiledGraph, GraphExecution, GraphInput, ResumeTarget, StateSnapshot};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -125,12 +125,13 @@ struct Activation {
     send_arg: Option<serde_json::Value>,
 }
 
-fn dedupe(nodes: Vec<NodeId>) -> Vec<NodeId> {
-    let mut seen = HashSet::new();
-    nodes
-        .into_iter()
-        .filter(|n| seen.insert(n.clone()))
-        .collect()
+impl Activation {
+    fn node(node: NodeId) -> Self {
+        Self {
+            node,
+            send_arg: None,
+        }
+    }
 }
 
 /// Maps an [`Activation`] slice to its node ids (for events, status, and
@@ -311,8 +312,30 @@ where
     /// Without a thread id no checkpoints are persisted even if a checkpointer
     /// is configured, since checkpoints are keyed by thread.
     pub async fn run(&self, state: State) -> Result<GraphExecution<State>> {
-        self.execute(state, vec![self.entry.clone()], None, HashMap::new())
-            .await
+        self.execute(
+            state,
+            vec![Activation::node(self.entry.clone())],
+            None,
+            HashMap::new(),
+        )
+        .await
+    }
+
+    /// Runs the graph with one or more external inputs in the first superstep.
+    ///
+    /// [`GraphInput::start`] targets the graph's compiled entry node, preserving
+    /// the usual `START -> entry` contract for user input. Additional inputs may
+    /// target any real node directly, so separate LLM/tool loops can be seeded
+    /// together. Inputs are not deduplicated: two inputs aimed at the same node
+    /// produce two separate activations, each with its own
+    /// [`NodeContext::send_arg`](crate::graph::NodeContext::send_arg).
+    pub async fn run_with_inputs(
+        &self,
+        state: State,
+        inputs: impl IntoIterator<Item = GraphInput>,
+    ) -> Result<GraphExecution<State>> {
+        let active = self.initial_inputs(inputs)?;
+        self.execute(state, active, None, HashMap::new()).await
     }
 
     /// Runs the graph under a thread id, persisting checkpoints at every
@@ -324,11 +347,25 @@ where
     ) -> Result<GraphExecution<State>> {
         self.execute(
             state,
-            vec![self.entry.clone()],
+            vec![Activation::node(self.entry.clone())],
             Some(thread_id.into()),
             HashMap::new(),
         )
         .await
+    }
+
+    /// Runs the graph under a thread id with one or more external inputs in the
+    /// first superstep, persisting checkpoints at every boundary when a
+    /// checkpointer is configured.
+    pub async fn run_with_thread_inputs(
+        &self,
+        thread_id: impl Into<ThreadId>,
+        state: State,
+        inputs: impl IntoIterator<Item = GraphInput>,
+    ) -> Result<GraphExecution<State>> {
+        let active = self.initial_inputs(inputs)?;
+        self.execute(state, active, Some(thread_id.into()), HashMap::new())
+            .await
     }
 
     /// Resumes an interrupted run from its latest checkpoint, re-running the
@@ -401,8 +438,44 @@ where
             }
         }
 
-        self.execute(checkpoint.state, active, Some(thread_id), resume_map)
-            .await
+        self.execute(
+            checkpoint.state,
+            active.into_iter().map(Activation::node).collect(),
+            Some(thread_id),
+            resume_map,
+        )
+        .await
+    }
+
+    fn initial_inputs(
+        &self,
+        inputs: impl IntoIterator<Item = GraphInput>,
+    ) -> Result<Vec<Activation>> {
+        let mut active = Vec::new();
+        for input in inputs {
+            let node = if input.node.as_str() == START {
+                self.entry.clone()
+            } else if input.node.as_str() == END {
+                return Err(TinyAgentsError::Graph(
+                    "graph input cannot target END".to_string(),
+                ));
+            } else {
+                if !self.nodes.contains_key(&input.node) {
+                    return Err(TinyAgentsError::MissingNode(input.node.to_string()));
+                }
+                input.node
+            };
+            active.push(Activation {
+                node,
+                send_arg: input.payload,
+            });
+        }
+        if active.is_empty() {
+            return Err(TinyAgentsError::Validation(
+                "run_with_inputs requires at least one input".to_string(),
+            ));
+        }
+        Ok(active)
     }
 
     // ---- State inspection & time travel ------------------------------------
@@ -611,7 +684,7 @@ where
     async fn execute(
         &self,
         state: State,
-        initial_active: Vec<NodeId>,
+        initial_active: Vec<Activation>,
         thread_id: Option<ThreadId>,
         resume_map: HashMap<NodeId, serde_json::Value>,
     ) -> Result<GraphExecution<State>> {
@@ -664,7 +737,7 @@ where
         &self,
         run_id: RunId,
         mut state: State,
-        initial_active: Vec<NodeId>,
+        initial_active: Vec<Activation>,
         thread_id: Option<ThreadId>,
         mut resume_map: HashMap<NodeId, serde_json::Value>,
     ) -> Result<GraphExecution<State>> {
@@ -720,13 +793,7 @@ where
         let mut all_child_runs: Vec<ChildRun> = Vec::new();
         // Per-node activation counts for `max_visits_per_node` enforcement.
         let mut node_visits: HashMap<NodeId, usize> = HashMap::new();
-        let mut active: Vec<Activation> = dedupe(initial_active)
-            .into_iter()
-            .map(|node| Activation {
-                node,
-                send_arg: None,
-            })
-            .collect();
+        let mut active = initial_active;
         // Barrier/waiting-edge arrivals accumulate across supersteps: a waiting
         // node only activates once every required predecessor has arrived.
         let mut barrier_arrivals: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();

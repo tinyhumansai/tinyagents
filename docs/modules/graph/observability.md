@@ -91,6 +91,10 @@ step. Readers must never need to deserialize full graph state to answer basic
 questions such as "is this run still active?", "which node is executing?", or
 "which interrupt is waiting?".
 
+Run-level latency can be derived from `started_at` and either `ended_at` or
+`updated_at`. This status-derived view is compact and cheap, but detailed step
+and node latency comes from durable observations.
+
 ## Observability Event Model
 
 Every graph event should carry stable envelope data:
@@ -141,6 +145,38 @@ Required observation kinds:
 - `stream.closed`
 - `debug.payload`
 
+## Latency Metrics
+
+The observability module exposes `GraphLatencyMetrics` for durable graph
+latency rollups. Metrics are derived from `GraphObservation` timestamps, so a
+late UI or supervisor can compute them from the event journal without holding
+the original in-process stream.
+
+Graph latency metrics include:
+
+- `run_elapsed_ms`: first `run.started` to first terminal `run.completed` or
+  `run.failed`
+- step latency: `step.started` to `step.completed`, correlated by superstep
+- node latency: `node.started` to `node.completed` or `node.failed`,
+  correlated by `(node_id, step)`
+- total, max, and average latency helpers for completed steps
+- total, max, and average latency helpers for completed node handlers
+
+```rust
+let observations = journal.read_from(run_id, 0).await?;
+let metrics = GraphLatencyMetrics::from_observations(&observations);
+
+let run_ms = metrics.run_elapsed_ms;
+let slowest_node_ms = metrics.max_node_ms;
+let average_step_ms = metrics.average_step_ms();
+```
+
+Incomplete work is ignored. A `step.started` without `step.completed`, or a
+`node.started` without `node.completed` / `node.failed`, does not produce a
+latency record because there is no terminal timestamp. Failed nodes are retained
+with `failed = true` so dashboards can separate slow successes from slow
+failures.
+
 ## Event Journal And Listener Replay
 
 Outside listeners need two paths:
@@ -189,6 +225,7 @@ Cacheable graph observability records include:
 - latest status by run id
 - latest status by thread id
 - node/task timing rollups
+- graph latency rollups from durable observations
 - latest state-update summary per step
 - checkpoint metadata summaries
 - visualization/introspection snapshots

@@ -118,3 +118,31 @@ Use `Command` for:
 Use `Send` for dynamic fanout where each target invocation receives custom
 input that can differ from the graph's main state. This is the primitive for
 map-reduce, search fanout, parallel tool calls, and per-item scoring.
+
+## External Run Inputs
+
+Most runs enter through the compiled `START -> entry` edge:
+
+```rust
+graph.run(state).await?;
+```
+
+When the caller needs to seed multiple graph loops at once, use
+`GraphInput`:
+
+```rust
+graph
+    .run_with_inputs(
+        state,
+        [
+            GraphInput::start(json!({ "message": "hello" })),
+            GraphInput::new("tool_loop", json!({ "tool": "search" })),
+        ],
+    )
+    .await?;
+```
+
+`GraphInput::start(..)` resolves to the compiled entry node and delivers its
+payload through `NodeContext::send_arg`. `GraphInput::new(node, ..)` targets a
+real node directly in the first superstep. Inputs are not deduplicated, so two
+inputs aimed at the same node run two activations with distinct payloads.

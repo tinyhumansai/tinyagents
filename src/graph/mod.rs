@@ -25,6 +25,7 @@ pub mod command;
 pub mod compiled;
 pub mod export;
 pub mod observability;
+pub mod orchestration;
 pub mod recursion;
 pub mod reducer;
 pub mod status;
@@ -49,15 +50,23 @@ pub use checkpoint::{
     Checkpointer, DurabilityMode, FileCheckpointer, InMemoryCheckpointer, PendingWrite,
 };
 pub use command::{Command, Interrupt, NodeResult, RouteTarget, Send};
-pub use compiled::{CompiledGraph, GraphExecution, ResumeTarget, StateSnapshot};
+pub use compiled::{CompiledGraph, GraphExecution, GraphInput, ResumeTarget, StateSnapshot};
 pub use export::{
     ChannelInfo, ConditionalEdgeInfo, EdgeInfo, GraphPolicySummary, GraphTopology, NodeInfo,
     NodePolicySummary, RouteInfo, ValidationReport, WaitingEdgeInfo, blueprint_to_json,
     blueprint_to_mermaid, blueprint_to_topology, from_json, to_json, to_mermaid,
 };
 pub use observability::{
-    GraphEventJournal, GraphObservation, GraphStatusStore, InMemoryGraphEventJournal,
-    InMemoryGraphStatusStore, JournalGraphSink, StoreGraphEventJournal,
+    GraphEventJournal, GraphLatencyMetrics, GraphNodeLatency, GraphObservation, GraphStatusStore,
+    GraphStepLatency, InMemoryGraphEventJournal, InMemoryGraphStatusStore, JournalGraphSink,
+    StoreGraphEventJournal,
+};
+pub use orchestration::{
+    InMemoryTaskStore, OrchestrationControlOutcome, OrchestrationTaskFilter, OrchestrationTaskKind,
+    OrchestrationTaskRecord, OrchestrationTaskResult, OrchestrationTaskSpec,
+    OrchestrationTaskStatus, OrchestrationTool, OrchestrationToolKind, TaskStore,
+    orchestration_tool_schema, orchestration_tool_schemas, orchestration_tools,
+    register_orchestration_tools,
 };
 pub use recursion::{
     ChildRun, ChildRunSink, RecursionFrame, RecursionPolicy, RecursionStack, RunTree,

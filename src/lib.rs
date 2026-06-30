@@ -125,8 +125,9 @@ pub use harness::cancel::CancellationToken;
 
 // --- Harness: durable observability (journals, status stores, sinks) ---
 pub use harness::observability::{
-    AgentObservation, FanOutSink, HarnessEventJournal, HarnessStatusStore, InMemoryEventJournal,
-    InMemoryStatusStore, JournalSink, JsonlSink, RedactingSink, StoreEventJournal,
+    AgentCallLatency, AgentLatencyMetrics, AgentObservation, FanOutSink, HarnessEventJournal,
+    HarnessStatusStore, InMemoryEventJournal, InMemoryStatusStore, JournalSink, JsonlSink,
+    RedactingSink, StoreEventJournal,
 };
 
 // --- Graph: durable execution model (LangGraph-style) ---
@@ -139,9 +140,9 @@ pub use graph::{
     Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource, CheckpointTuple,
     Checkpointer, ChildRun, ChildRunSink, ClosureReducer, ClosureStateReducer, Command,
     CompiledGraph, DurabilityMode, END, FileCheckpointer, ForkId, GraphBuilder, GraphDefaults,
-    GraphEvent, GraphExecution, GraphRunStatus, InMemoryCheckpointer, Interrupt, NodeContext,
-    NodeResult, RecursionFrame, RecursionPolicy, RecursionStack, Reducer, ResumeTarget, Route,
-    RouteTarget, RunTree, START, StateReducer, StateSnapshot,
+    GraphEvent, GraphExecution, GraphInput, GraphRunStatus, InMemoryCheckpointer, Interrupt,
+    NodeContext, NodeResult, RecursionFrame, RecursionPolicy, RecursionStack, Reducer,
+    ResumeTarget, Route, RouteTarget, RunTree, START, StateReducer, StateSnapshot,
 };
 
 // --- Graph: sub-agent nodes (delegate a graph step to a registered agent) ---
@@ -162,8 +163,18 @@ pub use graph::{
 // Names are graph-prefixed so they never collide with the harness observability
 // re-exports above.
 pub use graph::{
-    GraphEventJournal, GraphObservation, GraphStatusStore, InMemoryGraphEventJournal,
-    InMemoryGraphStatusStore, JournalGraphSink, StoreGraphEventJournal,
+    GraphEventJournal, GraphLatencyMetrics, GraphNodeLatency, GraphObservation, GraphStatusStore,
+    GraphStepLatency, InMemoryGraphEventJournal, InMemoryGraphStatusStore, JournalGraphSink,
+    StoreGraphEventJournal,
+};
+
+// --- Graph: orchestration tools (ordinary harness Tool implementations) ---
+pub use graph::{
+    InMemoryTaskStore, OrchestrationControlOutcome, OrchestrationTaskFilter, OrchestrationTaskKind,
+    OrchestrationTaskRecord, OrchestrationTaskResult, OrchestrationTaskSpec,
+    OrchestrationTaskStatus, OrchestrationTool, OrchestrationToolKind, TaskStore,
+    orchestration_tool_schema, orchestration_tool_schemas, orchestration_tools,
+    register_orchestration_tools,
 };
 
 // --- Graph: export / visualization ---

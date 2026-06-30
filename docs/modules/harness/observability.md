@@ -29,7 +29,8 @@ TinyAgents should use typed Rust events rather than stringly callback names.
 - Support deterministic test collectors.
 - Support durable event journals through `store`.
 - Preserve parent/root run relationships.
-- Include usage, cost, cache, retry, fallback, and timing data.
+- Include usage, cost, cache, retry, fallback, and latency data.
+- Capture model-call and tool-call latency as first-class metrics.
 - Include graph run ids, graph names, super-step indexes, node ids, routing
   commands, checkpoint ids, and interrupt metadata for state-graph runs.
 
@@ -82,6 +83,10 @@ Status should move through `Pending`, `Running`, `Waiting`, `Completed`,
 `Failed`, or `Cancelled` states while `current_phase` describes the active
 harness operation. A graph node that invokes a harness should be able to read
 the child harness status through `parent_run_id` and `root_run_id`.
+
+Run-level latency can be derived from `started_at` and either `ended_at` or
+`updated_at`. This status-derived view is compact and cheap, but it only reports
+end-to-end elapsed time; per-call latency comes from the event journal.
 
 ```rust
 #[async_trait]
@@ -150,6 +155,41 @@ Event kinds should include:
 - `graph.run.failed`
 - `graph.checkpoint.saved`
 
+## Latency Metrics
+
+The observability module exposes `AgentLatencyMetrics` for durable latency
+rollups. Metrics are derived from `AgentObservation` timestamps rather than
+payload metadata, so they work for in-memory journals, JSONL-backed journals,
+and redacted sinks that preserve structural ids.
+
+Agent latency metrics include:
+
+- `run_elapsed_ms`: first `run.started` to first terminal `run.completed` or
+  `run.failed`
+- model call latency: `model.started` to `model.completed`, correlated by
+  `CallId`
+- tool call latency: `tool.started` to `tool.completed`, correlated by `CallId`
+- total, max, and average latency helpers for completed model calls
+- total, max, and average latency helpers for completed tool calls
+
+Tool-call latency is required because tools are often the slowest part of an
+agent turn: retrieval, browser work, RPC calls, file processing, and sub-agent
+tools all need to be visible independently from provider latency.
+
+```rust
+let observations = journal.read_from(run_id, 0).await?;
+let metrics = AgentLatencyMetrics::from_observations(&observations);
+
+let run_ms = metrics.run_elapsed_ms;
+let slowest_tool_ms = metrics.max_tool_ms;
+let average_tool_ms = metrics.average_tool_ms();
+```
+
+Incomplete calls are ignored. A `model.started` without `model.completed` or a
+`tool.started` without `tool.completed` does not produce a latency record
+because there is no terminal timestamp. Failed runs still report
+`run_elapsed_ms` when `run.failed` is observed.
+
 ## Event Journal And Listener Replay
 
 The harness should support both live event subscribers and durable replay. A UI
@@ -194,6 +234,7 @@ Cacheable observability projections include:
 - latest thread status rollup
 - usage and cost rollups
 - model-call and tool-call timing summaries
+- agent latency rollups from durable observations
 - cache-hit summaries by model, tool, or prompt version
 - redacted prompt/message previews for UIs
 - event replay cursors for test collectors

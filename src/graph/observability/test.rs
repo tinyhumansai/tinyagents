@@ -8,7 +8,7 @@ use crate::graph::builder::{GraphBuilder, NodeContext};
 use crate::graph::command::NodeResult;
 use crate::graph::compiled::CompiledGraph;
 use crate::graph::stream::{CollectingSink, GraphEvent, GraphEventSink};
-use crate::harness::ids::{ExecutionStatus, GraphId, RunId};
+use crate::harness::ids::{ExecutionStatus, GraphId, NodeId, RunId};
 use crate::harness::store::InMemoryAppendStore;
 use std::sync::Arc;
 
@@ -38,6 +38,120 @@ fn failing_graph() -> CompiledGraph<i32, i32> {
         .set_finish("boom")
         .compile()
         .unwrap()
+}
+
+fn graph_obs(run: &str, offset: u64, step: usize, event: GraphEvent) -> GraphObservation {
+    GraphObservation {
+        event_id: crate::harness::ids::EventId::new(format!("g-evt-{offset}")),
+        run_id: RunId::new(run),
+        root_run_id: RunId::new(run),
+        parent_run_id: None,
+        thread_id: None,
+        graph_id: GraphId::new("graph-latency"),
+        checkpoint_id: None,
+        namespace: Vec::new(),
+        step,
+        offset,
+        ts_ms: 1_000 + offset,
+        event,
+    }
+}
+
+#[test]
+fn graph_latency_metrics_include_run_steps_and_nodes() {
+    let run_id = RunId::new("run-latency");
+    let node_a = NodeId::new("a");
+    let node_b = NodeId::new("b");
+    let observations = vec![
+        graph_obs(
+            run_id.as_str(),
+            0,
+            0,
+            GraphEvent::RunStarted {
+                run_id: run_id.clone(),
+            },
+        ),
+        graph_obs(
+            run_id.as_str(),
+            10,
+            1,
+            GraphEvent::StepStarted {
+                step: 1,
+                active: vec![node_a.clone(), node_b.clone()],
+            },
+        ),
+        graph_obs(
+            run_id.as_str(),
+            20,
+            1,
+            GraphEvent::NodeStarted {
+                node: node_a.clone(),
+                step: 1,
+            },
+        ),
+        graph_obs(
+            run_id.as_str(),
+            45,
+            1,
+            GraphEvent::NodeCompleted {
+                node: node_a.clone(),
+                step: 1,
+            },
+        ),
+        graph_obs(
+            run_id.as_str(),
+            50,
+            1,
+            GraphEvent::NodeStarted {
+                node: node_b.clone(),
+                step: 1,
+            },
+        ),
+        graph_obs(
+            run_id.as_str(),
+            80,
+            1,
+            GraphEvent::NodeFailed {
+                node: node_b.clone(),
+                step: 1,
+                error: "boom".to_string(),
+            },
+        ),
+        graph_obs(
+            run_id.as_str(),
+            90,
+            1,
+            GraphEvent::StepCompleted { step: 1 },
+        ),
+        graph_obs(
+            run_id.as_str(),
+            100,
+            1,
+            GraphEvent::RunFailed {
+                run_id: run_id.clone(),
+                error: "boom".to_string(),
+            },
+        ),
+    ];
+
+    let metrics = GraphLatencyMetrics::from_observations(&observations);
+    assert_eq!(metrics.run_elapsed_ms, Some(100));
+    assert_eq!(metrics.steps.len(), 1);
+    assert_eq!(metrics.steps[0].step, 1);
+    assert_eq!(metrics.steps[0].elapsed_ms, 80);
+    assert_eq!(metrics.total_step_ms, 80);
+    assert_eq!(metrics.average_step_ms(), Some(80));
+
+    assert_eq!(metrics.nodes.len(), 2);
+    assert_eq!(metrics.nodes[0].node, node_a);
+    assert_eq!(metrics.nodes[0].elapsed_ms, 25);
+    assert!(!metrics.nodes[0].failed);
+    assert_eq!(metrics.nodes[1].node, node_b);
+    assert_eq!(metrics.nodes[1].elapsed_ms, 30);
+    assert!(metrics.nodes[1].failed);
+    assert_eq!(metrics.total_node_ms, 55);
+    assert_eq!(metrics.max_node_ms, 30);
+    assert_eq!(metrics.average_node_ms(), Some(27));
 }
 
 #[tokio::test]

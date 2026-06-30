@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::graph::builder::START;
 use crate::graph::builder::{Branch, BuilderNode, NodeMeta};
 use crate::graph::checkpoint::{
     CheckpointConfig, CheckpointMetadata, Checkpointer, DurabilityMode,
@@ -142,6 +143,48 @@ pub struct GraphExecution<State> {
     pub status: GraphRunStatus,
     /// The latest persisted checkpoint id, if checkpointing was enabled.
     pub checkpoint_id: Option<CheckpointId>,
+}
+
+/// One external input used to seed a graph run.
+///
+/// Most runs should target [`START`] via [`GraphInput::start`], which delivers
+/// the payload to the graph's compiled entry node. More complex orchestrations
+/// can seed additional nodes in the same first superstep, letting independent
+/// loops receive user input, tool results, webhook payloads, or other external
+/// events without forcing every input through one entry handler.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphInput {
+    /// Target node for this input. `__start__` is accepted as the virtual entry
+    /// target and is resolved to the graph's compiled entry node at run time.
+    pub node: NodeId,
+    /// Optional per-input payload delivered as [`NodeContext::send_arg`].
+    pub payload: Option<serde_json::Value>,
+}
+
+impl GraphInput {
+    /// Delivers `payload` to the graph's compiled entry node.
+    pub fn start(payload: serde_json::Value) -> Self {
+        Self {
+            node: NodeId::from(START),
+            payload: Some(payload),
+        }
+    }
+
+    /// Delivers `payload` directly to `node` in the first superstep.
+    pub fn new(node: impl Into<NodeId>, payload: serde_json::Value) -> Self {
+        Self {
+            node: node.into(),
+            payload: Some(payload),
+        }
+    }
+
+    /// Activates `node` without a per-input payload.
+    pub fn node(node: impl Into<NodeId>) -> Self {
+        Self {
+            node: node.into(),
+            payload: None,
+        }
+    }
 }
 
 impl<State> GraphExecution<State> {

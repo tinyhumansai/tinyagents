@@ -32,16 +32,127 @@ mod types;
 
 pub use types::*;
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::graph::status::GraphRunStatus;
 use crate::graph::stream::{GraphEvent, GraphEventSink};
-use crate::harness::ids::{CheckpointId, EventId, GraphId, RunId, ThreadId};
+use crate::harness::ids::{CheckpointId, EventId, GraphId, NodeId, RunId, ThreadId};
 use crate::harness::store::AppendStore;
+
+// ---------------------------------------------------------------------------
+// GraphLatencyMetrics
+// ---------------------------------------------------------------------------
+
+impl GraphLatencyMetrics {
+    /// Builds latency rollups from durable observations for one graph run.
+    ///
+    /// Incomplete steps or node executions are ignored because there is no
+    /// terminal timestamp to measure against. Duplicate node activations for the
+    /// same `(node, step)` are paired in FIFO order.
+    pub fn from_observations(observations: &[GraphObservation]) -> Self {
+        let mut metrics = Self::default();
+        let mut run_start: Option<u64> = None;
+        let mut step_starts: HashMap<usize, u64> = HashMap::new();
+        let mut node_starts: HashMap<(NodeId, usize), VecDeque<u64>> = HashMap::new();
+
+        for obs in observations {
+            match &obs.event {
+                GraphEvent::RunStarted { .. } => {
+                    if run_start.is_none() {
+                        run_start = Some(obs.ts_ms);
+                    }
+                }
+                GraphEvent::RunCompleted { .. } | GraphEvent::RunFailed { .. } => {
+                    if metrics.run_elapsed_ms.is_none()
+                        && let Some(start) = run_start
+                    {
+                        metrics.run_elapsed_ms = Some(obs.ts_ms.saturating_sub(start));
+                    }
+                }
+                GraphEvent::StepStarted { step, .. } => {
+                    step_starts.insert(*step, obs.ts_ms);
+                }
+                GraphEvent::StepCompleted { step } => {
+                    if let Some(start) = step_starts.remove(step) {
+                        metrics.record_step(GraphStepLatency {
+                            step: *step,
+                            elapsed_ms: obs.ts_ms.saturating_sub(start),
+                        });
+                    }
+                }
+                GraphEvent::NodeStarted { node, step } => {
+                    node_starts
+                        .entry((node.clone(), *step))
+                        .or_default()
+                        .push_back(obs.ts_ms);
+                }
+                GraphEvent::NodeCompleted { node, step } => {
+                    if let Some(start) = pop_node_start(&mut node_starts, node, *step) {
+                        metrics.record_node(GraphNodeLatency {
+                            node: node.clone(),
+                            step: *step,
+                            elapsed_ms: obs.ts_ms.saturating_sub(start),
+                            failed: false,
+                        });
+                    }
+                }
+                GraphEvent::NodeFailed { node, step, .. } => {
+                    if let Some(start) = pop_node_start(&mut node_starts, node, *step) {
+                        metrics.record_node(GraphNodeLatency {
+                            node: node.clone(),
+                            step: *step,
+                            elapsed_ms: obs.ts_ms.saturating_sub(start),
+                            failed: true,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        metrics
+    }
+
+    /// Builds a run-level latency summary from a compact status snapshot.
+    ///
+    /// Status snapshots do not contain per-step or per-node timings, but they
+    /// do carry started/updated/ended timestamps for end-to-end elapsed time.
+    pub fn from_status(status: &GraphRunStatus) -> Self {
+        let end = status.ended_at.unwrap_or(status.updated_at);
+        Self {
+            run_elapsed_ms: duration_ms(status.started_at, end),
+            ..Self::default()
+        }
+    }
+
+    /// Average completed-step latency.
+    pub fn average_step_ms(&self) -> Option<u64> {
+        average(self.total_step_ms, self.steps.len())
+    }
+
+    /// Average completed-node latency.
+    pub fn average_node_ms(&self) -> Option<u64> {
+        average(self.total_node_ms, self.nodes.len())
+    }
+
+    fn record_step(&mut self, latency: GraphStepLatency) {
+        self.total_step_ms = self.total_step_ms.saturating_add(latency.elapsed_ms);
+        self.max_step_ms = self.max_step_ms.max(latency.elapsed_ms);
+        self.steps.push(latency);
+    }
+
+    fn record_node(&mut self, latency: GraphNodeLatency) {
+        self.total_node_ms = self.total_node_ms.saturating_add(latency.elapsed_ms);
+        self.max_node_ms = self.max_node_ms.max(latency.elapsed_ms);
+        self.nodes.push(latency);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // InMemoryGraphEventJournal
@@ -294,6 +405,30 @@ fn checkpoint_of(event: &GraphEvent) -> Option<CheckpointId> {
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+fn pop_node_start(
+    starts: &mut HashMap<(NodeId, usize), VecDeque<u64>>,
+    node: &NodeId,
+    step: usize,
+) -> Option<u64> {
+    let key = (node.clone(), step);
+    let queue = starts.get_mut(&key)?;
+    let start = queue.pop_front();
+    if queue.is_empty() {
+        starts.remove(&key);
+    }
+    start
+}
+
+fn average(total: u64, count: usize) -> Option<u64> {
+    (count > 0).then_some(total / count as u64)
+}
+
+fn duration_ms(start: SystemTime, end: SystemTime) -> Option<u64> {
+    end.duration_since(start)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
+}
 
 /// Returns the current time in Unix-epoch milliseconds, saturating at `0`.
 pub(crate) fn now_ms() -> u64 {

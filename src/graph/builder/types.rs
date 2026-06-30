@@ -77,9 +77,11 @@ pub struct NodeContext {
     /// (fan-out) superstep; `None` in sequential mode or single-node steps.
     pub fork: Option<ForkId>,
     /// The per-invocation argument when this activation was scheduled by a
-    /// [`crate::graph::Send`] packet; `None` for normal edge/`goto` activations.
-    /// This is how map-reduce / search-fanout branches receive custom input that
-    /// differs from the graph's shared committed state.
+    /// [`crate::graph::Send`] packet or seeded through
+    /// [`crate::graph::GraphInput`]; `None` for normal edge/`goto` activations.
+    /// This is how map-reduce / search-fanout branches and external graph
+    /// inputs receive custom data that differs from the graph's shared
+    /// committed state.
     pub send_arg: Option<serde_json::Value>,
     /// The root run id of the recursion tree this node executes within. For a
     /// top-level run this equals `run_id`; for a subgraph/sub-agent child run it

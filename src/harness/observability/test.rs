@@ -5,10 +5,10 @@
 use std::sync::Arc;
 
 use crate::harness::events::{AgentEvent, EventListener, EventRecord, HarnessRunStatus, LimitKind};
-use crate::harness::ids::{ComponentId, EventId, RunId, ThreadId};
+use crate::harness::ids::{CallId, ComponentId, EventId, RunId, ThreadId};
 use crate::harness::observability::{
-    AgentObservation, FanOutSink, HarnessEventJournal, HarnessStatusStore, InMemoryEventJournal,
-    InMemoryStatusStore, JournalSink, RedactingSink, StoreEventJournal,
+    AgentLatencyMetrics, AgentObservation, FanOutSink, HarnessEventJournal, HarnessStatusStore,
+    InMemoryEventJournal, InMemoryStatusStore, JournalSink, RedactingSink, StoreEventJournal,
 };
 use crate::harness::store::InMemoryAppendStore;
 
@@ -86,6 +86,80 @@ async fn store_backed_journal_append_read_round_trip() {
     let tail = journal.read_from("run-x", 1).await.unwrap();
     assert_eq!(tail, vec![b]);
     assert_eq!(journal.read_from("run-x", 5).await.unwrap().len(), 0);
+}
+
+#[test]
+fn agent_latency_metrics_include_model_tool_and_run_elapsed() {
+    let run_id = RunId::new("run-latency");
+    let model_id = CallId::new("model-1");
+    let tool_id = CallId::new("tool-1");
+
+    let observations = vec![
+        obs(
+            "run-latency",
+            0,
+            AgentEvent::RunStarted {
+                run_id: run_id.clone(),
+                thread_id: None,
+            },
+        ),
+        obs(
+            "run-latency",
+            10,
+            AgentEvent::ModelStarted {
+                call_id: model_id.clone(),
+                model: "gpt-test".to_string(),
+            },
+        ),
+        obs(
+            "run-latency",
+            40,
+            AgentEvent::ModelCompleted {
+                call_id: model_id.clone(),
+                usage: None,
+            },
+        ),
+        obs(
+            "run-latency",
+            50,
+            AgentEvent::ToolStarted {
+                call_id: tool_id.clone(),
+                tool_name: "lookup".to_string(),
+            },
+        ),
+        obs(
+            "run-latency",
+            75,
+            AgentEvent::ToolCompleted {
+                call_id: tool_id.clone(),
+                tool_name: "lookup".to_string(),
+            },
+        ),
+        obs(
+            "run-latency",
+            90,
+            AgentEvent::RunCompleted {
+                run_id: run_id.clone(),
+            },
+        ),
+    ];
+
+    let metrics = AgentLatencyMetrics::from_observations(&observations);
+    assert_eq!(metrics.run_elapsed_ms, Some(90));
+    assert_eq!(metrics.model_calls.len(), 1);
+    assert_eq!(metrics.model_calls[0].call_id, model_id);
+    assert_eq!(metrics.model_calls[0].elapsed_ms, 30);
+    assert_eq!(metrics.total_model_ms, 30);
+    assert_eq!(metrics.average_model_ms(), Some(30));
+
+    assert_eq!(metrics.tool_calls.len(), 1);
+    assert_eq!(metrics.tool_calls[0].call_id, tool_id);
+    assert_eq!(metrics.tool_calls[0].kind, "tool");
+    assert_eq!(metrics.tool_calls[0].name, "lookup");
+    assert_eq!(metrics.tool_calls[0].elapsed_ms, 25);
+    assert_eq!(metrics.total_tool_ms, 25);
+    assert_eq!(metrics.max_tool_ms, 25);
+    assert_eq!(metrics.average_tool_ms(), Some(25));
 }
 
 #[tokio::test]

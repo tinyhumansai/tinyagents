@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::harness::events::{AgentEvent, EventListener, HarnessRunStatus};
-use crate::harness::ids::{EventId, RunId};
+use crate::harness::ids::{CallId, EventId, RunId};
 use crate::harness::store::{AppendStore, JsonlAppendStore};
 
 // ---------------------------------------------------------------------------
@@ -58,6 +58,63 @@ pub struct AgentObservation {
 
     /// The typed event payload.
     pub event: AgentEvent,
+}
+
+// ---------------------------------------------------------------------------
+// Agent latency metrics
+// ---------------------------------------------------------------------------
+
+/// Latency for a completed model or tool call within an agent run.
+///
+/// These records are derived from durable [`AgentObservation`] timestamps by
+/// correlating `*.started` and `*.completed` events. They intentionally carry
+/// ids and short names only, never prompt text, tool arguments, or provider
+/// payloads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCallLatency {
+    /// The model/tool call id being measured.
+    pub call_id: CallId,
+
+    /// Stable call family, currently `"model"` or `"tool"`.
+    pub kind: String,
+
+    /// Model id or tool name associated with the call.
+    pub name: String,
+
+    /// Wall-clock elapsed time between start and completion, in milliseconds.
+    pub elapsed_ms: u64,
+}
+
+/// Summarized latency metrics for a single agent run.
+///
+/// `run_elapsed_ms` is measured between `run.started` and the first terminal
+/// `run.completed` / `run.failed` observation when both are available. Model
+/// and tool latencies are measured by call id from the same observation stream.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLatencyMetrics {
+    /// End-to-end run latency, when both run start and terminal events exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_elapsed_ms: Option<u64>,
+
+    /// Per-model-call latencies in completion order.
+    #[serde(default)]
+    pub model_calls: Vec<AgentCallLatency>,
+
+    /// Per-tool-call latencies in completion order.
+    #[serde(default)]
+    pub tool_calls: Vec<AgentCallLatency>,
+
+    /// Sum of completed model-call latency.
+    pub total_model_ms: u64,
+
+    /// Slowest completed model call.
+    pub max_model_ms: u64,
+
+    /// Sum of completed tool-call latency.
+    pub total_tool_ms: u64,
+
+    /// Slowest completed tool call.
+    pub max_tool_ms: u64,
 }
 
 impl AgentObservation {

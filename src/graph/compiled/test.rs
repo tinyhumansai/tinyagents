@@ -951,6 +951,107 @@ async fn send_fanout_delivers_distinct_args_to_parallel_branches() {
     assert_eq!(log, vec!["worker:10", "worker:20", "worker:30"]);
 }
 
+#[tokio::test]
+async fn run_with_inputs_seeds_start_and_peer_node() {
+    let graph = GraphBuilder::<Counter, String>::new()
+        .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: String| {
+            s.log.push(u);
+            Ok(s)
+        }))
+        .with_parallel(true)
+        .add_node("user_loop", |_s: Counter, c: NodeContext| async move {
+            let input = c
+                .send_arg
+                .expect("start input should be delivered to entry node")
+                .as_str()
+                .expect("user payload is a string")
+                .to_string();
+            Ok(NodeResult::Update(format!("user:{input}")))
+        })
+        .add_node("tool_loop", |_s: Counter, c: NodeContext| async move {
+            let tool = c
+                .send_arg
+                .expect("tool input should be delivered to peer node")
+                .get("tool")
+                .and_then(|v| v.as_str())
+                .expect("tool payload names the tool")
+                .to_string();
+            Ok(NodeResult::Update(format!("tool:{tool}")))
+        })
+        .set_entry("user_loop")
+        .set_finish("user_loop")
+        .set_finish("tool_loop")
+        .compile()
+        .unwrap();
+
+    let run = graph
+        .run_with_inputs(
+            Counter {
+                value: 0,
+                log: vec![],
+            },
+            [
+                GraphInput::start(json!("hello")),
+                GraphInput::new("tool_loop", json!({ "tool": "search" })),
+            ],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(run.steps, 1);
+    assert_eq!(run.state.log, vec!["user:hello", "tool:search"]);
+    assert_eq!(
+        run.visited.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
+        vec!["user_loop", "tool_loop"]
+    );
+}
+
+#[tokio::test]
+async fn run_with_inputs_preserves_repeated_inputs_to_same_node() {
+    let graph = GraphBuilder::<Counter, String>::new()
+        .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: String| {
+            s.log.push(u);
+            Ok(s)
+        }))
+        .add_node("worker", |_s: Counter, c: NodeContext| async move {
+            let item = c
+                .send_arg
+                .expect("external input should carry an item")
+                .as_i64()
+                .expect("item payload is an integer");
+            Ok(NodeResult::Update(format!("item:{item}")))
+        })
+        .set_entry("worker")
+        .set_finish("worker")
+        .compile()
+        .unwrap();
+
+    let run = graph
+        .run_with_inputs(
+            Counter {
+                value: 0,
+                log: vec![],
+            },
+            [
+                GraphInput::new("worker", json!(1)),
+                GraphInput::new("worker", json!(2)),
+                GraphInput::new("worker", json!(3)),
+            ],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(run.steps, 1);
+    assert_eq!(run.state.log, vec!["item:1", "item:2", "item:3"]);
+    assert_eq!(
+        run.visited
+            .iter()
+            .filter(|node| node.as_str() == "worker")
+            .count(),
+        3
+    );
+}
+
 /// A node with normal `goto` (no `send_arg`) gets `None`, while the same node
 /// reached via `Send` gets the packet's argument — proving the two coexist.
 #[tokio::test]
