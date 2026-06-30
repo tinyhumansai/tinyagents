@@ -17,8 +17,34 @@ use serde_json::Value;
 
 use crate::Result;
 
-/// A model-visible declaration of a tool: its name, description, and a
-/// JSON-schema-compatible parameter shape.
+/// The model-visible syntax a tool declaration prefers.
+///
+/// Tool execution remains provider-neutral: after parsing, the harness invokes
+/// tools with [`ToolCall::arguments`] as JSON so local schema validation,
+/// middleware, tracing, and replay use one stable representation. This format
+/// tells prompt renderers and provider adapters how a tool should be exposed to
+/// a model when the provider does not force a native tool-calling shape.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ToolFormat {
+    /// Native JSON/function-call style. This is the default and maps directly to
+    /// providers such as OpenAI Chat Completions.
+    #[default]
+    Json,
+    /// XML tag style, for example
+    /// `<search><query>rust</query></search>`.
+    Xml,
+    /// Parametric p-type style: a compact ordered-parameter call syntax such as
+    /// `search("rust", 5)`.
+    PType {
+        /// Ordered parameter names used by compact renderers. The names should
+        /// correspond to fields in [`ToolSchema::parameters`].
+        parameters: Vec<String>,
+    },
+}
+
+/// A model-visible declaration of a tool: its name, description,
+/// JSON-schema-compatible parameter shape, and preferred tool-call format.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolSchema {
     /// Canonical tool name (ASCII `snake_case` by convention).
@@ -27,6 +53,9 @@ pub struct ToolSchema {
     pub description: String,
     /// JSON Schema describing the model-visible input arguments.
     pub parameters: Value,
+    /// Preferred model-visible tool-call format.
+    #[serde(default, skip_serializing_if = "ToolFormat::is_json")]
+    pub format: ToolFormat,
 }
 
 /// A request from the model to invoke a tool.

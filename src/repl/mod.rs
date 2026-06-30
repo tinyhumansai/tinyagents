@@ -56,6 +56,33 @@ pub mod types;
 
 pub use types::*;
 
+/// Rhai-backed `.ragsh` session runtime (the imperative RLM/CodeAct surface).
+///
+/// This is the evolution of the line-oriented command REPL above into a full
+/// scripting session with a persistent namespace, policy-bounded capability
+/// calls, and typed cell results — the [`session::ReplSession`] described in the
+/// module design document. It is gated behind the `repl` cargo feature so the
+/// default build stays free of the embedded Rhai engine.
+///
+/// The command-driven [`ReplSession`](crate::repl::ReplSession) above remains
+/// available for the line-oriented REPL; the scripting engine is exposed as
+/// [`session::ReplSession`] (and re-exported at the crate root as
+/// [`crate::ReplSession`] when the feature is enabled) to keep both surfaces
+/// compiling side by side.
+#[cfg(feature = "repl")]
+pub mod session;
+
+// Re-export the non-colliding session types at the `repl` root for convenience.
+// `session::ReplSession` is intentionally *not* re-exported here because the
+// line-oriented `ReplSession` (above) already occupies that name in the default
+// build; reach the scripting session via `repl::session::ReplSession` or the
+// crate-root `crate::ReplSession` re-export.
+#[cfg(feature = "repl")]
+pub use session::{
+    LanguageCompiler, ReplCallKind, ReplCallRecord, ReplCapabilities, ReplPolicy, ReplResult,
+    ReplValue, ReplVariables,
+};
+
 #[cfg(test)]
 mod test;
 

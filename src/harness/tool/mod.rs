@@ -16,6 +16,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::error::{Result, TinyAgentsError};
+
 pub use types::*;
 
 impl ToolSchema {
@@ -25,7 +27,43 @@ impl ToolSchema {
             name: name.into(),
             description: description.into(),
             parameters,
+            format: ToolFormat::Json,
         }
+    }
+
+    /// Sets the preferred model-visible tool-call format.
+    pub fn with_format(mut self, format: ToolFormat) -> Self {
+        self.format = format;
+        self
+    }
+
+    /// Validates a model-supplied tool call against this tool's schema.
+    ///
+    /// The harness supports the JSON Schema subset used for model-visible tool
+    /// declarations: `type`, object `properties`, `required`,
+    /// `additionalProperties: false`, array `items`, and `enum`. Unknown schema
+    /// keywords are ignored so providers can still receive richer schemas while
+    /// the local execution boundary fails closed for the structural constraints
+    /// it understands.
+    pub fn validate_call(&self, call: &ToolCall) -> Result<()> {
+        if call.name != self.name {
+            return Err(TinyAgentsError::Validation(format!(
+                "tool call `{}` does not match schema `{}`",
+                call.name, self.name
+            )));
+        }
+        validate_schema_value(
+            &self.parameters,
+            &call.arguments,
+            &format!("tool `{}` arguments", self.name),
+        )
+    }
+}
+
+impl ToolFormat {
+    /// Returns `true` for the default JSON/function-call format.
+    pub fn is_json(&self) -> bool {
+        matches!(self, ToolFormat::Json)
     }
 }
 
@@ -118,6 +156,120 @@ impl<State> ToolRegistry<State> {
 impl<State> Default for ToolRegistry<State> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn validate_schema_value(schema: &Value, value: &Value, path: &str) -> Result<()> {
+    if schema.is_null() || schema.as_object().is_some_and(|o| o.is_empty()) {
+        return Ok(());
+    }
+
+    if let Some(enum_values) = schema.get("enum").and_then(Value::as_array)
+        && !enum_values.iter().any(|allowed| allowed == value)
+    {
+        return Err(TinyAgentsError::Validation(format!(
+            "{path} must be one of the declared enum values"
+        )));
+    }
+
+    if let Some(type_spec) = schema.get("type") {
+        validate_type_spec(type_spec, value, path)?;
+    }
+
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        let object = value.as_object().ok_or_else(|| {
+            TinyAgentsError::Validation(format!("{path} must be an object with declared fields"))
+        })?;
+
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            for field in required.iter().filter_map(Value::as_str) {
+                if !object.contains_key(field) {
+                    return Err(TinyAgentsError::Validation(format!(
+                        "{path}.{field} is required"
+                    )));
+                }
+            }
+        }
+
+        if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
+            for field in object.keys() {
+                if !properties.contains_key(field) {
+                    return Err(TinyAgentsError::Validation(format!(
+                        "{path}.{field} is not allowed"
+                    )));
+                }
+            }
+        }
+
+        for (field, field_schema) in properties {
+            if let Some(field_value) = object.get(field) {
+                validate_schema_value(field_schema, field_value, &format!("{path}.{field}"))?;
+            }
+        }
+    }
+
+    if let Some(items_schema) = schema.get("items")
+        && let Some(items) = value.as_array()
+    {
+        for (index, item) in items.iter().enumerate() {
+            validate_schema_value(items_schema, item, &format!("{path}[{index}]"))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_type_spec(type_spec: &Value, value: &Value, path: &str) -> Result<()> {
+    if let Some(kind) = type_spec.as_str() {
+        if json_value_matches_type(value, kind) {
+            return Ok(());
+        }
+        return Err(TinyAgentsError::Validation(format!(
+            "{path} must be {kind}, got {}",
+            json_value_kind(value)
+        )));
+    }
+
+    if let Some(kinds) = type_spec.as_array() {
+        let allowed: Vec<&str> = kinds.iter().filter_map(Value::as_str).collect();
+        if allowed
+            .iter()
+            .any(|kind| json_value_matches_type(value, kind))
+        {
+            return Ok(());
+        }
+        return Err(TinyAgentsError::Validation(format!(
+            "{path} must be one of {}, got {}",
+            allowed.join(", "),
+            json_value_kind(value)
+        )));
+    }
+
+    Ok(())
+}
+
+fn json_value_matches_type(value: &Value, kind: &str) -> bool {
+    match kind {
+        "null" => value.is_null(),
+        "boolean" => value.is_boolean(),
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "number" => value.is_number(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "string" => value.is_string(),
+        _ => true,
+    }
+}
+
+fn json_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) if n.as_i64().is_some() || n.as_u64().is_some() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
 }
 

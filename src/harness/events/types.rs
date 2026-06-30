@@ -419,8 +419,9 @@ pub trait EventListener: Send + Sync {
 ///
 /// All clones share the same underlying listener list and monotonic offset
 /// counter via an `Arc<Mutex<…>>`. Any clone can subscribe new listeners or
-/// emit events. The `emit` method assigns a monotonic [`EventId`] and offset
-/// before calling each registered listener in registration order.
+/// emit events. The `emit` method assigns a monotonic [`EventId`] and offset,
+/// clones the current listener list, releases the sink lock, and then calls each
+/// listener in registration order.
 ///
 /// # Example
 ///

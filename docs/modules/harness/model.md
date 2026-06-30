@@ -132,7 +132,10 @@ Resolution order should be explicit and configurable. A conservative default is:
 
 If a candidate fails capability, budget, tenant, provider-availability, or
 policy checks, the resolver should skip it and emit a diagnostic event. If no
-candidate remains, the model call fails before contacting a provider.
+candidate remains, the model call fails before contacting a provider. A model
+with no advertised profile is treated as unknown and does not satisfy non-empty
+required capabilities; callers that need capability filtering should register
+profiles for every candidate they expect the resolver to consider.
 
 ## Resolution Types
 

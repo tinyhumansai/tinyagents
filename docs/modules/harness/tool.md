@@ -106,13 +106,96 @@ Hidden values must never appear in the tool schema sent to a model. This avoids
 teaching the model about internal implementation details and prevents accidental
 secret exposure.
 
+The local execution boundary validates the schema subset TinyAgents relies on
+for fail-closed tool dispatch:
+
+- primitive and compound `type` checks
+- object `properties`
+- `required` object fields
+- `additionalProperties: false`
+- array `items`
+- exact-value `enum`
+
+Richer provider-facing JSON Schema keywords may still be present; the harness
+passes them through to providers but only enforces the subset above locally.
+
+## Tool Call Formats
+
+`ToolSchema` carries a `format: ToolFormat` field so a tool definition can state
+how it should be shown to a model. The execution boundary is still one typed
+shape: after parsing a model emission, the harness invokes tools through
+`ToolCall { id, name, arguments }`, where `arguments` is `serde_json::Value`.
+That keeps validation, middleware, replay, and provider normalization stable
+even when the model-facing syntax changes.
+
+TinyAgents supports three model-facing tool formats:
+
+- `ToolFormat::Json` — JSON/function-call format. This is the default and is
+  omitted during serialization for backward compatibility. Providers with
+  native function/tool calling, such as OpenAI Chat Completions, can map this
+  directly to their native tool declaration shape.
+- `ToolFormat::Xml` — XML tag format. A renderer may expose the same tool as
+  `<tool_name><field>value</field></tool_name>`. The parser must normalize the
+  emitted tag body back into JSON arguments before schema validation.
+- `ToolFormat::PType { parameters }` — parametric p-type format. This is a
+  compact ordered-parameter syntax for token-sensitive prompts, for example
+  `search("rust agents", 5)`. `parameters` records the ordered field names that
+  map positional values back into the JSON argument object.
+
+Example:
+
+```rust
+use serde_json::json;
+use tinyagents::harness::tool::{ToolFormat, ToolSchema};
+
+let json_tool = ToolSchema::new(
+    "weather",
+    "Look up weather for a city.",
+    json!({
+        "type": "object",
+        "required": ["city"],
+        "properties": { "city": { "type": "string" } }
+    }),
+);
+
+let xml_tool = json_tool.clone().with_format(ToolFormat::Xml);
+
+let ptype_tool = ToolSchema::new(
+    "search",
+    "Search documents.",
+    json!({
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+            "query": { "type": "string" },
+            "limit": { "type": "integer" }
+        }
+    }),
+)
+.with_format(ToolFormat::PType {
+    parameters: vec!["query".to_string(), "limit".to_string()],
+});
+```
+
+Provider adapters should treat `ToolFormat` as a capability-aware rendering
+preference:
+
+- If the provider has native JSON/function calling, send `ToolFormat::Json`
+  tools as native tool declarations.
+- If the provider does not support the requested format natively, render the
+  declaration into prompt text and parse the model's emitted call back into
+  `ToolCall`.
+- If a provider only accepts JSON tool declarations, it may fall back to the
+  JSON schema while preserving `ToolSchema::format` in harness metadata.
+
 ## Execution Lifecycle
 
-1. Validate tool name exists.
-2. Validate arguments against the input schema.
-3. Check tool-call limits and concurrency limits.
-4. Emit `tool.started`.
-5. Run `before_tool` middleware.
+1. Check cancellation, wall-clock deadline, and tool-call limits.
+2. Run `before_tool` middleware, allowing policy middleware to reject or adjust
+   the pending call.
+3. Validate the final tool name exists.
+4. Validate final arguments against the input schema.
+5. Emit `tool.started`.
 6. Execute the tool with `ToolRuntime`.
 7. Run `after_tool` middleware.
 8. Format result into a `ToolMessage`.

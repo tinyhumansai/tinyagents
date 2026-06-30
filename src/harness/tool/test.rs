@@ -66,3 +66,120 @@ fn error_result_preserves_call_id() {
     assert_eq!(result.call_id, "c-9");
     assert_eq!(result.error.as_deref(), Some("boom"));
 }
+
+#[test]
+fn tool_schema_defaults_to_json_format() {
+    let schema = ToolSchema::new("lookup", "looks up a user", json!({"type": "object"}));
+
+    assert_eq!(schema.format, ToolFormat::Json);
+    let value = serde_json::to_value(&schema).unwrap();
+    assert!(value.get("format").is_none());
+}
+
+#[test]
+fn tool_schema_can_declare_xml_and_ptype_formats() {
+    let xml = ToolSchema::new("lookup", "looks up a user", json!({"type": "object"}))
+        .with_format(ToolFormat::Xml);
+    let ptype = ToolSchema::new(
+        "search",
+        "searches docs",
+        json!({
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": { "type": "string" },
+                "limit": { "type": "integer" }
+            }
+        }),
+    )
+    .with_format(ToolFormat::PType {
+        parameters: vec!["query".to_string(), "limit".to_string()],
+    });
+
+    assert_eq!(xml.format, ToolFormat::Xml);
+    assert_eq!(
+        ptype.format,
+        ToolFormat::PType {
+            parameters: vec!["query".to_string(), "limit".to_string()],
+        }
+    );
+    let round_tripped: ToolSchema =
+        serde_json::from_value(serde_json::to_value(&ptype).unwrap()).unwrap();
+    assert_eq!(round_tripped, ptype);
+}
+
+#[test]
+fn schema_validation_accepts_matching_arguments() {
+    let schema = ToolSchema::new(
+        "lookup",
+        "looks up a user",
+        json!({
+            "type": "object",
+            "required": ["user"],
+            "additionalProperties": false,
+            "properties": {
+                "user": {
+                    "type": "object",
+                    "required": ["id"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "id": { "type": "string" },
+                        "roles": { "type": "array", "items": { "type": "string" } }
+                    }
+                },
+                "include_disabled": { "type": "boolean" }
+            }
+        }),
+    );
+    let call = ToolCall::new(
+        "c-1",
+        "lookup",
+        json!({
+            "user": { "id": "u-1", "roles": ["admin", "editor"] },
+            "include_disabled": false
+        }),
+    );
+
+    schema.validate_call(&call).expect("valid call");
+}
+
+#[test]
+fn schema_validation_rejects_missing_required_fields() {
+    let schema = ToolSchema::new(
+        "lookup",
+        "looks up a user",
+        json!({
+            "type": "object",
+            "required": ["user_id"],
+            "properties": { "user_id": { "type": "string" } }
+        }),
+    );
+    let call = ToolCall::new("c-1", "lookup", json!({}));
+
+    let err = schema.validate_call(&call).expect_err("missing field");
+    assert!(err.to_string().contains("user_id"));
+}
+
+#[test]
+fn schema_validation_rejects_wrong_types_and_extra_fields() {
+    let schema = ToolSchema::new(
+        "lookup",
+        "looks up a user",
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "user_id": { "type": "string" },
+                "limit": { "type": "integer" }
+            }
+        }),
+    );
+
+    let wrong_type = ToolCall::new("c-1", "lookup", json!({ "user_id": 42 }));
+    let err = schema.validate_call(&wrong_type).expect_err("wrong type");
+    assert!(err.to_string().contains("user_id"));
+
+    let extra = ToolCall::new("c-2", "lookup", json!({ "user_id": "u-1", "extra": true }));
+    let err = schema.validate_call(&extra).expect_err("extra field");
+    assert!(err.to_string().contains("extra"));
+}

@@ -10,176 +10,131 @@ code changes were made as part of the audit.
 
 The crate is in a healthy build state: default and `openai` feature builds pass,
 the full test suite passes, and clippy is clean. The main issues are not broad
-compile failures; they are fail-closed contract gaps around tool execution,
-provider parsing, model capability selection, and durable graph recovery.
+compile failures; they are fail-closed contract gaps around durable graph
+recovery and observability/runtime hardening.
 
 ## Findings
 
-### High: tool arguments are not schema-validated before execution
+## Resolved Findings
 
-The agent loop advertises tool schemas to the model, but when a model returns a
-tool call it looks up the tool and dispatches the raw `serde_json::Value`
-arguments directly:
+### Resolved: tool arguments are schema-validated before execution
 
-- `src/harness/agent_loop/mod.rs`: tool lookup and dispatch happen in the tool
-  loop without a central argument/schema validation step.
-- `src/harness/tool/types.rs`: `Tool::call` documents a validated call, but the
-  harness does not enforce `ToolSchema.parameters` before calling the tool.
+The agent loop now validates model-supplied tool arguments against the
+registered tool schema before emitting `ToolStarted` or invoking tool code:
 
-This is the most important security boundary in the crate. Side-effecting tools
-should reject malformed, missing, extra, or type-mismatched arguments before
-tool code runs.
+- `src/harness/tool/mod.rs`: `ToolSchema::validate_call` enforces the local JSON
+  Schema subset used at the harness boundary: `type`, object `properties`,
+  `required`, `additionalProperties: false`, array `items`, and `enum`.
+- `src/harness/agent_loop/mod.rs`: after middleware has had its chance to adjust
+  the call, the loop validates the final call against the tool schema before
+  wrapping/executing the tool.
+- `src/harness/tool/test.rs`: unit coverage exercises valid nested arguments,
+  missing required fields, wrong types, and disallowed extra fields.
+- `src/harness/agent_loop/test.rs`: end-to-end harness coverage proves invalid
+  arguments return a validation error before the tool implementation is called.
 
-Recommended fix:
+### Resolved: malformed OpenAI tool-call JSON fails closed
 
-- Add a local JSON Schema validation step before `tool.call(...)`.
-- Treat schema validation failures as fail-closed harness errors.
-- Add regression tests for missing required fields, wrong types, extra fields
-  when disallowed, and nested object validation.
+The OpenAI provider no longer converts malformed stringified tool arguments to
+`null`:
 
-### High: malformed OpenAI tool-call JSON is silently converted to `null`
+- `src/harness/providers/openai/mod.rs`: unary response parsing now returns a
+  model/provider error that names the tool call id, tool name, parse error, and
+  raw argument string.
+- `src/harness/providers/openai/mod.rs`: streamed tool-call reconstruction now
+  emits a terminal `ProviderFailed` item with code `invalid_tool_arguments`
+  when assembled arguments are invalid JSON.
+- `src/harness/providers/openai/test.rs`: unit coverage exercises both unary
+  malformed arguments and streamed malformed argument fragments.
 
-The OpenAI provider parses function-call arguments from provider string payloads
-with a fallback to `Value::Null`:
+### Resolved: required model capabilities are enforced during resolution
 
-- `src/harness/providers/openai/mod.rs`: unary response parsing falls back to
-  `Value::Null` on invalid JSON.
-- `src/harness/providers/openai/mod.rs`: streaming response reconstruction does
-  the same for assembled argument fragments.
+Model resolution now treats `ModelRequest::required_capabilities` as a hard
+candidate filter:
 
-This can hide malformed provider/model output and let the rest of the harness
-observe a valid-looking tool call with `null` arguments. Combined with missing
-schema validation, malformed arguments can reach tool implementations.
+- `src/harness/model/types.rs`: `ModelSelection` carries the required
+  capability set so direct registry resolution and request-based resolution use
+  the same filter.
+- `src/harness/model/mod.rs`: request overrides, previous-model reuse, hints,
+  agent defaults, and registry defaults are skipped unless their profile
+  satisfies the required capabilities. Models with unknown profiles fail
+  conservatively when non-empty requirements are present.
+- `src/harness/model/test.rs`: unit coverage exercises request overrides,
+  previous reuse, hints, agent defaults, registry defaults, and unknown-profile
+  rejection under required capabilities.
+- `tests/harness_agent_loop.rs`: integration coverage proves the agent loop can
+  select a capable hinted model over an incapable default after middleware adds
+  required capabilities.
 
-Recommended fix:
+### Resolved: runtime `Command::goto` targets are validated before persistence
 
-- Return a provider/serialization error when function arguments are invalid
-  JSON.
-- Preserve the raw malformed argument string in the error message or raw
-  provider payload for debugging.
-- Add unary and streaming tests for invalid function argument JSON.
+Runtime command routing now fails before a bad target can become the next active
+set or be written into a checkpoint:
 
-### Medium: `ModelRequest::required_capabilities` is not enforced
+- `src/graph/compiled/mod.rs`: command targets are validated in `route()` before
+  scheduler activation. `END` is allowed, `START` is rejected, and every other
+  target must name a compiled node.
+- `src/graph/compiled/test.rs`: unit coverage rejects unknown targets, rejects
+  `START`, and proves invalid command routes fail before checkpoint persistence.
+- `tests/graph_durable.rs`: integration coverage proves a threaded durable run
+  with an invalid command target writes no poisoned checkpoint.
+- `docs/modules/graph/routing.md`: documents the runtime validation contract.
 
-The request model has a `required_capabilities` field, and `ModelProfile` has a
-`satisfies` helper, but model resolution does not use that requirement before
-selecting a model:
+### Resolved: embedded subgraph runs inherit the parent thread id
 
-- `src/harness/model/types.rs`: `ModelRequest::required_capabilities` is
-  documented as pre-call validation/filtering.
-- `src/harness/model/mod.rs`: `ModelRegistry::resolve_request` ignores the
-  field.
-- `src/harness/agent_loop/mod.rs`: the loop resolves and invokes the selected
-  model without checking capabilities.
+Subgraph node adapters now propagate the parent thread id into embedded child
+runs when the parent run is threaded:
 
-Callers can therefore request streaming, tool calling, structured output,
-modalities, or token capacity and still be routed to a model profile that lacks
-those capabilities.
+- `src/graph/subgraph/mod.rs`: shared-state and adapter subgraph nodes call the
+  child with `run_with_thread` when `NodeContext::thread_id` is present,
+  preserving the existing unthreaded `run` behavior otherwise.
+- `src/graph/subgraph/test.rs`: unit coverage proves an embedded child with a
+  checkpointer persists under the parent thread and embedding-node namespace.
+- `tests/graph_durable.rs`: integration coverage proves the public durable graph
+  surface writes both parent and child checkpoints for a threaded subgraph run.
+- `docs/modules/graph/subgraphs.md`: documents the inherited thread and
+  namespace persistence contract.
 
-Recommended fix:
+### Resolved: interrupts fail closed without resumable durability
 
-- Filter or reject model candidates whose profiles do not satisfy
-  `required_capabilities`.
-- Decide how to handle models with no profile: either fail conservatively when
-  requirements are present or require callers to opt into unknown capability
-  profiles.
-- Add tests for request override, previous-model reuse, hints, agent default,
-  registry default, and fallback selection under capability requirements.
+The executor now returns a resume error instead of an interrupted execution when
+a node emits an interrupt without the durability required to resume it:
 
-### Medium: runtime `Command::goto` targets can poison durable graph state
+- `src/graph/compiled/mod.rs`: interrupt handling requires both a configured
+  checkpointer and a thread id before persisting the interrupt checkpoint and
+  returning `ExecutionStatus::Interrupted`.
+- `src/graph/compiled/test.rs`: unit coverage proves interrupts without a
+  checkpointer and interrupts without a thread id return errors rather than
+  unresumable paused executions.
+- `tests/graph_durable.rs`: integration coverage proves the public run surface
+  rejects an interrupt emitted without a thread id.
+- `docs/modules/graph/interrupts.md`: documents that interrupted results are
+  only returned after the checkpoint needed for resume is persisted.
 
-Graph compile-time validation checks static and conditional topology, but
-runtime command routing accepts targets returned by node code without validating
-them before they become the next active set:
+### Resolved: event sink listeners are notified outside the sink lock
 
-- `src/graph/compiled/mod.rs`: command results store `command.goto` directly in
-  the step routing map.
-- `src/graph/compiled/mod.rs`: `route()` returns command targets without
-  checking each target is `END` or a known node.
+The harness event sink no longer holds its mutex while invoking listener
+callbacks:
 
-With checkpointing enabled, an invalid target can be persisted as the next
-active node and only fail on the next superstep as `MissingNode`.
+- `src/harness/events/mod.rs`: `EventSink::emit` now assigns the record id and
+  clones the listener list under lock, then releases the lock before notifying
+  listeners in registration order.
+- `src/harness/events/types.rs`: public docs describe the lock-narrowing
+  contract and synchronous callback order.
+- `src/harness/events/test.rs`: unit coverage proves a listener can emit once
+  back into the same sink without deadlocking.
 
-Recommended fix:
+### Resolved: response cache keys use a collision-resistant digest
 
-- Validate each command target before appending it to `next`.
-- Reject `START` and unknown nodes immediately with a deterministic validation
-  or graph error.
-- Add tests for invalid command target, `START` as a command target, and invalid
-  target persistence under checkpointing.
+The local response cache key now uses SHA-256 over canonical request JSON:
 
-### Medium: subgraph checkpoint namespaces are extended, but child runs are not threaded
-
-Subgraph wrappers namespace the child graph, then invoke `child.run(...)`:
-
-- `src/graph/subgraph/mod.rs`: shared-state and adapter subgraph nodes call
-  `child.run(...)`.
-- `src/graph/compiled/mod.rs`: `run()` explicitly persists no checkpoints
-  without a thread id.
-
-This means namespace isolation exists, but child checkpoint persistence is not
-actually wired through the parent thread. Nested graph durability is weaker than
-the namespace support implies.
-
-Recommended fix:
-
-- Add a child graph execution path that propagates the parent `thread_id`.
-- Use a deterministic child namespace and parent checkpoint id linkage.
-- Add tests proving child checkpoints persist and can be inspected/resumed under
-  the parent thread.
-
-### Medium: interrupts can return an unresumable interrupted status
-
-When a node emits an interrupt, `persist_checkpoint` can return `Ok(None)` if no
-checkpointer or thread id is configured, but the graph still returns an
-interrupted execution status:
-
-- `src/graph/compiled/mod.rs`: interrupt handling returns
-  `ExecutionStatus::Interrupted`.
-- `src/graph/compiled/mod.rs`: `persist_checkpoint` is a no-op without both a
-  checkpointer and thread id.
-
-That creates an interrupted run that cannot be resumed, even though the runtime
-surface presents it as an interrupted execution.
-
-Recommended fix:
-
-- Require checkpointing and a thread id for interrupt-capable runs, or
-  explicitly mark the result as non-resumable.
-- Consider a separate error for "interrupt emitted without durability".
-- Add tests for interrupt without checkpointer, interrupt with checkpointer but
-  no thread, and interrupt with full durable configuration.
-
-### Low: event listeners can deadlock the sink
-
-`EventSink::emit` holds the sink mutex while invoking every listener:
-
-- `src/harness/events/mod.rs`: listener callbacks run while the lock is held.
-
-The docs warn listeners not to call back into the same sink, but the
-implementation can avoid this class of deadlock.
-
-Recommended fix:
-
-- Clone the listener list under lock, release the lock, then notify listeners.
-- Add a test with a listener that emits to another sink and, if supported, a
-  guard test for same-sink callback behavior.
-
-### Low: response cache keys use 64-bit FNV-1a
-
-The response cache key is deterministic, but not collision-resistant:
-
-- `src/harness/cache/mod.rs`: `cache_key` uses a 64-bit FNV-1a hash over the
-  canonical request JSON.
-
-This is acceptable for local tests and short-lived in-process caches, but risky
-for any shared, durable, multi-tenant, or untrusted-input cache.
-
-Recommended fix:
-
-- Use a stronger hash for durable/shared caches, or store and compare the
-  canonical request bytes alongside the hash.
-- Document the current key as non-cryptographic and local-cache oriented.
+- `src/harness/cache/mod.rs`: `cache_key` recursively canonicalizes request JSON
+  and returns a SHA-256 hex digest. The short FNV helper remains only for local
+  prompt-layout fingerprints, not response-cache identity.
+- `src/harness/cache/test.rs`: unit coverage asserts deterministic SHA-256 key
+  shape and different keys for different model requests.
+- `docs/modules/harness/cache.md`: documents that every behavior-affecting
+  serialized request field participates in the SHA-256 digest.
 
 ## Stale Prior Finding Resolved
 
@@ -211,13 +166,4 @@ Observed test coverage from the commands:
 
 ## Prioritization
 
-Fix order should be:
-
-1. Central tool argument validation.
-2. OpenAI invalid tool-argument JSON handling.
-3. Model capability enforcement.
-4. Runtime `Command::goto` target validation.
-5. Durable subgraph checkpoint/thread propagation.
-6. Interrupt durability guardrails.
-7. Event sink lock narrowing.
-8. Stronger cache key story for shared/durable caches.
+All findings from this audit have been resolved in the codebase.

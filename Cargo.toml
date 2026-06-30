@@ -17,6 +17,7 @@ async-trait = "0.1"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
 
 # Async runtime primitives used by the streaming pipeline. The library only
@@ -37,12 +38,20 @@ reqwest = { version = "0.12", default-features = false, features = [
 # required; the dependency is pulled in only by the `sqlite` feature.
 rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 
+# Optional embedded Rhai scripting engine powering the `.ragsh` REPL session
+# runtime (`repl::session`). The `sync` feature makes the engine and its values
+# `Send + Sync` so a session can live inside an async graph node. Pulled in only
+# by the `repl` feature to keep the default build light.
+rhai = { version = "1", features = ["sync"], optional = true }
+
 [features]
 default = []
 # Hosted OpenAI Chat Completions provider (`harness::providers::openai`).
 openai = ["dep:reqwest"]
 # Embedded SQLite-backed checkpointer (`graph::checkpoint::SqliteCheckpointer`).
 sqlite = ["dep:rusqlite"]
+# Embedded Rhai-backed `.ragsh` REPL session runtime (`repl::session`).
+repl = ["dep:rhai"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }

@@ -47,7 +47,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use crate::graph::builder::{Branch, BuilderNode, END, ForkId, NodeContext, NodeFuture, NodeMeta};
+use crate::graph::builder::{
+    Branch, BuilderNode, END, ForkId, NodeContext, NodeFuture, NodeMeta, START,
+};
 use crate::graph::checkpoint::{
     Checkpoint, CheckpointConfig, CheckpointTuple, Checkpointer, DurabilityMode,
 };
@@ -828,6 +830,11 @@ where
             // not-yet-completed members of this step (interrupted node first),
             // then return control to the caller.
             if let Some((index, emitted)) = interrupt {
+                if let Err(err) = self.require_interrupt_durability(&thread_id) {
+                    self.fail_run(&run_id, &thread_id, started_at, steps, &err)
+                        .await;
+                    return Err(err);
+                }
                 let pending: Vec<NodeId> = activation_nodes(&active[index..]);
                 let interrupt_id = InterruptId::new(emitted.id.clone());
                 let checkpoint_id = self
@@ -1334,6 +1341,7 @@ where
         state: &State,
     ) -> Result<Vec<RouteTarget>> {
         if let Some(targets) = goto_map.get(node_id) {
+            self.validate_route_targets(node_id, targets)?;
             return Ok(targets.clone());
         }
         if let Some(target) = self.edges.get(node_id) {
@@ -1351,6 +1359,38 @@ where
         }
         // Sink: no outgoing routing, the branch ends here.
         Ok(Vec::new())
+    }
+
+    fn validate_route_targets(&self, node_id: &NodeId, targets: &[RouteTarget]) -> Result<()> {
+        for target in targets {
+            let target_node = target.node();
+            if target_node.as_str() == END {
+                continue;
+            }
+            if target_node.as_str() == START {
+                return Err(TinyAgentsError::Graph(format!(
+                    "command goto from node `{node_id}` cannot target START"
+                )));
+            }
+            if !self.nodes.contains_key(target_node) {
+                return Err(TinyAgentsError::MissingNode(target_node.to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    fn require_interrupt_durability(&self, thread_id: &Option<ThreadId>) -> Result<()> {
+        if self.checkpointer.is_none() {
+            return Err(TinyAgentsError::Resume(
+                "interrupt emitted without a configured checkpointer".to_string(),
+            ));
+        }
+        if thread_id.is_none() {
+            return Err(TinyAgentsError::Resume(
+                "interrupt emitted without a thread id".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]

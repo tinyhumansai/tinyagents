@@ -97,6 +97,16 @@ many `Send`s may target the *same* node, producing one parallel activation each
 (map-reduce). Plain activations are deduplicated by node; `Send` activations are
 not.
 
+Runtime command targets are validated before they become the next active set or
+are persisted in a checkpoint:
+
+- `END` is allowed and terminates that branch.
+- `START` is rejected because it is a virtual entry marker, not an executable
+  runtime target.
+- every other target must name a compiled node.
+- invalid runtime targets fail the run before the boundary checkpoint is
+  written, so durable state cannot be poisoned with missing next nodes.
+
 Use `Command` for:
 
 - dynamic routing

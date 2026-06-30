@@ -9,6 +9,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use tinyagents::graph::ClosureStateReducer;
+use tinyagents::graph::shared_subgraph_node;
 use tinyagents::{
     Checkpointer, Command, GraphBuilder, InMemoryCheckpointer, Interrupt, NodeContext, NodeResult,
     TinyAgentsError,
@@ -129,6 +130,80 @@ async fn checkpointer_put_get_list_round_trip() {
 }
 
 #[tokio::test]
+async fn invalid_command_goto_does_not_write_poisoned_checkpoint() {
+    let checkpointer = Arc::new(InMemoryCheckpointer::<i64>::new());
+    let graph = GraphBuilder::<i64, i64>::overwrite()
+        .add_node("router", |_s: i64, _c: NodeContext| async move {
+            Ok(NodeResult::Command(
+                Command::update(1).with_goto(["missing"]),
+            ))
+        })
+        .set_entry("router")
+        .mark_command_routing("router")
+        .compile()
+        .expect("graph compiles")
+        .with_checkpointer(checkpointer.clone());
+
+    let err = graph
+        .run_with_thread("bad-route", 0)
+        .await
+        .expect_err("invalid runtime command target fails immediately");
+    assert!(
+        matches!(err, TinyAgentsError::MissingNode(_)),
+        "got {err:?}"
+    );
+    assert!(
+        checkpointer
+            .get("bad-route", None)
+            .await
+            .expect("get succeeds")
+            .is_none(),
+        "invalid command route should not persist a checkpoint with missing next nodes"
+    );
+}
+
+#[tokio::test]
+async fn subgraph_child_persists_under_parent_thread_namespace() {
+    let checkpointer = Arc::new(InMemoryCheckpointer::<i64>::new());
+    let child = GraphBuilder::<i64, i64>::overwrite()
+        .add_node("add", |s: i64, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 10))
+        })
+        .set_entry("add")
+        .set_finish("add")
+        .compile()
+        .expect("child graph compiles")
+        .with_checkpointer(checkpointer.clone());
+
+    let parent = GraphBuilder::<i64, i64>::overwrite()
+        .add_node("child", shared_subgraph_node(child))
+        .set_entry("child")
+        .set_finish("child")
+        .compile()
+        .expect("parent graph compiles")
+        .with_checkpointer(checkpointer.clone());
+
+    let run = parent
+        .run_with_thread("subgraph-thread", 0)
+        .await
+        .expect("threaded parent run succeeds");
+    assert_eq!(run.state, 10);
+
+    let checkpoints = checkpointer
+        .list("subgraph-thread")
+        .await
+        .expect("list succeeds");
+    assert_eq!(checkpoints.len(), 2);
+    assert!(checkpoints.iter().any(|c| c.namespace.is_empty()));
+    assert!(
+        checkpoints
+            .iter()
+            .any(|c| c.namespace == vec!["child".to_string()]),
+        "embedded child checkpoint should use the parent thread and child namespace"
+    );
+}
+
+#[tokio::test]
 async fn interrupt_then_resume_yields_resumed_result() {
     let graph = GraphBuilder::<i64, i64>::overwrite()
         .add_node("approve", |s: i64, ctx: NodeContext| async move {
@@ -164,4 +239,27 @@ async fn interrupt_then_resume_yields_resumed_result() {
         .expect("resume succeeds");
     assert!(!resumed.is_interrupted());
     assert_eq!(resumed.state, 15);
+}
+
+#[tokio::test]
+async fn interrupt_requires_resumable_durability() {
+    let graph = GraphBuilder::<i64, i64>::overwrite()
+        .add_node("approve", |_s: i64, _c: NodeContext| async move {
+            Ok(NodeResult::Interrupt(Interrupt::new(
+                "approve",
+                json!({ "ask": "approve?" }),
+            )))
+        })
+        .set_entry("approve")
+        .set_finish("approve")
+        .compile()
+        .expect("graph compiles")
+        .with_checkpointer(Arc::new(InMemoryCheckpointer::<i64>::new()));
+
+    let err = graph
+        .run(10)
+        .await
+        .expect_err("interrupt without a thread id is not resumable");
+    assert!(matches!(err, TinyAgentsError::Resume(_)), "got {err:?}");
+    assert!(err.to_string().contains("thread id"), "{err}");
 }

@@ -37,7 +37,7 @@ use tinyagents::harness::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyagents::harness::retry::RetryPolicy;
 use tinyagents::harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents::harness::testkit::{EventRecorder, FakeTool, ScriptedModel, Trajectory};
-use tinyagents::harness::tool::ToolCall;
+use tinyagents::harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
 use tinyagents::harness::usage::Usage;
 
 // ── Test doubles ──────────────────────────────────────────────────────────────
@@ -52,6 +52,50 @@ struct FlakyModel {
     fail_first: usize,
     calls: Mutex<usize>,
     inner: ScriptedModel,
+}
+
+/// A tool with a strict model-visible schema, used to exercise harness-level
+/// argument validation through the public integration path.
+struct StrictLookupTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl Tool<()> for StrictLookupTool {
+    fn name(&self) -> &str {
+        "strict_lookup"
+    }
+
+    fn description(&self) -> &str {
+        "strict lookup"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "strict_lookup",
+            "strict lookup",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "additionalProperties": false,
+                "properties": {
+                    "query": { "type": "string" },
+                    "filters": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "limit": { "type": "integer" }
+                        }
+                    }
+                }
+            }),
+        )
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> tinyagents::Result<ToolResult> {
+        *self.calls.lock().expect("strict tool calls lock poisoned") += 1;
+        Ok(ToolResult::text(call.id, self.name(), "strict-output"))
+    }
 }
 
 impl FlakyModel {
@@ -275,5 +319,46 @@ async fn stacked_middleware_rejects_disallowed_tool() {
     assert!(
         !traj.tool_was_called("danger"),
         "no ToolStarted event for the rejected tool"
+    );
+}
+
+/// A registered tool with malformed arguments is rejected by the harness schema
+/// boundary before `ToolStarted` is emitted or the tool implementation runs.
+#[tokio::test]
+async fn invalid_tool_arguments_are_rejected_before_execution() {
+    let recorder = EventRecorder::new();
+    let scripted = ScriptedModel::new(vec![tool_call_response(
+        "call-1",
+        "strict_lookup",
+        json!({ "query": 42, "extra": true }),
+    )]);
+    let calls = Arc::new(Mutex::new(0));
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness
+        .register_model("scripted", Arc::new(scripted))
+        .set_default_model("scripted")
+        .register_tool(Arc::new(StrictLookupTool {
+            calls: Arc::clone(&calls),
+        }));
+
+    let ctx =
+        RunContext::new(RunConfig::new("mw-e2e-tool-schema"), ()).with_events(recorder.sink());
+    let err = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("lookup")])
+        .await
+        .expect_err("invalid tool arguments must fail closed");
+
+    assert!(
+        matches!(err, TinyAgentsError::Validation(_)),
+        "expected a validation error, got {err:?}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 0, "tool implementation did not run");
+
+    let traj = trajectory(&recorder);
+    assert!(traj.failed(), "the run failed");
+    assert!(
+        !traj.tool_was_called("strict_lookup"),
+        "invalid arguments fail before ToolStarted"
     );
 }

@@ -323,6 +323,9 @@ pub struct ModelSelection {
     /// Agent-level default model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_default: Option<String>,
+    /// Capabilities the selected model must satisfy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_capabilities: Option<CapabilitySet>,
 }
 
 /// A provider-neutral chat model request.

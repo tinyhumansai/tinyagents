@@ -197,6 +197,39 @@ async fn namespaced_children_persist_under_isolated_namespaces() {
 }
 
 #[tokio::test]
+async fn embedded_child_persists_under_parent_thread_and_child_namespace() {
+    let ckpt = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let child = child_add_ten().with_checkpointer(ckpt.clone());
+    let parent = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("child", shared_subgraph_node(child.clone()))
+        .set_entry("child")
+        .set_finish("child")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt.clone());
+
+    let run = parent.run_with_thread("t", 0).await.unwrap();
+    assert_eq!(run.state, 10);
+
+    let list = ckpt.list("t").await.unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(list.iter().any(|m| m.namespace.is_empty()));
+    let child_meta = list
+        .iter()
+        .find(|m| m.namespace == vec!["child".to_string()])
+        .expect("child checkpoint is stored under the embedding namespace");
+
+    let child_scoped = namespaced(&child, &ctx_for("child"));
+    let child_state = child_scoped
+        .get_state("t", Some(&child_meta.checkpoint_id))
+        .await
+        .unwrap()
+        .expect("child checkpoint can be loaded from the parent thread");
+    assert_eq!(child_state.values, 10);
+    assert_eq!(child_state.next_nodes, Vec::<NodeId>::new());
+}
+
+#[tokio::test]
 async fn subgraph_child_run_distinct_and_shares_root() {
     // A parent embedding one child: the parent run records exactly one child run
     // whose run id differs from the parent's, and whose root run id equals the

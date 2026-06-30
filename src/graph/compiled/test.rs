@@ -122,6 +122,67 @@ async fn command_goto_overrides_edges() {
 }
 
 #[tokio::test]
+async fn command_goto_rejects_unknown_target_immediately() {
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("router", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Command(Command::goto(["missing"])))
+        })
+        .set_entry("router")
+        .mark_command_routing("router")
+        .compile()
+        .unwrap();
+
+    let err = graph.run(0).await.unwrap_err();
+    match err {
+        TinyAgentsError::MissingNode(node) => assert_eq!(node, "missing"),
+        other => panic!("expected MissingNode, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn command_goto_rejects_start_target() {
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("router", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Command(Command::goto(["__start__"])))
+        })
+        .set_entry("router")
+        .mark_command_routing("router")
+        .compile()
+        .unwrap();
+
+    let err = graph.run(0).await.unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Graph(_)), "got {err:?}");
+    assert!(err.to_string().contains("START"), "{err}");
+}
+
+#[tokio::test]
+async fn invalid_command_goto_is_not_persisted_as_next_node() {
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("router", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Command(
+                Command::update(1).with_goto(["missing"]),
+            ))
+        })
+        .set_entry("router")
+        .mark_command_routing("router")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    let err = graph.run_with_thread("bad-goto", 0).await.unwrap_err();
+    assert!(
+        matches!(err, TinyAgentsError::MissingNode(_)),
+        "got {err:?}"
+    );
+    assert_eq!(
+        cp.count("bad-goto"),
+        0,
+        "invalid runtime route must fail before boundary checkpoint persistence"
+    );
+}
+
+#[tokio::test]
 async fn recursion_limit_is_deterministic() {
     let graph = GraphBuilder::<i32, i32>::overwrite()
         .with_recursion_limit(3)
@@ -265,6 +326,45 @@ async fn interrupt_then_resume_reruns_node() {
     assert!(!resumed.is_interrupted());
     assert_eq!(resumed.state, 15);
     assert_eq!(resumed.status.status, ExecutionStatus::Completed);
+}
+
+#[tokio::test]
+async fn interrupt_without_checkpointer_errors_instead_of_pausing() {
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("approve", |_s, _ctx: NodeContext| async move {
+            Ok(NodeResult::Interrupt(Interrupt::new(
+                "approve",
+                json!({ "ask": "approve?" }),
+            )))
+        })
+        .set_entry("approve")
+        .set_finish("approve")
+        .compile()
+        .unwrap();
+
+    let err = graph.run_with_thread("hitl", 10).await.unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Resume(_)), "got {err:?}");
+    assert!(err.to_string().contains("checkpointer"), "{err}");
+}
+
+#[tokio::test]
+async fn interrupt_without_thread_errors_instead_of_pausing() {
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("approve", |_s, _ctx: NodeContext| async move {
+            Ok(NodeResult::Interrupt(Interrupt::new(
+                "approve",
+                json!({ "ask": "approve?" }),
+            )))
+        })
+        .set_entry("approve")
+        .set_finish("approve")
+        .compile()
+        .unwrap()
+        .with_checkpointer(Arc::new(InMemoryCheckpointer::<i32>::new()));
+
+    let err = graph.run(10).await.unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Resume(_)), "got {err:?}");
+    assert!(err.to_string().contains("thread id"), "{err}");
 }
 
 #[tokio::test]

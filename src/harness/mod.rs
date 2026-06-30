@@ -48,7 +48,7 @@ pub use model::{
     collect_model_stream,
 };
 pub use tool::{
-    Tool as HarnessTool, ToolCall as HarnessToolCall, ToolRegistry,
+    Tool as HarnessTool, ToolCall as HarnessToolCall, ToolFormat, ToolRegistry,
     ToolResult as HarnessToolResult, ToolSchema,
 };
 pub use usage::Usage;

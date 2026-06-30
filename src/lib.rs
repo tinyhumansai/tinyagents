@@ -184,3 +184,14 @@ pub use graph::testkit::{
     assert_graph, failing_node, fanout_node, interrupting_node, noop_node, run_recorded,
     scripted_route_node, scripted_update_node, subagent_fake_node, subgraph_test_node,
 };
+
+// --- REPL language `.ragsh` Rhai session runtime (feature = "repl") ---
+// The imperative orchestration surface. Gated behind the `repl` feature so the
+// default build does not pull in the embedded Rhai engine. `ReplSession` here is
+// the scripting session from `repl::session`; the line-oriented command session
+// remains available as `repl::ReplSession`.
+#[cfg(feature = "repl")]
+pub use repl::session::{
+    LanguageCompiler, ReplCallKind, ReplCallRecord, ReplCapabilities, ReplPolicy, ReplResult,
+    ReplSession, ReplValue, ReplVariables,
+};

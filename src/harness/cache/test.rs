@@ -24,7 +24,8 @@ fn cache_key_is_deterministic() {
     let k1 = cache_key(&req);
     let k2 = cache_key(&req);
     assert_eq!(k1, k2, "cache_key must be deterministic");
-    assert_eq!(k1.len(), 16, "cache_key should be 16 hex chars");
+    assert_eq!(k1.len(), 64, "cache_key should be a SHA-256 hex digest");
+    assert!(k1.chars().all(|c| c.is_ascii_hexdigit()));
 }
 
 #[test]
@@ -50,6 +51,8 @@ fn prompt_cache_layout_stable_prefix() {
     ]);
     let layout = PromptCacheLayout::from_request(&req);
     assert_eq!(layout.prefix_ids(), &["sys"]);
+    // Prompt-layout fingerprints are short local stability markers; response
+    // cache identity uses the stronger `cache_key` digest.
     assert_eq!(layout.fingerprint().len(), 16);
 
     let same = PromptCacheLayout::from_request(&req);

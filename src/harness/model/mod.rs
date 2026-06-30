@@ -310,8 +310,10 @@ impl<State: Send + Sync> ModelRegistry<State> {
     /// Resolves a model using request override, previous state, hints,
     /// agent default, and finally registry default.
     pub fn resolve(&self, selection: ModelSelection) -> Option<ResolvedModelBinding<State>> {
+        let required = selection.required_capabilities.as_ref();
         if let Some(requested) = selection.requested
             && let Some(model) = self.get(&requested)
+            && model_satisfies(model.as_ref(), required)
         {
             return Some(ResolvedModelBinding {
                 resolved: ResolvedModel {
@@ -326,6 +328,7 @@ impl<State: Send + Sync> ModelRegistry<State> {
         if selection.reuse_previous
             && let Some(previous) = selection.previous
             && let Some(model) = self.get(&previous.name)
+            && model_satisfies(model.as_ref(), required)
         {
             return Some(ResolvedModelBinding {
                 resolved: ResolvedModel {
@@ -346,7 +349,9 @@ impl<State: Send + Sync> ModelRegistry<State> {
         });
 
         for (_, hint) in hints {
-            if let Some(model) = self.get(&hint.model) {
+            if let Some(model) = self.get(&hint.model)
+                && model_satisfies(model.as_ref(), required)
+            {
                 return Some(ResolvedModelBinding {
                     resolved: ResolvedModel {
                         name: hint.model.clone(),
@@ -360,6 +365,7 @@ impl<State: Send + Sync> ModelRegistry<State> {
 
         if let Some(agent_default) = selection.agent_default
             && let Some(model) = self.get(&agent_default)
+            && model_satisfies(model.as_ref(), required)
         {
             return Some(ResolvedModelBinding {
                 resolved: ResolvedModel {
@@ -372,14 +378,16 @@ impl<State: Send + Sync> ModelRegistry<State> {
         }
 
         let name = self.default_name()?.to_string();
-        self.default_model().map(|model| ResolvedModelBinding {
-            resolved: ResolvedModel {
-                name,
-                requested: None,
-                source: ModelResolutionSource::RegistryDefault,
-            },
-            model,
-        })
+        self.default_model()
+            .filter(|model| model_satisfies(model.as_ref(), required))
+            .map(|model| ResolvedModelBinding {
+                resolved: ResolvedModel {
+                    name,
+                    requested: None,
+                    source: ModelResolutionSource::RegistryDefault,
+                },
+                model,
+            })
     }
 
     /// Resolves a model for one request with optional agent and previous-state
@@ -396,6 +404,7 @@ impl<State: Send + Sync> ModelRegistry<State> {
             reuse_previous: request.reuse_previous_model,
             hints: request.model_hints.clone(),
             agent_default: agent_default.map(ToOwned::to_owned),
+            required_capabilities: request.required_capabilities.clone(),
         })
     }
 
@@ -404,6 +413,19 @@ impl<State: Send + Sync> ModelRegistry<State> {
         let mut names: Vec<String> = self.models.keys().cloned().collect();
         names.sort();
         names
+    }
+}
+
+fn model_satisfies<State: Send + Sync>(
+    model: &dyn ChatModel<State>,
+    required: Option<&CapabilitySet>,
+) -> bool {
+    match required {
+        None => true,
+        Some(required) if required == &CapabilitySet::default() => true,
+        Some(required) => model
+            .profile()
+            .is_some_and(|profile| profile.satisfies(required)),
     }
 }
 

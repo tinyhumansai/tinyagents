@@ -52,6 +52,24 @@ pub struct NodeId(pub(crate) String);
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskId(pub(crate) String);
 
+/// Identifies a single interactive `.ragsh` REPL session.
+///
+/// A `SessionId` names one [`crate::repl`] session: a persistent namespace and
+/// capability boundary that a (possibly model-driven) orchestrator drives one
+/// cell at a time. Pairing it with a [`RunId`] lets REPL events and the child
+/// model/tool/graph runs a session spawns be correlated back to the session
+/// that issued them.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SessionId(pub(crate) String);
+
+/// Identifies a single executed cell within a [`SessionId`] REPL session.
+///
+/// Each `.ragsh` cell evaluated against a session is named by a `CellId` so
+/// stdout chunks, variable changes, capability calls, and diagnostics can be
+/// attributed to the exact cell that produced them.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CellId(pub(crate) String);
+
 /// Identifies a persisted graph checkpoint.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CheckpointId(pub(crate) String);

@@ -23,15 +23,11 @@
 //! preserved or invalidated the provider's KV-cache prefix.
 //! [`CachePolicy`] toggles both concerns at the call-site level.
 //!
-//! # Allowed crates
-//! Only `std`, `serde`, `serde_json`, `async-trait`, and `thiserror` are used.
-//! The deterministic hash in [`cache_key`] is a pure-`std` FNV-1a 64-bit
-//! implementation with a stable, random-seed-free offset basis.
-
 mod types;
 
 use async_trait::async_trait;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 pub use types::*;
 
@@ -40,12 +36,20 @@ use crate::harness::model::{ModelRequest, ModelResponse};
 
 // ── Deterministic hash ────────────────────────────────────────────────────────
 
+/// Computes a deterministic SHA-256 digest over `data` and returns it as a
+/// 64-character lowercase hex string.
+fn sha256_hex(data: &[u8]) -> String {
+    let digest = Sha256::digest(data);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Computes a deterministic FNV-1a 64-bit hash over `data` and returns it as
 /// a 16-character lowercase hex string.
 ///
 /// FNV-1a uses a fixed, seed-free offset basis so the result is identical
 /// across process restarts — unlike Rust's default `SipHash`, which is seeded
-/// randomly at startup.
+/// randomly at startup. It is used only for short local prompt-layout
+/// fingerprints, not for response-cache identity.
 fn fnv1a_hex(data: &[u8]) -> String {
     const OFFSET_BASIS: u64 = 14_695_981_039_346_656_037;
     const PRIME: u64 = 1_099_511_628_211;
@@ -84,11 +88,12 @@ fn canonical_value(v: Value) -> Value {
 /// 1. Serializing `request` to a [`serde_json::Value`].
 /// 2. Sorting all JSON object keys recursively (canonical form).
 /// 3. Re-serializing to a compact JSON string.
-/// 4. Applying a seed-free FNV-1a 64-bit hash.
+/// 4. Applying SHA-256 to the canonical bytes.
 ///
 /// Because every behavior-affecting field of [`ModelRequest`] participates in
-/// the serialization, two requests that differ in any field will (with high
-/// probability) produce different keys.
+/// the serialization, two requests that differ in any field produce different
+/// canonical bytes and should produce different keys modulo SHA-256 collision
+/// resistance.
 ///
 /// # Panics
 /// Does not panic. If serialization unexpectedly fails, returns an empty-data
@@ -97,7 +102,7 @@ pub fn cache_key(request: &ModelRequest) -> String {
     let value = serde_json::to_value(request).unwrap_or(Value::Null);
     let canonical = canonical_value(value);
     let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
-    fnv1a_hex(&bytes)
+    sha256_hex(&bytes)
 }
 
 // ── InMemoryResponseCache ─────────────────────────────────────────────────────

@@ -64,6 +64,47 @@ impl Tool<()> for FakeTool {
     }
 }
 
+/// A strict tool used to prove harness-level schema validation runs before the
+/// tool implementation is invoked.
+struct StrictLookupTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl Tool<()> for StrictLookupTool {
+    fn name(&self) -> &str {
+        "strict_lookup"
+    }
+    fn description(&self) -> &str {
+        "strict lookup"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "strict_lookup",
+            "strict lookup",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "additionalProperties": false,
+                "properties": {
+                    "query": { "type": "string" },
+                    "filters": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "limit": { "type": "integer" }
+                        }
+                    }
+                }
+            }),
+        )
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(call.id, self.name(), "strict-output"))
+    }
+}
+
 /// Builds a tool-call assistant response (no text, one tool call).
 fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> ModelResponse {
     ModelResponse {
@@ -438,6 +479,34 @@ async fn tool_not_found_errors() {
         TinyAgentsError::ToolNotFound(name) => assert_eq!(name, "missing"),
         other => panic!("expected ToolNotFound, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn invalid_tool_arguments_fail_before_tool_execution() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_tool_call(
+            "strict_lookup",
+            json!({ "query": 42, "extra": true }),
+        )),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StrictLookupTool {
+        calls: Arc::clone(&calls),
+    }));
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect_err("invalid arguments should fail closed");
+
+    assert!(matches!(err, TinyAgentsError::Validation(_)), "got {err:?}");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "tool implementation must not run"
+    );
 }
 
 #[tokio::test]

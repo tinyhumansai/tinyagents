@@ -46,9 +46,10 @@ where
 {
     Box::new(move |state: State, ctx: NodeContext| {
         let child = child_for(&child, &ctx);
+        let thread_id = ctx.thread_id.clone();
         let recorder = ChildRunRecorder::new(&ctx);
         Box::pin(async move {
-            let execution = child.run(state).await?;
+            let execution = run_child(child, thread_id, state).await?;
             recorder.record(&execution);
             Ok(NodeResult::Update(execution.state))
         })
@@ -75,12 +76,13 @@ where
 {
     Box::new(move |state: P, ctx: NodeContext| {
         let child = child_for(&child, &ctx);
+        let thread_id = ctx.thread_id.clone();
         let recorder = ChildRunRecorder::new(&ctx);
         let to_child = to_child.clone();
         let from_child = from_child.clone();
         Box::pin(async move {
             let child_input = to_child(&state);
-            let execution = child.run(child_input).await?;
+            let execution = run_child(child, thread_id, child_input).await?;
             recorder.record(&execution);
             let update = from_child(&state, execution.state);
             Ok(NodeResult::Update(update))
@@ -105,6 +107,21 @@ fn child_for<S, U>(child: &CompiledGraph<S, U>, ctx: &NodeContext) -> CompiledGr
     namespaced(child, ctx)
         .with_recursion_frames(ctx.recursion_frames.clone())
         .with_recursion_node(ctx.node_id.clone())
+}
+
+async fn run_child<S, U>(
+    child: CompiledGraph<S, U>,
+    thread_id: Option<crate::harness::ids::ThreadId>,
+    state: S,
+) -> Result<GraphExecution<S>>
+where
+    S: Clone + Send + Sync + 'static,
+    U: Send + 'static,
+{
+    match thread_id {
+        Some(thread_id) => child.run_with_thread(thread_id, state).await,
+        None => child.run(state).await,
+    }
 }
 
 /// Captures the enclosing run's child-run sink and lineage so a subgraph node can

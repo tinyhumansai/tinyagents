@@ -4,12 +4,38 @@
 //! compiles and that the core fan-out and recording primitives work together.
 //! Comprehensive property tests and replay tests are tracked for a later pass.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::Duration;
 
 use crate::harness::events::{
-    AgentEvent, EventJournal, EventSink, HarnessRunStatus, RecordingListener,
+    AgentEvent, EventJournal, EventListener, EventRecord, EventSink, HarnessRunStatus,
+    RecordingListener,
 };
 use crate::harness::ids::{ComponentId, ExecutionStatus, HarnessPhase, RunId};
+
+struct ReentrantEmitter {
+    sink: EventSink,
+    emitted: AtomicBool,
+}
+
+impl ReentrantEmitter {
+    fn new(sink: EventSink) -> Self {
+        Self {
+            sink,
+            emitted: AtomicBool::new(false),
+        }
+    }
+}
+
+impl EventListener for ReentrantEmitter {
+    fn on_event(&self, _record: &EventRecord) {
+        if !self.emitted.swap(true, Ordering::SeqCst) {
+            self.sink.emit(AgentEvent::StateUpdate);
+        }
+    }
+}
 
 #[test]
 fn smoke_event_sink_records_events() {
@@ -91,4 +117,28 @@ fn smoke_sink_clone_shares_state() {
     // Emitting through the clone should still reach the recorder.
     sink2.emit(AgentEvent::StateUpdate);
     assert_eq!(recorder.len(), 1);
+}
+
+#[test]
+fn sink_listener_can_emit_to_same_sink_without_deadlock() {
+    let sink = EventSink::new();
+    let recorder = Arc::new(RecordingListener::new());
+    sink.subscribe(recorder.clone());
+    sink.subscribe(Arc::new(ReentrantEmitter::new(sink.clone())));
+
+    let (tx, rx) = mpsc::channel();
+    let emit_sink = sink.clone();
+    let handle = thread::spawn(move || {
+        emit_sink.emit(AgentEvent::StateUpdate);
+        tx.send(()).unwrap();
+    });
+
+    rx.recv_timeout(Duration::from_secs(1))
+        .expect("re-entrant emit should not deadlock");
+    handle.join().expect("emit thread should finish");
+
+    let events = recorder.events();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].offset, 0);
+    assert_eq!(events[1].offset, 1);
 }

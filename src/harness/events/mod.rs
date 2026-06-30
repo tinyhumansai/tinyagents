@@ -69,15 +69,19 @@ impl EventSink {
     /// Returns the [`EventRecord`] that was dispatched so the caller can
     /// record the assigned id or offset.
     ///
-    /// Listener invocations are synchronous and hold the sink lock. Listeners
-    /// must not call back into the same [`EventSink`] to avoid deadlock.
+    /// Listener invocations are synchronous. The sink lock is held only while
+    /// assigning the record id and cloning the listener list, so callbacks may
+    /// safely emit to the same sink when they guard against event recursion.
     pub fn emit(&self, event: AgentEvent) -> EventRecord {
-        let mut inner = self.inner.lock().expect("EventSink lock poisoned");
-        let offset = inner.next_offset;
-        inner.next_offset += 1;
-        let id = crate::harness::ids::EventId::new(format!("evt-{offset}"));
-        let record = EventRecord { id, offset, event };
-        for listener in &inner.listeners {
+        let (record, listeners) = {
+            let mut inner = self.inner.lock().expect("EventSink lock poisoned");
+            let offset = inner.next_offset;
+            inner.next_offset += 1;
+            let id = crate::harness::ids::EventId::new(format!("evt-{offset}"));
+            let record = EventRecord { id, offset, event };
+            (record, inner.listeners.clone())
+        };
+        for listener in &listeners {
             listener.on_event(&record);
         }
         record

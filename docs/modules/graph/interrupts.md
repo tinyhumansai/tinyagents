@@ -25,8 +25,11 @@ compiled_graph
 
 Rules:
 
-- interrupts require a checkpointer
-- resume requires a `thread_id`
+- interrupts require both a checkpointer and a `thread_id`
+- if a node emits an interrupt without resumable durability, the run returns a
+  resume error instead of an interrupted execution
+- interrupted executions are returned only after the checkpoint needed for
+  resume has been persisted
 - the interrupted node restarts from the beginning
 - multiple interrupts inside one task are matched by order or interrupt id
 - resume values can be a single value or a map from interrupt id to value

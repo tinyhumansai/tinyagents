@@ -404,6 +404,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                                     name: name.clone(),
                                     description: format!("Return the result as `{name}`."),
                                     parameters: schema.clone(),
+                                    format: crate::harness::tool::ToolFormat::Json,
                                 });
                                 request.tool_choice = ToolChoice::Tool(name.clone());
                             }
@@ -532,6 +533,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     .tools
                     .get(&call.name)
                     .ok_or_else(|| TinyAgentsError::ToolNotFound(call.name.clone()))?;
+                tool.schema().validate_call(&call)?;
 
                 let tool_call_id = CallId::new(call.id.clone());
                 let tool_name = call.name.clone();

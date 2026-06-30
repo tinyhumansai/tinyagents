@@ -189,12 +189,23 @@ async fn deep_nested_subgraphs_merge_state_without_checkpoint_collision() {
         Some(list[0].checkpoint_id.as_str())
     );
 
-    // Embedded subgraphs run on their own (threadless) executions, so their
-    // checkpoints NEVER leak into the parent's thread. The mechanism that keeps
-    // them isolated — namespace extension — is unit-tested in
-    // `src/graph/subgraph/test.rs`.
-    assert_eq!(mid_ckpt.count("deep"), 0);
-    assert_eq!(inner_ckpt.count("deep"), 0);
+    // Embedded subgraphs inherit the parent thread id, but their checkpoints
+    // stay isolated by checkpointer and embedding namespace.
+    let middle_list = mid_ckpt.list("deep").await.expect("middle list succeeds");
+    assert_eq!(middle_list.len(), 2);
+    assert!(
+        middle_list
+            .iter()
+            .all(|m| m.namespace == vec!["middle".to_string()])
+    );
+
+    let inner_list = inner_ckpt.list("deep").await.expect("inner list succeeds");
+    assert_eq!(inner_list.len(), 1);
+    assert!(
+        inner_list
+            .iter()
+            .all(|m| m.namespace == vec!["inner".to_string()])
+    );
 }
 
 // ---------------------------------------------------------------------------

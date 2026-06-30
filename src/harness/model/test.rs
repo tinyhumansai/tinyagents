@@ -20,6 +20,27 @@ impl ChatModel<()> for StaticModel {
     }
 }
 
+struct ProfiledModel {
+    profile: ModelProfile,
+}
+
+impl ProfiledModel {
+    fn new(profile: ModelProfile) -> Self {
+        Self { profile }
+    }
+}
+
+#[async_trait]
+impl ChatModel<()> for ProfiledModel {
+    fn profile(&self) -> Option<&ModelProfile> {
+        Some(&self.profile)
+    }
+
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> crate::Result<ModelResponse> {
+        Ok(ModelResponse::assistant("profiled"))
+    }
+}
+
 #[test]
 fn request_builder_sets_fields() {
     let req = ModelRequest::new(vec![Message::user("hi")])
@@ -351,4 +372,124 @@ async fn registry_tries_hints_by_priority_then_agent_default_then_registry_defau
 
     assert_eq!(resolved.name, "registry_default");
     assert_eq!(resolved.source, ModelResolutionSource::RegistryDefault);
+}
+
+#[tokio::test]
+async fn registry_filters_request_override_by_required_capabilities() {
+    let mut registry: ModelRegistry<()> = ModelRegistry::new();
+    registry
+        .register(
+            "plain",
+            Arc::new(ProfiledModel::new(ModelProfile::default())),
+        )
+        .register(
+            "tool_capable",
+            Arc::new(ProfiledModel::new(ModelProfile {
+                tool_calling: true,
+                ..ModelProfile::default()
+            })),
+        );
+
+    let request = ModelRequest::default()
+        .with_model("plain")
+        .with_model_hint(ModelHint {
+            model: "tool_capable".into(),
+            priority: 1,
+            reason: None,
+        })
+        .with_required_capabilities(CapabilitySet {
+            tool_calling: true,
+            ..CapabilitySet::default()
+        });
+
+    let resolved = registry
+        .resolve_request(&request, None, None)
+        .unwrap()
+        .resolved;
+    assert_eq!(resolved.name, "tool_capable");
+    assert_eq!(resolved.source, ModelResolutionSource::Hint);
+}
+
+#[tokio::test]
+async fn registry_filters_previous_hints_and_defaults_by_required_capabilities() {
+    let mut registry: ModelRegistry<()> = ModelRegistry::new();
+    registry
+        .register(
+            "registry_default",
+            Arc::new(ProfiledModel::new(ModelProfile::default())),
+        )
+        .register(
+            "previous",
+            Arc::new(ProfiledModel::new(ModelProfile::default())),
+        )
+        .register(
+            "weak_hint",
+            Arc::new(ProfiledModel::new(ModelProfile::default())),
+        )
+        .register(
+            "strong_hint",
+            Arc::new(ProfiledModel::new(ModelProfile {
+                streaming: true,
+                ..ModelProfile::default()
+            })),
+        )
+        .register(
+            "agent_default",
+            Arc::new(ProfiledModel::new(ModelProfile {
+                streaming: true,
+                ..ModelProfile::default()
+            })),
+        );
+
+    let previous = ResolvedModel {
+        name: "previous".into(),
+        requested: Some("previous".into()),
+        source: ModelResolutionSource::StateReuse,
+    };
+    let required = CapabilitySet {
+        streaming: true,
+        ..CapabilitySet::default()
+    };
+
+    let request = ModelRequest::default()
+        .with_reuse_previous_model(true)
+        .with_model_hint(ModelHint {
+            model: "weak_hint".into(),
+            priority: 100,
+            reason: None,
+        })
+        .with_model_hint(ModelHint {
+            model: "strong_hint".into(),
+            priority: 1,
+            reason: None,
+        })
+        .with_required_capabilities(required.clone());
+
+    let resolved = registry
+        .resolve_request(&request, Some("agent_default"), Some(previous))
+        .unwrap()
+        .resolved;
+    assert_eq!(resolved.name, "strong_hint");
+    assert_eq!(resolved.source, ModelResolutionSource::Hint);
+
+    let request = ModelRequest::default().with_required_capabilities(required);
+    let resolved = registry
+        .resolve_request(&request, Some("agent_default"), None)
+        .unwrap()
+        .resolved;
+    assert_eq!(resolved.name, "agent_default");
+    assert_eq!(resolved.source, ModelResolutionSource::AgentDefault);
+}
+
+#[tokio::test]
+async fn registry_rejects_unknown_profiles_when_capabilities_are_required() {
+    let mut registry: ModelRegistry<()> = ModelRegistry::new();
+    registry.register("unknown", Arc::new(StaticModel));
+
+    let request = ModelRequest::default().with_required_capabilities(CapabilitySet {
+        json_schema: true,
+        ..CapabilitySet::default()
+    });
+
+    assert!(registry.resolve_request(&request, None, None).is_none());
 }

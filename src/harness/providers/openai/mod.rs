@@ -576,14 +576,21 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
         .message
         .tool_calls
         .into_iter()
-        .map(|call| ToolCall {
-            id: call.id,
-            name: call.function.name,
-            // Tool arguments arrive as a JSON string; parse back to a value,
-            // falling back to JSON null if the model emitted invalid JSON.
-            arguments: serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null),
+        .map(|call| {
+            Ok(ToolCall {
+                id: call.id.clone(),
+                name: call.function.name.clone(),
+                // Tool arguments arrive as a JSON string. Invalid JSON is a
+                // provider/model error, not an empty/default argument payload.
+                arguments: parse_tool_arguments(
+                    "openai response",
+                    &call.id,
+                    &call.function.name,
+                    &call.function.arguments,
+                )?,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let usage = parsed.usage.map(convert_usage);
 
@@ -600,6 +607,14 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
         finish_reason: choice.finish_reason,
         raw: Some(value),
         resolved_model: None,
+    })
+}
+
+fn parse_tool_arguments(context: &str, call_id: &str, name: &str, raw: &str) -> Result<Value> {
+    serde_json::from_str(raw).map_err(|err| {
+        TinyAgentsError::Model(format!(
+            "{context} contained invalid JSON arguments for tool call `{call_id}` (`{name}`): {err}; raw arguments: {raw:?}"
+        ))
     })
 }
 
@@ -702,7 +717,7 @@ impl OpenAiStreamAcc {
     }
 
     /// Consumes the accumulator into the final, merged [`ModelResponse`].
-    fn into_response(self) -> ModelResponse {
+    fn into_response(self) -> Result<ModelResponse> {
         let mut content = Vec::new();
         if !self.text.is_empty() {
             content.push(ContentBlock::Text(self.text));
@@ -712,29 +727,32 @@ impl OpenAiStreamAcc {
             .into_iter()
             .filter(|b| !b.name.is_empty() || !b.args.is_empty())
             .enumerate()
-            .map(|(idx, b)| ToolCall {
-                id: if b.id.is_empty() {
+            .map(|(idx, b)| {
+                let id = if b.id.is_empty() {
                     format!("tool-{idx}")
                 } else {
-                    b.id
-                },
-                name: b.name,
-                arguments: serde_json::from_str(&b.args).unwrap_or(Value::Null),
+                    b.id.clone()
+                };
+                Ok(ToolCall {
+                    id: id.clone(),
+                    name: b.name.clone(),
+                    arguments: parse_tool_arguments("openai stream", &id, &b.name, &b.args)?,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         let message = AssistantMessage {
             id: self.id,
             content,
             tool_calls,
             usage: self.usage,
         };
-        ModelResponse {
+        Ok(ModelResponse {
             message,
             usage: self.usage,
             finish_reason: self.finish_reason,
             raw: None,
             resolved_model: None,
-        }
+        })
     }
 }
 
@@ -806,8 +824,20 @@ async fn sse_next(mut state: SseState) -> Option<(ModelStreamItem, SseState)> {
                 return None;
             }
             state.terminal_emitted = true;
-            let response = std::mem::take(&mut state.acc).into_response();
-            return Some((ModelStreamItem::Completed(response), state));
+            return match std::mem::take(&mut state.acc).into_response() {
+                Ok(response) => Some((ModelStreamItem::Completed(response), state)),
+                Err(error) => {
+                    let provider_error = ProviderError {
+                        provider: state.provider.clone(),
+                        model: Some(state.model.clone()),
+                        code: Some("invalid_tool_arguments".to_string()),
+                        message: error.to_string(),
+                        retryable: false,
+                        ..ProviderError::default()
+                    };
+                    Some((ModelStreamItem::ProviderFailed(provider_error), state))
+                }
+            };
         }
         match state.bytes.next().await {
             Some(Ok(chunk)) => {

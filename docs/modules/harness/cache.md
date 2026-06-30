@@ -116,6 +116,10 @@ Cache keys must include every behavior-affecting input: model, messages, tools,
 tool schemas, response format, provider options, and relevant metadata. Unsafe
 or side-effecting tool calls should not be cached by default.
 
+The local response cache key is a SHA-256 digest of canonical request JSON.
+Prompt text is not embedded directly in the key, but every serialized
+behavior-affecting request field participates in the digest.
+
 ## Cache Key Inputs
 
 Model response cache keys should include:

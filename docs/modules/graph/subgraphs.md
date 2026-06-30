@@ -45,3 +45,17 @@ into the parent's recursion tree:
 - callers read the parent/child lineage after a run via
   `GraphExecution::run_tree()` (a `RunTree`: this run's id, the shared root, the
   parent run, and the spawned children).
+
+When the parent `NodeContext` carries a thread id, embedded child graphs run on
+that same thread by default. The child checkpoint namespace is still extended
+with the embedding node id, so parent and child checkpoints share a thread but
+remain separately inspectable:
+
+```text
+thread: t
+parent checkpoint namespace: []
+child checkpoint namespace: ["child_node"]
+```
+
+If the parent run has no thread id, the child keeps the unthreaded execution
+behavior and does not persist checkpoints.

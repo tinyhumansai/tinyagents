@@ -331,6 +331,7 @@ async fn dynamic_tool_selection_filters_request_tools() {
         name: name.to_string(),
         description: String::new(),
         parameters: json!({}),
+        format: crate::harness::tool::ToolFormat::Json,
     };
     let mut request = ModelRequest::new(Vec::new()).with_tools(vec![
         schema("keep"),

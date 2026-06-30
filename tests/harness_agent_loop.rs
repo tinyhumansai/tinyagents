@@ -20,7 +20,10 @@ use tinyagents::harness::events::RecordingListener;
 use tinyagents::harness::limits::RunLimits;
 use tinyagents::harness::message::{AssistantMessage, ContentBlock, Message};
 use tinyagents::harness::middleware::Middleware;
-use tinyagents::harness::model::ModelResponse;
+use tinyagents::harness::model::{
+    CapabilitySet, ChatModel, ModelHint, ModelProfile, ModelRequest, ModelResolutionSource,
+    ModelResponse,
+};
 use tinyagents::harness::providers::MockModel;
 use tinyagents::harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents::harness::testkit::{FakeTool, Trajectory};
@@ -81,6 +84,53 @@ fn text_response(text: &str, input: u64, output: u64) -> ModelResponse {
     }
 }
 
+struct ProfiledIntegrationModel {
+    profile: ModelProfile,
+    text: &'static str,
+}
+
+#[async_trait]
+impl ChatModel<()> for ProfiledIntegrationModel {
+    fn profile(&self) -> Option<&ModelProfile> {
+        Some(&self.profile)
+    }
+
+    async fn invoke(
+        &self,
+        _state: &(),
+        _request: ModelRequest,
+    ) -> tinyagents::Result<ModelResponse> {
+        Ok(ModelResponse::assistant(self.text))
+    }
+}
+
+struct RequireJsonSchemaMiddleware;
+
+#[async_trait]
+impl Middleware<(), ()> for RequireJsonSchemaMiddleware {
+    fn name(&self) -> &str {
+        "require_json_schema"
+    }
+
+    async fn before_model(
+        &self,
+        _ctx: &mut RunContext<()>,
+        _state: &(),
+        request: &mut ModelRequest,
+    ) -> tinyagents::Result<()> {
+        request.required_capabilities = Some(CapabilitySet {
+            json_schema: true,
+            ..CapabilitySet::default()
+        });
+        request.model_hints.push(ModelHint {
+            model: "capable".to_string(),
+            priority: 1,
+            reason: Some("needs json schema".to_string()),
+        });
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn single_turn_response_completes_with_one_model_call() {
     let listener = Arc::new(RecordingListener::new());
@@ -106,6 +156,45 @@ async fn single_turn_response_completes_with_one_model_call() {
     traj.assert_model_called_times(1);
     traj.assert_completed();
     assert!(!traj.failed());
+}
+
+#[tokio::test]
+async fn required_capabilities_select_capable_model() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness
+        .register_model(
+            "incapable",
+            Arc::new(ProfiledIntegrationModel {
+                profile: ModelProfile::default(),
+                text: "incapable",
+            }),
+        )
+        .set_default_model("incapable")
+        .register_model(
+            "capable",
+            Arc::new(ProfiledIntegrationModel {
+                profile: ModelProfile {
+                    json_schema: true,
+                    ..ModelProfile::default()
+                },
+                text: "capable",
+            }),
+        )
+        .push_middleware(Arc::new(RequireJsonSchemaMiddleware));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("pick a model")])
+        .await
+        .expect("capable hinted model satisfies required capabilities");
+
+    assert_eq!(run.text(), Some("capable".to_string()));
+    let resolved = run
+        .final_response
+        .expect("final response")
+        .resolved_model
+        .expect("resolved model metadata");
+    assert_eq!(resolved.name, "capable");
+    assert_eq!(resolved.source, ModelResolutionSource::Hint);
 }
 
 #[tokio::test]

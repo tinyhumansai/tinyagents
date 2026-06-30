@@ -228,6 +228,38 @@ fn parses_openai_response_with_content_tool_call_and_usage() {
 }
 
 #[test]
+fn parse_response_errors_on_invalid_tool_argument_json() {
+    let body = json!({
+        "id": "chatcmpl-badargs",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-bad",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": "{\"q\":"
+                            }
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }
+        ]
+    });
+
+    let err = parse_response(body).expect_err("invalid arguments must fail");
+    let message = err.to_string();
+    assert!(matches!(err, TinyAgentsError::Model(_)));
+    assert!(message.contains("call-bad"), "{message}");
+    assert!(message.contains("lookup"), "{message}");
+    assert!(message.contains("raw arguments"), "{message}");
+}
+
+#[test]
 fn parses_text_only_response_without_usage_details() {
     let body = json!({
         "id": "chatcmpl-xyz",
@@ -406,6 +438,52 @@ async fn sse_stream_parses_text_tool_calls_and_usage() {
     assert_eq!(calls[0].arguments, json!({ "q": 42 }));
     assert_eq!(response.finish_reason.as_deref(), Some("tool_calls"));
     assert_eq!(response.usage.unwrap().total_tokens, 8);
+}
+
+#[tokio::test]
+async fn sse_stream_invalid_tool_argument_json_fails_terminally() {
+    use futures::StreamExt;
+
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-bad\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let bytes = futures::stream::iter(raw.into_iter().map(Ok::<Vec<u8>, TinyAgentsError>));
+
+    let state = SseState {
+        bytes: Box::pin(bytes),
+        buf: String::new(),
+        pending: std::collections::VecDeque::new(),
+        acc: OpenAiStreamAcc::default(),
+        provider: "openai".to_string(),
+        model: "gpt-4.1-mini".to_string(),
+        started: false,
+        finished: false,
+        terminal_emitted: false,
+    };
+    let items: Vec<ModelStreamItem> = futures::stream::unfold(state, sse_next).collect().await;
+
+    let failed = items
+        .iter()
+        .find_map(|item| match item {
+            ModelStreamItem::ProviderFailed(error) => Some(error),
+            _ => None,
+        })
+        .expect("invalid arguments should emit ProviderFailed");
+    assert_eq!(failed.code.as_deref(), Some("invalid_tool_arguments"));
+    assert!(!failed.retryable);
+    assert!(failed.message.contains("call-bad"), "{}", failed.message);
+    assert!(failed.message.contains("lookup"), "{}", failed.message);
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let err = merged
+        .finish()
+        .expect_err("provider failure must reach accumulator");
+    assert!(err.to_string().contains("invalid_tool_arguments"));
 }
 
 #[test]
