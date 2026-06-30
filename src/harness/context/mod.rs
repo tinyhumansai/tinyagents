@@ -61,6 +61,7 @@ impl RunConfig {
             timeout_ms: None,
             max_model_calls: 25,
             max_tool_calls: 50,
+            max_turn_output_tokens: None,
             depth: 0,
             max_depth: RunLimits::default().max_depth,
         }
@@ -102,6 +103,12 @@ impl RunConfig {
         self
     }
 
+    /// Sets the maximum output tokens requested for each model turn.
+    pub fn with_max_turn_output_tokens(mut self, n: u32) -> Self {
+        self.max_turn_output_tokens = Some(n);
+        self
+    }
+
     /// Sets this run's depth in the sub-agent / recursion tree.
     ///
     /// Top-level runs are depth `0`; child runs spawned by a
@@ -127,6 +134,7 @@ impl RunConfig {
         config.depth = self.depth + 1;
         config.max_depth = self.max_depth;
         config.thread_id = self.thread_id.clone();
+        config.max_turn_output_tokens = self.max_turn_output_tokens;
         config
     }
 

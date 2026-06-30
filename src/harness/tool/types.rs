@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::Result;
+use crate::harness::context::RunContext;
+use crate::harness::events::EventSink;
+use crate::harness::ids::{RunId, ThreadId};
 
 /// The model-visible syntax a tool declaration prefers.
 ///
@@ -90,6 +93,39 @@ pub struct ToolResult {
     pub elapsed_ms: u64,
 }
 
+/// Live run context visible to a tool invoked by an agent loop.
+///
+/// The legacy [`Tool::call`] entry point remains available for direct calls and
+/// tests. The agent loop uses [`Tool::call_with_context`] so recursive tools
+/// such as sub-agents can inherit caller lineage while still isolating child
+/// threads.
+#[derive(Clone)]
+pub struct ToolExecutionContext {
+    /// Run that invoked the tool.
+    pub run_id: RunId,
+    /// Caller thread id, when the parent run is threaded.
+    pub thread_id: Option<ThreadId>,
+    /// Caller recursion depth.
+    pub depth: usize,
+    /// Maximum output tokens requested for each model turn in the caller's run.
+    pub max_turn_output_tokens: Option<u32>,
+    /// Shared event sink for nested run observability.
+    pub events: EventSink,
+}
+
+impl ToolExecutionContext {
+    /// Captures the non-generic tool-visible parts of a live [`RunContext`].
+    pub fn from_run_context<Ctx>(ctx: &RunContext<Ctx>) -> Self {
+        Self {
+            run_id: ctx.config.run_id.clone(),
+            thread_id: ctx.config.thread_id.clone(),
+            depth: ctx.config.depth,
+            max_turn_output_tokens: ctx.config.max_turn_output_tokens,
+            events: ctx.events.clone(),
+        }
+    }
+}
+
 /// An incremental progress update emitted while a tool runs (streaming).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolDelta {
@@ -116,6 +152,20 @@ pub trait Tool<State>: Send + Sync {
 
     /// Executes the tool against application state and a validated call.
     async fn call(&self, state: &State, call: ToolCall) -> Result<ToolResult>;
+
+    /// Executes the tool with access to caller run context.
+    ///
+    /// Implementors that do not need caller lineage can rely on the default,
+    /// which delegates to [`Self::call`].
+    async fn call_with_context(
+        &self,
+        state: &State,
+        call: ToolCall,
+        context: ToolExecutionContext,
+    ) -> Result<ToolResult> {
+        let _ = context;
+        self.call(state, call).await
+    }
 }
 
 /// A name-keyed registry of tools available to the harness.

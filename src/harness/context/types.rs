@@ -61,6 +61,13 @@ pub struct RunConfig {
     pub max_model_calls: usize,
     /// Maximum number of tool invocations permitted for this run.
     pub max_tool_calls: usize,
+    /// Maximum output tokens requested for each model turn in this run.
+    ///
+    /// When set, the agent loop applies this as an upper bound to
+    /// [`crate::harness::model::ModelRequest::max_tokens`] before dispatching a
+    /// model call. Child sub-agent runs inherit the same cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turn_output_tokens: Option<u32>,
     /// Current depth of this run in the sub-agent / recursion tree.
     ///
     /// A top-level run is depth `0`. When a [`crate::harness::subagent::SubAgent`]

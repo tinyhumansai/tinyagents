@@ -81,10 +81,11 @@ use serde_json::{Value, json};
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::events::{AgentEvent, EventSink};
+use crate::harness::ids::{ThreadId, next_seq};
 use crate::harness::message::Message;
 use crate::harness::middleware::AgentRun;
 use crate::harness::runtime::AgentHarness;
-use crate::harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
+use crate::harness::tool::{Tool, ToolCall, ToolExecutionContext, ToolResult, ToolSchema};
 
 impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
     /// Creates a sub-agent wrapping `harness` with a stable `name` and
@@ -136,19 +137,30 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
     }
 
     /// Builds the child [`RunConfig`] for an invocation at `parent_depth`,
-    /// enforcing the depth cap.
+    /// enforcing the depth cap and deriving an isolated child thread from a
+    /// parent thread when one is available.
     ///
     /// Returns [`TinyAgentsError::SubAgentDepth`] when the child depth
     /// (`parent_depth + 1`) would exceed the harness policy's `max_depth`.
-    fn child_config(&self, parent_depth: usize) -> Result<RunConfig> {
+    fn child_config(
+        &self,
+        parent_depth: usize,
+        thread_id: Option<&ThreadId>,
+        max_turn_output_tokens: Option<u32>,
+    ) -> Result<RunConfig> {
         let max_depth = self.harness.policy().limits.max_depth;
         let child_depth = parent_depth + 1;
         if child_depth > max_depth {
             return Err(TinyAgentsError::SubAgentDepth(max_depth));
         }
-        Ok(RunConfig::new(format!("{}-d{child_depth}", self.name))
+        let child_run_id = format!("{}-d{child_depth}", self.name);
+        let mut config = RunConfig::new(child_run_id.clone())
             .with_depth(child_depth)
-            .with_max_depth(max_depth))
+            .with_max_depth(max_depth);
+        config.thread_id =
+            thread_id.map(|parent| child_thread_id(parent, &child_run_id, next_seq()));
+        config.max_turn_output_tokens = max_turn_output_tokens;
+        Ok(config)
     }
 
     /// Runs the sub-agent as a child run at `parent_depth`, returning the
@@ -171,7 +183,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
         parent_depth: usize,
         input: impl Into<String>,
     ) -> Result<AgentRun> {
-        let config = self.child_config(parent_depth)?;
+        let config = self.child_config(parent_depth, None, None)?;
         let ctx = RunContext::new(config, ctx_data);
         self.run_child(state, ctx, input.into()).await
     }
@@ -187,7 +199,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
         input: impl Into<String>,
         events: &EventSink,
     ) -> Result<AgentRun> {
-        let config = self.child_config(parent_depth)?;
+        let config = self.child_config(parent_depth, None, None)?;
         let ctx = RunContext::new(config, ctx_data).with_events(events.clone());
         self.run_child(state, ctx, input.into()).await
     }
@@ -209,8 +221,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
         parent: &RunContext<Ctx>,
         input: impl Into<String>,
     ) -> Result<AgentRun> {
-        self.invoke_with_events(state, ctx_data, parent.depth(), input, &parent.events)
-            .await
+        let config = self.child_config(
+            parent.depth(),
+            parent.thread_id(),
+            parent.config.max_turn_output_tokens,
+        )?;
+        let ctx = RunContext::new(config, ctx_data).with_events(parent.events.clone());
+        self.run_child(state, ctx, input.into()).await
     }
 
     /// Shared driver: emits the sub-agent lifecycle events around the child
@@ -242,6 +259,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
 
         Ok(run)
     }
+}
+
+fn child_thread_id(parent: &ThreadId, child_run_id: &str, sequence: u64) -> ThreadId {
+    ThreadId::new(format!(
+        "{}-subagent-{child_run_id}-{sequence}",
+        parent.as_str()
+    ))
 }
 
 impl<State: Send + Sync, Ctx: Send + Sync> SubAgentSession<State, Ctx> {
@@ -511,6 +535,35 @@ where
             .invoke(state, Ctx::default(), self.parent_depth, input)
             .await
         {
+            Ok(run) => run,
+            Err(error) => {
+                if let Some(result) =
+                    Self::limit_result_for_parent(call_id, &self.tool_name, &error)
+                {
+                    return Ok(result);
+                }
+                return Err(error);
+            }
+        };
+        let text = run.text().unwrap_or_default();
+        Ok(ToolResult::text(call_id, &self.tool_name, text))
+    }
+
+    async fn call_with_context(
+        &self,
+        state: &State,
+        call: ToolCall,
+        context: ToolExecutionContext,
+    ) -> Result<ToolResult> {
+        let input = Self::extract_input(&call.arguments);
+        let call_id = call.id;
+        let config = self.subagent.child_config(
+            context.depth,
+            context.thread_id.as_ref(),
+            context.max_turn_output_tokens,
+        )?;
+        let ctx = RunContext::new(config, Ctx::default()).with_events(context.events);
+        let run = match self.subagent.run_child(state, ctx, input).await {
             Ok(run) => run,
             Err(error) => {
                 if let Some(result) =

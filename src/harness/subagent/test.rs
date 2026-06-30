@@ -13,6 +13,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::error::TinyAgentsError;
+use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::events::{AgentEvent, EventSink, RecordingListener};
 use crate::harness::limits::RunLimits;
 use crate::harness::message::{AssistantMessage, ContentBlock, Message};
@@ -321,6 +322,52 @@ async fn invoke_with_events_emits_lifecycle_on_shared_sink() {
             .iter()
             .any(|e| matches!(e, AgentEvent::RunStarted { .. }))
     );
+}
+
+#[tokio::test]
+async fn invoke_in_parent_derives_unique_child_thread_ids() {
+    let subagent = SubAgent::new(
+        "observed",
+        "an observed agent",
+        Arc::new(child_harness("done")),
+    );
+
+    let sink = EventSink::new();
+    let recorder = Arc::new(RecordingListener::new());
+    sink.subscribe(recorder.clone());
+    let parent = RunContext::new(
+        RunConfig::new("parent-run").with_thread("parent-thread"),
+        (),
+    )
+    .with_events(sink);
+
+    subagent
+        .invoke_in_parent(&(), (), &parent, "first")
+        .await
+        .expect("first child run succeeds");
+    subagent
+        .invoke_in_parent(&(), (), &parent, "second")
+        .await
+        .expect("second child run succeeds");
+
+    let child_threads: Vec<String> = recorder
+        .events()
+        .into_iter()
+        .filter_map(|record| match record.event {
+            AgentEvent::RunStarted {
+                thread_id: Some(thread_id),
+                ..
+            } => Some(thread_id.to_string()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(child_threads.len(), 2);
+    assert_ne!(child_threads[0], child_threads[1]);
+    for thread in child_threads {
+        assert!(thread.starts_with("parent-thread-subagent-observed-d1-"));
+        assert!(!thread.contains('/'));
+    }
 }
 
 #[tokio::test]

@@ -355,6 +355,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             if let Some(format) = &self.policy.default_response_format {
                 request = request.with_response_format(format.clone());
             }
+            if let Some(cap) = ctx.config.max_turn_output_tokens {
+                request.max_tokens =
+                    Some(request.max_tokens.map_or(cap, |current| current.min(cap)));
+            }
 
             status.mark_running(HarnessPhase::Middleware);
             self.middleware
@@ -966,7 +970,15 @@ impl<State: Send + Sync, Ctx: Send + Sync> ToolBaseCall<State, Ctx> for ToolCall
         state: &'a State,
         call: ToolCall,
     ) -> BoxToolFuture<'a> {
-        Box::pin(async move { self.tool.call(state, call).await })
+        Box::pin(async move {
+            self.tool
+                .call_with_context(
+                    state,
+                    call,
+                    crate::harness::tool::ToolExecutionContext::from_run_context(ctx),
+                )
+                .await
+        })
     }
 }
 
