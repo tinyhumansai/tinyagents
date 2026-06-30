@@ -39,7 +39,7 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
@@ -394,9 +394,13 @@ impl OpenAiModel {
             tool_choice,
             response_format,
             temperature: request.temperature,
+            top_p: request.top_p,
             max_tokens: request.max_tokens,
+            stop: request.stop_sequences.clone(),
+            seed: request.seed,
             stream: false,
             stream_options: None,
+            extra: provider_extra_options(&request.provider_options)?,
         })
     }
 
@@ -456,6 +460,43 @@ impl OpenAiModel {
             .map(str::to_string);
         self.provider_error(message, Some(status), code, raw)
     }
+}
+
+/// Returns provider-specific top-level fields to flatten into the request body.
+///
+/// Core OpenAI-compatible fields are intentionally reserved so normalized
+/// TinyAgents fields remain the source of truth. Callers that need local-model
+/// controls should use distinct provider fields such as Ollama's `options`.
+fn provider_extra_options(options: &Value) -> Result<Map<String, Value>> {
+    if options.is_null() {
+        return Ok(Map::new());
+    }
+    let Some(object) = options.as_object() else {
+        return Err(TinyAgentsError::Validation(
+            "provider_options for OpenAI-compatible providers must be a JSON object".to_string(),
+        ));
+    };
+
+    const RESERVED: &[&str] = &[
+        "model",
+        "messages",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "seed",
+        "stream",
+        "stream_options",
+    ];
+
+    Ok(object
+        .iter()
+        .filter(|(key, _)| !RESERVED.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect())
 }
 
 /// Translates one harness [`Message`] into an OpenAI wire message.

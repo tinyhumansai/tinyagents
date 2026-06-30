@@ -7,7 +7,7 @@
 //! never leaks into core harness code.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 // ---------------------------------------------------------------------------
 // Request shapes (serialized and sent to OpenAI)
@@ -32,9 +32,18 @@ pub struct ChatCompletionRequest {
     /// Sampling temperature. Omitted when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    /// Nucleus sampling probability mass. Omitted when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
     /// Maximum number of output tokens. Omitted when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Stop sequences that terminate generation. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stop: Vec<String>,
+    /// Deterministic generation seed. Omitted when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
     /// Request Server-Sent-Events streaming. Omitted (false) for unary calls.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stream: bool,
@@ -42,6 +51,11 @@ pub struct ChatCompletionRequest {
     /// unary calls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<Value>,
+    /// Provider-specific top-level request fields. Flattened after normalized
+    /// fields so OpenAI-compatible local providers can receive their own typed
+    /// controls without new wire structs.
+    #[serde(flatten, skip_serializing_if = "Map::is_empty")]
+    pub extra: Map<String, Value>,
 }
 
 // ---------------------------------------------------------------------------

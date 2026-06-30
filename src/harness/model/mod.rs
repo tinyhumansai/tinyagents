@@ -156,9 +156,30 @@ impl ModelRequest {
         self
     }
 
+    /// Sets nucleus sampling probability mass.
+    pub fn with_top_p(mut self, top_p: f64) -> Self {
+        self.top_p = Some(top_p);
+        self
+    }
+
     /// Sets the maximum output tokens.
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// Sets stop sequences that should terminate generation.
+    pub fn with_stop_sequences(
+        mut self,
+        stop_sequences: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.stop_sequences = stop_sequences.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets a deterministic generation seed.
+    pub fn with_seed(mut self, seed: i64) -> Self {
+        self.seed = Some(seed);
         self
     }
 
@@ -189,6 +210,22 @@ impl ModelRequest {
     /// Sets the provider-specific pass-through options.
     pub fn with_provider_options(mut self, options: Value) -> Self {
         self.provider_options = options;
+        self
+    }
+
+    /// Adds one provider-specific pass-through option.
+    ///
+    /// If `provider_options` is not already an object, it is replaced with a new
+    /// object containing this option.
+    pub fn with_provider_option(mut self, key: impl Into<String>, value: Value) -> Self {
+        let options = self
+            .provider_options
+            .as_object_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let mut options = options;
+        options.insert(key.into(), value);
+        self.provider_options = Value::Object(options);
         self
     }
 

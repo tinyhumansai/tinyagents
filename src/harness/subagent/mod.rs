@@ -458,6 +458,27 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgentTool<State, Ctx> {
             _ => String::new(),
         }
     }
+
+    fn limit_result_for_parent(
+        call_id: String,
+        tool_name: &str,
+        error: &TinyAgentsError,
+    ) -> Option<ToolResult> {
+        let limit_kind = match error {
+            TinyAgentsError::LimitExceeded(_) => "configured run limit",
+            TinyAgentsError::Timeout(_) => "wall-clock deadline",
+            TinyAgentsError::SubAgentDepth(_) => "recursion depth limit",
+            _ => return None,
+        };
+
+        Some(ToolResult::error(
+            call_id,
+            tool_name,
+            format!(
+                "Sub-agent `{tool_name}` stopped before completing because it hit its {limit_kind}: {error}. The parent orchestrator should treat this as a delegated-agent limit signal, not a completed answer."
+            ),
+        ))
+    }
 }
 
 #[async_trait]
@@ -484,12 +505,24 @@ where
 
     async fn call(&self, state: &State, call: ToolCall) -> Result<ToolResult> {
         let input = Self::extract_input(&call.arguments);
-        let run = self
+        let call_id = call.id;
+        let run = match self
             .subagent
             .invoke(state, Ctx::default(), self.parent_depth, input)
-            .await?;
+            .await
+        {
+            Ok(run) => run,
+            Err(error) => {
+                if let Some(result) =
+                    Self::limit_result_for_parent(call_id, &self.tool_name, &error)
+                {
+                    return Ok(result);
+                }
+                return Err(error);
+            }
+        };
         let text = run.text().unwrap_or_default();
-        Ok(ToolResult::text(call.id, &self.tool_name, text))
+        Ok(ToolResult::text(call_id, &self.tool_name, text))
     }
 }
 

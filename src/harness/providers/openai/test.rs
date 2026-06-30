@@ -49,6 +49,9 @@ fn translates_request_to_openai_json_shape() {
         }),
     ))
     .with_temperature(0.2)
+    .with_top_p(0.8)
+    .with_stop_sequences(["END"])
+    .with_seed(7)
     .with_max_tokens(256);
 
     let body = model().translate_request(&request).unwrap();
@@ -100,7 +103,63 @@ fn translates_request_to_openai_json_shape() {
 
     // Sampling params.
     assert_eq!(value["temperature"], json!(0.2));
+    assert_eq!(value["top_p"], json!(0.8));
     assert_eq!(value["max_tokens"], json!(256));
+    assert_eq!(value["stop"], json!(["END"]));
+    assert_eq!(value["seed"], json!(7));
+}
+
+#[test]
+fn translates_provider_options_for_local_openai_compatible_models() {
+    let request = ModelRequest::new(vec![Message::user("hi")])
+        .with_temperature(0.1)
+        .with_provider_options(json!({
+            "temperature": 9.9,
+            "stream": true,
+            "hotness": "spicy",
+            "reasoning": { "effort": "high" },
+            "options": {
+                "num_ctx": 8192,
+                "top_k": 40,
+                "repeat_penalty": 1.1,
+                "mirostat": 2
+            },
+            "keep_alive": "10m"
+        }));
+
+    let value = serde_json::to_value(
+        OpenAiModel::ollama()
+            .with_model("qwen2.5")
+            .translate_request(&request)
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(value["model"], json!("qwen2.5"));
+    assert_eq!(value["temperature"], json!(0.1));
+    assert!(value.get("stream").is_none());
+    assert_eq!(value["hotness"], json!("spicy"));
+    assert_eq!(value["reasoning"]["effort"], json!("high"));
+    assert_eq!(value["options"]["num_ctx"], json!(8192));
+    assert_eq!(value["options"]["top_k"], json!(40));
+    assert_eq!(value["options"]["repeat_penalty"], json!(1.1));
+    assert_eq!(value["options"]["mirostat"], json!(2));
+    assert_eq!(value["keep_alive"], json!("10m"));
+}
+
+#[test]
+fn rejects_non_object_provider_options_for_openai_compatible_models() {
+    let request =
+        ModelRequest::new(vec![Message::user("hi")]).with_provider_options(json!(["top_k", 40]));
+
+    let error = model().translate_request(&request).unwrap_err();
+
+    assert!(matches!(error, TinyAgentsError::Validation(_)));
+    assert!(
+        error
+            .to_string()
+            .contains("provider_options for OpenAI-compatible providers must be a JSON object")
+    );
 }
 
 #[test]

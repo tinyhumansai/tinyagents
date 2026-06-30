@@ -52,13 +52,19 @@ fn request_builder_sets_fields() {
         })
         .with_reuse_previous_model(true)
         .with_temperature(0.5)
+        .with_top_p(0.9)
         .with_max_tokens(128)
+        .with_stop_sequences(["END", "STOP"])
+        .with_seed(42)
         .with_timeout_ms(1000)
         .with_tool_choice(ToolChoice::Required)
         .with_tag("t");
     assert_eq!(req.model.as_deref(), Some("gpt"));
     assert_eq!(req.temperature, Some(0.5));
+    assert_eq!(req.top_p, Some(0.9));
     assert_eq!(req.max_tokens, Some(128));
+    assert_eq!(req.stop_sequences, vec!["END", "STOP"]);
+    assert_eq!(req.seed, Some(42));
     assert_eq!(req.timeout_ms, Some(1000));
     assert_eq!(req.tool_choice, ToolChoice::Required);
     assert_eq!(req.tags, vec!["t".to_string()]);
@@ -215,9 +221,10 @@ fn model_request_capability_and_provider_option_builders() {
     let req = ModelRequest::new(vec![])
         .with_required_capabilities(caps.clone())
         .with_provider_options(json!({"top_k": 5}))
+        .with_provider_option("hotness", json!("high"))
         .with_continuation_id("resp-1");
     assert_eq!(req.required_capabilities, Some(caps));
-    assert_eq!(req.provider_options, json!({"top_k": 5}));
+    assert_eq!(req.provider_options, json!({"top_k": 5, "hotness": "high"}));
     assert_eq!(req.continuation_id.as_deref(), Some("resp-1"));
     // Defaults stay null/None so existing builders/tests are unaffected.
     assert!(ModelRequest::default().provider_options.is_null());

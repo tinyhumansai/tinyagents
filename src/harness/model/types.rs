@@ -354,9 +354,18 @@ pub struct ModelRequest {
     /// Sampling temperature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    /// Nucleus sampling probability mass, when supported by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
     /// Maximum output tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Stop sequences that should terminate generation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_sequences: Vec<String>,
+    /// Deterministic generation seed, when supported by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
     /// Per-call timeout in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
@@ -377,8 +386,8 @@ pub struct ModelRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_capabilities: Option<CapabilitySet>,
     /// Provider-specific options passed through untouched (for example OpenAI
-    /// Responses API knobs or Anthropic thinking config). Defaults to JSON
-    /// null.
+    /// Responses API knobs, Anthropic thinking config, Ollama local `options`,
+    /// or provider-specific controls such as `hotness`). Defaults to JSON null.
     #[serde(default)]
     pub provider_options: Value,
     /// Optional caching policy for this call.

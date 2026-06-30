@@ -306,6 +306,30 @@ Responses API options, Anthropic thinking config, Ollama local options, or
 future provider extensions. Provider adapters should document which normalized
 fields they honor and which provider options they pass through.
 
+For OpenAI-compatible providers, TinyAgents sends normalized fields for common
+controls (`temperature`, `top_p`, `max_tokens`, `stop`, and `seed`) and flattens
+object-shaped `provider_options` into the request body. Reserved core fields
+such as `model`, `messages`, `tools`, `temperature`, `stream`, and
+`stream_options` are ignored from `provider_options` so the normalized request
+remains authoritative. Local providers can still receive arbitrary typed knobs
+through distinct provider fields, for example:
+
+```rust
+let request = ModelRequest::new(messages)
+    .with_temperature(0.2)
+    .with_top_p(0.9)
+    .with_provider_options(json!({
+        "options": {
+            "num_ctx": 8192,
+            "top_k": 40,
+            "repeat_penalty": 1.1,
+            "mirostat": 2
+        },
+        "keep_alive": "10m",
+        "hotness": "spicy"
+    }));
+```
+
 ## Adapter Requirements
 
 Provider adapters must:

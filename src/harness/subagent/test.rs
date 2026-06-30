@@ -21,7 +21,7 @@ use crate::harness::providers::MockModel;
 use crate::harness::runtime::{AgentHarness, RunPolicy};
 use crate::harness::subagent::{SubAgent, SubAgentSession, SubAgentTool};
 use crate::harness::testkit::ScriptedModel;
-use crate::harness::tool::{Tool, ToolCall};
+use crate::harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
 use crate::harness::usage::Usage;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -72,6 +72,42 @@ fn child_harness_with_max_depth(answer: &str, max_depth: usize) -> AgentHarness<
         limits: RunLimits::default().with_max_depth(max_depth),
         ..RunPolicy::default()
     });
+    harness
+}
+
+struct SpinTool;
+
+#[async_trait::async_trait]
+impl Tool<()> for SpinTool {
+    fn name(&self) -> &str {
+        "spin"
+    }
+
+    fn description(&self) -> &str {
+        "keeps the child loop running"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new("spin", "keeps the child loop running", json!({}))
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> crate::Result<ToolResult> {
+        Ok(ToolResult::text(call.id, "spin", "again"))
+    }
+}
+
+fn looping_child_harness_with_max_model_calls(max_model_calls: usize) -> AgentHarness<()> {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness
+        .register_model(
+            "child-model",
+            Arc::new(MockModel::with_tool_call("spin", json!({}))),
+        )
+        .register_tool(Arc::new(SpinTool))
+        .with_policy(RunPolicy {
+            limits: RunLimits::default().with_max_model_calls(max_model_calls),
+            ..RunPolicy::default()
+        });
     harness
 }
 
@@ -170,11 +206,85 @@ async fn tool_path_enforces_depth_limit() {
     // Invoke the child at parent_depth 1 -> child depth 2 -> exceeds cap of 1.
     let tool = SubAgentTool::new(subagent).with_parent_depth(1);
 
-    let err = tool
+    let result = tool
         .call(&(), ToolCall::new("c1", "deep", json!({ "input": "x" })))
         .await
-        .expect_err("tool surfaces the depth error");
-    assert!(matches!(err, TinyAgentsError::SubAgentDepth(1)));
+        .expect("tool reports depth limit as a parent-visible tool result");
+    assert!(result.is_error());
+    assert!(
+        result.content.contains("recursion depth limit")
+            && result.content.contains("delegated-agent limit signal"),
+        "unexpected depth limit message: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn subagent_tool_reports_child_limit_to_parent_as_tool_error() {
+    let subagent = Arc::new(SubAgent::new(
+        "worker",
+        "does bounded work",
+        Arc::new(looping_child_harness_with_max_model_calls(1)),
+    ));
+    let tool = SubAgentTool::new(subagent);
+
+    let result = tool
+        .call(
+            &(),
+            ToolCall::new("c1", "worker", json!({ "input": "loop" })),
+        )
+        .await
+        .expect("child limit is converted into a parent-visible tool result");
+
+    assert!(result.is_error());
+    assert_eq!(result.call_id, "c1");
+    assert_eq!(result.name, "worker");
+    assert!(
+        result.content.contains("Sub-agent `worker` stopped")
+            && result.content.contains("configured run limit")
+            && result.content.contains("delegated-agent limit signal"),
+        "unexpected limit message: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn parent_can_continue_after_subagent_tool_hits_child_limit() {
+    let subagent = Arc::new(SubAgent::new(
+        "worker",
+        "does bounded work",
+        Arc::new(looping_child_harness_with_max_model_calls(1)),
+    ));
+
+    let mut parent: AgentHarness<()> = AgentHarness::new();
+    parent
+        .register_tool(Arc::new(SubAgentTool::new(subagent)))
+        .register_model(
+            "parent-model",
+            Arc::new(MockModel::with_responses(vec![
+                tool_call_response("c1", "worker", json!({ "input": "loop" })),
+                text_response("worker hit its limit; I will narrow the task"),
+            ])),
+        );
+
+    let run = parent
+        .invoke_default(&(), vec![Message::user("delegate bounded work")])
+        .await
+        .expect("parent receives the sub-agent limit as a tool result and continues");
+
+    assert_eq!(
+        run.text(),
+        Some("worker hit its limit; I will narrow the task".to_string())
+    );
+    assert_eq!(run.model_calls, 2);
+    assert_eq!(run.tool_calls, 1);
+    assert!(
+        run.messages
+            .iter()
+            .any(|message| matches!(message, Message::Tool(_))
+                && message.text().contains("delegated-agent limit signal")),
+        "parent transcript should include the child limit tool result"
+    );
 }
 
 #[tokio::test]

@@ -172,12 +172,14 @@ async fn nesting_past_max_depth_is_a_deterministic_error() {
     // Tool path past the cap: constructing the tool at parent_depth 1 makes the
     // child run at depth 2, which also exceeds the cap deterministically.
     let tool = SubAgentTool::new(subagent).with_parent_depth(1);
-    let tool_err = tool
+    let tool_result = tool
         .call(&(), ToolCall::new("c1", "deep", json!({ "input": "x" })))
         .await
-        .expect_err("the tool surfaces the same depth error");
+        .expect("the tool returns a failed tool result");
+    let tool_error = tool_result.error.expect("tool result carries an error");
     assert!(
-        matches!(tool_err, TinyAgentsError::SubAgentDepth(1)),
-        "expected SubAgentDepth(1) from the tool path, got {tool_err:?}"
+        tool_error.contains("recursion depth limit")
+            && tool_error.contains("maximum depth of 1"),
+        "expected SubAgentDepth(1) from the tool path, got {tool_error:?}"
     );
 }
