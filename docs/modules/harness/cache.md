@@ -92,6 +92,13 @@ Request builders and middleware should follow these rules:
 - fingerprint prompt segments separately from the full request
 - include middleware policy fingerprints when a middleware can affect
   model-visible bytes
+- preserve `thread_id` across parent agents, sub-agents, graph subgraphs, and
+  harness calls so provider-side prompt/KV-cache attribution remains stable for
+  the logical conversation
+- map stable `thread_id` or tenant/user identity into provider-specific cache
+  headers when required by a provider policy; for example, Fireworks-style
+  integrations may need a deterministic user/cache identifier header to reuse
+  provider cache safely
 - emit `cache.layout_preserved`, `cache.layout_changed`, and
   `cache.prefix_invalidated` events for observability
 

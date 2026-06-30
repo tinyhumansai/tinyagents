@@ -178,8 +178,7 @@ async fn nesting_past_max_depth_is_a_deterministic_error() {
         .expect("the tool returns a failed tool result");
     let tool_error = tool_result.error.expect("tool result carries an error");
     assert!(
-        tool_error.contains("recursion depth limit")
-            && tool_error.contains("maximum depth of 1"),
+        tool_error.contains("recursion depth limit") && tool_error.contains("maximum depth of 1"),
         "expected SubAgentDepth(1) from the tool path, got {tool_error:?}"
     );
 }
