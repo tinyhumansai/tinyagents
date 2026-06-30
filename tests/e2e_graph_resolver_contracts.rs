@@ -10,15 +10,16 @@ use tinyagents::harness::providers::MockModel;
 use tinyagents::harness::testkit::FakeTool;
 use tinyagents::language::compiler::CapabilityResolver;
 use tinyagents::language::resolver::{Resolver, resolve_source};
-use tinyagents::language::{
-    Blueprint, ChannelSpec, EdgeSpec, Literal, NodeSpec, Routing, parser,
-};
+use tinyagents::language::{Blueprint, ChannelSpec, EdgeSpec, Literal, NodeSpec, Routing, parser};
 use tinyagents::registry::{CapabilityRegistry, ComponentKind};
 
 #[tokio::test]
 async fn graph_builder_validates_topology_and_exports_metadata() {
     let no_reducer = GraphBuilder::<i32, i32>::new()
-        .add_node("a", |state, _| async move { Ok(NodeResult::Update(state + 1)) })
+        .add_node(
+            "a",
+            |state, _| async move { Ok(NodeResult::Update(state + 1)) },
+        )
         .set_entry("a")
         .set_finish("a")
         .compile()
@@ -26,19 +27,34 @@ async fn graph_builder_validates_topology_and_exports_metadata() {
     assert!(no_reducer.to_string().contains("no state reducer"));
 
     let missing_start = GraphBuilder::<i32, i32>::overwrite()
-        .add_node("a", |state, _| async move { Ok(NodeResult::Update(state + 1)) })
+        .add_node(
+            "a",
+            |state, _| async move { Ok(NodeResult::Update(state + 1)) },
+        )
         .compile()
         .unwrap_err();
-    assert!(missing_start.to_string().to_ascii_lowercase().contains("start"));
+    assert!(
+        missing_start
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("start")
+    );
 
     let start_to_end = GraphBuilder::<i32, i32>::overwrite()
         .add_edge(START, tinyagents::graph::END)
         .compile()
         .unwrap_err();
-    assert!(start_to_end.to_string().contains("START cannot route directly to END"));
+    assert!(
+        start_to_end
+            .to_string()
+            .contains("START cannot route directly to END")
+    );
 
     let dangling = GraphBuilder::<i32, i32>::overwrite()
-        .add_node("a", |state, _| async move { Ok(NodeResult::Update(state + 1)) })
+        .add_node(
+            "a",
+            |state, _| async move { Ok(NodeResult::Update(state + 1)) },
+        )
         .set_entry("a")
         .add_edge("a", "missing")
         .compile()
@@ -46,8 +62,14 @@ async fn graph_builder_validates_topology_and_exports_metadata() {
     assert!(dangling.to_string().contains("missing"));
 
     let mixed_routing = GraphBuilder::<i32, i32>::overwrite()
-        .add_node("a", |state, _| async move { Ok(NodeResult::Update(state + 1)) })
-        .add_node("b", |state, _| async move { Ok(NodeResult::Update(state + 1)) })
+        .add_node(
+            "a",
+            |state, _| async move { Ok(NodeResult::Update(state + 1)) },
+        )
+        .add_node(
+            "b",
+            |state, _| async move { Ok(NodeResult::Update(state + 1)) },
+        )
         .set_entry("a")
         .add_edge("a", "b")
         .mark_command_routing("a")
@@ -76,12 +98,19 @@ async fn graph_builder_validates_topology_and_exports_metadata() {
             assert_eq!(ctx.node_id.as_str(), "start");
             Ok(NodeResult::Update(state + 1))
         })
-        .add_node("branch", |state, _| async move { Ok(NodeResult::Update(state + 10)) })
-        .add_node("join", |state, _| async move { Ok(NodeResult::Update(state + 100)) })
+        .add_node("branch", |state, _| async move {
+            Ok(NodeResult::Update(state + 10))
+        })
+        .add_node("join", |state, _| async move {
+            Ok(NodeResult::Update(state + 100))
+        })
         .add_node("cmd", |_state, _| async move {
             Ok(NodeResult::Command(Command::goto(["join"]).with_update(1)))
         })
-        .add_node("orphan", |state, _| async move { Ok(NodeResult::Update(state)) })
+        .add_node(
+            "orphan",
+            |state, _| async move { Ok(NodeResult::Update(state)) },
+        )
         .set_entry("start")
         .add_conditional_edges(
             "start",
@@ -105,26 +134,68 @@ async fn graph_builder_validates_topology_and_exports_metadata() {
     assert!(builder_topology.policy.parallel);
     assert_eq!(builder_topology.policy.max_concurrency, Some(2));
     assert_eq!(builder_topology.policy.node_timeout_ms, Some(250));
-    assert!(builder_topology
-        .validation
-        .warnings
-        .iter()
-        .any(|w| w.contains("orphan")));
+    assert!(
+        builder_topology
+            .validation
+            .warnings
+            .iter()
+            .any(|w| w.contains("orphan"))
+    );
 
     let graph = builder.compile().unwrap();
     let execution = graph.run(0).await.unwrap();
     assert_eq!(execution.state, 1);
     let topology = graph.topology();
-    assert_eq!(topology.nodes.iter().find(|n| n.id == "cmd").unwrap().kind.as_deref(), Some("command"));
-    assert_eq!(topology.nodes.iter().find(|n| n.id == "cmd").unwrap().metadata["owner"], "test");
-    assert!(topology.nodes.iter().find(|n| n.id == "branch").unwrap().subgraph);
-    assert!(topology.nodes.iter().find(|n| n.id == "start").unwrap().interrupt);
-    assert!(topology.nodes.iter().find(|n| n.id == "join").unwrap().deferred);
+    assert_eq!(
+        topology
+            .nodes
+            .iter()
+            .find(|n| n.id == "cmd")
+            .unwrap()
+            .kind
+            .as_deref(),
+        Some("command")
+    );
+    assert_eq!(
+        topology
+            .nodes
+            .iter()
+            .find(|n| n.id == "cmd")
+            .unwrap()
+            .metadata["owner"],
+        "test"
+    );
+    assert!(
+        topology
+            .nodes
+            .iter()
+            .find(|n| n.id == "branch")
+            .unwrap()
+            .subgraph
+    );
+    assert!(
+        topology
+            .nodes
+            .iter()
+            .find(|n| n.id == "start")
+            .unwrap()
+            .interrupt
+    );
+    assert!(
+        topology
+            .nodes
+            .iter()
+            .find(|n| n.id == "join")
+            .unwrap()
+            .deferred
+    );
     assert_eq!(topology.waiting_edges[0].target, "join");
-    assert!(topology.conditional_edges[0]
-        .routes
-        .iter()
-        .any(|route| route.label == "ok" && route.target == "branch"));
+    assert!(
+        topology.conditional_edges[0]
+            .routes
+            .iter()
+            .any(|route| route.label == "ok" && route.target == "branch")
+    );
 
     let json = to_json(&topology);
     let round_trip = from_json(&json).unwrap();
@@ -204,12 +275,21 @@ fn blueprint_export_helpers_preserve_channels_routing_and_validation() {
     assert_eq!(topology.entry.as_deref(), Some("plan"));
     assert_eq!(topology.recursion_limit, 9);
     assert_eq!(topology.channels[0].name, "messages");
-    assert!(topology.nodes.iter().find(|n| n.id == "answer").unwrap().subgraph);
+    assert!(
+        topology
+            .nodes
+            .iter()
+            .find(|n| n.id == "answer")
+            .unwrap()
+            .subgraph
+    );
     assert!(topology.finish_nodes.contains(&"answer".to_string()));
-    assert!(topology
-        .conditional_edges
-        .iter()
-        .any(|edge| edge.from == "plan" && edge.routes.len() == 2));
+    assert!(
+        topology
+            .conditional_edges
+            .iter()
+            .any(|edge| edge.from == "plan" && edge.routes.len() == 2)
+    );
     assert!(blueprint_to_json(&blueprint).contains("\"graph_id\": \"bp\""));
     assert!(blueprint_to_mermaid(&blueprint).contains("START --> n_plan"));
 }
@@ -255,13 +335,41 @@ graph workflow {
     assert!(!resolver.agent_allowed("missing_agent"));
     let diagnostics = resolver.resolve_program(&program);
     let rendered: Vec<String> = diagnostics.iter().map(|d| d.render_plain()).collect();
-    assert!(rendered.iter().any(|d| d.contains("unknown model `missing_model`")));
-    assert!(rendered.iter().any(|d| d.contains("unknown tool `missing_tool`")));
-    assert!(rendered.iter().any(|d| d.contains("unknown router `missing_router`")));
-    assert!(rendered.iter().any(|d| d.contains("unknown subgraph `missing_graph`")));
-    assert!(rendered.iter().any(|d| d.contains("unknown agent `missing_agent`")));
-    assert!(rendered.iter().any(|d| d.contains("unknown reducer `missing_reducer`")));
-    assert!(rendered.iter().any(|d| d.contains("unknown kind `made_up`")));
+    assert!(
+        rendered
+            .iter()
+            .any(|d| d.contains("unknown model `missing_model`"))
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|d| d.contains("unknown tool `missing_tool`"))
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|d| d.contains("unknown router `missing_router`"))
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|d| d.contains("unknown subgraph `missing_graph`"))
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|d| d.contains("unknown agent `missing_agent`"))
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|d| d.contains("unknown reducer `missing_reducer`"))
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|d| d.contains("unknown kind `made_up`"))
+    );
 
     let check_err = resolver
         .clone()

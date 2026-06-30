@@ -10,10 +10,10 @@ use tinyagents::harness::events::{AgentEvent, RecordingListener};
 use tinyagents::harness::message::Message;
 use tinyagents::harness::middleware::{
     AgentRun, DynamicPromptMiddleware, DynamicToolSelectionMiddleware, HumanApprovalMiddleware,
-    LoggingMiddleware, Middleware, MiddlewareModelOutcome, MiddlewareStack,
-    MiddlewareToolOutcome, ModelBaseCall, ModelFallbackMiddleware, ModelMiddleware,
-    RedactionMiddleware, StructuredOutputValidatorMiddleware, TimeoutMiddleware, ToolBaseCall,
-    ToolHandler, ToolMiddleware, ToolAllowlistMiddleware, TracingMiddleware,
+    LoggingMiddleware, Middleware, MiddlewareModelOutcome, MiddlewareStack, MiddlewareToolOutcome,
+    ModelBaseCall, ModelFallbackMiddleware, ModelMiddleware, RedactionMiddleware,
+    StructuredOutputValidatorMiddleware, TimeoutMiddleware, ToolAllowlistMiddleware, ToolBaseCall,
+    ToolHandler, ToolMiddleware, TracingMiddleware,
 };
 use tinyagents::harness::model::{ModelDelta, ModelRequest, ModelResponse, ResponseFormat};
 use tinyagents::harness::tool::{ToolCall, ToolDelta, ToolResult, ToolSchema};
@@ -144,7 +144,14 @@ async fn middleware_stack_runs_lifecycle_hooks_and_builtin_guards() {
         .await
         .unwrap();
     assert_eq!(request.messages[0].text(), "run run-mw");
-    assert_eq!(request.tools.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["lookup"]);
+    assert_eq!(
+        request
+            .tools
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["lookup"]
+    );
 
     let mut delta = ModelDelta {
         call_id: "model-1".into(),
@@ -193,7 +200,10 @@ async fn middleware_stack_runs_lifecycle_hooks_and_builtin_guards() {
     let mut run = AgentRun::new();
     run.final_response = Some(response.clone());
     assert_eq!(run.text().as_deref(), Some("*** response"));
-    stack.run_after_agent(&mut ctx, &(), &mut run).await.unwrap();
+    stack
+        .run_after_agent(&mut ctx, &(), &mut run)
+        .await
+        .unwrap();
     stack
         .run_on_error(&mut ctx, &TinyAgentsError::Model("boom".into()))
         .await
@@ -221,8 +231,10 @@ async fn middleware_stack_runs_lifecycle_hooks_and_builtin_guards() {
 async fn builtin_middleware_validates_structured_output_human_approval_and_wraps_calls() {
     let (mut ctx, recorder) = context();
 
-    let approval = HumanApprovalMiddleware::new(["danger"])
-        .with_approval(Arc::new(|call: &ToolCall| call.arguments["approved"] == true));
+    let approval =
+        HumanApprovalMiddleware::new(["danger"]).with_approval(Arc::new(|call: &ToolCall| {
+            call.arguments["approved"] == true
+        }));
     let mut approved = ToolCall::new("tool-1", "danger", json!({ "approved": true }));
     approval
         .before_tool(&mut ctx, &(), &mut approved)
@@ -268,10 +280,7 @@ async fn builtin_middleware_validates_structured_output_human_approval_and_wraps
         .unwrap();
 
     let mut fallback_stack: MiddlewareStack<(), ()> = MiddlewareStack::new();
-    fallback_stack.push_model_middleware(Arc::new(ModelFallbackMiddleware::new([
-        "small",
-        "tiny",
-    ])));
+    fallback_stack.push_model_middleware(Arc::new(ModelFallbackMiddleware::new(["small", "tiny"])));
     assert_eq!(fallback_stack.model_middleware_len(), 1);
     let base = ModelBase::new(1);
     let outcome = fallback_stack

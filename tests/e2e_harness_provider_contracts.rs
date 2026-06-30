@@ -190,9 +190,14 @@ async fn model_request_response_registry_and_stream_contracts_are_stable() {
         .register("hinted", Arc::new(MockModel::constant("hinted")));
     registry.set_default("default");
 
-    let binding = registry.resolve_request(&request, Some("default"), None).unwrap();
+    let binding = registry
+        .resolve_request(&request, Some("default"), None)
+        .unwrap();
     assert_eq!(binding.resolved.name, "direct");
-    assert_eq!(binding.resolved.source, ModelResolutionSource::RequestOverride);
+    assert_eq!(
+        binding.resolved.source,
+        ModelResolutionSource::RequestOverride
+    );
     assert_eq!(registry.names(), vec!["default", "direct", "hinted"]);
 
     let fallback = registry
@@ -252,7 +257,9 @@ async fn model_request_response_registry_and_stream_contracts_are_stable() {
 
     let mut completed = StreamAccumulator::new();
     completed.push(&ModelStreamItem::UsageDelta(Usage::new(1, 1)));
-    completed.push(&ModelStreamItem::Completed(ModelResponse::assistant("final")));
+    completed.push(&ModelStreamItem::Completed(ModelResponse::assistant(
+        "final",
+    )));
     assert!(completed.is_terminal());
     let final_response = completed.finish().unwrap();
     assert_eq!(final_response.text(), "final");
@@ -270,7 +277,10 @@ async fn model_request_response_registry_and_stream_contracts_are_stable() {
         },
     )]));
     let err = collect_model_stream(failed_stream).await.unwrap_err();
-    assert!(err.to_string().contains("mock provider error (internal): nope"));
+    assert!(
+        err.to_string()
+            .contains("mock provider error (internal): nope")
+    );
 }
 
 #[test]
@@ -407,7 +417,11 @@ fn structured_output_supports_provider_schema_and_tool_fallbacks() {
     let invalid = extractor
         .extract(&ModelResponse::assistant("not json"))
         .unwrap_err();
-    assert!(invalid.to_string().contains("response text is not valid JSON"));
+    assert!(
+        invalid
+            .to_string()
+            .contains("response text is not valid JSON")
+    );
 
     let tool_response = ModelResponse {
         message: tinyagents::harness::message::AssistantMessage {
@@ -484,11 +498,17 @@ fn model_catalog_loads_seed_and_custom_snapshots() {
     let catalog = ModelCatalog::from_snapshot(snapshot.clone());
     assert_eq!(catalog.snapshot().snapshot_id, "test-snapshot");
     assert_eq!(catalog.models().len(), 1);
-    assert_eq!(catalog.get("mock", "mock-large").unwrap().model_id, "mock-large");
-    assert_eq!(catalog.get("mock", "large").unwrap().model_id, "mock-large");
     assert_eq!(
-        catalog.get_by_model_id("large").unwrap().capabilities.tool_calling,
-        true
+        catalog.get("mock", "mock-large").unwrap().model_id,
+        "mock-large"
+    );
+    assert_eq!(catalog.get("mock", "large").unwrap().model_id, "mock-large");
+    assert!(
+        catalog
+            .get_by_model_id("large")
+            .unwrap()
+            .capabilities
+            .tool_calling
     );
     assert!(catalog.get("other", "large").is_none());
 

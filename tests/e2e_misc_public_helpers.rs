@@ -26,8 +26,14 @@ use tinyagents::repl::{CapabilityPolicy, ReplCommand, ReplOutcome, ReplSession, 
 #[tokio::test]
 async fn graph_reducers_streams_observability_and_status_helpers_work() {
     assert_eq!(OverwriteReducer.reduce(1, 2).unwrap(), 2);
-    assert_eq!(AppendReducer.reduce(vec![1], vec![2, 3]).unwrap(), vec![1, 2, 3]);
-    assert_eq!(SetUnionReducer.reduce(vec![1, 2], vec![2, 3]).unwrap(), vec![1, 2, 3]);
+    assert_eq!(
+        AppendReducer.reduce(vec![1], vec![2, 3]).unwrap(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(
+        SetUnionReducer.reduce(vec![1, 2], vec![2, 3]).unwrap(),
+        vec![1, 2, 3]
+    );
     assert_eq!(MinReducer.reduce(10, 2).unwrap(), 2);
     assert_eq!(MaxReducer.reduce(10, 20).unwrap(), 20);
     assert_eq!(
@@ -57,31 +63,81 @@ async fn graph_reducers_streams_observability_and_status_helpers_work() {
     assert_eq!(command.goto.len(), 3);
     assert_eq!(command.resume.as_ref().unwrap()["resume"], true);
     assert_eq!(Command::<i32>::update(9).update, Some(9));
-    assert_eq!(Command::<i32>::resume(json!("ok")).resume, Some(json!("ok")));
+    assert_eq!(
+        Command::<i32>::resume(json!("ok")).resume,
+        Some(json!("ok"))
+    );
     let interrupt = Interrupt::new("node-a", json!({ "question": "continue?" }));
     assert!(interrupt.id.starts_with("interrupt-node-a-"));
     let explicit = Interrupt::with_id("int-1", "node-b", json!(1));
     assert_eq!(explicit.id, "int-1");
 
     let events = vec![
-        GraphEvent::RunStarted { run_id: RunId::new("run") },
-        GraphEvent::RunCompleted { run_id: RunId::new("run"), steps: 2 },
-        GraphEvent::RunFailed { run_id: RunId::new("run"), error: "bad".into() },
-        GraphEvent::StepStarted { step: 1, active: vec![NodeId::new("a")] },
+        GraphEvent::RunStarted {
+            run_id: RunId::new("run"),
+        },
+        GraphEvent::RunCompleted {
+            run_id: RunId::new("run"),
+            steps: 2,
+        },
+        GraphEvent::RunFailed {
+            run_id: RunId::new("run"),
+            error: "bad".into(),
+        },
+        GraphEvent::StepStarted {
+            step: 1,
+            active: vec![NodeId::new("a")],
+        },
         GraphEvent::StepCompleted { step: 1 },
-        GraphEvent::TaskScheduled { node: NodeId::new("a"), step: 1 },
-        GraphEvent::NodeStarted { node: NodeId::new("a"), step: 1 },
-        GraphEvent::NodeCompleted { node: NodeId::new("a"), step: 1 },
-        GraphEvent::NodeFailed { node: NodeId::new("a"), step: 1, error: "bad".into() },
-        GraphEvent::StateUpdated { node: NodeId::new("a"), step: 1 },
-        GraphEvent::RouteSelected { node: NodeId::new("a"), target: NodeId::new("b") },
-        GraphEvent::CheckpointSaved { checkpoint_id: CheckpointId::new("cp-1") },
-        GraphEvent::InterruptEmitted { interrupt: explicit.clone() },
-        GraphEvent::SubgraphStarted { node: NodeId::new("a"), namespace: vec!["child".into()] },
-        GraphEvent::SubgraphCompleted { node: NodeId::new("a"), namespace: vec!["child".into()] },
-        GraphEvent::ContextForked { node: NodeId::new("a"), fork: 0, step: 1 },
+        GraphEvent::TaskScheduled {
+            node: NodeId::new("a"),
+            step: 1,
+        },
+        GraphEvent::NodeStarted {
+            node: NodeId::new("a"),
+            step: 1,
+        },
+        GraphEvent::NodeCompleted {
+            node: NodeId::new("a"),
+            step: 1,
+        },
+        GraphEvent::NodeFailed {
+            node: NodeId::new("a"),
+            step: 1,
+            error: "bad".into(),
+        },
+        GraphEvent::StateUpdated {
+            node: NodeId::new("a"),
+            step: 1,
+        },
+        GraphEvent::RouteSelected {
+            node: NodeId::new("a"),
+            target: NodeId::new("b"),
+        },
+        GraphEvent::CheckpointSaved {
+            checkpoint_id: CheckpointId::new("cp-1"),
+        },
+        GraphEvent::InterruptEmitted {
+            interrupt: explicit.clone(),
+        },
+        GraphEvent::SubgraphStarted {
+            node: NodeId::new("a"),
+            namespace: vec!["child".into()],
+        },
+        GraphEvent::SubgraphCompleted {
+            node: NodeId::new("a"),
+            namespace: vec!["child".into()],
+        },
+        GraphEvent::ContextForked {
+            node: NodeId::new("a"),
+            fork: 0,
+            step: 1,
+        },
         GraphEvent::RecursionDepthChanged { depth: 2 },
-        GraphEvent::Custom { name: "custom".into(), data: json!({ "x": 1 }) },
+        GraphEvent::Custom {
+            name: "custom".into(),
+            data: json!({ "x": 1 }),
+        },
     ];
     assert_eq!(events[0].kind(), "run.started");
     assert_eq!(events[3].step(), Some(1));
@@ -96,7 +152,10 @@ async fn graph_reducers_streams_observability_and_status_helpers_work() {
     }
     assert_eq!(sink.len(), events.len());
     assert_eq!(sink.events()[0].kind(), "run.started");
-    NoopSink.emit(GraphEvent::Custom { name: "drop".into(), data: json!(null) });
+    NoopSink.emit(GraphEvent::Custom {
+        name: "drop".into(),
+        data: json!(null),
+    });
 
     let journal = Arc::new(InMemoryGraphEventJournal::new());
     assert!(journal.is_empty("run-g"));
@@ -120,17 +179,31 @@ async fn graph_reducers_streams_observability_and_status_helpers_work() {
     let observations = journal.read_from("run-g", 0).await.unwrap();
     assert_eq!(observations[0].step, 3);
     assert_eq!(observations[1].step, 3);
-    assert_eq!(observations[1].checkpoint_id.as_ref().unwrap().as_str(), "cp-3");
-    assert_eq!(observations[0].parent_run_id.as_ref().unwrap().as_str(), "parent");
-    assert_eq!(observations[0].thread_id.as_ref().unwrap().as_str(), "thread");
+    assert_eq!(
+        observations[1].checkpoint_id.as_ref().unwrap().as_str(),
+        "cp-3"
+    );
+    assert_eq!(
+        observations[0].parent_run_id.as_ref().unwrap().as_str(),
+        "parent"
+    );
+    assert_eq!(
+        observations[0].thread_id.as_ref().unwrap().as_str(),
+        "thread"
+    );
     assert_eq!(observations[0].namespace, vec!["child"]);
 
     let append_store = InMemoryAppendStore::new();
     let store_journal = StoreGraphEventJournal::new(append_store.clone());
-    assert_eq!(store_journal.append(observations[0].clone()).await.unwrap(), 0);
+    assert_eq!(
+        store_journal.append(observations[0].clone()).await.unwrap(),
+        0
+    );
     assert_eq!(store_journal.store().len("run-g").await.unwrap(), 1);
     assert_eq!(
-        store_journal.read_from("run-g", 0).await.unwrap()[0].event.kind(),
+        store_journal.read_from("run-g", 0).await.unwrap()[0]
+            .event
+            .kind(),
         "step.started"
     );
 
@@ -158,8 +231,18 @@ async fn graph_reducers_streams_observability_and_status_helpers_work() {
             .current_step,
         4
     );
-    assert_eq!(status_store.list_by_thread("thread").await.unwrap().len(), 1);
-    assert!(GraphRunStatus::new(RunId::new("done"), GraphId::new("g"), ExecutionStatus::Completed).is_terminal());
+    assert_eq!(
+        status_store.list_by_thread("thread").await.unwrap().len(),
+        1
+    );
+    assert!(
+        GraphRunStatus::new(
+            RunId::new("done"),
+            GraphId::new("g"),
+            ExecutionStatus::Completed
+        )
+        .is_terminal()
+    );
 
     let _ = NodeResult::<i32>::Update(1);
     let _ = NodeResult::<i32>::Command(Command::default());
@@ -191,31 +274,49 @@ fn tool_schema_limits_ids_and_repl_contracts_cover_public_helpers() {
             json!({ "name": "ok", "count": 1, "items": [1, 2.5] }),
         ))
         .unwrap();
-    assert!(schema
-        .validate_call(&ToolCall::new("call-2", "other", json!({ "name": "ok" })))
-        .unwrap_err()
-        .to_string()
-        .contains("does not match"));
-    assert!(schema
-        .validate_call(&ToolCall::new("call-3", "make", json!({ "count": 1 })))
-        .unwrap_err()
-        .to_string()
-        .contains("required"));
-    assert!(schema
-        .validate_call(&ToolCall::new("call-4", "make", json!({ "name": "bad" })))
-        .unwrap_err()
-        .to_string()
-        .contains("enum"));
-    assert!(schema
-        .validate_call(&ToolCall::new("call-5", "make", json!({ "name": "ok", "extra": true })))
-        .unwrap_err()
-        .to_string()
-        .contains("not allowed"));
-    assert!(schema
-        .validate_call(&ToolCall::new("call-6", "make", json!({ "name": "ok", "items": ["x"] })))
-        .unwrap_err()
-        .to_string()
-        .contains("must be number"));
+    assert!(
+        schema
+            .validate_call(&ToolCall::new("call-2", "other", json!({ "name": "ok" })))
+            .unwrap_err()
+            .to_string()
+            .contains("does not match")
+    );
+    assert!(
+        schema
+            .validate_call(&ToolCall::new("call-3", "make", json!({ "count": 1 })))
+            .unwrap_err()
+            .to_string()
+            .contains("required")
+    );
+    assert!(
+        schema
+            .validate_call(&ToolCall::new("call-4", "make", json!({ "name": "bad" })))
+            .unwrap_err()
+            .to_string()
+            .contains("enum")
+    );
+    assert!(
+        schema
+            .validate_call(&ToolCall::new(
+                "call-5",
+                "make",
+                json!({ "name": "ok", "extra": true })
+            ))
+            .unwrap_err()
+            .to_string()
+            .contains("not allowed")
+    );
+    assert!(
+        schema
+            .validate_call(&ToolCall::new(
+                "call-6",
+                "make",
+                json!({ "name": "ok", "items": ["x"] })
+            ))
+            .unwrap_err()
+            .to_string()
+            .contains("must be number")
+    );
 
     let ok = ToolResult::text("call-1", "make", "done");
     assert!(!ok.is_error());
@@ -276,7 +377,11 @@ fn tool_schema_limits_ids_and_repl_contracts_cover_public_helpers() {
 
     let mut policy = CapabilityPolicy::new();
     assert!(policy.is_empty());
-    policy.allow("load").allow("compile").allow("run").allow("tool");
+    policy
+        .allow("load")
+        .allow("compile")
+        .allow("run")
+        .allow("tool");
     assert_eq!(policy.len(), 4);
     assert!(policy.is_allowed("tool"));
     let list_policy = CapabilityPolicy::from_list(["tool"]);
@@ -307,19 +412,25 @@ fn tool_schema_limits_ids_and_repl_contracts_cover_public_helpers() {
     );
     assert!(matches!(
         session
-            .execute(ReplCommand::Show { what: "vars".into() })
+            .execute(ReplCommand::Show {
+                what: "vars".into()
+            })
             .unwrap(),
         ReplOutcome::Value(_)
     ));
     assert!(matches!(
         session
-            .execute(ReplCommand::Show { what: "graphs".into() })
+            .execute(ReplCommand::Show {
+                what: "graphs".into()
+            })
             .unwrap(),
         ReplOutcome::Message(_)
     ));
     assert!(matches!(
         session
-            .execute(ReplCommand::Show { what: "status".into() })
+            .execute(ReplCommand::Show {
+                what: "status".into()
+            })
             .unwrap(),
         ReplOutcome::Value(_)
     ));
@@ -331,7 +442,9 @@ fn tool_schema_limits_ids_and_repl_contracts_cover_public_helpers() {
     ));
     assert!(matches!(
         session
-            .execute(ReplCommand::Load { path: "x.rag".into() })
+            .execute(ReplCommand::Load {
+                path: "x.rag".into()
+            })
             .unwrap(),
         ReplOutcome::Planned { .. }
     ));
@@ -359,14 +472,19 @@ fn tool_schema_limits_ids_and_repl_contracts_cover_public_helpers() {
             .unwrap(),
         ReplOutcome::Planned { .. }
     ));
-    assert!(session
-        .execute(ReplCommand::Call {
-            capability: "blocked".into(),
-            args: json!({})
-        })
-        .unwrap_err()
-        .to_string()
-        .contains("allowlist"));
-    assert_eq!(session.execute(ReplCommand::Quit).unwrap(), ReplOutcome::Quit);
+    assert!(
+        session
+            .execute(ReplCommand::Call {
+                capability: "blocked".into(),
+                args: json!({})
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("allowlist")
+    );
+    assert_eq!(
+        session.execute(ReplCommand::Quit).unwrap(),
+        ReplOutcome::Quit
+    );
     assert!(!session.history.is_empty());
 }

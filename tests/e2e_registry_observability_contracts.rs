@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use tinyagents::harness::events::{
-    AgentEvent, EventJournal, EventListener, EventRecord, EventSink, HarnessRunStatus,
-    LimitKind, RecordingListener,
+    AgentEvent, EventJournal, EventListener, EventRecord, EventSink, HarnessRunStatus, LimitKind,
+    RecordingListener,
 };
 use tinyagents::harness::ids::{
     CallId, ComponentId as HarnessComponentId, EventId, ExecutionStatus, HarnessPhase, RunId,
@@ -18,9 +18,7 @@ use tinyagents::harness::providers::MockModel;
 use tinyagents::harness::store::{AppendStore, InMemoryAppendStore, JsonlAppendStore};
 use tinyagents::harness::testkit::{FakeTool, Trajectory};
 use tinyagents::harness::tool::ToolCall;
-use tinyagents::registry::{
-    CapabilityRegistry, ComponentId, ComponentKind, ComponentMetadata,
-};
+use tinyagents::registry::{CapabilityRegistry, ComponentId, ComponentKind, ComponentMetadata};
 
 #[tokio::test]
 async fn capability_registry_resolves_aliases_and_hands_off_runtime_registries() {
@@ -39,7 +37,12 @@ async fn capability_registry_resolves_aliases_and_hands_off_runtime_registries()
     assert!(registry.has(ComponentKind::Model, "primary"));
     assert!(registry.has(ComponentKind::Tool, "lookup"));
     assert_eq!(registry.names(ComponentKind::Reducer), vec!["append"]);
-    assert_eq!(registry.resolve_name(ComponentKind::Tool, "lookup").as_deref(), Some("lookup"));
+    assert_eq!(
+        registry
+            .resolve_name(ComponentKind::Tool, "lookup")
+            .as_deref(),
+        Some("lookup")
+    );
 
     registry
         .alias(ComponentKind::Model, "fast", "primary")
@@ -52,7 +55,10 @@ async fn capability_registry_resolves_aliases_and_hands_off_runtime_registries()
     assert!(registry.model("fast").is_some());
     assert!(registry.tool("search").is_some());
     assert_eq!(
-        registry.metadata(ComponentKind::Model, "fast").unwrap().aliases,
+        registry
+            .metadata(ComponentKind::Model, "fast")
+            .unwrap()
+            .aliases,
         vec!["fast"]
     );
     assert_eq!(
@@ -60,7 +66,9 @@ async fn capability_registry_resolves_aliases_and_hands_off_runtime_registries()
         vec!["lookup", "search"]
     );
 
-    let duplicate = registry.register_model("primary", model.clone()).unwrap_err();
+    let duplicate = registry
+        .register_model("primary", model.clone())
+        .unwrap_err();
     assert!(duplicate.to_string().contains("already registered"));
     let bad_alias = registry
         .alias(ComponentKind::Model, "ghost", "missing")
@@ -69,7 +77,11 @@ async fn capability_registry_resolves_aliases_and_hands_off_runtime_registries()
     let duplicate_alias = registry
         .alias(ComponentKind::Tool, "lookup", "lookup")
         .unwrap_err();
-    assert!(duplicate_alias.to_string().contains("already a registered component"));
+    assert!(
+        duplicate_alias
+            .to_string()
+            .contains("already a registered component")
+    );
 
     registry.replace_model("primary", Arc::new(MockModel::constant("new")));
     registry.replace_tool(Arc::new(FakeTool::returning("lookup", "new answer")));
@@ -206,7 +218,9 @@ fn component_metadata_and_event_kinds_are_stable_serializable_contracts() {
             from_tokens: 100,
             to_tokens: 25,
         },
-        AgentEvent::RouteSelected { route: "done".into() },
+        AgentEvent::RouteSelected {
+            route: "done".into(),
+        },
         AgentEvent::UsageRecorded {
             usage: tinyagents::harness::usage::Usage::new(1, 2),
         },
@@ -246,7 +260,12 @@ fn component_metadata_and_event_kinds_are_stable_serializable_contracts() {
     trajectory.assert_tool_called("lookup");
     trajectory.assert_model_called_times(1);
     trajectory
-        .assert_order(&["run.started", "model.started", "tool.started", "run.completed"])
+        .assert_order(&[
+            "run.started",
+            "model.started",
+            "tool.started",
+            "run.completed",
+        ])
         .unwrap();
 }
 
@@ -291,8 +310,12 @@ async fn event_sinks_journals_and_status_stores_preserve_run_lineage() {
         offset: 99,
         event: AgentEvent::StateUpdate,
     };
-    let observation =
-        AgentObservation::from_record(&record, run_id.clone(), Some(parent_id.clone()), root_id.clone());
+    let observation = AgentObservation::from_record(
+        &record,
+        run_id.clone(),
+        Some(parent_id.clone()),
+        root_id.clone(),
+    );
     assert_eq!(observation.event_id.as_str(), "evt-99");
     assert_eq!(observation.run_id, run_id);
     assert_eq!(observation.parent_run_id, Some(parent_id.clone()));
@@ -305,17 +328,27 @@ async fn event_sinks_journals_and_status_stores_preserve_run_lineage() {
     assert_eq!(memory_journal.append(observation.clone()).await.unwrap(), 0);
     assert_eq!(memory_journal.len("child-run"), 1);
     assert_eq!(
-        memory_journal.read_from("child-run", 0).await.unwrap()[0].event.kind(),
+        memory_journal.read_from("child-run", 0).await.unwrap()[0]
+            .event
+            .kind(),
         "state.update"
     );
-    assert!(memory_journal.read_from("missing", 0).await.unwrap().is_empty());
+    assert!(
+        memory_journal
+            .read_from("missing", 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     let append_store = InMemoryAppendStore::new();
     let store_journal = StoreEventJournal::new(append_store.clone());
     assert_eq!(store_journal.append(observation.clone()).await.unwrap(), 0);
     assert_eq!(store_journal.store().len("child-run").await.unwrap(), 1);
     assert_eq!(
-        store_journal.read_from("child-run", 0).await.unwrap()[0].event.kind(),
+        store_journal.read_from("child-run", 0).await.unwrap()[0]
+            .event
+            .kind(),
         "state.update"
     );
 
@@ -348,15 +381,12 @@ async fn event_sinks_journals_and_status_stores_preserve_run_lineage() {
         "parent-run"
     );
     assert_eq!(
-        status_store
-            .list_by_thread("thread-1")
-            .await
-            .unwrap()
-            .len(),
+        status_store.list_by_thread("thread-1").await.unwrap().len(),
         1
     );
 
-    let mut completed = HarnessRunStatus::new(RunId::new("run-done"), HarnessComponentId::new("agent"));
+    let mut completed =
+        HarnessRunStatus::new(RunId::new("run-done"), HarnessComponentId::new("agent"));
     completed.mark_running(HarnessPhase::Tools);
     completed.mark_completed();
     assert_eq!(completed.status, ExecutionStatus::Completed);
@@ -386,8 +416,8 @@ async fn fanout_redaction_journal_and_jsonl_sinks_forward_best_effort_events() {
     assert_eq!(right.len(), 1);
 
     let redacted_listener = Arc::new(RecordingListener::new());
-    let redacting = RedactingSink::new(redacted_listener.clone(), vec!["api-key-123".into()])
-        .with_mask("***");
+    let redacting =
+        RedactingSink::new(redacted_listener.clone(), vec!["api-key-123".into()]).with_mask("***");
     redacting.on_event(&secret_record);
     let redacted_value = serde_json::to_value(&redacted_listener.events()[0].event).unwrap();
     assert_eq!(redacted_value["key"], "prefix-***-suffix");
@@ -398,7 +428,10 @@ async fn fanout_redaction_journal_and_jsonl_sinks_forward_best_effort_events() {
     journal_sink.on_event(&secret_record);
     let observations = journal.read_from("child-run", 0).await.unwrap();
     assert_eq!(observations.len(), 1);
-    assert_eq!(observations[0].parent_run_id.as_ref().unwrap().as_str(), "parent-run");
+    assert_eq!(
+        observations[0].parent_run_id.as_ref().unwrap().as_str(),
+        "parent-run"
+    );
     assert_eq!(observations[0].root_run_id.as_str(), "root-run");
 
     let root = std::env::temp_dir().join(format!(
