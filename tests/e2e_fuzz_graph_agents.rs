@@ -71,6 +71,10 @@ impl Scenario {
             2
         }
     }
+
+    fn expected_observed_model_calls_per_agent(self) -> usize {
+        self.expected_parent_model_calls_per_agent() + usize::from(self.use_subagent)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -709,7 +713,7 @@ fn assert_state_invariants(scenario: Scenario, state: &FuzzState) {
 fn assert_event_invariants(scenario: Scenario, recorder: &EventRecorder) {
     let trajectory = Trajectory::from_events(recorder.events());
     trajectory.assert_completed();
-    trajectory.assert_model_called_times(scenario.expected_parent_model_calls_per_agent());
+    trajectory.assert_model_called_times(scenario.expected_observed_model_calls_per_agent());
     if scenario.use_regular_tool {
         trajectory.assert_tool_called("lookup");
         assert_eq!(

@@ -118,7 +118,7 @@ impl ToolResult {
     }
 }
 
-impl<State> ToolRegistry<State> {
+impl<State: Send + Sync> ToolRegistry<State> {
     /// Creates an empty registry.
     pub fn new() -> Self {
         Self {
@@ -153,7 +153,7 @@ impl<State> ToolRegistry<State> {
     }
 }
 
-impl<State> Default for ToolRegistry<State> {
+impl<State: Send + Sync> Default for ToolRegistry<State> {
     fn default() -> Self {
         Self::new()
     }

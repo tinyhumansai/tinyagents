@@ -219,7 +219,7 @@ async fn parent_drives_subagent_and_composes_answer() {
     let traj = Trajectory::from_events(recorder.events());
     traj.assert_tool_called("researcher");
     assert_eq!(traj.tool_call_count("researcher"), 1);
-    traj.assert_model_called_times(2);
+    traj.assert_model_called_times(3);
     traj.assert_completed();
     traj.assert_order(&["run.started", "researcher", "run.completed"])
         .expect("sub-agent tool runs between run start and completion");
@@ -251,7 +251,7 @@ async fn child_subagents_derive_unique_thread_ids_from_parent_thread() {
     let child_threads: Vec<String> = recorder
         .events()
         .into_iter()
-        .filter_map(|record| match record.event {
+        .filter_map(|event| match event {
             AgentEvent::RunStarted {
                 thread_id: Some(thread_id),
                 ..
@@ -373,7 +373,7 @@ async fn nested_subagent_turns_preserve_kv_layout_thread_lineage_and_output_cap(
     let child_threads: Vec<String> = recorder
         .events()
         .into_iter()
-        .filter_map(|record| match record.event {
+        .filter_map(|event| match event {
             AgentEvent::RunStarted {
                 thread_id: Some(thread_id),
                 ..

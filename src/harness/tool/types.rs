@@ -140,7 +140,7 @@ pub struct ToolDelta {
 /// Generic over the application `State` so tools can read shared context
 /// without exposing it to model-visible schemas.
 #[async_trait]
-pub trait Tool<State>: Send + Sync {
+pub trait Tool<State: Send + Sync>: Send + Sync {
     /// Canonical tool name.
     fn name(&self) -> &str;
 
