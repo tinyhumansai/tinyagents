@@ -258,6 +258,30 @@ pub enum AgentEvent {
         cost: CostTotals,
     },
 
+    /// A budget crossed its configured warning threshold but has not been
+    /// exceeded, so the run continues.
+    ///
+    /// Emitted by
+    /// [`BudgetMiddleware`][crate::harness::middleware::BudgetMiddleware] after a
+    /// spend pushes cumulative usage/cost past `warn_fraction` of a limit.
+    BudgetWarning {
+        /// Human-readable description of which budget threshold was crossed.
+        reason: String,
+    },
+
+    /// A budget limit was reached. When emitted from budget preflight the run is
+    /// about to be blocked with
+    /// [`TinyAgentsError::LimitExceeded`][crate::error::TinyAgentsError::LimitExceeded];
+    /// when emitted post-spend it flags that the accumulated totals now exceed a
+    /// limit.
+    BudgetExceeded {
+        /// Human-readable description of which budget limit was hit.
+        reason: String,
+        /// Whether this occurrence blocked a model call (preflight) rather than
+        /// being detected after a spend.
+        blocked: bool,
+    },
+
     /// A configured run limit (cap) tripped and the run is about to fail.
     ///
     /// Emitted by the agent loop just before returning
@@ -365,6 +389,8 @@ impl AgentEvent {
             AgentEvent::ToolStarted { .. } => "tool.started",
             AgentEvent::ToolCompleted { .. } => "tool.completed",
             AgentEvent::UnknownToolCall { .. } => "tool.unknown",
+            AgentEvent::BudgetWarning { .. } => "budget.warning",
+            AgentEvent::BudgetExceeded { .. } => "budget.exceeded",
             AgentEvent::StateUpdate => "state.update",
             AgentEvent::MiddlewareStarted { .. } => "middleware.started",
             AgentEvent::MiddlewareCompleted { .. } => "middleware.completed",

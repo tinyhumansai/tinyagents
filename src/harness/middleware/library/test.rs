@@ -297,6 +297,114 @@ async fn rate_limit_wait_then_proceed_with_advancing_clock() {
     assert_eq!(model_base.calls(), 1);
 }
 
+// ── BudgetMiddleware ────────────────────────────────────────────────────────
+
+fn response_with_usage(model: &str, input: u64, output: u64) -> ModelResponse {
+    use crate::harness::model::{ModelResolutionSource, ResolvedModel};
+    use crate::harness::usage::Usage;
+    let mut response = ModelResponse::assistant("ok");
+    response.usage = Some(Usage::new(input, output));
+    response.resolved_model = Some(ResolvedModel {
+        name: model.to_string(),
+        requested: None,
+        source: ModelResolutionSource::RegistryDefault,
+    });
+    response
+}
+
+#[tokio::test]
+async fn budget_warns_then_blocks_on_token_exhaustion() {
+    let (mut ctx, recorder) = ctx_with_recorder();
+    let mw = BudgetMiddleware::new(BudgetLimits {
+        max_total_tokens: Some(10),
+        warn_fraction: Some(0.5),
+        ..BudgetLimits::default()
+    });
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    // First spend: 8 tokens crosses the 0.5*10=5 warning threshold, not exceeded.
+    let mut resp = response_with_usage("m", 5, 3);
+    stack
+        .run_after_model(&mut ctx, &(), &mut resp)
+        .await
+        .unwrap();
+    assert!(
+        events(&recorder)
+            .iter()
+            .any(|e| matches!(e, AgentEvent::BudgetWarning { .. }))
+    );
+
+    // Preflight still admits the next call (8 < 10).
+    let mut req = ModelRequest::new(vec![Message::user("go")]);
+    stack
+        .run_before_model(&mut ctx, &(), &mut req)
+        .await
+        .unwrap();
+
+    // Second spend pushes cumulative tokens to 13 (>= 10): exceeded event.
+    let mut resp2 = response_with_usage("m", 3, 2);
+    stack
+        .run_after_model(&mut ctx, &(), &mut resp2)
+        .await
+        .unwrap();
+    assert!(
+        events(&recorder)
+            .iter()
+            .any(|e| matches!(e, AgentEvent::BudgetExceeded { blocked: false, .. }))
+    );
+
+    // Now preflight fails closed.
+    let err = stack
+        .run_before_model(&mut ctx, &(), &mut req)
+        .await
+        .expect_err("budget exhausted should block");
+    assert!(matches!(err, TinyAgentsError::LimitExceeded(_)));
+}
+
+#[tokio::test]
+async fn budget_prices_usage_and_enforces_cost() {
+    use crate::registry::catalog::ModelPricing;
+    let (mut ctx, recorder) = ctx_with_recorder();
+    let mut pricing = std::collections::HashMap::new();
+    pricing.insert(
+        "m".to_string(),
+        ModelPricing {
+            input_per_token: Some(1.0),
+            output_per_token: Some(1.0),
+            ..ModelPricing::default()
+        },
+    );
+    let mw = BudgetMiddleware::new(BudgetLimits {
+        max_cost: Some(5.0),
+        ..BudgetLimits::default()
+    })
+    .with_pricing(pricing);
+    let tracker = mw.tracker();
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    // 4 in + 2 out at 1.0/token = 6.0 cost >= 5.0 budget.
+    let mut resp = response_with_usage("m", 4, 2);
+    stack
+        .run_after_model(&mut ctx, &(), &mut resp)
+        .await
+        .unwrap();
+    assert!((tracker.snapshot().cost.total_cost - 6.0).abs() < 1e-9);
+    assert!(
+        events(&recorder)
+            .iter()
+            .any(|e| matches!(e, AgentEvent::CostRecorded { .. }))
+    );
+
+    let mut req = ModelRequest::new(vec![Message::user("go")]);
+    let err = stack
+        .run_before_model(&mut ctx, &(), &mut req)
+        .await
+        .expect_err("cost budget exhausted should block");
+    assert!(matches!(err, TinyAgentsError::LimitExceeded(_)));
+}
+
 // ── ToolAllowlistMiddleware ─────────────────────────────────────────────────
 
 #[tokio::test]

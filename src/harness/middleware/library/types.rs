@@ -159,6 +159,77 @@ pub struct ToolAllowlistMiddleware {
     pub(crate) allowed: std::collections::HashSet<String>,
 }
 
+// ── BudgetMiddleware ──────────────────────────────────────────────────────────
+
+/// Token and money budget limits enforced by a [`BudgetMiddleware`].
+///
+/// Every field is optional; an unset limit is not enforced. `warn_fraction`
+/// (for example `0.9`) emits an
+/// [`AgentEvent::BudgetWarning`][crate::harness::events::AgentEvent::BudgetWarning]
+/// once cumulative usage/cost crosses that fraction of any set limit.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BudgetLimits {
+    /// Maximum cumulative input tokens.
+    pub max_input_tokens: Option<u64>,
+    /// Maximum cumulative output tokens.
+    pub max_output_tokens: Option<u64>,
+    /// Maximum cumulative total (effective) tokens.
+    pub max_total_tokens: Option<u64>,
+    /// Maximum cumulative reasoning tokens.
+    pub max_reasoning_tokens: Option<u64>,
+    /// Maximum cumulative estimated cost (pricing-table currency).
+    pub max_cost: Option<f64>,
+    /// Fraction of any limit (0.0–1.0) at which a warning is emitted.
+    pub warn_fraction: Option<f64>,
+}
+
+/// Shared, accumulating budget spend.
+///
+/// Cloning a [`BudgetTracker`] shares the same underlying accumulator, so
+/// handing the same tracker to a parent harness and every sub-agent harness
+/// makes a single budget roll up across an entire recursive run tree.
+#[derive(Clone, Debug, Default)]
+pub struct BudgetTracker {
+    pub(crate) inner: Arc<Mutex<BudgetSpend>>,
+}
+
+/// A point-in-time snapshot of accumulated budget spend.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BudgetSpend {
+    /// Accumulated token usage.
+    pub usage: crate::harness::usage::UsageTotals,
+    /// Accumulated estimated cost.
+    pub cost: crate::harness::cost::CostTotals,
+    /// Whether a warning has already been emitted (warn-once).
+    pub warned: bool,
+}
+
+/// Around-nothing lifecycle middleware that enforces a token/money
+/// [`BudgetLimits`] across a run (or a shared run tree).
+///
+/// - `before_model` (preflight): if the accumulated spend already meets or
+///   exceeds any limit, emits
+///   [`AgentEvent::BudgetExceeded`][crate::harness::events::AgentEvent::BudgetExceeded]
+///   `{ blocked: true }` and fails the call with
+///   [`TinyAgentsError::LimitExceeded`][crate::error::TinyAgentsError::LimitExceeded],
+///   so a recursive run stops once a root budget is exhausted.
+/// - `after_model` (spend + reconcile): folds the response usage into the
+///   tracker, prices it via the configured per-model [`ModelPricing`] table
+///   (wiring cost into the loop, emitting
+///   [`AgentEvent::UsageRecorded`][crate::harness::events::AgentEvent::UsageRecorded]
+///   and [`AgentEvent::CostRecorded`][crate::harness::events::AgentEvent::CostRecorded]),
+///   and emits warn/exceeded events as thresholds are crossed.
+///
+/// Reservation and refund semantics are intentionally out of scope here; this
+/// middleware enforces post-hoc spend against limits with a fail-closed
+/// preflight.
+pub struct BudgetMiddleware {
+    pub(crate) label: &'static str,
+    pub(crate) limits: BudgetLimits,
+    pub(crate) tracker: BudgetTracker,
+    pub(crate) pricing: std::collections::HashMap<String, crate::registry::catalog::ModelPricing>,
+}
+
 // ── ToolPolicyMiddleware ──────────────────────────────────────────────────────
 
 /// Lifecycle middleware that enforces per-tool [`ToolPolicy`] metadata, both at

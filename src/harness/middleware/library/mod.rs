@@ -319,6 +319,215 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for ToolAllowl
     }
 }
 
+// ── BudgetMiddleware ──────────────────────────────────────────────────────────
+
+impl BudgetTracker {
+    /// Creates an empty tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns a snapshot of the accumulated spend.
+    pub fn snapshot(&self) -> BudgetSpend {
+        self.inner.lock().map(|g| *g).unwrap_or_default()
+    }
+
+    /// Folds a model call's usage and estimated cost into the tracker.
+    pub fn record(
+        &self,
+        usage: crate::harness::usage::Usage,
+        cost: crate::harness::cost::CostTotals,
+    ) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.usage += usage;
+            guard.cost += cost;
+        }
+    }
+}
+
+impl BudgetLimits {
+    /// Returns a human-readable reason when `spend` meets or exceeds any limit.
+    fn exceeded_reason(&self, spend: &BudgetSpend) -> Option<String> {
+        let u = &spend.usage.usage;
+        if let Some(max) = self.max_input_tokens
+            && u.input_tokens >= max
+        {
+            return Some(format!("input tokens {} >= budget {max}", u.input_tokens));
+        }
+        if let Some(max) = self.max_output_tokens
+            && u.output_tokens >= max
+        {
+            return Some(format!("output tokens {} >= budget {max}", u.output_tokens));
+        }
+        if let Some(max) = self.max_total_tokens
+            && u.effective_total() >= max
+        {
+            return Some(format!(
+                "total tokens {} >= budget {max}",
+                u.effective_total()
+            ));
+        }
+        if let Some(max) = self.max_reasoning_tokens
+            && u.reasoning_tokens >= max
+        {
+            return Some(format!(
+                "reasoning tokens {} >= budget {max}",
+                u.reasoning_tokens
+            ));
+        }
+        if let Some(max) = self.max_cost
+            && spend.cost.total_cost >= max
+        {
+            return Some(format!(
+                "cost {:.6} >= budget {max:.6}",
+                spend.cost.total_cost
+            ));
+        }
+        None
+    }
+
+    /// Returns a reason when `spend` crosses `warn_fraction` of any set limit.
+    fn warn_reason(&self, spend: &BudgetSpend) -> Option<String> {
+        let frac = self.warn_fraction?;
+        let u = &spend.usage.usage;
+        let over = |value: f64, max: Option<u64>| -> bool {
+            max.is_some_and(|m| m > 0 && value >= frac * m as f64)
+        };
+        if over(u.input_tokens as f64, self.max_input_tokens) {
+            return Some("input token budget".to_string());
+        }
+        if over(u.output_tokens as f64, self.max_output_tokens) {
+            return Some("output token budget".to_string());
+        }
+        if over(u.effective_total() as f64, self.max_total_tokens) {
+            return Some("total token budget".to_string());
+        }
+        if over(u.reasoning_tokens as f64, self.max_reasoning_tokens) {
+            return Some("reasoning token budget".to_string());
+        }
+        if let Some(max) = self.max_cost
+            && max > 0.0
+            && spend.cost.total_cost >= frac * max
+        {
+            return Some("cost budget".to_string());
+        }
+        None
+    }
+}
+
+impl BudgetMiddleware {
+    /// Creates a budget middleware with its own fresh tracker and no pricing
+    /// table (token budgets only; cost stays zero until pricing is supplied).
+    pub fn new(limits: BudgetLimits) -> Self {
+        Self {
+            label: "budget",
+            limits,
+            tracker: BudgetTracker::new(),
+            pricing: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Shares an existing [`BudgetTracker`] so this middleware's spend rolls up
+    /// into a run-tree-wide budget (hand the same tracker to sub-agents).
+    pub fn with_tracker(mut self, tracker: BudgetTracker) -> Self {
+        self.tracker = tracker;
+        self
+    }
+
+    /// Supplies a per-model-name [`ModelPricing`] table so `after_model` can
+    /// price usage and enforce the money budget.
+    pub fn with_pricing(
+        mut self,
+        pricing: std::collections::HashMap<String, crate::registry::catalog::ModelPricing>,
+    ) -> Self {
+        self.pricing = pricing;
+        self
+    }
+
+    /// Returns the shared tracker (for reading accumulated spend).
+    pub fn tracker(&self) -> BudgetTracker {
+        self.tracker.clone()
+    }
+
+    fn price(&self, response: &ModelResponse) -> crate::harness::cost::CostTotals {
+        let Some(usage) = response.usage else {
+            return crate::harness::cost::CostTotals::default();
+        };
+        let Some(name) = response.resolved_model.as_ref().map(|r| r.name.as_str()) else {
+            return crate::harness::cost::CostTotals::default();
+        };
+        match self.pricing.get(name) {
+            Some(pricing) => crate::harness::cost::estimate_cost(pricing, &usage),
+            None => crate::harness::cost::CostTotals::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for BudgetMiddleware {
+    fn name(&self) -> &str {
+        self.label
+    }
+
+    async fn before_model(
+        &self,
+        ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        _request: &mut ModelRequest,
+    ) -> Result<()> {
+        let spend = self.tracker.snapshot();
+        if let Some(reason) = self.limits.exceeded_reason(&spend) {
+            ctx.emit(AgentEvent::BudgetExceeded {
+                reason: reason.clone(),
+                blocked: true,
+            });
+            return Err(TinyAgentsError::LimitExceeded(format!(
+                "budget exhausted: {reason}"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn after_model(
+        &self,
+        ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        response: &mut ModelResponse,
+    ) -> Result<()> {
+        let Some(usage) = response.usage else {
+            return Ok(());
+        };
+        let cost = self.price(response);
+        self.tracker.record(usage, cost);
+
+        ctx.emit(AgentEvent::UsageRecorded { usage });
+        if cost.total_cost > 0.0 {
+            ctx.emit(AgentEvent::CostRecorded { cost });
+        }
+
+        let mut spend = self.tracker.snapshot();
+        // Warn-once on threshold crossing.
+        if !spend.warned
+            && let Some(reason) = self.limits.warn_reason(&spend)
+        {
+            ctx.emit(AgentEvent::BudgetWarning {
+                reason: format!("approaching {reason}"),
+            });
+            if let Ok(mut guard) = self.tracker.inner.lock() {
+                guard.warned = true;
+            }
+            spend.warned = true;
+        }
+        if let Some(reason) = self.limits.exceeded_reason(&spend) {
+            ctx.emit(AgentEvent::BudgetExceeded {
+                reason,
+                blocked: false,
+            });
+        }
+        Ok(())
+    }
+}
+
 // ── ToolPolicyMiddleware ──────────────────────────────────────────────────────
 
 impl ToolPolicyMiddleware {
