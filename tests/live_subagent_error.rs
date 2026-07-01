@@ -8,10 +8,9 @@
 //!
 //! # Skips gracefully
 //!
-//! Gated behind `#[cfg(feature = "openai")]`; returns early (after an
-//! `eprintln!`) when `OPENAI_API_KEY` is unset.
+//! Returns early (after an `eprintln!`) when `OPENAI_API_KEY` is unset, so the
+//! default `cargo test` passes with no key configured.
 
-#[cfg(feature = "openai")]
 #[tokio::test]
 async fn live_openai_subagent_surfaces_tool_failure() {
     use std::sync::Arc;

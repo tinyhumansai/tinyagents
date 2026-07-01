@@ -1,4 +1,4 @@
-//! Feature-gated model provider integrations — the leaves of the recursion.
+//! Model provider integrations — the leaves of the recursion.
 //!
 //! Every recursive call in the runtime — an agent, a sub-agent, a graph node, a
 //! `.ragsh` step — ultimately bottoms out in a concrete model invocation, and
@@ -10,30 +10,35 @@
 //!
 //! # Available providers
 //!
-//! | Provider | Feature flag | Status |
-//! |---|---|---|
-//! | [`MockModel`] | *(always available)* | Implemented — deterministic, no network |
-//! | `openai` (and OpenAI-compatible endpoints) | `openai` | Implemented |
+//! | Provider | Status |
+//! |---|---|
+//! | [`MockModel`] | Implemented — deterministic, no network |
+//! | [`openai`] (and OpenAI-compatible endpoints) | Implemented |
 //!
 //! [`MockModel`] is always compiled and needs no network, keeping the default
-//! build offline and deterministic. The `openai` module is gated behind the
-//! `openai` Cargo feature and additionally serves every OpenAI-compatible
-//! endpoint (Anthropic, Ollama, DeepSeek, Groq, xAI, OpenRouter, Together,
-//! Mistral) through the same Chat Completions wire format.
+//! build offline and deterministic. The [`openai`] module is always compiled
+//! too (it pulls no extra dependencies) and additionally serves every
+//! OpenAI-compatible endpoint (Ollama, DeepSeek, Groq, xAI, OpenRouter,
+//! Together, Mistral, and Anthropic's OpenAI-compat endpoint) through the same
+//! Chat Completions wire format. The default build stays offline anyway: the
+//! adapter only touches the network when invoked, and the live tests
+//! early-return without `OPENAI_API_KEY`.
 //!
-//! To add a provider with a different wire protocol, enable a new feature in
-//! `Cargo.toml` and add the corresponding gated module declaration:
+//! To add a provider with a different wire protocol, gate it behind a new
+//! Cargo feature and add the corresponding module declaration:
 //!
 //! ```text
-//! #[cfg(feature = "openai")]    pub mod openai;
+//! pub mod openai;                          // always compiled
 //! // #[cfg(feature = "anthropic")] pub mod anthropic;
 //! // #[cfg(feature = "ollama")]    pub mod ollama;
 //! ```
 
 mod types;
 
-// --- real provider integrations (gated behind Cargo features) ---
-#[cfg(feature = "openai")]
+// --- real provider integrations ---
+// The OpenAI Chat Completions adapter is always compiled; it also serves every
+// OpenAI-compatible endpoint. Providers with a different wire protocol would be
+// added behind their own Cargo feature.
 pub mod openai;
 // #[cfg(feature = "anthropic")] pub mod anthropic;
 // #[cfg(feature = "ollama")]    pub mod ollama;

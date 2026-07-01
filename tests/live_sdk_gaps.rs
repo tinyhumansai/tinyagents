@@ -2,12 +2,9 @@
 //! OpenAI model: budget preflight gating, tool-policy exposure of a classified
 //! read-only tool, and the streaming reasoning side channel.
 //!
-//! Every test here talks to the real OpenAI API, so each one is:
-//!
-//! 1. gated behind `#[cfg(feature = "openai")]` (without the feature the file
-//!    compiles to nothing), and
-//! 2. an early no-op `return` (after an `eprintln!`) when `OPENAI_API_KEY` is
-//!    unset, so `cargo test --features openai` passes with no key configured.
+//! Every test here talks to the real OpenAI API, so each one is an early no-op
+//! `return` (after an `eprintln!`) when `OPENAI_API_KEY` is unset, so the
+//! default `cargo test` passes with no key configured.
 //!
 //! Prompts are tiny and `max_tokens` is small to keep cost negligible. Asserts
 //! target structural facts (an event fired, the run succeeded, text is
@@ -20,7 +17,6 @@
 /// `max_total_tokens` budget. The middleware's `before_model` hook runs the
 /// preflight check and fails the run with [`TinyAgentsError::LimitExceeded`]
 /// deterministically — without ever contacting OpenAI on the gated call.
-#[cfg(feature = "openai")]
 #[tokio::test]
 async fn live_budget_blocks_second_call() {
     use std::sync::Arc;
@@ -87,12 +83,10 @@ async fn live_budget_blocks_second_call() {
 /// A trivial, classified, read-only calculator tool used by the tool-policy
 /// test. It records every execution so the test can tell whether the model
 /// actually called it.
-#[cfg(feature = "openai")]
 struct AddTool {
     calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-#[cfg(feature = "openai")]
 #[async_trait::async_trait]
 impl tinyagents::harness::tool::Tool<()> for AddTool {
     fn name(&self) -> &str {
@@ -142,7 +136,6 @@ impl tinyagents::harness::tool::Tool<()> for AddTool {
 /// real run: strict policy rejects unclassified/destructive tools, but this one
 /// is classified read-only, so the run completes. If the model happens to call
 /// the tool it executes (recorded), but we tolerate it not calling it.
-#[cfg(feature = "openai")]
 #[tokio::test]
 async fn live_tool_policy_exposes_classified_tool() {
     use std::sync::Arc;
@@ -200,7 +193,6 @@ async fn live_tool_policy_exposes_classified_tool() {
 /// streaming. We stream a short real completion and assert deltas arrived, the
 /// merged text is non-empty, and the `reasoning()` accessor returns a valid
 /// `&str` (empty for a non-reasoning model — we only assert it does not panic).
-#[cfg(feature = "openai")]
 #[tokio::test]
 async fn live_streaming_reasoning_channel_smoke() {
     use futures::StreamExt;

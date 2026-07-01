@@ -7,12 +7,9 @@
 //!
 //! # Skips gracefully
 //!
-//! Gated behind `#[cfg(feature = "openai")]`; returns early (after an
-//! `eprintln!`) when `OPENAI_API_KEY` is unset, so `cargo test --features
-//! openai` passes with no key configured. Without the `openai` feature this is
-//! a trivial no-op.
+//! Returns early (after an `eprintln!`) when `OPENAI_API_KEY` is unset, so the
+//! default `cargo test` passes with no key configured.
 
-#[cfg(feature = "openai")]
 #[tokio::test]
 async fn live_openai_subagent_reused_with_carried_context() {
     use std::sync::Arc;

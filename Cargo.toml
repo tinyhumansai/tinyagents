@@ -47,8 +47,6 @@ rhai = { version = "1", features = ["sync"], optional = true }
 
 [features]
 default = []
-# Hosted OpenAI Chat Completions provider (`harness::providers::openai`).
-openai = []
 # Embedded SQLite-backed checkpointer (`graph::checkpoint::SqliteCheckpointer`).
 sqlite = ["dep:rusqlite"]
 # Embedded Rhai-backed `.ragsh` REPL session runtime (`repl::session`).
@@ -62,28 +60,7 @@ dotenvy = "0.15"
 # `ModelStream` directly.
 futures = "0.3"
 
-# --- OpenAI-backed examples (require a network call + OPENAI_API_KEY) ---
-# Gated behind the `openai` feature so the default build/test stays offline.
-[[example]]
-name = "openai_chat"
-required-features = ["openai"]
-
-[[example]]
-name = "openai_tools"
-required-features = ["openai"]
-
-[[example]]
-name = "openai_structured"
-required-features = ["openai"]
-
-[[example]]
-name = "openai_graph_agent"
-required-features = ["openai"]
-
-[[example]]
-name = "openai_self_blueprint"
-required-features = ["openai"]
-
-[[example]]
-name = "orchestrator_subagents"
-required-features = ["openai"]
+# --- OpenAI-backed examples ---
+# The OpenAI provider is always compiled, so these build with a plain
+# `cargo build --examples`; they only need a network call + `OPENAI_API_KEY`
+# at run time.

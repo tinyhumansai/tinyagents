@@ -1,14 +1,12 @@
 //! Live steering test against the real OpenAI API.
 //!
 //! Skips gracefully (early return) when `OPENAI_API_KEY` is unset, so
-//! `cargo test --features openai` stays green without credentials. Run it for
-//! real with:
+//! `cargo test` stays green without credentials. Run it for real with:
 //!
 //! ```text
-//! cargo test --features openai --test live_steering -- --nocapture
+//! cargo test --test live_steering -- --nocapture
 //! ```
 
-#![cfg(feature = "openai")]
 
 use std::sync::Arc;
 

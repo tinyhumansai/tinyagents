@@ -212,9 +212,8 @@ impl Retriever {
     }
 }
 
-// ── OpenAiEmbeddingModel (feature `openai`) ───────────────────────────────────
+// ── OpenAiEmbeddingModel ──────────────────────────────────────────────────────
 
-#[cfg(feature = "openai")]
 mod openai {
     use async_trait::async_trait;
     use serde_json::{Value, json};
@@ -393,7 +392,6 @@ mod openai {
     }
 }
 
-#[cfg(feature = "openai")]
 pub use openai::OpenAiEmbeddingModel;
 
 #[cfg(test)]

@@ -16,12 +16,9 @@
 //!
 //! # Skips gracefully
 //!
-//! The OpenAI-using code is gated behind `#[cfg(feature = "openai")]`, and the
-//! test returns early (after an `eprintln!`) when `OPENAI_API_KEY` is unset, so
-//! `cargo test --features openai` passes with no key configured. Without the
-//! `openai` feature the test is a trivial no-op.
+//! The test returns early (after an `eprintln!`) when `OPENAI_API_KEY` is
+//! unset, so `cargo test` passes with no key configured.
 
-#[cfg(feature = "openai")]
 #[tokio::test]
 async fn live_durable_graph_checkpoints_then_resumes_across_model_call() {
     use std::sync::Arc;

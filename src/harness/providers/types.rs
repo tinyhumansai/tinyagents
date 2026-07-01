@@ -321,11 +321,12 @@ pub(crate) struct MockInner {
 ///
 /// # Placement of real providers
 ///
-/// Real network-backed providers are gated behind Cargo features and live in
-/// sub-modules alongside this one:
+/// Real network-backed providers live in sub-modules alongside this one. The
+/// OpenAI (and OpenAI-compatible) adapter is always compiled; providers with a
+/// different wire protocol would be gated behind their own Cargo feature:
 ///
 /// ```text
-/// // #[cfg(feature = "openai")]   pub mod openai;
+/// pub mod openai;                          // always compiled
 /// // #[cfg(feature = "anthropic")] pub mod anthropic;
 /// // #[cfg(feature = "ollama")]   pub mod ollama;
 /// ```
