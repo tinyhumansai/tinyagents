@@ -22,8 +22,10 @@
 //! the async journal/store APIs with `futures::executor::block_on` and treat
 //! persistence as best-effort: a backend error never aborts the run.
 
+mod langfuse;
 mod types;
 
+pub use langfuse::{LangfuseAuth, LangfuseClient, LangfuseTraceConfig};
 pub use types::*;
 
 use std::collections::HashMap;

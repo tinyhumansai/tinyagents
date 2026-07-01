@@ -183,6 +183,29 @@ export OPENAI_API_KEY=...
 cargo run --features openai --example openai_chat
 ```
 
+Export durable harness observations to Langfuse with the embedded client:
+
+```rust
+use tinyagents::{LangfuseClient, LangfuseTraceConfig};
+
+let client = LangfuseClient::proxy("https://api.tinyhumans.ai", backend_jwt)?;
+client
+    .send_observations(
+        LangfuseTraceConfig {
+            user_id: Some("user_123".to_string()),
+            session_id: Some("thread_abc".to_string()),
+            ..Default::default()
+        },
+        &observations,
+    )
+    .await?;
+```
+
+`LangfuseClient::proxy` sends to the backend
+`/telemetry/langfuse/ingestion` endpoint with bearer auth. Use
+`LangfuseClient::direct(langfuse_url, public_key, secret_key)` when an
+application is allowed to talk to Langfuse directly.
+
 ## Examples to explore
 
 All live in [`examples/`](examples/):
