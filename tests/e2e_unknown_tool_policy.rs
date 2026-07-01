@@ -142,6 +142,46 @@ async fn return_tool_error_recovers_and_emits_event() {
     assert_eq!(recovery, "tool_error");
 }
 
+#[tokio::test]
+async fn return_tool_error_preserves_original_arguments() {
+    let original = json!({ "query": "weather", "n": 3 });
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("c1", "search", original.clone()),
+            text_response("recovered"),
+        ])),
+    );
+    harness.with_policy(RunPolicy {
+        unknown_tool: UnknownToolPolicy::ReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(RunConfig::new("preserve-args"), ()).with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("go")])
+        .await
+        .expect("ReturnToolError is recoverable");
+
+    // The event carries the original arguments verbatim.
+    let args = recorder.events().into_iter().find_map(|e| match e {
+        AgentEvent::UnknownToolCall { arguments, .. } => Some(arguments),
+        _ => None,
+    });
+    assert_eq!(args, Some(original));
+
+    // The injected repair message echoes the arguments for the model.
+    assert!(
+        run.messages
+            .iter()
+            .any(|m| m.text().contains("\"query\":\"weather\"")),
+        "the injected message should echo the original arguments"
+    );
+}
+
 // ── 3. Rewrite retargets to a real, registered tool ───────────────────────────
 
 #[tokio::test]

@@ -101,6 +101,10 @@ pub enum AgentEvent {
         call_id: CallId,
         /// The tool name the model requested (which is not registered).
         requested_name: String,
+        /// The raw arguments the model supplied for the call, preserved
+        /// verbatim so repair middleware or analysis can re-target or replay
+        /// the intended invocation.
+        arguments: serde_json::Value,
         /// How the run recovered (for example `"tool_error"` or
         /// `"rewrite:other_tool"`).
         recovery: String,

@@ -554,6 +554,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                         // The model called an unregistered tool. Apply the run's
                         // `UnknownToolPolicy` instead of unconditionally aborting.
                         let requested = call.name.clone();
+                        let arguments = call.arguments.clone();
                         let call_id = CallId::new(call.id.clone());
 
                         // Rewrite mode: retarget to a fixed compatibility tool if
@@ -570,6 +571,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                             let record = ctx.emit(AgentEvent::UnknownToolCall {
                                 call_id,
                                 requested_name: requested,
+                                arguments,
                                 recovery: format!("rewrite:{tool_name}"),
                             });
                             status.set_last_event(record.id);
@@ -583,11 +585,16 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                             // the model can correct itself. This consumed one
                             // tool-call budget slot above, bounding the loop.
                             let valid = self.tools.names().join(", ");
-                            let message =
-                                format!("unknown tool `{requested}`; valid tools: [{valid}]");
+                            let args_repr = serde_json::to_string(&arguments)
+                                .unwrap_or_else(|_| "<unserializable>".to_string());
+                            let message = format!(
+                                "unknown tool `{requested}` (arguments: {args_repr}); \
+                                 valid tools: [{valid}]"
+                            );
                             let record = ctx.emit(AgentEvent::UnknownToolCall {
                                 call_id,
                                 requested_name: requested.clone(),
+                                arguments,
                                 recovery: "tool_error".to_string(),
                             });
                             status.set_last_event(record.id);
