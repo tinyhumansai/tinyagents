@@ -18,7 +18,46 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 
 use crate::Result;
+use crate::harness::events::{AgentEvent, EventSink};
 use crate::harness::tool::SandboxMode;
+
+/// Prepares a per-agent environment through `isolation` and emits an
+/// [`AgentEvent::WorkspacePrepared`] on the run's event sink so late observers
+/// and journals record the isolation setup. Returns the descriptor to thread
+/// into the run via [`RunContext::with_workspace`][crate::harness::context::RunContext::with_workspace].
+///
+/// A preparation failure is propagated to the caller (there is no partial
+/// environment to clean up); the paired teardown is
+/// [`cleanup_workspace`].
+pub async fn prepare_workspace(
+    isolation: &dyn WorkspaceIsolation,
+    events: &EventSink,
+    run_id: &str,
+    agent: Option<&str>,
+) -> Result<WorkspaceDescriptor> {
+    let descriptor = isolation.prepare(run_id, agent).await?;
+    events.emit(AgentEvent::WorkspacePrepared {
+        policy_id: descriptor.policy_id.clone(),
+        root: descriptor.root.display().to_string(),
+    });
+    Ok(descriptor)
+}
+
+/// Tears down a previously prepared environment through `isolation` and emits an
+/// [`AgentEvent::WorkspaceCleanup`] (with `error` set when cleanup fails) so the
+/// teardown is observable. The cleanup result is returned unchanged.
+pub async fn cleanup_workspace(
+    isolation: &dyn WorkspaceIsolation,
+    events: &EventSink,
+    descriptor: &WorkspaceDescriptor,
+) -> Result<()> {
+    let result = isolation.cleanup(descriptor).await;
+    events.emit(AgentEvent::WorkspaceCleanup {
+        policy_id: descriptor.policy_id.clone(),
+        error: result.as_ref().err().map(|e| e.to_string()),
+    });
+    result
+}
 
 /// A [`WorkspaceIsolation`] provider that scopes every agent to one shared root
 /// without creating per-agent copies.

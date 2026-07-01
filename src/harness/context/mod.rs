@@ -176,7 +176,24 @@ impl<Ctx> RunContext<Ctx> {
             steering: None,
             cancellation: CancellationToken::new(),
             control: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            workspace: None,
         }
+    }
+
+    /// Attaches an isolated workspace descriptor that is threaded into every
+    /// [`ToolExecutionContext`][crate::harness::tool::ToolExecutionContext] this
+    /// run creates, so tools read their allowed root from context. To prepare
+    /// and tear down the environment via a
+    /// [`WorkspaceIsolation`][crate::harness::workspace::WorkspaceIsolation]
+    /// provider (emitting the workspace lifecycle events), use
+    /// [`crate::harness::workspace::prepare_workspace`] to obtain the descriptor
+    /// first.
+    pub fn with_workspace(
+        mut self,
+        workspace: crate::harness::workspace::WorkspaceDescriptor,
+    ) -> Self {
+        self.workspace = Some(workspace);
+        self
     }
 
     /// Requests a [`MiddlewareControl`] outcome. The agent loop drains and acts

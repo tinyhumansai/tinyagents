@@ -128,7 +128,7 @@ impl ToolExecutionContext {
             depth: ctx.config.depth,
             max_turn_output_tokens: ctx.config.max_turn_output_tokens,
             events: ctx.events.clone(),
-            workspace: None,
+            workspace: ctx.workspace.clone(),
         }
     }
 

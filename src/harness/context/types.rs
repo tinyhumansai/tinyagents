@@ -163,4 +163,12 @@ pub struct RunContext<Ctx = ()> {
     /// loop (stop with a final response, or interrupt). Drained by the agent
     /// loop at its safe checkpoints via [`RunContext::take_control`].
     pub control: std::sync::Arc<std::sync::Mutex<Option<MiddlewareControl>>>,
+    /// The isolated workspace/sandbox descriptor threaded into every
+    /// [`ToolExecutionContext`][crate::harness::tool::ToolExecutionContext] this
+    /// run creates, so tools discover their allowed root from context rather
+    /// than an application global. Populated by
+    /// [`RunContext::with_workspace`] or by preparing a
+    /// [`WorkspaceIsolation`][crate::harness::workspace::WorkspaceIsolation]
+    /// provider; `None` means no workspace policy is in effect.
+    pub workspace: Option<crate::harness::workspace::WorkspaceDescriptor>,
 }

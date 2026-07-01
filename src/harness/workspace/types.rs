@@ -77,6 +77,24 @@ impl WorkspaceDescriptor {
             .chain(self.trusted_roots.iter())
             .any(|root| candidate.starts_with(normalize(root)))
     }
+
+    /// Fail-closed path gate to call *before* a tool touches `path`: when the
+    /// path is outside every allowed root, emits an
+    /// [`AgentEvent::WorkspaceViolation`][crate::harness::events::AgentEvent::WorkspaceViolation]
+    /// on `events` and returns a [`TinyAgentsError::Validation`] so the caller
+    /// blocks the operation. Returns `Ok(())` when the path is allowed.
+    pub fn enforce(&self, path: &Path, events: &crate::harness::events::EventSink) -> Result<()> {
+        if self.allows(path) {
+            return Ok(());
+        }
+        let rendered = path.display().to_string();
+        events.emit(crate::harness::events::AgentEvent::WorkspaceViolation {
+            path: rendered.clone(),
+        });
+        Err(crate::error::TinyAgentsError::Validation(format!(
+            "path `{rendered}` is outside the allowed workspace roots"
+        )))
+    }
 }
 
 /// Lexically normalizes a path by resolving `.` and `..` components without
