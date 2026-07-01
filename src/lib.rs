@@ -126,6 +126,9 @@ pub use harness::steering::{
 // --- Cooperative run cancellation ---
 pub use harness::cancel::CancellationToken;
 
+// --- Workspace isolation / sandbox hooks ---
+pub use harness::workspace::{SharedRootWorkspace, WorkspaceDescriptor, WorkspaceIsolation};
+
 // --- Harness: durable observability (journals, status stores, sinks) ---
 pub use harness::observability::{
     AgentCallLatency, AgentLatencyMetrics, AgentObservation, FanOutSink, HarnessEventJournal,

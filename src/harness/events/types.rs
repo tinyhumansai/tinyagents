@@ -106,6 +106,30 @@ pub enum AgentEvent {
         recovery: String,
     },
 
+    /// A per-agent isolated workspace/sandbox was prepared.
+    WorkspacePrepared {
+        /// Audit identity of the policy that produced the environment.
+        policy_id: String,
+        /// The allowed root, rendered as a string.
+        root: String,
+    },
+
+    /// A tool attempted to touch a path outside its allowed workspace roots and
+    /// was blocked.
+    WorkspaceViolation {
+        /// The offending path, rendered as a string.
+        path: String,
+    },
+
+    /// A previously prepared isolated workspace/sandbox was cleaned up (or the
+    /// cleanup failed, when `error` is set).
+    WorkspaceCleanup {
+        /// Audit identity of the policy whose environment was cleaned up.
+        policy_id: String,
+        /// Cleanup error, when cleanup failed.
+        error: Option<String>,
+    },
+
     /// Agent or graph-node state was mutated.
     ///
     /// Emitted after state transitions so downstream subscribers can
@@ -391,6 +415,9 @@ impl AgentEvent {
             AgentEvent::UnknownToolCall { .. } => "tool.unknown",
             AgentEvent::BudgetWarning { .. } => "budget.warning",
             AgentEvent::BudgetExceeded { .. } => "budget.exceeded",
+            AgentEvent::WorkspacePrepared { .. } => "workspace.prepared",
+            AgentEvent::WorkspaceViolation { .. } => "workspace.violation",
+            AgentEvent::WorkspaceCleanup { .. } => "workspace.cleanup",
             AgentEvent::StateUpdate => "state.update",
             AgentEvent::MiddlewareStarted { .. } => "middleware.started",
             AgentEvent::MiddlewareCompleted { .. } => "middleware.completed",

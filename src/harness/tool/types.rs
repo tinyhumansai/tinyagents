@@ -111,6 +111,12 @@ pub struct ToolExecutionContext {
     pub max_turn_output_tokens: Option<u32>,
     /// Shared event sink for nested run observability.
     pub events: EventSink,
+    /// The isolated workspace/sandbox the tool may operate in, when the run was
+    /// configured with a
+    /// [`WorkspaceIsolation`][crate::harness::workspace::WorkspaceIsolation]
+    /// provider. A tool discovers its allowed root here instead of an
+    /// application global; `None` means no workspace policy is in effect.
+    pub workspace: Option<crate::harness::workspace::WorkspaceDescriptor>,
 }
 
 impl ToolExecutionContext {
@@ -122,7 +128,17 @@ impl ToolExecutionContext {
             depth: ctx.config.depth,
             max_turn_output_tokens: ctx.config.max_turn_output_tokens,
             events: ctx.events.clone(),
+            workspace: None,
         }
+    }
+
+    /// Attaches an isolated workspace descriptor the tool may operate in.
+    pub fn with_workspace(
+        mut self,
+        workspace: crate::harness::workspace::WorkspaceDescriptor,
+    ) -> Self {
+        self.workspace = Some(workspace);
+        self
     }
 }
 

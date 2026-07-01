@@ -38,6 +38,7 @@ pub mod summarization;
 pub mod testkit;
 pub mod tool;
 pub mod usage;
+pub mod workspace;
 
 pub use cost::CostTotals;
 pub use ids::*;
