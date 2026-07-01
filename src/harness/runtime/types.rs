@@ -46,10 +46,39 @@ use crate::harness::tool::ToolRegistry;
 /// caching is enabled — caching only takes effect once a [`ResponseCache`] is
 /// actually attached via [`AgentHarness::with_response_cache`], so the default
 /// is safe even without a cache.
+/// How the agent loop reacts when the model calls a tool that is not
+/// registered.
+///
+/// The default is [`UnknownToolPolicy::Fail`], preserving the historical
+/// fail-fast behavior. The recoverable variants let a run keep going so the
+/// model can correct itself — each recovery still consumes a tool-call budget
+/// slot, so [`RunLimits::max_tool_calls`] bounds any unknown-tool loop.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum UnknownToolPolicy {
+    /// Abort the run with
+    /// [`TinyAgentsError::ToolNotFound`][crate::error::TinyAgentsError::ToolNotFound]
+    /// (the default, historical behavior).
+    #[default]
+    Fail,
+    /// Inject a tool-error result (naming the originally requested tool and
+    /// listing the registered tools) back into the transcript and continue the
+    /// loop, letting the model retry with a valid tool.
+    ReturnToolError,
+    /// Rewrite an unknown call to a fixed compatibility tool name and retry the
+    /// lookup once. If the rewrite target is also unregistered, fall back to
+    /// [`UnknownToolPolicy::ReturnToolError`] behavior.
+    Rewrite {
+        /// The registered tool an unknown call is rewritten to.
+        tool_name: String,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunPolicy {
     /// Hard run limits enforced fail-closed by the agent loop.
     pub limits: RunLimits,
+    /// How the loop reacts to a model call for an unregistered tool.
+    pub unknown_tool: UnknownToolPolicy,
     /// Retry policy applied to each model call.
     pub retry: RetryPolicy,
     /// Optional ordered model fallback chain.
@@ -69,6 +98,7 @@ impl Default for RunPolicy {
     fn default() -> Self {
         Self {
             limits: RunLimits::default(),
+            unknown_tool: UnknownToolPolicy::default(),
             retry: RetryPolicy::default(),
             fallback: None,
             default_response_format: None,

@@ -24,7 +24,7 @@ use crate::harness::model::{
 };
 use crate::harness::providers::MockModel;
 use crate::harness::retry::{FallbackPolicy, RetryPolicy};
-use crate::harness::runtime::{AgentHarness, RunPolicy};
+use crate::harness::runtime::{AgentHarness, RunPolicy, UnknownToolPolicy};
 use crate::harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
 use crate::harness::usage::Usage;
 
@@ -479,6 +479,67 @@ async fn tool_not_found_errors() {
         TinyAgentsError::ToolNotFound(name) => assert_eq!(name, "missing"),
         other => panic!("expected ToolNotFound, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn unknown_tool_return_tool_error_recovers() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "missing", json!({})),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    harness.with_policy(RunPolicy {
+        unknown_tool: UnknownToolPolicy::ReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("unknown tool is recoverable");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    // The injected tool-error message names the requested tool for repair.
+    let injected = run
+        .messages
+        .iter()
+        .any(|m| format!("{m:?}").contains("unknown tool `missing`"));
+    assert!(
+        injected,
+        "recovery message should be injected into transcript"
+    );
+}
+
+#[tokio::test]
+async fn unknown_tool_rewrite_retargets_to_real_tool() {
+    let lookup = Arc::new(FakeTool::new("lookup", "out"));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "missing", json!({})),
+            text_response("done", 1, 1),
+        ])),
+    );
+    harness.register_tool(lookup.clone());
+    harness.with_policy(RunPolicy {
+        unknown_tool: UnknownToolPolicy::Rewrite {
+            tool_name: "lookup".to_string(),
+        },
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("rewrite recovers");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    // The rewritten call actually executed the real tool.
+    assert_eq!(*lookup.calls.lock().unwrap(), 1);
 }
 
 #[tokio::test]

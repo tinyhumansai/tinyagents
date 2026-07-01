@@ -77,7 +77,7 @@ use crate::harness::model::{
     ResolvedModel, ResolvedModelBinding, ResponseFormat, StreamAccumulator, ToolChoice,
 };
 use crate::harness::retry::is_retryable;
-use crate::harness::runtime::AgentHarness;
+use crate::harness::runtime::{AgentHarness, UnknownToolPolicy};
 use crate::harness::structured::{StructuredExtractor, StructuredStrategy};
 use crate::harness::tool::{Tool, ToolCall, ToolSchema};
 use futures::StreamExt;
@@ -533,10 +533,56 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     .run_before_tool(ctx, state, &mut call)
                     .await?;
 
-                let tool = self
-                    .tools
-                    .get(&call.name)
-                    .ok_or_else(|| TinyAgentsError::ToolNotFound(call.name.clone()))?;
+                let tool = match self.tools.get(&call.name) {
+                    Some(tool) => tool,
+                    None => {
+                        // The model called an unregistered tool. Apply the run's
+                        // `UnknownToolPolicy` instead of unconditionally aborting.
+                        let requested = call.name.clone();
+                        let call_id = CallId::new(call.id.clone());
+
+                        // Rewrite mode: retarget to a fixed compatibility tool if
+                        // that tool exists, otherwise fall through to recovery.
+                        let rewrite_target = match &self.policy.unknown_tool {
+                            UnknownToolPolicy::Rewrite { tool_name } => {
+                                self.tools.get(tool_name).map(|t| (tool_name.clone(), t))
+                            }
+                            _ => None,
+                        };
+
+                        if let Some((tool_name, tool)) = rewrite_target {
+                            call.name = tool_name.clone();
+                            let record = ctx.emit(AgentEvent::UnknownToolCall {
+                                call_id,
+                                requested_name: requested,
+                                recovery: format!("rewrite:{tool_name}"),
+                            });
+                            status.set_last_event(record.id);
+                            tool
+                        } else if matches!(self.policy.unknown_tool, UnknownToolPolicy::Fail) {
+                            return Err(TinyAgentsError::ToolNotFound(requested));
+                        } else {
+                            // `ReturnToolError` (or a Rewrite whose target is also
+                            // missing): inject a tool-error result naming the
+                            // requested tool and the valid tools, then continue so
+                            // the model can correct itself. This consumed one
+                            // tool-call budget slot above, bounding the loop.
+                            let valid = self.tools.names().join(", ");
+                            let message =
+                                format!("unknown tool `{requested}`; valid tools: [{valid}]");
+                            let record = ctx.emit(AgentEvent::UnknownToolCall {
+                                call_id,
+                                requested_name: requested.clone(),
+                                recovery: "tool_error".to_string(),
+                            });
+                            status.set_last_event(record.id);
+                            run.tool_calls += 1;
+                            status.tool_calls = run.tool_calls;
+                            messages.push(Message::tool(call.id.clone(), message));
+                            continue;
+                        }
+                    }
+                };
                 tool.schema().validate_call(&call)?;
 
                 let tool_call_id = CallId::new(call.id.clone());

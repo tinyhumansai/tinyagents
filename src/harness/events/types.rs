@@ -89,6 +89,23 @@ pub enum AgentEvent {
         tool_name: String,
     },
 
+    /// The model called a tool that is not registered, and the run's
+    /// [`UnknownToolPolicy`][crate::harness::runtime::UnknownToolPolicy]
+    /// recovered from it instead of aborting.
+    ///
+    /// This is distinct from a tool that ran and returned an error: no tool was
+    /// executed. The original requested name and arguments are preserved so the
+    /// event stream can drive repair/analysis.
+    UnknownToolCall {
+        /// Identifier of the offending tool call.
+        call_id: CallId,
+        /// The tool name the model requested (which is not registered).
+        requested_name: String,
+        /// How the run recovered (for example `"tool_error"` or
+        /// `"rewrite:other_tool"`).
+        recovery: String,
+    },
+
     /// Agent or graph-node state was mutated.
     ///
     /// Emitted after state transitions so downstream subscribers can
@@ -347,6 +364,7 @@ impl AgentEvent {
             AgentEvent::ModelCompleted { .. } => "model.completed",
             AgentEvent::ToolStarted { .. } => "tool.started",
             AgentEvent::ToolCompleted { .. } => "tool.completed",
+            AgentEvent::UnknownToolCall { .. } => "tool.unknown",
             AgentEvent::StateUpdate => "state.update",
             AgentEvent::MiddlewareStarted { .. } => "middleware.started",
             AgentEvent::MiddlewareCompleted { .. } => "middleware.completed",
