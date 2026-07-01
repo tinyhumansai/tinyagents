@@ -52,30 +52,77 @@ where
         options.max_concurrency
     };
 
+    let item_timeout = options.item_timeout;
     // Each future carries its input index so results can be re-ordered.
     // `buffer_unordered` bounds concurrency to `concurrency` and yields items as
     // they complete; we re-order into `slots` by index. Dropping the stream on a
     // fail-fast break cancels any remaining in-flight work.
     let mut stream = futures::stream::iter(items.into_iter().enumerate().map(|(index, item)| {
         let fut = f(index, item);
-        async move { (index, fut.await) }
+        async move {
+            // A per-item timeout turns a slow item into a recoverable failure
+            // rather than stalling the whole batch.
+            let result = match item_timeout {
+                Some(limit) => match tokio::time::timeout(limit, fut).await {
+                    Ok(r) => r,
+                    Err(_) => Err(TinyAgentsError::Timeout(format!(
+                        "parallel item {index} exceeded {} ms",
+                        limit.as_millis()
+                    ))),
+                },
+                None => fut.await,
+            };
+            (index, result)
+        }
     }))
     .buffer_unordered(concurrency);
 
     let mut slots: Vec<Option<std::result::Result<T, String>>> = (0..total).map(|_| None).collect();
     let mut fail_fast_error: Option<TinyAgentsError> = None;
 
-    while let Some((index, result)) = stream.next().await {
-        match result {
-            Ok(value) => slots[index] = Some(Ok(value)),
-            Err(err) => {
-                if options.failure_policy == FailurePolicy::FailFast {
-                    fail_fast_error = Some(err);
-                    break; // dropping `pending` cancels remaining work
+    // The collection loop, wrapped so it can be raced against an overall timeout
+    // and a cancellation token without duplicating the drain logic.
+    let collect = async {
+        while let Some((index, result)) = stream.next().await {
+            match result {
+                Ok(value) => slots[index] = Some(Ok(value)),
+                Err(err) => {
+                    if options.failure_policy == FailurePolicy::FailFast {
+                        fail_fast_error = Some(err);
+                        break; // dropping the stream cancels remaining work
+                    }
+                    slots[index] = Some(Err(err.to_string()));
                 }
-                slots[index] = Some(Err(err.to_string()));
             }
         }
+    };
+
+    let cancelled = async {
+        match &options.cancellation {
+            Some(token) => token.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+
+    // Race collection against cancellation, all under an optional total timeout.
+    let raced = async {
+        tokio::select! {
+            biased;
+            _ = cancelled => Err(TinyAgentsError::Cancelled),
+            () = collect => Ok(()),
+        }
+    };
+    match options.total_timeout {
+        Some(limit) => match tokio::time::timeout(limit, raced).await {
+            Ok(inner) => inner?,
+            Err(_) => {
+                return Err(TinyAgentsError::Timeout(format!(
+                    "parallel map/reduce exceeded {} ms",
+                    limit.as_millis()
+                )));
+            }
+        },
+        None => raced.await?,
     }
 
     if let Some(err) = fail_fast_error {

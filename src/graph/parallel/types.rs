@@ -1,13 +1,14 @@
 //! Types for the ordered, bounded parallel map/reduce helper.
 
 /// What [`map_reduce`](super::map_reduce) does when some items fail.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FailurePolicy {
     /// Stop at the first failing item (in input order) and return its error;
     /// remaining in-flight work is dropped/cancelled.
     FailFast,
     /// Run every item to completion and always return `Ok`, recording per-item
     /// success or failure for the caller to inspect.
+    #[default]
     CollectAll,
     /// Run every item to completion; return `Ok` when at least `n` items
     /// succeeded, otherwise return an error.
@@ -18,21 +19,24 @@ pub enum FailurePolicy {
 }
 
 /// Options controlling parallel execution.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ParallelOptions {
     /// Maximum number of items to run concurrently. `0` means unbounded.
     pub max_concurrency: usize,
     /// How to react to per-item failures.
     pub failure_policy: FailurePolicy,
-}
-
-impl Default for ParallelOptions {
-    fn default() -> Self {
-        Self {
-            max_concurrency: 0,
-            failure_policy: FailurePolicy::CollectAll,
-        }
-    }
+    /// Per-item wall-clock timeout. An item exceeding it fails with a timeout
+    /// message (then handled by the [`FailurePolicy`]); `None` means no per-item
+    /// bound.
+    pub item_timeout: Option<std::time::Duration>,
+    /// Overall wall-clock timeout for the whole map/reduce. On elapse the call
+    /// returns [`TinyAgentsError::Timeout`][crate::error::TinyAgentsError::Timeout]
+    /// and remaining in-flight work is dropped; `None` means no overall bound.
+    pub total_timeout: Option<std::time::Duration>,
+    /// Cooperative cancellation token: when cancelled, the call stops collecting
+    /// and returns [`TinyAgentsError::Cancelled`][crate::error::TinyAgentsError::Cancelled],
+    /// dropping remaining in-flight work.
+    pub cancellation: Option<crate::harness::cancel::CancellationToken>,
 }
 
 impl ParallelOptions {
@@ -45,6 +49,24 @@ impl ParallelOptions {
     /// Sets the failure policy.
     pub fn with_failure_policy(mut self, policy: FailurePolicy) -> Self {
         self.failure_policy = policy;
+        self
+    }
+
+    /// Bounds each item to `timeout` of wall-clock execution.
+    pub fn with_item_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.item_timeout = Some(timeout);
+        self
+    }
+
+    /// Bounds the whole map/reduce to `timeout` of wall-clock execution.
+    pub fn with_total_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.total_timeout = Some(timeout);
+        self
+    }
+
+    /// Attaches a cooperative cancellation token.
+    pub fn with_cancellation(mut self, token: crate::harness::cancel::CancellationToken) -> Self {
+        self.cancellation = Some(token);
         self
     }
 }

@@ -133,3 +133,59 @@ async fn concurrency_cap_bounds_simultaneous_work() {
 
     assert!(peak.load(Ordering::SeqCst) <= 2, "concurrency exceeded cap");
 }
+
+#[tokio::test(start_paused = true)]
+async fn item_timeout_fails_only_the_slow_item() {
+    // Item 1 hangs; a per-item timeout turns it into a recoverable failure
+    // while the fast items still succeed (CollectAll).
+    let out = map_reduce(
+        vec![0u64, 3_600_000, 0],
+        ParallelOptions::default()
+            .with_failure_policy(FailurePolicy::CollectAll)
+            .with_item_timeout(std::time::Duration::from_millis(50)),
+        |_i, ms| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            Ok::<_, TinyAgentsError>(ms)
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out.success_count(), 2);
+    assert_eq!(out.failure_count(), 1);
+    assert!(!out.outcomes[1].is_ok(), "the hanging item timed out");
+}
+
+#[tokio::test(start_paused = true)]
+async fn total_timeout_aborts_the_batch() {
+    let err = map_reduce(
+        vec![3_600_000u64],
+        ParallelOptions::default().with_total_timeout(std::time::Duration::from_millis(20)),
+        |_i, ms| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            Ok::<_, TinyAgentsError>(ms)
+        },
+    )
+    .await
+    .expect_err("total timeout should abort");
+    assert!(matches!(err, TinyAgentsError::Timeout(_)));
+}
+
+#[tokio::test]
+async fn cancellation_token_stops_the_batch() {
+    use crate::harness::cancel::CancellationToken;
+
+    let token = CancellationToken::new();
+    token.cancel();
+    let err = map_reduce(
+        vec![0u64],
+        ParallelOptions::default().with_cancellation(token),
+        |_i, _n| async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            Ok::<_, TinyAgentsError>(0u64)
+        },
+    )
+    .await
+    .expect_err("a pre-cancelled token should abort");
+    assert!(matches!(err, TinyAgentsError::Cancelled));
+}
