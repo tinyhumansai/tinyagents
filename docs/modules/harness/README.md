@@ -211,6 +211,8 @@ Feature ownership:
 - `testkit`: fakes, recorders, deterministic ids, trajectory assertions.
 - `tool`: tool traits, schemas, validation, execution, result formatting.
 - `usage`: token accounting, cached token tracking, context-window estimates.
+- `workspace`: per-agent filesystem/sandbox isolation, allowed-root descriptors,
+  and fail-closed path enforcement for tools that touch real files.
 
 Feature details:
 
@@ -220,6 +222,7 @@ Feature details:
 - [State graph runtime feature](state-graph.md)
 - [Prompt feature](prompt.md)
 - [Tool feature](tool.md)
+- [Workspace isolation feature](workspace.md)
 - [Middleware feature](middleware.md)
 - [Sub-agent and orchestrator steering](subagent-steering.md)
 - [Structured output feature](structured-output.md)

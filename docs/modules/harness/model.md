@@ -288,6 +288,52 @@ Profiles are used to:
 Profiles are not a pricing table. Prices belong to the cost feature and should
 be updateable independently.
 
+## Model Lifecycle Gating
+
+`ModelProfile::status` (`ModelStatus::Stable` / `Preview` / `Deprecated` /
+`Retired`) drives lifecycle gating during resolution. Two helpers on
+`ModelProfile` classify a profile:
+
+- `is_usable()` — `true` for any status **except** `Retired` (still callable, so
+  `Deprecated` is usable but flagged).
+- `is_deprecated()` — `true` for both `Deprecated` and `Retired`.
+
+```rust
+use tinyagents::harness::model::{ModelProfile, ModelStatus};
+
+let retired = ModelProfile { status: ModelStatus::Retired, ..ModelProfile::default() };
+assert!(!retired.is_usable());
+assert!(retired.is_deprecated());
+
+let deprecated = ModelProfile { status: ModelStatus::Deprecated, ..ModelProfile::default() };
+assert!(deprecated.is_usable());   // still callable, but flagged
+assert!(deprecated.is_deprecated());
+```
+
+`ModelRegistry::resolve` skips any candidate whose profile reports `Retired`
+across **every** resolution path — explicit override, state reuse, hints,
+agent default, and registry default — so a provider-retired model is never
+selected accidentally. A higher-priority retired hint is passed over for a live
+one, and resolution falls through to (or fails on) live candidates rather than a
+retired registry default. Opt back in with `ModelSelection { allow_retired:
+true, .. }` (for example when replaying historical runs). `Deprecated` models
+remain selectable.
+
+```rust
+use tinyagents::harness::model::ModelSelection;
+
+// A retired model resolves only when the caller opts in.
+let allowed = registry.resolve(ModelSelection {
+    requested: Some("retired_override".into()),
+    allow_retired: true,
+    ..ModelSelection::default()
+});
+assert_eq!(allowed.unwrap().resolved.name, "retired_override");
+```
+
+A model with **no** advertised profile is never lifecycle-excluded (it is only
+excluded when it fails a non-empty `required_capabilities` set).
+
 ## Provider Options
 
 `ModelSettings` should contain normalized settings:

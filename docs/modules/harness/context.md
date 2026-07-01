@@ -90,6 +90,47 @@ Wiring:
 Cancellation is cooperative, never preemptive: a token is never observed
 mid-tool or mid-chunk, only at well-defined checkpoints.
 
+## Middleware Control Outcomes
+
+`RunContext` carries a one-shot control request that a middleware or step can set
+to steer the agent loop from outside its `Result<()>` return channel. This is the
+harness-native complement to the graph `Command`/`Interrupt` vocabulary; the loop
+drains any request at its safe checkpoints (after each model response).
+
+```rust
+pub enum MiddlewareControl {
+    /// Stop the loop now; use this text as the final assistant response.
+    StopWithFinal(String),
+    /// Pause at the next safe checkpoint, surfacing TinyAgentsError::Interrupted
+    /// so a caller can persist a checkpoint and resume later.
+    Interrupt { node: String, message: String },
+}
+```
+
+Each outcome reports a stable `kind()` label (`"stop_with_final"` /
+`"interrupt"`) used in audit events, and a `precedence()` rank (higher wins).
+`RunContext::request_control` keeps the **highest-precedence** pending request
+within a turn rather than last-writer-wins: `Interrupt` (2) outranks
+`StopWithFinal` (1), because pausing to preserve state for a later resume is
+stronger than terminating with a final answer, so a pause is never silently
+downgraded to a stop.
+
+```rust
+let ctx: RunContext = RunContext::new(RunConfig::new("run-ctrl"), ());
+ctx.request_control(MiddlewareControl::Interrupt {
+    node: "review".into(),
+    message: "hold".into(),
+});
+// A later, weaker StopWithFinal does not replace the stronger Interrupt.
+ctx.request_control(MiddlewareControl::StopWithFinal("stop".into()));
+assert!(matches!(ctx.take_control(), Some(MiddlewareControl::Interrupt { .. })));
+assert!(ctx.take_control().is_none()); // take_control clears the request
+```
+
+The loop reads the request via `RunContext::take_control` and, when it honors
+one, emits `AgentEvent::ControlApplied { control, detail }` (`control` is the
+outcome's `kind()`; `detail` is the final text or the interrupt node/message).
+
 ## Context Pressure
 
 Before every model call, the harness estimates whether the request fits. If not,

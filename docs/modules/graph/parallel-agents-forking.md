@@ -216,3 +216,113 @@ Future policies:
 - fallback: run secondary agent only if primary fails
 
 These should be explicit policies, not implicit behavior hidden in node code.
+
+## Reusable map/reduce helper {#map-reduce}
+
+`graph::parallel::map_reduce` is a standalone helper — independent of the graph
+executor — for the common "run N items concurrently and reduce the results"
+pattern. Where `Send` fanout is the low-level superstep primitive, `map_reduce`
+gives a reusable async function with deterministic input-order results, a
+concurrency cap, per-item success/failure isolation, and a configurable failure
+policy:
+
+```rust
+pub async fn map_reduce<I, T, F, Fut>(
+    items: Vec<I>,
+    options: ParallelOptions,
+    f: F,
+) -> Result<ParallelOutcome<T>>
+where
+    F: Fn(usize, I) -> Fut,
+    Fut: Future<Output = Result<T>>;
+```
+
+`f` receives each item's 0-based input index and the item. Results are collected
+into a `ParallelOutcome<T>` of per-item `ItemOutcome<T>` values **in input order**
+regardless of completion order (concurrency is driven by an ordered buffered
+stream). `ParallelOutcome` exposes `success_count`, `failure_count`, `successes`,
+and `into_successes`.
+
+### Failure policy
+
+`FailurePolicy` decides what happens when items fail:
+
+- `FailFast` — stop at the first failing item (in input order) and return its
+  error; remaining in-flight work is dropped.
+- `CollectAll` (default) — run every item to completion, always return `Ok`,
+  recording per-item success/failure for the caller to inspect.
+- `Quorum(n)` — run every item; return `TinyAgentsError::Graph` unless at least
+  `n` items succeeded.
+- `BestEffort` — always `Ok`, silently keeping only the successful outputs.
+
+### Execution controls
+
+`ParallelOptions` is a builder. It is `Clone` (no longer `Copy`) because it can
+hold a cancellation token.
+
+| Builder | Effect |
+| --- | --- |
+| `with_max_concurrency(n)` | Cap simultaneous items (`0` = unbounded). |
+| `with_failure_policy(p)` | Set the `FailurePolicy`. |
+| `with_item_timeout(dur)` | Per-item wall-clock bound; a slow item becomes a recoverable per-item failure (then handled by the policy) rather than stalling the batch. |
+| `with_total_timeout(dur)` | Overall wall-clock bound; on elapse the call returns `TinyAgentsError::Timeout` and drops remaining in-flight work. |
+| `with_cancellation(token)` | Attach a cooperative `CancellationToken`; when cancelled the call returns `TinyAgentsError::Cancelled` and drops in-flight work. |
+
+Per-item timeout — a slow item fails in isolation while fast items still
+succeed:
+
+```rust
+use tinyagents::graph::parallel::{map_reduce, FailurePolicy, ParallelOptions};
+use tinyagents::TinyAgentsError;
+
+// Item 1 hangs; a 50ms per-item timeout turns it into a recoverable failure.
+let out = map_reduce(
+    vec![0u64, 3_600_000, 0],
+    ParallelOptions::default()
+        .with_failure_policy(FailurePolicy::CollectAll)
+        .with_item_timeout(std::time::Duration::from_millis(50)),
+    |_i, ms| async move {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        Ok::<_, TinyAgentsError>(ms)
+    },
+)
+.await?;
+assert_eq!(out.success_count(), 2);
+assert_eq!(out.failure_count(), 1); // the hanging item timed out
+```
+
+Total timeout — the whole batch aborts and drops in-flight work:
+
+```rust
+let err = map_reduce(
+    vec![3_600_000u64],
+    ParallelOptions::default().with_total_timeout(std::time::Duration::from_millis(20)),
+    |_i, ms| async move {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        Ok::<_, TinyAgentsError>(ms)
+    },
+)
+.await
+.expect_err("total timeout aborts the batch");
+assert!(matches!(err, TinyAgentsError::Timeout(_)));
+```
+
+Cancellation — a cancelled token stops the batch:
+
+```rust
+use tinyagents::CancellationToken;
+
+let token = CancellationToken::new();
+token.cancel();
+let err = map_reduce(
+    vec![0u64],
+    ParallelOptions::default().with_cancellation(token),
+    |_i, _n| async move {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        Ok::<_, TinyAgentsError>(0u64)
+    },
+)
+.await
+.expect_err("a cancelled token aborts");
+assert!(matches!(err, TinyAgentsError::Cancelled));
+```

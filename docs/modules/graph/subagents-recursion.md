@@ -112,6 +112,38 @@ Every steering event must include root run id, parent run id, child run id when
 available, task id when graph-backed, namespace, actor, command kind, policy id,
 correlation id, and checkpoint id when available.
 
+## Listing Orchestration Tasks {#orchestrate-list}
+
+The model-facing `orchestrate_list` tool enumerates managed tasks visible to the
+current orchestration scope, filtered through `OrchestrationTaskFilter`. Beyond
+the run-tree fields (`parent_run_id`, `root_run_id`, `thread_id`, `node_id`,
+`status`), the filter supports:
+
+- `kind` — a task-kind discriminant label matching
+  `OrchestrationTaskKind::as_str` (`"graph"`, `"sub_agent"`, `"tool"`,
+  `"external_process"`).
+- `created_after_ms` / `created_before_ms` — an inclusive created-at window in
+  Unix-epoch **milliseconds**, parsed into `SystemTime` bounds against each
+  record's `created_at`.
+
+`OrchestrationTaskFilter` exposes `with_kind(label)` and
+`created_between(after, before)` builders (each bound is `Option<SystemTime>`),
+plus a `matches(record)` predicate. The tool schema accepts the same names:
+
+```rust
+// orchestrate_list arguments (all optional):
+json!({ "kind": "sub_agent" })            // only sub-agent tasks
+json!({ "created_after_ms": 0 })          // created at/after the epoch (all)
+json!({ "created_before_ms": 0 })         // created at/before the epoch (none)
+```
+
+For example, spawning one `graph` task and one `sub_agent` task and then listing
+with `{ "kind": "sub_agent" }` returns just the sub-agent record; a
+`{ "created_before_ms": 0 }` upper bound excludes everything created just now,
+while `{ "created_after_ms": 0 }` includes both. The full orchestration tool set
+(`orchestrate_spawn`, `orchestrate_await`, `orchestrate_list`, and the rest) is
+described in the Graph Runtime wiki page.
+
 ## Recursion And Depth Tracking
 
 The graph should allow recursive execution, but only with explicit limits and

@@ -214,6 +214,79 @@ Provider-supplied tool calls must fail closed:
 - allowlist violations emit events and append repairable tool-result messages
   only when the agent loop policy allows recovery
 
+## Unknown-tool recovery
+
+When the model calls a tool that is not registered, the agent loop's behavior is
+governed by `RunPolicy::unknown_tool: UnknownToolPolicy`
+(`src/harness/runtime/types.rs`):
+
+- `UnknownToolPolicy::Fail` (default, historical) — abort the run with
+  `TinyAgentsError::ToolNotFound(name)`.
+- `UnknownToolPolicy::ReturnToolError` — inject a tool-error result (naming the
+  requested tool, echoing its arguments, and listing the registered tools) back
+  into the transcript and continue, letting the model retry with a valid tool.
+- `UnknownToolPolicy::Rewrite { tool_name }` — retarget the unknown call to a
+  fixed compatibility tool and retry the lookup once; if that target is also
+  unregistered, fall back to `ReturnToolError` behavior.
+
+Each recovery still consumes a tool-call budget slot, so
+`RunLimits::max_tool_calls` bounds any unknown-tool loop. Every recovery emits
+`AgentEvent::UnknownToolCall { call_id, requested_name, arguments, recovery }`
+— the original `arguments` are preserved verbatim so repair/analysis middleware
+can re-target or replay the intended call, and `recovery` is a label such as
+`"tool_error"` or `"rewrite:lookup"`.
+
+```rust
+use tinyagents::harness::runtime::{AgentHarness, RunPolicy, UnknownToolPolicy};
+
+let mut harness: AgentHarness<()> = AgentHarness::new();
+// ... register a model whose first turn calls the unregistered `missing` ...
+harness.with_policy(RunPolicy {
+    unknown_tool: UnknownToolPolicy::ReturnToolError,
+    ..RunPolicy::default()
+});
+
+let run = harness
+    .invoke_in_context(&(), ctx, vec![Message::user("go")])
+    .await?;
+// The injected repair message names the requested tool for the model.
+assert!(run.messages.iter().any(|m| m.text().contains("unknown tool `missing`")));
+// A single UnknownToolCall event was recorded with recovery == "tool_error".
+```
+
+## Tool policy enforcement
+
+Beyond the model-visible `ToolSchema`, each tool advertises a structured,
+serializable `ToolPolicy` (`src/harness/tool/types.rs`) via `Tool::policy()`.
+The default is **unclassified** (`classified == false`), so strict enforcement
+can fail closed on any tool that has not declared its safety profile.
+
+```rust
+pub struct ToolPolicy {
+    pub classified: bool,
+    pub side_effects: ToolSideEffects, // read_only, writes_files, network,
+                                       // installs_dependencies, destructive,
+                                       // external_service, payment
+    pub runtime: ToolRuntime,          // sandbox: SandboxMode, max_result_bytes,
+                                       // timeout_ms, max_retries, idempotent, …
+    pub access: ToolAccess,            // workspace: WorkspaceAccess, trusted_roots,
+                                       // credentials, approval_required, background_safe
+}
+```
+
+Build a policy fluently: `ToolPolicy::read_only()`, `ToolPolicy::classified()`,
+then `.with_side_effects(…)`, `.with_runtime(…)`, `.with_access(…)`. A registry
+snapshot for enforcement comes from `ToolRegistry::policies()`.
+
+Enforcement itself lives in `ToolPolicyMiddleware`; see
+[Tool policy enforcement in the middleware feature](middleware.md#tool-policy-enforcement)
+for the exposure/execution hooks and the enforcement builders
+(`require_sandbox`, `require_approval`, `enforce_result_bytes`, `strict`,
+`deny_side_effects`, `require_classification`, `require_background_safe`). The
+`require_sandbox` gate reads the run's
+[`WorkspaceDescriptor`](workspace.md) to decide whether a `SandboxMode::Required`
+tool may run.
+
 ## Results And Artifacts
 
 ```rust

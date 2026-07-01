@@ -265,6 +265,41 @@ Event emission should not make the model or tool call fail unless policy says
 observability is required. When best-effort sinks fail, the harness should emit
 or record a sink error where possible.
 
+## Stable Event Ids And Delta Attribution
+
+Emitted `EventId`s are scoped by a stream prefix so they are stable across
+process restarts and never collide between concurrent runs. An `EventSink`
+built with `EventSink::with_stream_id(prefix)` mints ids of the form
+`{prefix}-evt-{offset}`, where `offset` is the sink's monotonic emission
+counter. `RunContext` seeds the prefix from the run id
+(`EventSink::with_stream_id(config.run_id.as_str())`), so replaying the same run
+re-mints identical ids for the same `(stream_id, offset)`. `EventSink::new()`
+(the default) instead uses a process-unique prefix (`s<n>`) so two default sinks
+never collide at offset 0.
+
+```rust
+use tinyagents::harness::events::{AgentEvent, EventSink};
+
+// Two "processes" replaying the same run re-mint identical, stable ids.
+let first = EventSink::with_stream_id("run-42");
+let second = EventSink::with_stream_id("run-42");
+let a = first.emit(AgentEvent::StateUpdate);
+assert_eq!(a.id.as_str(), "run-42-evt-0");
+assert_eq!(a.id, second.emit(AgentEvent::StateUpdate).id);
+
+// A different run never collides even though both restart at offset 0.
+let other = EventSink::with_stream_id("run-99");
+assert_ne!(other.emit(AgentEvent::StateUpdate).id, a.id);
+```
+
+Because a sink is shared across a recursive run tree, a streamed delta must be
+attributable to *its* run without depending on which sink instance delivered it.
+`AgentEvent::ModelDelta` therefore carries `run_id` alongside `call_id` and the
+`MessageDelta`, so a UI can route each streamed chunk to its run/thread lineage
+directly. The `invoke_streaming*` agent-loop methods emit one
+`ModelDelta { run_id, .. }` per streamed delta, each tagged with the emitting
+run's id.
+
 ## Redaction
 
 Redaction should happen at sink boundaries. Internal typed events may carry

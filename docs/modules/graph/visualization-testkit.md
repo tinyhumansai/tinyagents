@@ -71,6 +71,57 @@ Observation and assertion surfaces:
 id is supplied — collects the durable checkpoint history, so the export/event/
 checkpoint truth all read from one `GraphRun`.
 
+## Storage conformance {#conformance}
+
+`graph::testkit::conformance` encodes durable-store **contracts** once so any
+backend — the built-in ones or a caller-supplied adapter — behaves
+interchangeably. Each function panics with a descriptive message on the first
+violation, so call them from a `#[test]` / `#[tokio::test]`. Five contracts
+ship:
+
+| Contract | Asserts |
+| --- | --- |
+| `checkpointer_contract(cp)` | Single-threaded put/get (latest + specific), insertion-order listing, `list_threads`, `delete_thread`, `prune`. |
+| `taskstore_contract(store)` | Full task lifecycle state machine, cooperative cancel, kill, deadline updates, status filtering, terminal-transition rejection. |
+| `checkpointer_concurrent_contract(Arc<C>)` | Many concurrent tasks put distinct checkpoints on one shared instance; every write lands and is retrievable (no lost writes). |
+| `taskstore_concurrent_contract(Arc<S>)` | Many threads insert and advance distinct tasks against one shared store; every write lands exactly once. |
+| `taskstore_replay_contract(reopen)` | Durable state written through one handle survives re-opening the backing store (terminal status + transition history replay). |
+
+The concurrent contracts take an `Arc<_>` (the store is shared across
+threads/tasks); the replay contract takes a `Fn() -> S` that re-opens the same
+durable backing so the same store can be closed and reconstructed. Wire them
+across every backend in one test file:
+
+```rust
+use tinyagents::graph::checkpoint::{FileCheckpointer, InMemoryCheckpointer};
+use tinyagents::graph::orchestration::{InMemoryTaskStore, JsonlTaskStore};
+use tinyagents::graph::testkit::conformance::{
+    checkpointer_concurrent_contract, taskstore_concurrent_contract, taskstore_replay_contract,
+};
+
+#[tokio::test]
+async fn checkpointer_handles_concurrent_writes() {
+    checkpointer_concurrent_contract(std::sync::Arc::new(InMemoryCheckpointer::<i32>::new())).await;
+}
+
+#[test]
+fn task_store_handles_concurrent_writes() {
+    taskstore_concurrent_contract(std::sync::Arc::new(InMemoryTaskStore::new()));
+}
+
+#[test]
+fn jsonl_task_store_replays_after_restart() {
+    let path = std::env::temp_dir().join("conformance-replay.jsonl");
+    let _ = std::fs::remove_file(&path);
+    taskstore_replay_contract(|| JsonlTaskStore::open(&path).unwrap());
+    let _ = std::fs::remove_file(&path);
+}
+```
+
+Only durable backends (`FileCheckpointer`, `JsonlTaskStore`, SQLite) can pass
+the replay contract — an in-memory store drops state on reopen, so run it only
+against the durable ones.
+
 Example:
 
 ```rust

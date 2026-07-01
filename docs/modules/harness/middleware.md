@@ -198,6 +198,122 @@ Each built-in must document:
 - interaction with provider prompt/KV-cache layout
 - interaction with retries and fallbacks
 
+## Tool policy enforcement
+
+`ToolPolicyMiddleware` (`src/harness/middleware/library/`) enforces the
+per-tool [`ToolPolicy`](tool.md#tool-policy-enforcement) metadata at two hooks:
+`before_model` (exposure — a blocked tool is hidden from the model) and
+`before_tool` (execution — a blocked call is rejected with
+`TinyAgentsError::Validation`). Both hooks share one decision so a hidden tool
+can never be executed by a divergent path.
+
+Build it from a registry snapshot (`ToolRegistry::policies()`), then compose
+enforcement builders:
+
+- `ToolPolicyMiddleware::strict(policies)` — fail-closed baseline: unclassified
+  or unknown tools are rejected, and `destructive`/`payment` side effects denied.
+- `.require_classification(bool)` / `.require_background_safe(bool)`
+- `.deny_side_effects(mask)` — deny any tool declaring a side effect in `mask`.
+- `.require_sandbox(true)` — block a tool whose `runtime.sandbox ==
+  SandboxMode::Required` **unless** the run carries a workspace whose `sandbox`
+  is `Required` (see [workspace isolation](workspace.md)); fail closed otherwise.
+- `.require_approval([names])` — block any tool declaring
+  `access.approval_required` unless its name is in the approved set.
+- `.enforce_result_bytes(true)` — in `after_tool`, truncate a result exceeding
+  the tool's `runtime.max_result_bytes` and flag it (`result.error` mentions
+  `max_result_bytes`).
+
+```rust
+use std::sync::Arc;
+use tinyagents::harness::middleware::{MiddlewareStack, ToolPolicyMiddleware};
+use tinyagents::harness::tool::{SandboxMode, ToolPolicy, ToolRuntime};
+use tinyagents::harness::context::{RunConfig, RunContext};
+use tinyagents::harness::workspace::WorkspaceDescriptor;
+
+let mut policies = std::collections::HashMap::new();
+policies.insert(
+    "shell".to_string(),
+    ToolPolicy::classified().with_runtime(ToolRuntime {
+        sandbox: SandboxMode::Required,
+        ..ToolRuntime::default()
+    }),
+);
+use tinyagents::harness::tool::ToolCall;
+let call = || ToolCall::new("c1", "shell", serde_json::json!({}));
+
+let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+stack.push(Arc::new(ToolPolicyMiddleware::new(policies).require_sandbox(true)));
+
+// No workspace -> the sandboxed tool is blocked (fail closed).
+let mut bare: RunContext = RunContext::new(RunConfig::new("no-sandbox"), ());
+assert!(stack.run_before_tool(&mut bare, &(), &mut call()).await.is_err());
+
+// A sandboxed workspace satisfies the requirement.
+let mut ok: RunContext = RunContext::new(RunConfig::new("sandboxed"), ())
+    .with_workspace(WorkspaceDescriptor::new("/work").with_sandbox(SandboxMode::Required));
+stack.run_before_tool(&mut ok, &(), &mut call()).await?; // admitted
+```
+
+Emitted events: rejections surface as `TinyAgentsError::Validation` (not events).
+`enforce_result_bytes` mutates the `ToolResult` in place.
+
+## Tool exposure
+
+`ContextualToolSelectionMiddleware` filters the model-visible tool set on each
+`before_model`, using a predicate that sees both the `ToolSchema` and a live
+`ToolSelectionContext { run_id, depth, tags, requested_model }` — so exposure can
+vary by recursion depth, run tags (security tier / background marker), or the
+target model. When it withholds any tools it emits
+`AgentEvent::ToolsFiltered { by, excluded, remaining }`, making the exposure
+decision auditable.
+
+Two constructors:
+
+- `from_lists(allow, deny)` — deny always hides; when `allow` is `Some`, a tool
+  must be listed to be exposed (fail-closed for unknown tools).
+- `inheriting(parent_allow, parent_deny, child_allow, child_deny)` — composes a
+  child policy against an inherited parent policy so a sub-agent can only
+  **narrow**, never widen: **deny is additive** (`parent ∪ child`) and **allow
+  is intersective** (the effective allowlist is the intersection when both
+  restrict; the single restriction when only one does; unrestricted otherwise).
+
+```rust
+use tinyagents::harness::middleware::ContextualToolSelectionMiddleware;
+
+// Parent allows {a,b,c} and denies {c}; child tries to allow {b,c,d}.
+// Effective allow = {a,b,c} ∩ {b,c,d} = {b,c}; deny adds parent's c -> {c}.
+// So only `b` survives (`d` was never parent-allowed, `c` is parent-denied).
+let mw = ContextualToolSelectionMiddleware::inheriting(
+    Some(["a", "b", "c"]), ["c"],
+    Some(["b", "c", "d"]), Vec::<String>::new(),
+);
+// After run_before_model, request.tools == [schema("b")].
+```
+
+Exposure only changes what the model *sees*; pair it with
+[tool policy enforcement](#tool-policy-enforcement) or `ToolAllowlistMiddleware`
+so a model that calls a hidden tool is still stopped at execution.
+
+## Middleware control
+
+Any middleware (or step) can steer the loop out-of-band via
+`RunContext::request_control(MiddlewareControl)`
+([context feature](context.md#middleware-control-outcomes)):
+
+- `MiddlewareControl::StopWithFinal(text)` — stop now, using `text` as the final
+  assistant response.
+- `MiddlewareControl::Interrupt { node, message }` — pause at the next safe
+  checkpoint, surfacing `TinyAgentsError::Interrupted` so a caller can checkpoint
+  and resume.
+
+Requests are resolved by **precedence, not last-writer**: `request_control`
+keeps the highest-`precedence()` pending request within a turn (`Interrupt` (2)
+outranks `StopWithFinal` (1)), so a stronger pause is never silently downgraded
+to a stop by a later weaker request. The agent loop drains the request at its
+safe checkpoint (after each model response) via `RunContext::take_control` and,
+when it honors one, emits `AgentEvent::ControlApplied { control, detail }` where
+`control` is the outcome's `kind()` label.
+
 ## State And Request Mutation
 
 Middleware should prefer immutable request replacement for large changes and

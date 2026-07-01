@@ -104,6 +104,74 @@ answers questions such as:
 - What are the known context-window and price details for this model?
 - Which events should be emitted and where should they go?
 
+## Introspection And Diagnostics
+
+The `CapabilityRegistry` exposes machine-readable views of what is registered so
+CLIs, UIs, and audit logs can render and diff the catalog without owning the
+live handles.
+
+### Component kinds
+
+`ComponentKind` partitions the registry namespace and now has **11** variants.
+Alongside `Model`, `Tool`, `Graph`, `Router`, `Reducer`, `Store`, and `Agent`,
+four kinds cover the runtime's durable roles:
+
+| Kind | `as_str` |
+| --- | --- |
+| `Middleware` | `"middleware"` |
+| `Checkpointer` | `"checkpointer"` |
+| `TaskStore` | `"task_store"` |
+| `Listener` | `"listener"` |
+
+### Snapshots
+
+`CapabilityRegistry::snapshot()` returns a serializable `RegistrySnapshot`
+sorted by `(kind, name)` for diff-friendly output. It carries both the
+registered `components` (each a `ComponentMetadata`) **and** every alias as an
+`aliases: Vec<AliasBinding { kind, alias, canonical }>`, so a CLI can enumerate
+the alternate names that resolve to each canonical component. The snapshot
+round-trips through serde for audit logs.
+
+```rust
+let mut reg = CapabilityRegistry::<()>::new();
+reg.register_model("gpt-4o", model)?;
+reg.alias(ComponentKind::Model, "default", "gpt-4o")?;
+
+let snapshot = reg.snapshot();
+assert_eq!(snapshot.aliases.len(), 1);
+assert_eq!(snapshot.aliases[0].alias, "default");
+assert_eq!(snapshot.aliases[0].canonical, "gpt-4o");
+assert_eq!(snapshot.aliases[0].kind, ComponentKind::Model);
+```
+
+`RegistrySnapshot::to_dot()` renders a Graphviz DOT document clustering
+components by kind.
+
+### Health diagnostics
+
+`CapabilityRegistry::diagnostics()` returns actionable `RegistryDiagnostic`
+findings sorted by `(kind, name)`:
+
+- **alias shadows a component** (`DiagnosticSeverity::Warning`) — an alias has
+  the same name as a registered component of that kind, so the alias is
+  unreachable.
+- **dangling alias** (`Error`) — an alias resolves to a name that is not a
+  registered component.
+- **name reused across kinds** (`Warning`) — the same name is registered under
+  more than one kind. Registration only rejects same-`(kind, name)` duplicates,
+  so a name legally shared across kinds is flagged for audits.
+
+```rust
+let mut reg = CapabilityRegistry::<()>::new();
+reg.register_model("shared", model)?;
+reg.register_router("shared")?; // legal: different kind
+
+let diags = reg.diagnostics();
+assert_eq!(diags.len(), 1);
+assert_eq!(diags[0].name, "shared");
+assert!(diags[0].message.contains("multiple kinds"));
+```
+
 ## Local Model Catalog
 
 The local model catalog is a snapshot, not a source of truth. It gives

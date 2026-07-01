@@ -64,3 +64,76 @@ Budget policy should support:
 The harness should estimate cost before calls when enough information exists,
 then reconcile after provider usage is known. Unknown prices should either fail
 closed or emit an unpriced usage record depending on policy.
+
+## Budget Middleware
+
+`BudgetMiddleware` (`src/harness/middleware/library/`) enforces a
+`BudgetLimits` across a run — or across a whole recursive run tree, when the same
+`BudgetTracker` is shared with every sub-agent harness (cloning a tracker shares
+its accumulator). Every `BudgetLimits` field is optional; an unset limit is not
+enforced:
+
+```rust
+pub struct BudgetLimits {
+    pub max_input_tokens: Option<u64>,
+    pub max_cached_input_tokens: Option<u64>, // vs Usage.cache_read_tokens
+    pub max_output_tokens: Option<u64>,
+    pub max_total_tokens: Option<u64>,
+    pub max_reasoning_tokens: Option<u64>,
+    pub max_cost: Option<f64>,
+    pub warn_fraction: Option<f64>,           // e.g. 0.9
+}
+```
+
+The middleware acts at two hooks:
+
+- **`before_model` (preflight reservation).** It estimates the upcoming call's
+  input tokens from the request and, if that reservation would breach the input
+  budget, emits `AgentEvent::BudgetExceeded { blocked: true }` and fails the call
+  with `TinyAgentsError::LimitExceeded` **before** any provider dispatch. On a
+  successful reservation it emits
+  `AgentEvent::BudgetReserved { estimated_input_tokens }`. If the accumulated
+  spend already meets any limit, the preflight fails closed the same way.
+- **`after_model` (spend + reconcile).** It folds the response `Usage` into the
+  tracker, prices it via the configured per-model `ModelPricing` table (emitting
+  `AgentEvent::UsageRecorded` / `AgentEvent::CostRecorded`), reconciles the prior
+  reservation against the provider-reported input tokens
+  (`AgentEvent::BudgetReconciled { estimated_input_tokens, actual_input_tokens }`),
+  and emits `BudgetWarning` (past `warn_fraction`) or `BudgetExceeded { blocked:
+  false }` as thresholds are crossed.
+
+`max_cached_input_tokens` is enforced against `Usage.cache_read_tokens`, so a run
+can bound how many cached (cache-read) input tokens it consumes independently of
+fresh input tokens.
+
+```rust
+use std::sync::Arc;
+use tinyagents::harness::middleware::{BudgetLimits, BudgetMiddleware, MiddlewareStack};
+
+let mw = BudgetMiddleware::new(BudgetLimits {
+    max_input_tokens: Some(5),
+    ..BudgetLimits::default()
+});
+let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+stack.push(Arc::new(mw));
+
+// A long prompt estimates well over 5 input tokens -> the reservation preflight
+// blocks it before any call is dispatched (LimitExceeded + BudgetExceeded{blocked:true}).
+let big = "word ".repeat(200);
+let mut req = ModelRequest::new(vec![Message::user(big)]);
+assert!(stack.run_before_model(&mut ctx, &(), &mut req).await.is_err());
+```
+
+Attach pricing with `BudgetMiddleware::new(limits).with_pricing(map)` and read
+the shared accumulator with `.tracker()` (a `BudgetTracker` whose `.snapshot()`
+yields a `BudgetSpend { usage, cost, warned, last_reserved_input }`).
+
+### Emitted events
+
+| Event | When |
+| --- | --- |
+| `BudgetReserved { estimated_input_tokens }` | preflight reserved an estimate for the upcoming call |
+| `BudgetReconciled { estimated_input_tokens, actual_input_tokens }` | after the call, estimate reconciled against actual |
+| `BudgetWarning { reason }` | cumulative spend crossed `warn_fraction` of a limit (warn-once) |
+| `BudgetExceeded { reason, blocked }` | a limit was hit (`blocked: true` = preflight blocked a call; `false` = detected post-spend) |
+| `UsageRecorded` / `CostRecorded` | after each priced spend |
