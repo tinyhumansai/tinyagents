@@ -280,6 +280,38 @@ impl HarnessStatusStore for InMemoryStatusStore {
             .cloned()
             .collect())
     }
+
+    async fn list_by_root(&self, root_run_id: &str) -> Result<Vec<HarnessRunStatus>> {
+        let statuses = self
+            .statuses
+            .lock()
+            .map_err(|e| poisoned("InMemoryStatusStore", e))?;
+        Ok(statuses
+            .values()
+            .filter(|s| s.root_run_id.as_str() == root_run_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_active(&self) -> Result<Vec<HarnessRunStatus>> {
+        use crate::harness::ids::ExecutionStatus;
+        let statuses = self
+            .statuses
+            .lock()
+            .map_err(|e| poisoned("InMemoryStatusStore", e))?;
+        Ok(statuses
+            .values()
+            .filter(|s| {
+                matches!(
+                    s.status,
+                    ExecutionStatus::Pending
+                        | ExecutionStatus::Running
+                        | ExecutionStatus::Interrupted
+                )
+            })
+            .cloned()
+            .collect())
+    }
 }
 
 // ---------------------------------------------------------------------------

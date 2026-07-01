@@ -160,6 +160,37 @@ pub trait HarnessEventJournal: Send + Sync {
     /// offset`, in offset order. Reading from `0` replays the whole run;
     /// reading an unknown run returns an empty `Vec`.
     async fn read_from(&self, run_id: &str, offset: u64) -> Result<Vec<AgentObservation>>;
+
+    /// Returns at most `limit` observations for `run_id` starting at `offset`
+    /// (a bounded replay window). The default reads from `offset` and
+    /// truncates; durable backends may override for a server-side limit.
+    async fn read_window(
+        &self,
+        run_id: &str,
+        offset: u64,
+        limit: usize,
+    ) -> Result<Vec<AgentObservation>> {
+        let mut all = self.read_from(run_id, offset).await?;
+        all.truncate(limit);
+        Ok(all)
+    }
+
+    /// Returns observations for `run_id` from `offset` whose
+    /// [`AgentEvent::kind`][crate::harness::events::AgentEvent::kind] is in
+    /// `kinds`. An empty `kinds` slice matches everything. This is the
+    /// UI-surface filter (text-only, tool timeline, cost updates, errors, …).
+    async fn read_filtered(
+        &self,
+        run_id: &str,
+        offset: u64,
+        kinds: &[&str],
+    ) -> Result<Vec<AgentObservation>> {
+        let all = self.read_from(run_id, offset).await?;
+        Ok(all
+            .into_iter()
+            .filter(|obs| kinds.is_empty() || kinds.contains(&obs.event.kind()))
+            .collect())
+    }
 }
 
 /// In-memory [`HarnessEventJournal`] backed by a per-run `Vec`.
@@ -205,6 +236,23 @@ pub trait HarnessStatusStore: Send + Sync {
     /// Returns all known statuses whose `thread_id` matches `thread_id`, in
     /// unspecified order.
     async fn list_by_thread(&self, thread_id: &str) -> Result<Vec<HarnessRunStatus>>;
+
+    /// Returns all known statuses whose `root_run_id` matches `root_run_id`,
+    /// letting a supervisor walk every descendant of a run tree.
+    ///
+    /// The default returns an empty `Vec` (backends without enumeration cannot
+    /// answer lineage queries); enumerable backends such as
+    /// [`InMemoryStatusStore`] override it.
+    async fn list_by_root(&self, root_run_id: &str) -> Result<Vec<HarnessRunStatus>> {
+        let _ = root_run_id;
+        Ok(Vec::new())
+    }
+
+    /// Returns every non-terminal (active) run status. The default returns an
+    /// empty `Vec`; enumerable backends override it.
+    async fn list_active(&self) -> Result<Vec<HarnessRunStatus>> {
+        Ok(Vec::new())
+    }
 }
 
 /// In-memory [`HarnessStatusStore`] backed by a `run_id → status` map.

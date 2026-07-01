@@ -201,6 +201,83 @@ async fn status_store_put_get_list_by_thread() {
 }
 
 #[tokio::test]
+async fn journal_window_and_filter_reads() {
+    let journal = InMemoryEventJournal::new();
+    journal
+        .append(obs(
+            "run-1",
+            0,
+            AgentEvent::RunStarted {
+                run_id: RunId::new("run-1"),
+                thread_id: None,
+            },
+        ))
+        .await
+        .unwrap();
+    journal
+        .append(obs("run-1", 1, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+    journal
+        .append(obs(
+            "run-1",
+            2,
+            AgentEvent::RunCompleted {
+                run_id: RunId::new("run-1"),
+            },
+        ))
+        .await
+        .unwrap();
+
+    // Bounded window: at most 2 from offset 0.
+    let window = journal.read_window("run-1", 0, 2).await.unwrap();
+    assert_eq!(window.len(), 2);
+
+    // Kind filter: only run.* lifecycle events.
+    let filtered = journal
+        .read_filtered("run-1", 0, &["run.started", "run.completed"])
+        .await
+        .unwrap();
+    assert_eq!(filtered.len(), 2);
+    assert!(filtered.iter().all(|o| o.event.kind().starts_with("run.")));
+
+    // Empty kinds matches everything.
+    let all = journal.read_filtered("run-1", 0, &[]).await.unwrap();
+    assert_eq!(all.len(), 3);
+}
+
+#[tokio::test]
+async fn status_store_lists_by_root_and_active() {
+    let store = InMemoryStatusStore::new();
+    let root = RunId::new("root");
+
+    // Parent (root) running, child running, sibling completed under same root.
+    let mut parent = HarnessRunStatus::new(root.clone(), ComponentId::new("agent"));
+    parent.mark_running(crate::harness::ids::HarnessPhase::Model);
+    let mut child = HarnessRunStatus::new(RunId::new("child"), ComponentId::new("agent"))
+        .with_parent(root.clone(), root.clone());
+    child.mark_running(crate::harness::ids::HarnessPhase::Tools);
+    let mut done = HarnessRunStatus::new(RunId::new("done"), ComponentId::new("agent"))
+        .with_parent(root.clone(), root.clone());
+    done.mark_completed();
+    // An unrelated run under a different root.
+    let other = HarnessRunStatus::new(RunId::new("other"), ComponentId::new("agent"));
+
+    store.put_status(parent).await.unwrap();
+    store.put_status(child).await.unwrap();
+    store.put_status(done).await.unwrap();
+    store.put_status(other).await.unwrap();
+
+    // Every descendant of the root run tree (parent + child + done).
+    assert_eq!(store.list_by_root("root").await.unwrap().len(), 3);
+
+    // Only non-terminal runs are active (parent + child; done is completed,
+    // other is pending/... actually `other` is freshly-new = Pending -> active).
+    let active = store.list_active().await.unwrap();
+    assert!(active.iter().all(|s| s.run_id.as_str() != "done"));
+}
+
+#[tokio::test]
 async fn journal_sink_persists_observations() {
     let journal = Arc::new(InMemoryEventJournal::new());
     let sink = JournalSink::new(journal.clone(), RunId::new("run-sink"));
