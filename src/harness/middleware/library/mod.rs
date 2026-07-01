@@ -319,6 +319,123 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for ToolAllowl
     }
 }
 
+// ── ToolPolicyMiddleware ──────────────────────────────────────────────────────
+
+impl ToolPolicyMiddleware {
+    /// Creates a policy middleware from a name→policy snapshot (typically
+    /// [`ToolRegistry::policies`][crate::harness::tool::ToolRegistry::policies]).
+    ///
+    /// Defaults are permissive: nothing is required or denied until configured.
+    /// Use [`strict`](Self::strict) for a fail-closed baseline.
+    pub fn new(
+        policies: std::collections::HashMap<String, crate::harness::tool::ToolPolicy>,
+    ) -> Self {
+        Self {
+            label: "tool_policy",
+            policies,
+            require_classification: false,
+            require_background_safe: false,
+            deny: crate::harness::tool::ToolSideEffects::default(),
+        }
+    }
+
+    /// Creates a fail-closed policy middleware: unclassified tools are rejected,
+    /// and tools declaring `destructive` or `payment` side effects are denied.
+    pub fn strict(
+        policies: std::collections::HashMap<String, crate::harness::tool::ToolPolicy>,
+    ) -> Self {
+        Self {
+            label: "tool_policy",
+            policies,
+            require_classification: true,
+            require_background_safe: false,
+            deny: crate::harness::tool::ToolSideEffects {
+                destructive: true,
+                payment: true,
+                ..crate::harness::tool::ToolSideEffects::default()
+            },
+        }
+    }
+
+    /// Requires every tool to carry a classified policy (fail closed on
+    /// unclassified or unknown tools).
+    pub fn require_classification(mut self, require: bool) -> Self {
+        self.require_classification = require;
+        self
+    }
+
+    /// Requires every exposed/executed tool to be `background_safe`.
+    pub fn require_background_safe(mut self, require: bool) -> Self {
+        self.require_background_safe = require;
+        self
+    }
+
+    /// Denies tools declaring any side effect present in `mask`.
+    pub fn deny_side_effects(mut self, mask: crate::harness::tool::ToolSideEffects) -> Self {
+        self.deny = mask;
+        self
+    }
+
+    /// Returns `Ok(())` if the named tool is permitted, otherwise an explanation
+    /// of why it is blocked. Used by both the exposure and execution hooks so a
+    /// hidden tool cannot be executed by a divergent decision.
+    fn evaluate(&self, name: &str) -> std::result::Result<(), String> {
+        let Some(policy) = self.policies.get(name) else {
+            if self.require_classification {
+                return Err(format!("tool `{name}` has no declared policy"));
+            }
+            return Ok(());
+        };
+        if self.require_classification && !policy.classified {
+            return Err(format!("tool `{name}` is unclassified"));
+        }
+        let s = &policy.side_effects;
+        let d = &self.deny;
+        let denied = (d.writes_files && s.writes_files)
+            || (d.network && s.network)
+            || (d.installs_dependencies && s.installs_dependencies)
+            || (d.destructive && s.destructive)
+            || (d.external_service && s.external_service)
+            || (d.payment && s.payment);
+        if denied {
+            return Err(format!("tool `{name}` declares a denied side effect"));
+        }
+        if self.require_background_safe && !policy.access.background_safe {
+            return Err(format!("tool `{name}` is not background-safe"));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for ToolPolicyMiddleware {
+    fn name(&self) -> &str {
+        self.label
+    }
+
+    async fn before_model(
+        &self,
+        _ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        request: &mut ModelRequest,
+    ) -> Result<()> {
+        request
+            .tools
+            .retain(|schema| self.evaluate(&schema.name).is_ok());
+        Ok(())
+    }
+
+    async fn before_tool(
+        &self,
+        _ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        call: &mut ToolCall,
+    ) -> Result<()> {
+        self.evaluate(&call.name)
+            .map_err(TinyAgentsError::Validation)
+    }
+}
+
 // ── DynamicToolSelectionMiddleware ────────────────────────────────────────────
 
 impl DynamicToolSelectionMiddleware {

@@ -126,6 +126,122 @@ impl ToolExecutionContext {
     }
 }
 
+/// How strictly a tool must be sandboxed when it executes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxMode {
+    /// Inherit whatever the run's execution environment provides (the default).
+    #[default]
+    Inherit,
+    /// The tool is safe to run without any sandbox.
+    Disabled,
+    /// The tool must run inside an isolated execution environment; policy
+    /// enforcement fails closed if no sandbox is available.
+    Required,
+}
+
+/// How a tool is allowed to reach the caller's workspace / filesystem root.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAccess {
+    /// The tool needs no filesystem/workspace access (the safe default).
+    #[default]
+    None,
+    /// The tool may only touch explicitly declared
+    /// [`ToolAccess::trusted_roots`].
+    Scoped,
+    /// The tool may touch any path the process can reach.
+    Any,
+}
+
+/// Declared side effects a tool may cause.
+///
+/// Used by policy enforcement (see
+/// [`ToolPolicyMiddleware`][crate::harness::middleware::ToolPolicyMiddleware]) to
+/// decide whether a tool may be exposed to the model or executed under a given
+/// run's constraints. Every flag defaults to `false`, matching a pure,
+/// side-effect-free tool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolSideEffects {
+    /// The tool reads state but never mutates anything observable.
+    pub read_only: bool,
+    /// The tool creates, modifies, or deletes files.
+    pub writes_files: bool,
+    /// The tool performs network I/O.
+    pub network: bool,
+    /// The tool installs packages or otherwise mutates the toolchain.
+    pub installs_dependencies: bool,
+    /// The tool can perform irreversible / destructive actions.
+    pub destructive: bool,
+    /// The tool calls an external third-party service.
+    pub external_service: bool,
+    /// The tool can move money or incur a charge.
+    pub payment: bool,
+}
+
+/// Runtime requirements a tool declares for safe execution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRuntime {
+    /// Suggested per-call wall-clock timeout in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// Maximum automatic retries permitted for this tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+    /// Whether repeating the call with identical arguments is safe.
+    pub idempotent: bool,
+    /// Whether the tool honors cooperative cancellation.
+    pub cancelable: bool,
+    /// How strictly the tool must be sandboxed.
+    pub sandbox: SandboxMode,
+    /// Maximum result payload the harness should accept, in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_result_bytes: Option<usize>,
+    /// Whether the tool can emit [`ToolDelta`] streaming fragments.
+    pub streaming: bool,
+}
+
+/// Access requirements a tool declares before it can be exposed or run.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolAccess {
+    /// Workspace/filesystem reach the tool needs.
+    pub workspace: WorkspaceAccess,
+    /// Filesystem roots the tool is allowed to touch (for
+    /// [`WorkspaceAccess::Scoped`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_roots: Vec<String>,
+    /// Named credentials the tool requires to be present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<String>,
+    /// Whether an explicit human approval is required before each call.
+    pub approval_required: bool,
+    /// Whether the tool is safe to run in a background/non-interactive run.
+    pub background_safe: bool,
+}
+
+/// SDK-owned safety and runtime metadata attached to a [`Tool`].
+///
+/// A tool advertises its policy through [`Tool::policy`]. The default is
+/// **unclassified** (`classified == false`): policy enforcement can be
+/// configured to fail closed on unclassified tools so that adding a new tool
+/// without declaring its safety profile does not silently widen the attack
+/// surface. The plain [`ToolSchema`] remains the model-visible projection;
+/// `ToolPolicy` is the audit/enforcement projection and is fully serializable
+/// for registry introspection.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolPolicy {
+    /// Whether the tool author has explicitly classified this policy. A default
+    /// (`false`) marks the tool as *unclassified*, which strict enforcement
+    /// treats as untrusted.
+    pub classified: bool,
+    /// Declared side effects.
+    pub side_effects: ToolSideEffects,
+    /// Declared runtime requirements.
+    pub runtime: ToolRuntime,
+    /// Declared access requirements.
+    pub access: ToolAccess,
+}
+
 /// An incremental progress update emitted while a tool runs (streaming).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolDelta {
@@ -149,6 +265,16 @@ pub trait Tool<State: Send + Sync>: Send + Sync {
 
     /// Returns the model-visible schema for this tool.
     fn schema(&self) -> ToolSchema;
+
+    /// Returns the SDK-owned safety/runtime policy for this tool.
+    ///
+    /// The default is an *unclassified* [`ToolPolicy`]; tools that touch the
+    /// filesystem, network, money, or otherwise carry risk should override this
+    /// so policy enforcement can make fail-closed decisions. Enforcement lives in
+    /// [`ToolPolicyMiddleware`][crate::harness::middleware::ToolPolicyMiddleware].
+    fn policy(&self) -> ToolPolicy {
+        ToolPolicy::default()
+    }
 
     /// Executes the tool against application state and a validated call.
     async fn call(&self, state: &State, call: ToolCall) -> Result<ToolResult>;

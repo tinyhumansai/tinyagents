@@ -159,6 +159,40 @@ pub struct ToolAllowlistMiddleware {
     pub(crate) allowed: std::collections::HashSet<String>,
 }
 
+// ── ToolPolicyMiddleware ──────────────────────────────────────────────────────
+
+/// Lifecycle middleware that enforces per-tool [`ToolPolicy`] metadata, both at
+/// model-visible exposure time (`before_model`) and at execution time
+/// (`before_tool`).
+///
+/// Unlike [`ToolAllowlistMiddleware`] (name lists) and
+/// [`DynamicToolSelectionMiddleware`] (schema-only predicates), this middleware
+/// reads the structured [`ToolPolicy`] each tool advertises via
+/// [`Tool::policy`][crate::harness::tool::Tool::policy]. Build it from a
+/// registry snapshot with
+/// [`ToolRegistry::policies`][crate::harness::tool::ToolRegistry::policies].
+///
+/// # Fail-closed behavior
+///
+/// - With [`require_classification`](Self::require_classification) set (the
+///   default via [`strict`](Self::strict)), a tool whose policy is *unclassified*
+///   (`ToolPolicy::classified == false`) — or has no snapshot entry at all — is
+///   hidden from the model and rejected if called.
+/// - Tools declaring any side effect in the [`deny`](Self::deny) mask are hidden
+///   and rejected.
+/// - When [`require_background_safe`](Self::require_background_safe) is set, tools
+///   that are not `access.background_safe` are hidden and rejected.
+///
+/// Rejections at `before_tool` surface as
+/// [`TinyAgentsError::Validation`][crate::error::TinyAgentsError::Validation].
+pub struct ToolPolicyMiddleware {
+    pub(crate) label: &'static str,
+    pub(crate) policies: std::collections::HashMap<String, crate::harness::tool::ToolPolicy>,
+    pub(crate) require_classification: bool,
+    pub(crate) require_background_safe: bool,
+    pub(crate) deny: crate::harness::tool::ToolSideEffects,
+}
+
 // ── DynamicToolSelectionMiddleware ────────────────────────────────────────────
 
 /// A predicate deciding whether a [`ToolSchema`] should be exposed to the model.

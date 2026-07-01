@@ -49,6 +49,50 @@ fn registry_register_get_names_schemas() {
     assert_eq!(registry.schemas()[0].name, "echo");
 }
 
+#[test]
+fn default_policy_is_unclassified() {
+    let policy = EchoTool.policy();
+    assert!(!policy.classified);
+    assert!(!policy.has_side_effects());
+}
+
+#[test]
+fn read_only_policy_is_classified_and_pure() {
+    let policy = ToolPolicy::read_only();
+    assert!(policy.classified);
+    assert!(policy.side_effects.read_only);
+    assert!(!policy.has_side_effects());
+    assert!(policy.access.background_safe);
+    assert!(policy.runtime.idempotent);
+}
+
+#[test]
+fn policy_builders_mark_classified_and_serialize() {
+    let policy = ToolPolicy::classified()
+        .with_side_effects(ToolSideEffects {
+            network: true,
+            payment: true,
+            ..ToolSideEffects::default()
+        })
+        .requiring_approval();
+    assert!(policy.classified);
+    assert!(policy.has_side_effects());
+    assert!(policy.access.approval_required);
+    // Round-trips for audit/registry introspection.
+    let json = serde_json::to_value(&policy).unwrap();
+    let back: ToolPolicy = serde_json::from_value(json).unwrap();
+    assert_eq!(policy, back);
+}
+
+#[test]
+fn registry_exposes_policy_snapshot() {
+    let mut registry: ToolRegistry<()> = ToolRegistry::new();
+    registry.register(Arc::new(EchoTool));
+    let policies = registry.policies();
+    assert!(policies.contains_key("echo"));
+    assert!(!policies["echo"].classified);
+}
+
 #[tokio::test]
 async fn tool_call_round_trips() {
     let tool = EchoTool;

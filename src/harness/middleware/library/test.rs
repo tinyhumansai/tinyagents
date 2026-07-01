@@ -347,6 +347,81 @@ async fn dynamic_tool_selection_filters_request_tools() {
     assert!(request.tools.iter().all(|t| t.name == "keep"));
 }
 
+// ── ToolPolicyMiddleware ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn tool_policy_strict_hides_and_rejects_unclassified() {
+    use crate::harness::tool::ToolPolicy;
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let mut policies = std::collections::HashMap::new();
+    policies.insert("safe".to_string(), ToolPolicy::read_only());
+    // "risky" is present but unclassified.
+    policies.insert("risky".to_string(), ToolPolicy::default());
+
+    let mw = ToolPolicyMiddleware::strict(policies);
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    let schema = |name: &str| ToolSchema {
+        name: name.to_string(),
+        description: String::new(),
+        parameters: json!({}),
+        format: crate::harness::tool::ToolFormat::Json,
+    };
+    let mut request = ModelRequest::new(Vec::new()).with_tools(vec![
+        schema("safe"),
+        schema("risky"),
+        schema("unknown"),
+    ]);
+    stack
+        .run_before_model(&mut ctx, &(), &mut request)
+        .await
+        .expect("exposure filter runs");
+    // Only the classified read-only tool survives exposure.
+    assert_eq!(request.tools.len(), 1);
+    assert_eq!(request.tools[0].name, "safe");
+
+    // Execution guard agrees with exposure.
+    let mut safe = tool_call("safe");
+    stack
+        .run_before_tool(&mut ctx, &(), &mut safe)
+        .await
+        .expect("classified tool admitted");
+    let mut risky = tool_call("risky");
+    let err = stack
+        .run_before_tool(&mut ctx, &(), &mut risky)
+        .await
+        .expect_err("unclassified tool rejected");
+    assert!(matches!(err, TinyAgentsError::Validation(_)));
+}
+
+#[tokio::test]
+async fn tool_policy_denies_declared_side_effect() {
+    use crate::harness::tool::{ToolPolicy, ToolSideEffects};
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let mut policies = std::collections::HashMap::new();
+    policies.insert(
+        "charge".to_string(),
+        ToolPolicy::classified().with_side_effects(ToolSideEffects {
+            payment: true,
+            ..ToolSideEffects::default()
+        }),
+    );
+    let mw = ToolPolicyMiddleware::new(policies).deny_side_effects(ToolSideEffects {
+        payment: true,
+        ..ToolSideEffects::default()
+    });
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    let mut call = tool_call("charge");
+    let err = stack
+        .run_before_tool(&mut ctx, &(), &mut call)
+        .await
+        .expect_err("payment tool denied");
+    assert!(matches!(err, TinyAgentsError::Validation(_)));
+}
+
 // ── HumanApprovalMiddleware ─────────────────────────────────────────────────
 
 #[tokio::test]
