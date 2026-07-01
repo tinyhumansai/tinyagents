@@ -181,6 +181,11 @@ pub use graph::{
     register_orchestration_tools,
 };
 
+// --- Graph: parallel map/reduce helper ---
+pub use graph::parallel::{
+    FailurePolicy, ItemOutcome, ParallelOptions, ParallelOutcome, map_reduce,
+};
+
 // --- Graph: export / visualization ---
 // Topology types are surfaced at the crate root; the `to_json`/`to_mermaid`
 // free functions stay behind `graph::export::` to avoid generic-name clashes.

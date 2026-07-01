@@ -26,6 +26,7 @@ pub mod compiled;
 pub mod export;
 pub mod observability;
 pub mod orchestration;
+pub mod parallel;
 pub mod recursion;
 pub mod reducer;
 pub mod status;
