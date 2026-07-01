@@ -326,6 +326,13 @@ pub struct ModelSelection {
     /// Capabilities the selected model must satisfy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_capabilities: Option<CapabilitySet>,
+    /// When `false` (the default), resolution skips models whose profile
+    /// reports [`ModelStatus::Retired`][crate::harness::model::ModelStatus],
+    /// so a provider-retired model is never selected via override, reuse,
+    /// hint, or default. Set `true` to opt back into retired models (e.g. for
+    /// replaying historical runs). Deprecated models are still selectable.
+    #[serde(default)]
+    pub allow_retired: bool,
 }
 
 /// A provider-neutral chat model request.

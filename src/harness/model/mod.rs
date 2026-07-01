@@ -405,9 +405,10 @@ impl<State: Send + Sync> ModelRegistry<State> {
     /// agent default, and finally registry default.
     pub fn resolve(&self, selection: ModelSelection) -> Option<ResolvedModelBinding<State>> {
         let required = selection.required_capabilities.as_ref();
+        let allow_retired = selection.allow_retired;
         if let Some(requested) = selection.requested
             && let Some(model) = self.get(&requested)
-            && model_satisfies(model.as_ref(), required)
+            && model_eligible(model.as_ref(), required, allow_retired)
         {
             return Some(ResolvedModelBinding {
                 resolved: ResolvedModel {
@@ -422,7 +423,7 @@ impl<State: Send + Sync> ModelRegistry<State> {
         if selection.reuse_previous
             && let Some(previous) = selection.previous
             && let Some(model) = self.get(&previous.name)
-            && model_satisfies(model.as_ref(), required)
+            && model_eligible(model.as_ref(), required, allow_retired)
         {
             return Some(ResolvedModelBinding {
                 resolved: ResolvedModel {
@@ -444,7 +445,7 @@ impl<State: Send + Sync> ModelRegistry<State> {
 
         for (_, hint) in hints {
             if let Some(model) = self.get(&hint.model)
-                && model_satisfies(model.as_ref(), required)
+                && model_eligible(model.as_ref(), required, allow_retired)
             {
                 return Some(ResolvedModelBinding {
                     resolved: ResolvedModel {
@@ -459,7 +460,7 @@ impl<State: Send + Sync> ModelRegistry<State> {
 
         if let Some(agent_default) = selection.agent_default
             && let Some(model) = self.get(&agent_default)
-            && model_satisfies(model.as_ref(), required)
+            && model_eligible(model.as_ref(), required, allow_retired)
         {
             return Some(ResolvedModelBinding {
                 resolved: ResolvedModel {
@@ -473,7 +474,7 @@ impl<State: Send + Sync> ModelRegistry<State> {
 
         let name = self.default_name()?.to_string();
         self.default_model()
-            .filter(|model| model_satisfies(model.as_ref(), required))
+            .filter(|model| model_eligible(model.as_ref(), required, allow_retired))
             .map(|model| ResolvedModelBinding {
                 resolved: ResolvedModel {
                     name,
@@ -499,6 +500,7 @@ impl<State: Send + Sync> ModelRegistry<State> {
             hints: request.model_hints.clone(),
             agent_default: agent_default.map(ToOwned::to_owned),
             required_capabilities: request.required_capabilities.clone(),
+            allow_retired: false,
         })
     }
 
@@ -521,6 +523,26 @@ fn model_satisfies<State: Send + Sync>(
             .profile()
             .is_some_and(|profile| profile.satisfies(required)),
     }
+}
+
+/// A model is eligible for resolution when it satisfies the required
+/// capabilities *and* is not lifecycle-excluded. Unless `allow_retired` is set,
+/// a model whose profile reports [`ModelStatus::Retired`] is rejected so a
+/// provider-retired model is never selected. A model with no profile carries no
+/// lifecycle facts, so it is treated as usable (consistent with capability
+/// gating, which only rejects a model when a profile is present and fails).
+fn model_eligible<State: Send + Sync>(
+    model: &dyn ChatModel<State>,
+    required: Option<&CapabilitySet>,
+    allow_retired: bool,
+) -> bool {
+    if !model_satisfies(model, required) {
+        return false;
+    }
+    if allow_retired {
+        return true;
+    }
+    model.profile().is_none_or(ModelProfile::is_usable)
 }
 
 impl<State: Send + Sync> Default for ModelRegistry<State> {

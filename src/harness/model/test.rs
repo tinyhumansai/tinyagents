@@ -524,6 +524,66 @@ async fn registry_rejects_unknown_profiles_when_capabilities_are_required() {
     assert!(registry.resolve_request(&request, None, None).is_none());
 }
 
+#[tokio::test]
+async fn registry_skips_retired_models_across_every_resolution_path() {
+    let retired = || {
+        Arc::new(ProfiledModel::new(ModelProfile {
+            status: ModelStatus::Retired,
+            ..ModelProfile::default()
+        }))
+    };
+    let mut registry: ModelRegistry<()> = ModelRegistry::new();
+    registry
+        .register("retired_default", retired())
+        .register("retired_override", retired())
+        .register("retired_hint", retired())
+        .register(
+            "stable_hint",
+            Arc::new(ProfiledModel::new(ModelProfile::default())),
+        )
+        .set_default("retired_default");
+
+    // Explicit override of a retired model is rejected.
+    let override_req = ModelRequest::default().with_model("retired_override");
+    assert!(
+        registry
+            .resolve_request(&override_req, None, None)
+            .is_none(),
+        "a retired override must not resolve"
+    );
+
+    // Fallback skips a higher-priority retired hint for a live one, and never
+    // falls through to the retired registry default.
+    let hint_req = ModelRequest::default()
+        .with_model_hint(ModelHint {
+            model: "retired_hint".into(),
+            priority: 100,
+            reason: None,
+        })
+        .with_model_hint(ModelHint {
+            model: "stable_hint".into(),
+            priority: 1,
+            reason: None,
+        });
+    let resolved = registry
+        .resolve_request(&hint_req, None, None)
+        .expect("live hint should resolve")
+        .resolved;
+    assert_eq!(resolved.name, "stable_hint");
+
+    // With only retired candidates, resolution yields nothing.
+    let bare = ModelRequest::default().with_model("retired_override");
+    assert!(registry.resolve_request(&bare, None, None).is_none());
+
+    // Opting in via `allow_retired` lets the retired model resolve again.
+    let allowed = registry.resolve(ModelSelection {
+        requested: Some("retired_override".into()),
+        allow_retired: true,
+        ..ModelSelection::default()
+    });
+    assert_eq!(allowed.unwrap().resolved.name, "retired_override");
+}
+
 #[test]
 fn stream_accumulator_collects_reasoning_side_channel() {
     use crate::harness::message::MessageDelta;
