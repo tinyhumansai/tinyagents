@@ -89,6 +89,32 @@ fn default_max_depth() -> usize {
     crate::harness::limits::RunLimits::DEFAULT_MAX_DEPTH
 }
 
+/// A structured control outcome a middleware (or any step) can request on the
+/// [`RunContext`] to steer the agent loop from outside its `Result<()>` return
+/// channel.
+///
+/// This is the harness-native complement to the graph
+/// [`Command`][crate::graph::command::Command]/[`Interrupt`][crate::graph::command::Interrupt]
+/// vocabulary: the agent loop drains any requested control at its safe
+/// checkpoints (after each model response) and acts on it, so behaviors like
+/// "stop after an early-exit tool" or "pause on budget" no longer need a
+/// bespoke side channel. Requests are visible via
+/// [`RunContext::take_control`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MiddlewareControl {
+    /// Stop the loop now and use this text as the final assistant response.
+    StopWithFinal(String),
+    /// Pause the run at the next safe checkpoint, surfacing
+    /// [`crate::error::TinyAgentsError::Interrupted`] with this node/message so a
+    /// caller can persist a checkpoint and resume later.
+    Interrupt {
+        /// Logical node/label the interrupt is attributed to.
+        node: String,
+        /// Human-readable reason surfaced with the interrupt.
+        message: String,
+    },
+}
+
 /// Live, in-process handle threaded through every step of a harness run.
 ///
 /// A `RunContext` bundles the declarative [`RunConfig`] with the runtime
@@ -133,4 +159,8 @@ pub struct RunContext<Ctx = ()> {
     /// provider stream. On observing cancellation the run ends with
     /// [`crate::error::TinyAgentsError::Cancelled`].
     pub cancellation: CancellationToken,
+    /// A one-shot control request a middleware or step can set to steer the
+    /// loop (stop with a final response, or interrupt). Drained by the agent
+    /// loop at its safe checkpoints via [`RunContext::take_control`].
+    pub control: std::sync::Arc<std::sync::Mutex<Option<MiddlewareControl>>>,
 }

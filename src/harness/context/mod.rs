@@ -171,7 +171,22 @@ impl<Ctx> RunContext<Ctx> {
             limits,
             steering: None,
             cancellation: CancellationToken::new(),
+            control: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// Requests a [`MiddlewareControl`] outcome. The agent loop drains and acts
+    /// on it at its next safe checkpoint (after the current model response).
+    /// A later request overwrites an undrained earlier one.
+    pub fn request_control(&self, control: MiddlewareControl) {
+        if let Ok(mut guard) = self.control.lock() {
+            *guard = Some(control);
+        }
+    }
+
+    /// Takes any pending [`MiddlewareControl`] request, clearing it.
+    pub fn take_control(&self) -> Option<MiddlewareControl> {
+        self.control.lock().ok().and_then(|mut guard| guard.take())
     }
 
     /// Attaches a [`CancellationToken`] so an orchestrator can request that this

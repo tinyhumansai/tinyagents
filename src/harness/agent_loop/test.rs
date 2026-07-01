@@ -1120,3 +1120,87 @@ async fn request_cache_policy_overrides_run_policy_to_disable_caching() {
         "request-level cache_policy disabling caching must bypass the cache"
     );
 }
+
+/// Middleware that requests an early stop-with-final control outcome after the
+/// first model response, exercising the harness control channel (gap #13).
+struct EarlyStopMiddleware;
+
+#[async_trait]
+impl Middleware<(), ()> for EarlyStopMiddleware {
+    fn name(&self) -> &str {
+        "early_stop"
+    }
+    async fn after_model(
+        &self,
+        ctx: &mut RunContext<()>,
+        _state: &(),
+        _response: &mut ModelResponse,
+    ) -> Result<()> {
+        ctx.request_control(crate::harness::context::MiddlewareControl::StopWithFinal(
+            "stopped early".into(),
+        ));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn middleware_control_stops_loop_with_final_response() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    // The model asks for a tool; without control the loop would execute it and
+    // continue, but the control outcome stops the run first.
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_tool_call("lookup", json!({}))),
+    );
+    harness.register_tool(Arc::new(FakeTool::new("lookup", "out")));
+    harness.push_middleware(Arc::new(EarlyStopMiddleware));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("control stop yields a run");
+    assert_eq!(run.final_response.unwrap().text(), "stopped early");
+    // The tool was never executed because the loop stopped first.
+    assert_eq!(run.tool_calls, 0);
+}
+
+/// Middleware that requests an interrupt after the first model response.
+struct InterruptMiddleware;
+
+#[async_trait]
+impl Middleware<(), ()> for InterruptMiddleware {
+    fn name(&self) -> &str {
+        "interrupt_ctl"
+    }
+    async fn after_model(
+        &self,
+        ctx: &mut RunContext<()>,
+        _state: &(),
+        _response: &mut ModelResponse,
+    ) -> Result<()> {
+        ctx.request_control(crate::harness::context::MiddlewareControl::Interrupt {
+            node: "review".into(),
+            message: "needs approval".into(),
+        });
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn middleware_control_can_interrupt_run() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("hi")));
+    harness.push_middleware(Arc::new(InterruptMiddleware));
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect_err("control interrupt surfaces as an error");
+    match err {
+        TinyAgentsError::Interrupted { node, message } => {
+            assert_eq!(node, "review");
+            assert_eq!(message, "needs approval");
+        }
+        other => panic!("expected Interrupted, got {other:?}"),
+    }
+}

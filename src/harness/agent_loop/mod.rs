@@ -65,7 +65,7 @@ use std::time::Duration;
 
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::cache::{ResponseCache, cache_key};
-use crate::harness::context::{RunConfig, RunContext};
+use crate::harness::context::{MiddlewareControl, RunConfig, RunContext};
 use crate::harness::events::{AgentEvent, HarnessRunStatus, LimitKind};
 use crate::harness::ids::{CallId, ComponentId, HarnessPhase};
 use crate::harness::message::{Message, MessageDelta};
@@ -471,6 +471,21 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             status.set_last_event(record.id);
 
             messages.push(Message::Assistant(response.message.clone()));
+
+            // Safe checkpoint: honor any control outcome a middleware requested
+            // during this turn (for example an early-exit tool or a budget stop
+            // hook), before executing further tools.
+            if let Some(control) = ctx.take_control() {
+                match control {
+                    MiddlewareControl::StopWithFinal(text) => {
+                        run.final_response = Some(ModelResponse::assistant(text));
+                        break;
+                    }
+                    MiddlewareControl::Interrupt { node, message } => {
+                        return Err(TinyAgentsError::Interrupted { node, message });
+                    }
+                }
+            }
 
             let tool_calls = response.tool_calls().to_vec();
 
