@@ -811,12 +811,25 @@ async fn invoke_streaming_emits_model_delta_events() {
         .expect("streaming run succeeds");
 
     assert_eq!(run.text(), Some("ab".to_string()));
-    let delta_events = recorder
-        .kinds()
+    let delta_run_ids: Vec<_> = recorder
+        .events()
         .into_iter()
-        .filter(|k| k == "model.delta")
-        .count();
-    assert_eq!(delta_events, 2, "one model.delta event per streamed delta");
+        .filter_map(|e| match e {
+            crate::harness::events::AgentEvent::ModelDelta { run_id, .. } => Some(run_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        delta_run_ids.len(),
+        2,
+        "one model.delta event per streamed delta"
+    );
+    // Every delta is attributed to its run, so a UI can route it by lineage
+    // without depending on which (shared) sink it arrived on.
+    assert!(
+        delta_run_ids.iter().all(|id| id.as_str() == "stream-run"),
+        "deltas must carry their run id"
+    );
 }
 
 // ── Cooperative cancellation ──────────────────────────────────────────────────

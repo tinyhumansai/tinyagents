@@ -58,6 +58,10 @@ pub enum AgentEvent {
 
     /// An incremental chunk of model output arrived during streaming.
     ModelDelta {
+        /// The run that produced this delta. Attributed explicitly so a UI can
+        /// route a delta to its run/thread lineage without depending on which
+        /// sink it arrived on — sinks are shared across a recursive run tree.
+        run_id: RunId,
         /// Identifier for the model call that produced this delta.
         call_id: CallId,
         /// Incremental text and/or tool-call fragment.

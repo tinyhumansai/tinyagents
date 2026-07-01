@@ -163,6 +163,7 @@ fn component_metadata_and_event_kinds_are_stable_serializable_contracts() {
             model: "gpt".into(),
         },
         AgentEvent::ModelDelta {
+            run_id: RunId::new("run-1"),
             call_id: CallId::new("model-1"),
             delta: Default::default(),
         },

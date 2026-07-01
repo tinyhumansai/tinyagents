@@ -968,6 +968,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
 
             if let Some(message_delta) = message_delta {
                 let record = ctx.emit(AgentEvent::ModelDelta {
+                    run_id: ctx.config.run_id.clone(),
                     call_id: call_id.clone(),
                     delta: message_delta.clone(),
                 });
