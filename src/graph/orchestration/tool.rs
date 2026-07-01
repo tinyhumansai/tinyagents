@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::harness::ids::{GraphId, TaskId, new_call_id, next_seq};
+use crate::harness::message::Message;
 use crate::harness::steering::{SteeringCommand, SteeringHandle};
 use crate::harness::tool::{Tool, ToolCall, ToolRegistry, ToolResult, ToolSchema};
 use crate::{Result, TinyAgentsError};
@@ -281,16 +282,53 @@ impl OrchestrationTool {
 
 /// Parses a model-supplied steering command label + args into a
 /// [`SteeringCommand`].
+///
+/// Command-specific data is carried in the schema-allowed `payload` field (the
+/// steer tool schema is `additionalProperties: false`, so top-level extras are
+/// rejected before this runs). `redirect` reads its instruction from `payload`
+/// (a bare string, or an object with an `instruction` key); `set_metadata`
+/// takes `payload` verbatim; `inject_message` takes `payload` as the message
+/// text (or an object with a `content` key).
 fn parse_steering_command(command: &str, args: &Value) -> Result<SteeringCommand> {
+    let payload = args.get("payload");
+    let payload_text = || -> Option<String> {
+        payload.and_then(|p| {
+            p.as_str().map(str::to_string).or_else(|| {
+                p.get("instruction")
+                    .or_else(|| p.get("content"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+        })
+    };
     match command {
         "pause" => Ok(SteeringCommand::Pause),
         "resume" => Ok(SteeringCommand::Resume),
         "cancel" => Ok(SteeringCommand::Cancel),
         "redirect" => Ok(SteeringCommand::Redirect {
-            instruction: required_str(args, "instruction")?.to_string(),
+            instruction: payload_text().ok_or_else(|| {
+                TinyAgentsError::Validation(
+                    "steering `redirect` requires a `payload` string (or an object with an \
+                     `instruction` key) carrying the redirection instruction"
+                        .to_string(),
+                )
+            })?,
+        }),
+        "inject_message" => Ok(SteeringCommand::InjectMessage(Message::user(
+            payload_text().ok_or_else(|| {
+                TinyAgentsError::Validation(
+                    "steering `inject_message` requires a `payload` string (or an object with a \
+                     `content` key) carrying the message text"
+                        .to_string(),
+                )
+            })?,
+        ))),
+        "set_metadata" => Ok(SteeringCommand::SetMetadata {
+            metadata: payload.cloned().unwrap_or(Value::Null),
         }),
         other => Err(TinyAgentsError::Validation(format!(
-            "unknown steering command `{other}` (expected pause, resume, cancel, or redirect)"
+            "unknown steering command `{other}` (expected pause, resume, cancel, redirect, \
+             inject_message, or set_metadata)"
         ))),
     }
 }

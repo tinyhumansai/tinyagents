@@ -225,3 +225,70 @@ async fn steer_tool_reports_not_delivered_without_registered_handle() {
         .unwrap();
     assert_eq!(result.raw.as_ref().unwrap()["accepted"], false);
 }
+
+#[tokio::test]
+async fn steer_tool_delivers_redirect_via_payload() {
+    use crate::harness::steering::{SteeringCommand, SteeringHandle};
+
+    let store: Arc<dyn TaskStore> = Arc::new(InMemoryTaskStore::new());
+    let steering = SteeringRegistry::new();
+    let task_id = TaskId::new("child-r");
+    store.insert(graph_spec(task_id.as_str())).unwrap();
+    store.mark_running(&task_id).unwrap();
+    let handle = SteeringHandle::allow_all();
+    steering.register(task_id.clone(), handle.clone());
+
+    let steer = OrchestrationTool::new(OrchestrationToolKind::Steer, store.clone())
+        .with_steering(steering.clone());
+
+    // redirect carries its instruction in the schema-allowed `payload` field.
+    let result = steer
+        .call(
+            &(),
+            ToolCall::new(
+                "call-steer",
+                "orchestrate_steer",
+                json!({
+                    "task_id": task_id.as_str(),
+                    "command": "redirect",
+                    "payload": "go north"
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.raw.as_ref().unwrap()["accepted"], true);
+    let drained = handle.drain();
+    assert!(matches!(
+        &drained[0],
+        SteeringCommand::Redirect { instruction } if instruction == "go north"
+    ));
+}
+
+#[tokio::test]
+async fn steer_tool_redirect_without_payload_is_rejected() {
+    let store: Arc<dyn TaskStore> = Arc::new(InMemoryTaskStore::new());
+    let steering = SteeringRegistry::new();
+    let task_id = TaskId::new("child-r2");
+    store.insert(graph_spec(task_id.as_str())).unwrap();
+    store.mark_running(&task_id).unwrap();
+    steering.register(
+        task_id.clone(),
+        crate::harness::steering::SteeringHandle::allow_all(),
+    );
+
+    let steer =
+        OrchestrationTool::new(OrchestrationToolKind::Steer, store.clone()).with_steering(steering);
+    let err = steer
+        .call(
+            &(),
+            ToolCall::new(
+                "call-steer",
+                "orchestrate_steer",
+                json!({ "task_id": task_id.as_str(), "command": "redirect" }),
+            ),
+        )
+        .await
+        .expect_err("redirect without payload is rejected");
+    assert!(matches!(err, crate::TinyAgentsError::Validation(_)));
+}
