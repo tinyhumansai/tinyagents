@@ -468,6 +468,24 @@ mod sqlite_backend {
     }
 
     #[tokio::test]
+    async fn from_caller_owned_connection_and_reusable_schema() {
+        use rusqlite::Connection;
+
+        // An application owns its own connection and creates the checkpoint
+        // tables from the reusable, dependency-free DDL helper.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SqliteCheckpointer::<i32>::schema_sql())
+            .unwrap();
+
+        // The checkpointer can then wrap that same connection (idempotent
+        // schema) and operate over the app-owned database.
+        let cp = SqliteCheckpointer::<i32>::from_connection(conn).unwrap();
+        cp.put(checkpoint("t1", "c1", None, 1)).await.unwrap();
+        let got = cp.get("t1", None).await.unwrap().unwrap();
+        assert_eq!(got.state, 1);
+    }
+
+    #[tokio::test]
     async fn clones_share_the_in_memory_database() {
         let cp = SqliteCheckpointer::<i32>::in_memory().unwrap();
         let cp2 = cp.clone();

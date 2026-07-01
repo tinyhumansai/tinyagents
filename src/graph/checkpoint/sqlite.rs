@@ -78,14 +78,36 @@ impl<State> SqliteCheckpointer<State> {
         Self::from_connection(conn)
     }
 
-    /// Wraps an open connection, ensuring the schema exists.
-    fn from_connection(conn: Connection) -> Result<Self> {
+    /// Wraps a caller-owned open [`Connection`], ensuring the checkpoint schema
+    /// exists.
+    ///
+    /// Use this to share a connection from your own pool or an existing
+    /// application database instead of letting the checkpointer own its handle.
+    /// The schema is idempotent (`CREATE TABLE IF NOT EXISTS`), so it is safe to
+    /// call on a database that already has the tables.
+    ///
+    /// If your application depends on a *different* `rusqlite`/`libsqlite3-sys`
+    /// version (a native-link conflict that prevents passing a `Connection`
+    /// across the boundary), apply [`SqliteCheckpointer::schema_sql`] to your own
+    /// connection instead and drive the tables directly.
+    pub fn from_connection(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)
             .map_err(|e| sqlite_err("create schema", e))?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             _marker: PhantomData,
         })
+    }
+
+    /// Returns the checkpoint table + index DDL as a reusable, dependency-free
+    /// SQL string.
+    ///
+    /// This is the schema-helper escape hatch for applications that own their
+    /// own SQLite connection (possibly at an incompatible native-link version):
+    /// execute this DDL on your connection to create the tables the checkpoint
+    /// projection expects, without linking this crate's `rusqlite`.
+    pub fn schema_sql() -> &'static str {
+        SCHEMA
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
