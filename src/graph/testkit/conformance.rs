@@ -212,3 +212,102 @@ where
     assert_eq!(completed.len(), 1, "one completed task");
     assert_eq!(completed[0].spec.task_id.as_str(), "happy");
 }
+
+/// Concurrent-write contract for a [`Checkpointer`]: many tasks put distinct
+/// checkpoints on one shared instance concurrently; every put must be durable
+/// and retrievable with no lost writes.
+pub async fn checkpointer_concurrent_contract<C>(cp: std::sync::Arc<C>)
+where
+    C: Checkpointer<i32> + 'static,
+{
+    const WRITERS: usize = 8;
+    let mut handles = Vec::new();
+    for w in 0..WRITERS {
+        let cp = cp.clone();
+        handles.push(tokio::spawn(async move {
+            cp.put(contract_checkpoint("shared", &format!("c{w}"), None, w))
+                .await
+                .expect("concurrent put");
+        }));
+    }
+    for h in handles {
+        h.await.expect("writer task joins");
+    }
+
+    // Every concurrently-written checkpoint is retrievable by id.
+    for w in 0..WRITERS {
+        let got = cp.get("shared", Some(&format!("c{w}"))).await.expect("get");
+        assert!(got.is_some(), "checkpoint c{w} survived concurrent writes");
+    }
+}
+
+/// Concurrent-write contract: many threads insert and advance distinct tasks
+/// against one shared store; every write must land exactly once with no lost
+/// updates. Any backend that passes is safe to share across a run tree.
+pub fn taskstore_concurrent_contract<S>(store: std::sync::Arc<S>)
+where
+    S: TaskStore + 'static,
+{
+    const WRITERS: usize = 8;
+    std::thread::scope(|scope| {
+        for w in 0..WRITERS {
+            let store = store.clone();
+            scope.spawn(move || {
+                let id = TaskId::new(format!("task-{w}"));
+                store
+                    .insert(crate::graph::orchestration::OrchestrationTaskSpec::new(
+                        id.as_str(),
+                        OrchestrationTaskKind::SubAgent {
+                            agent: "worker".into(),
+                        },
+                    ))
+                    .expect("concurrent insert");
+                store.mark_running(&id).expect("concurrent mark_running");
+            });
+        }
+    });
+
+    let all = store.list(OrchestrationTaskFilter::default());
+    assert_eq!(all.len(), WRITERS, "every concurrent insert must land once");
+    assert!(
+        all.iter()
+            .all(|r| r.status == OrchestrationTaskStatus::Running),
+        "every concurrently-advanced task reached Running"
+    );
+}
+
+/// Durable replay contract: state written through one handle must survive
+/// re-opening the backing store through `reopen`. Only meaningful for durable
+/// backends (call it for those; an in-memory store would drop state on reopen).
+pub fn taskstore_replay_contract<S, F>(reopen: F)
+where
+    S: TaskStore,
+    F: Fn() -> S,
+{
+    let id = TaskId::new("survivor");
+    let spec = || {
+        crate::graph::orchestration::OrchestrationTaskSpec::new(
+            "survivor",
+            OrchestrationTaskKind::SubAgent {
+                agent: "worker".into(),
+            },
+        )
+    };
+    {
+        let store = reopen();
+        store.insert(spec()).expect("insert");
+        store.mark_running(&id).expect("running");
+        store
+            .complete(&id, OrchestrationTaskResult::text("done"))
+            .expect("complete");
+    }
+    // Re-open: the terminal state and full transition history are reconstructed.
+    let reopened = reopen();
+    let record = reopened.get(&id).expect("task survives reopen");
+    assert_eq!(record.status, OrchestrationTaskStatus::Completed);
+    assert_eq!(
+        reopened.history(&id).len(),
+        3,
+        "pending → running → completed history replays"
+    );
+}
