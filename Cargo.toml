@@ -25,13 +25,14 @@ thiserror = "2"
 # multi-threaded runtime stays a dev-dependency for examples and tests.
 tokio = { version = "1", default-features = false, features = ["sync", "time", "macros"] }
 
-# Optional HTTP client, pulled in only by hosted-provider features. The `stream`
-# feature enables `Response::bytes_stream` for Server-Sent-Events streaming.
+# HTTP client used by hosted providers and the embedded Langfuse exporter. The
+# `stream` feature enables `Response::bytes_stream` for Server-Sent-Events
+# streaming.
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
     "stream",
-], optional = true }
+] }
 
 # Optional embedded SQLite checkpointer backend (`graph::checkpoint::sqlite`).
 # `bundled` compiles SQLite from vendored C source so no system library is
@@ -47,7 +48,7 @@ rhai = { version = "1", features = ["sync"], optional = true }
 [features]
 default = []
 # Hosted OpenAI Chat Completions provider (`harness::providers::openai`).
-openai = ["dep:reqwest"]
+openai = []
 # Embedded SQLite-backed checkpointer (`graph::checkpoint::SqliteCheckpointer`).
 sqlite = ["dep:rusqlite"]
 # Embedded Rhai-backed `.ragsh` REPL session runtime (`repl::session`).
