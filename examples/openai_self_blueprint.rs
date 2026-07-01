@@ -19,7 +19,7 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run --features openai --example openai_self_blueprint
+//! cargo run --example openai_self_blueprint
 //! ```
 
 use std::sync::Arc;

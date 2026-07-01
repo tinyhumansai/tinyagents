@@ -160,13 +160,8 @@ Add TinyAgents to your project:
 tinyagents = "0.1"
 ```
 
-The default build is offline. To enable hosted providers, turn on the `openai`
-feature:
-
-```toml
-[dependencies]
-tinyagents = { version = "0.1", features = ["openai"] }
-```
+The OpenAI (and OpenAI-compatible) provider is compiled in by default and pulls
+no extra dependencies; the build stays offline unless you actually make a call.
 
 To explore locally:
 
@@ -180,7 +175,7 @@ OpenAI-backed examples need the feature flag and an API key:
 
 ```sh
 export OPENAI_API_KEY=...
-cargo run --features openai --example openai_chat
+cargo run --example openai_chat
 ```
 
 Export durable harness observations to Langfuse with the embedded client:
@@ -244,7 +239,7 @@ All live in [`examples/`](examples/):
 - **`openai_structured`** — typed structured output.
 - **`openai_graph_agent`** — a provider-backed agent driven inside a graph.
 
-OpenAI-backed examples require `--features openai` and `OPENAI_API_KEY`.
+OpenAI-backed examples require `OPENAI_API_KEY` at run time.
 
 ## Documentation
 

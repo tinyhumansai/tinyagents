@@ -8,7 +8,7 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run --features openai --example openai_structured
+//! cargo run --example openai_structured
 //! ```
 
 use std::sync::Arc;

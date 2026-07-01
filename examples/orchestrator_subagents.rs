@@ -26,7 +26,7 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run --features openai --example orchestrator_subagents
+//! cargo run --example orchestrator_subagents
 //! ```
 
 use std::sync::Arc;

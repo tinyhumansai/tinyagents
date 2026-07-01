@@ -7,7 +7,7 @@
 //! Run with (after copying `.env.example` to `.env` and setting your key):
 //!
 //! ```text
-//! cargo run --features openai --example openai_chat
+//! cargo run --example openai_chat
 //! ```
 
 use std::sync::Arc;

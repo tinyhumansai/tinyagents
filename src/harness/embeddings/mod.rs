@@ -19,8 +19,8 @@
 //!   indexing documents and answering text queries.
 //! - [`cosine_similarity`] — the distance metric used by the in-memory store.
 //!
-//! With the `openai` feature enabled, [`OpenAiEmbeddingModel`] adds a hosted
-//! provider backed by the OpenAI embeddings endpoint.
+//! [`OpenAiEmbeddingModel`] adds a hosted provider backed by the OpenAI
+//! embeddings endpoint (always compiled).
 //!
 //! The design mirrors LangChain's separation of concerns: chat models generate
 //! messages, embedding models generate vectors, vector stores search vectors,

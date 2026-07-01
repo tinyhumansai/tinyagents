@@ -8,8 +8,8 @@ code changes were made as part of the audit.
 
 ## Summary
 
-The crate is in a healthy build state: default and `openai` feature builds pass,
-the full test suite passes, and clippy is clean. The main issues are not broad
+The crate is in a healthy build state: the build passes (the OpenAI adapter is
+compiled in by default), the full test suite passes, and clippy is clean. The main issues are not broad
 compile failures; they are fail-closed contract gaps around durable graph
 recovery and observability/runtime hardening.
 
@@ -138,10 +138,10 @@ The local response cache key now uses SHA-256 over canonical request JSON:
 
 ## Stale Prior Finding Resolved
 
-A prior audit found that `cargo build --all-targets --features openai` failed
-because the feature-gated OpenAI module was missing. That is no longer current:
-`src/harness/providers/openai/` exists and both build and test paths pass with
-the `openai` feature enabled.
+A prior audit found that `cargo build --all-targets` failed
+because the OpenAI module was missing. That is no longer current:
+`src/harness/providers/openai/` exists and is compiled in by default, so build
+and test paths cover it without any feature flag.
 
 ## Verification
 
@@ -149,20 +149,15 @@ Commands run from the repository root:
 
 - `cargo fmt --check`: passed
 - `cargo build --all-targets`: passed
-- `cargo build --all-targets --features openai`: passed
 - `cargo test`: passed
 - `cargo clippy --all-targets -- -D warnings`: passed
-- `cargo clippy --all-targets --features openai -- -D warnings`: passed
-- `cargo test --features openai`: passed
 
 Observed test coverage from the commands:
 
-- Default unit tests: 421 passed.
-- Default doctests: 40 passed, 1 ignored.
-- `openai` feature unit tests: 432 passed.
-- `openai` feature doctests: 42 passed, 1 ignored.
-- Live OpenAI tests ran and passed in this environment when the `openai` feature
-  was enabled.
+- Unit tests (including the OpenAI adapter): passed.
+- Doctests: passed.
+- Live OpenAI tests ran and passed in this environment when `OPENAI_API_KEY`
+  was set (they skip otherwise).
 
 ## Prioritization
 
