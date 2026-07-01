@@ -206,6 +206,26 @@ client
 `LangfuseClient::direct(langfuse_url, public_key, secret_key)` when an
 application is allowed to talk to Langfuse directly.
 
+Graph runs export the same way through `GraphLangfuseExporter`, which reuses the
+harness `LangfuseClient` transport and turns supersteps and nodes into timed
+spans (failures promoted to `ERROR`), with per-node **tool health** telemetry
+attached to the trace:
+
+```rust
+use tinyagents::{GraphLangfuseExporter, LangfuseClient, LangfuseTraceConfig};
+
+let exporter = GraphLangfuseExporter::new(LangfuseClient::from_env()?);
+let observations = journal.read_from(run_id, 0).await?;
+exporter
+    .send_observations(LangfuseTraceConfig::default(), &observations)
+    .await?;
+```
+
+Because a graph run and the agent runs its nodes spawn share the same
+`root_run_id` — the default Langfuse `traceId` for both exporters — exporting a
+graph run and its child agents lands every step, node, model generation, and
+tool call under one trace for full end-to-end observability.
+
 ## Examples to explore
 
 All live in [`examples/`](examples/):

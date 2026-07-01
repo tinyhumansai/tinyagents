@@ -177,6 +177,33 @@ latency record because there is no terminal timestamp. Failed nodes are retained
 with `failed = true` so dashboards can separate slow successes from slow
 failures.
 
+### Node / Tool Health
+
+A graph node is the graph's unit of work and is frequently a delegated agent or
+tool call (`SubAgentNode`), so per-node success/failure counts double as **tool
+health** telemetry. `GraphHealthSummary::from_observations` rolls the same
+durable stream into:
+
+- `total_started` / `total_completed` / `total_failed` node counts
+- `run_failed` — whether the run emitted `run.failed`
+- a per-node `GraphNodeHealth` entry (`started`, `completed`, `failed`), sorted
+  by node id, with `failure_rate()` and `is_healthy()` helpers
+- `is_healthy()`, `failure_rate()`, and `unhealthy_nodes()` at the run level
+
+```rust
+let observations = journal.read_from(run_id, 0).await?;
+let health = GraphHealthSummary::from_observations(&observations);
+
+if !health.is_healthy() {
+    for node in health.unhealthy_nodes() {
+        eprintln!("{} failed {}x", node.node.as_str(), node.failed);
+    }
+}
+```
+
+The summary is attached to the Langfuse trace metadata (below) so it is visible
+alongside the exported spans.
+
 ## Event Journal And Listener Replay
 
 Outside listeners need two paths:
@@ -258,8 +285,54 @@ events and adapters:
 - in-memory observer for tests
 - JSONL observer for local debugging
 - tracing-span adapter
+- a Langfuse ingestion exporter (`GraphLangfuseExporter`, see below)
 - OpenTelemetry adapter later
 - LangSmith-compatible exporter later
+
+## Langfuse Export
+
+`GraphLangfuseExporter` is the concrete, implemented exporter for the Langfuse
+ingestion API. It is pull-based and best-effort: read a run's observations back
+from a journal, build a batch, and send it — it never sits on the executor hot
+path.
+
+The exporter reuses the harness `LangfuseClient` for transport (Basic or Bearer
+auth, endpoint normalization, `207 Multi-Status` handling), so a single set of
+credentials serves both the agent and graph sides:
+
+```rust
+let exporter = GraphLangfuseExporter::from_env()?; // or ::new(client)
+let observations = journal.read_from(run_id, 0).await?;
+exporter
+    .send_observations(LangfuseTraceConfig::default(), &observations)
+    .await?;
+```
+
+The batch maps the graph run onto Langfuse's trace/observation model:
+
+- one `trace-create` (id defaults to the run's `root_run_id`; name defaults to
+  the `graph_id`; session defaults to the run's `thread_id`) with the
+  `GraphHealthSummary` folded into trace metadata
+- one timed `span-create` per superstep (`{trace}:step:{n}`), parented to the
+  trace
+- one timed `span-create` per node handler (`{trace}:node:{name}:{step}`),
+  parented to its superstep span; `node.failed` promotes the span to `ERROR`
+  level with the rendered error as `statusMessage`
+- one timed `span-create` per embedded subgraph
+- an `event-create` for every remaining observation (routes, checkpoints,
+  interrupts, custom writes, run lifecycle), with `run.failed` mapped to `ERROR`
+
+Still-running work (a `node.started` with no terminal event) is exported as an
+open span with a start time but no end time.
+
+### Unified Traces With Agents And Tools
+
+Because a graph run and the agent runs its nodes spawn share the same
+`root_run_id`, and both the graph and harness exporters default their `traceId`
+to that root run id, exporting a graph run **and** its child agent runs lands
+every graph step, node, model generation, and tool call under one Langfuse
+trace. This is what makes full end-to-end telemetry — including tool health and
+tool timing — visible in a single trace tree.
 
 ## Debug Payloads
 
