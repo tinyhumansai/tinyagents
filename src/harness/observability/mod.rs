@@ -26,6 +26,9 @@ mod langfuse;
 mod types;
 
 pub use langfuse::{LangfuseAuth, LangfuseClient, LangfuseTraceConfig};
+// Shared Langfuse payload helpers reused by the graph observability exporter so
+// ISO-8601 timestamp formatting and null-field pruning live in one place.
+pub(crate) use langfuse::{clean_nulls, iso_ms};
 pub use types::*;
 
 use std::collections::HashMap;
@@ -57,11 +60,10 @@ impl AgentLatencyMetrics {
 
         for obs in observations {
             match &obs.event {
-                AgentEvent::RunStarted { .. } => {
-                    if run_start.is_none() {
-                        run_start = Some(obs.ts_ms);
-                    }
+                AgentEvent::RunStarted { .. } if run_start.is_none() => {
+                    run_start = Some(obs.ts_ms);
                 }
+                AgentEvent::RunStarted { .. } => {}
                 AgentEvent::RunCompleted { .. } | AgentEvent::RunFailed { .. } => {
                     if metrics.run_elapsed_ms.is_none()
                         && let Some(start) = run_start

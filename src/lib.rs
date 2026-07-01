@@ -170,9 +170,9 @@ pub use graph::{
 // Names are graph-prefixed so they never collide with the harness observability
 // re-exports above.
 pub use graph::{
-    GraphEventJournal, GraphLatencyMetrics, GraphNodeLatency, GraphObservation, GraphStatusStore,
-    GraphStepLatency, InMemoryGraphEventJournal, InMemoryGraphStatusStore, JournalGraphSink,
-    StoreGraphEventJournal,
+    GraphEventJournal, GraphHealthSummary, GraphLangfuseExporter, GraphLatencyMetrics,
+    GraphNodeHealth, GraphNodeLatency, GraphObservation, GraphStatusStore, GraphStepLatency,
+    InMemoryGraphEventJournal, InMemoryGraphStatusStore, JournalGraphSink, StoreGraphEventJournal,
 };
 
 // --- Graph: orchestration tools (ordinary harness Tool implementations) ---

@@ -58,9 +58,9 @@ pub use export::{
     blueprint_to_mermaid, blueprint_to_topology, from_json, to_json, to_mermaid,
 };
 pub use observability::{
-    GraphEventJournal, GraphLatencyMetrics, GraphNodeLatency, GraphObservation, GraphStatusStore,
-    GraphStepLatency, InMemoryGraphEventJournal, InMemoryGraphStatusStore, JournalGraphSink,
-    StoreGraphEventJournal,
+    GraphEventJournal, GraphHealthSummary, GraphLangfuseExporter, GraphLatencyMetrics,
+    GraphNodeHealth, GraphNodeLatency, GraphObservation, GraphStatusStore, GraphStepLatency,
+    InMemoryGraphEventJournal, InMemoryGraphStatusStore, JournalGraphSink, StoreGraphEventJournal,
 };
 pub use orchestration::{
     InMemoryTaskStore, JsonlTaskStore, OrchestrationControlOutcome, OrchestrationTaskFilter,

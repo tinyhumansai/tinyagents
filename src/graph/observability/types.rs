@@ -149,6 +149,109 @@ pub struct GraphLatencyMetrics {
 }
 
 // ---------------------------------------------------------------------------
+// Graph health telemetry
+// ---------------------------------------------------------------------------
+
+/// Health rollup for a single graph node across one run.
+///
+/// A graph node is the graph's unit of work — frequently a delegated agent or
+/// tool call (see [`crate::graph::SubAgentNode`]) — so per-node success/failure
+/// counts double as **tool health** telemetry for the graph. Counts are derived
+/// from durable [`GraphObservation`]s by correlating `node.started` with
+/// `node.completed` / `node.failed`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphNodeHealth {
+    /// The node these counts describe.
+    pub node: NodeId,
+
+    /// Number of `node.started` observations seen.
+    pub started: u64,
+
+    /// Number of `node.completed` observations seen.
+    pub completed: u64,
+
+    /// Number of `node.failed` observations seen.
+    pub failed: u64,
+}
+
+impl GraphNodeHealth {
+    /// Terminal attempts (`completed + failed`) — activations with a known
+    /// outcome. `started` may exceed this while a node is still running.
+    pub fn attempts(&self) -> u64 {
+        self.completed.saturating_add(self.failed)
+    }
+
+    /// Fraction of terminal attempts that failed, in `0.0..=1.0`. Returns `0.0`
+    /// when the node has no terminal attempts yet.
+    pub fn failure_rate(&self) -> f64 {
+        let attempts = self.attempts();
+        if attempts == 0 {
+            0.0
+        } else {
+            self.failed as f64 / attempts as f64
+        }
+    }
+
+    /// True when the node has never failed.
+    pub fn is_healthy(&self) -> bool {
+        self.failed == 0
+    }
+}
+
+/// Aggregate node/tool health for a single graph run.
+///
+/// Built from the same durable observation stream that feeds
+/// [`GraphLatencyMetrics`], this is the compact "is anything unhealthy?" surface
+/// a supervisor or dashboard reads, and the telemetry the Langfuse exporter
+/// attaches to a trace. Per-node entries are sorted by node id for stable
+/// output.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphHealthSummary {
+    /// Per-node health entries, sorted by node id.
+    #[serde(default)]
+    pub nodes: Vec<GraphNodeHealth>,
+
+    /// Total `node.started` observations across all nodes.
+    pub total_started: u64,
+
+    /// Total `node.completed` observations across all nodes.
+    pub total_completed: u64,
+
+    /// Total `node.failed` observations across all nodes.
+    pub total_failed: u64,
+
+    /// True when the run itself emitted `run.failed`.
+    pub run_failed: bool,
+}
+
+impl GraphHealthSummary {
+    /// Terminal node attempts (`total_completed + total_failed`).
+    pub fn total_attempts(&self) -> u64 {
+        self.total_completed.saturating_add(self.total_failed)
+    }
+
+    /// Fraction of terminal node attempts that failed, in `0.0..=1.0`.
+    pub fn failure_rate(&self) -> f64 {
+        let attempts = self.total_attempts();
+        if attempts == 0 {
+            0.0
+        } else {
+            self.total_failed as f64 / attempts as f64
+        }
+    }
+
+    /// True when no node failed and the run did not fail.
+    pub fn is_healthy(&self) -> bool {
+        self.total_failed == 0 && !self.run_failed
+    }
+
+    /// The nodes that failed at least once, in node-id order.
+    pub fn unhealthy_nodes(&self) -> impl Iterator<Item = &GraphNodeHealth> {
+        self.nodes.iter().filter(|n| !n.is_healthy())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GraphEventJournal
 // ---------------------------------------------------------------------------
 

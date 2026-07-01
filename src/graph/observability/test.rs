@@ -154,6 +154,128 @@ fn graph_latency_metrics_include_run_steps_and_nodes() {
     assert_eq!(metrics.average_node_ms(), Some(27));
 }
 
+#[test]
+fn graph_health_summary_counts_node_outcomes() {
+    let run = "run-health";
+    let a = NodeId::new("a");
+    let b = NodeId::new("b");
+    let observations = vec![
+        graph_obs(
+            run,
+            0,
+            0,
+            GraphEvent::RunStarted {
+                run_id: RunId::new(run),
+            },
+        ),
+        graph_obs(
+            run,
+            1,
+            1,
+            GraphEvent::NodeStarted {
+                node: a.clone(),
+                step: 1,
+            },
+        ),
+        graph_obs(
+            run,
+            2,
+            1,
+            GraphEvent::NodeCompleted {
+                node: a.clone(),
+                step: 1,
+            },
+        ),
+        graph_obs(
+            run,
+            3,
+            1,
+            GraphEvent::NodeStarted {
+                node: b.clone(),
+                step: 1,
+            },
+        ),
+        graph_obs(
+            run,
+            4,
+            1,
+            GraphEvent::NodeFailed {
+                node: b.clone(),
+                step: 1,
+                error: "boom".to_string(),
+            },
+        ),
+        graph_obs(
+            run,
+            5,
+            1,
+            GraphEvent::RunFailed {
+                run_id: RunId::new(run),
+                error: "boom".to_string(),
+            },
+        ),
+    ];
+
+    let health = GraphHealthSummary::from_observations(&observations);
+    assert_eq!(health.total_started, 2);
+    assert_eq!(health.total_completed, 1);
+    assert_eq!(health.total_failed, 1);
+    assert!(health.run_failed);
+    assert!(!health.is_healthy());
+    assert_eq!(health.failure_rate(), 0.5);
+
+    // Sorted by node id, with per-node health surfaced.
+    assert_eq!(health.nodes.len(), 2);
+    assert_eq!(health.nodes[0].node, a);
+    assert!(health.nodes[0].is_healthy());
+    assert_eq!(health.nodes[1].node, b);
+    assert!(!health.nodes[1].is_healthy());
+    assert_eq!(health.nodes[1].failure_rate(), 1.0);
+
+    let unhealthy: Vec<_> = health.unhealthy_nodes().map(|n| n.node.clone()).collect();
+    assert_eq!(unhealthy, vec![b]);
+}
+
+#[test]
+fn healthy_run_reports_no_failures() {
+    let run = "run-ok";
+    let a = NodeId::new("a");
+    let observations = vec![
+        graph_obs(
+            run,
+            0,
+            1,
+            GraphEvent::NodeStarted {
+                node: a.clone(),
+                step: 1,
+            },
+        ),
+        graph_obs(
+            run,
+            1,
+            1,
+            GraphEvent::NodeCompleted {
+                node: a.clone(),
+                step: 1,
+            },
+        ),
+        graph_obs(
+            run,
+            2,
+            1,
+            GraphEvent::RunCompleted {
+                run_id: RunId::new(run),
+                steps: 1,
+            },
+        ),
+    ];
+
+    let health = GraphHealthSummary::from_observations(&observations);
+    assert!(health.is_healthy());
+    assert_eq!(health.failure_rate(), 0.0);
+    assert_eq!(health.unhealthy_nodes().count(), 0);
+}
+
 #[tokio::test]
 async fn run_with_journal_records_replayable_observations() {
     let journal = Arc::new(InMemoryGraphEventJournal::new());

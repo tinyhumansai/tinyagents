@@ -190,6 +190,18 @@ impl LangfuseClient {
         observations: &[AgentObservation],
     ) -> Result<Value> {
         let payload = self.build_ingestion_batch(trace, observations)?;
+        self.send_batch(payload).await
+    }
+
+    /// Posts a pre-built ingestion `payload` to the configured endpoint,
+    /// attaching the right auth header and translating transport/HTTP errors.
+    ///
+    /// This is the shared transport used by [`Self::send_observations`]. Other
+    /// exporters that build their own `{ "batch": [...] }` payload — such as the
+    /// graph observability exporter — reuse this method so authentication,
+    /// endpoint normalization, and the Langfuse `207 Multi-Status` handling live
+    /// in one place.
+    pub async fn send_batch(&self, payload: Value) -> Result<Value> {
         let mut req = self.client.post(&self.endpoint).json(&payload);
         req = match &self.auth {
             LangfuseAuth::Basic {
@@ -340,14 +352,14 @@ fn langfuse_usage(usage: Usage) -> Value {
     })
 }
 
-fn clean_nulls(mut value: Value) -> Value {
+pub(crate) fn clean_nulls(mut value: Value) -> Value {
     if let Value::Object(map) = &mut value {
         map.retain(|_, v| !v.is_null());
     }
     value
 }
 
-fn iso_ms(ms: u64) -> String {
+pub(crate) fn iso_ms(ms: u64) -> String {
     use std::time::{Duration, UNIX_EPOCH};
     let system_time = UNIX_EPOCH + Duration::from_millis(ms);
     let duration = system_time

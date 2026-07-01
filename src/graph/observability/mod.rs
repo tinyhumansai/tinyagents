@@ -28,8 +28,10 @@
 //! the async journal API with `futures::executor::block_on` and treats
 //! persistence as best-effort: a backend error never aborts the run.
 
+mod langfuse;
 mod types;
 
+pub use langfuse::GraphLangfuseExporter;
 pub use types::*;
 
 use std::collections::{HashMap, VecDeque};
@@ -63,11 +65,10 @@ impl GraphLatencyMetrics {
 
         for obs in observations {
             match &obs.event {
-                GraphEvent::RunStarted { .. } => {
-                    if run_start.is_none() {
-                        run_start = Some(obs.ts_ms);
-                    }
+                GraphEvent::RunStarted { .. } if run_start.is_none() => {
+                    run_start = Some(obs.ts_ms);
                 }
+                GraphEvent::RunStarted { .. } => {}
                 GraphEvent::RunCompleted { .. } | GraphEvent::RunFailed { .. } => {
                     if metrics.run_elapsed_ms.is_none()
                         && let Some(start) = run_start
@@ -152,6 +153,65 @@ impl GraphLatencyMetrics {
         self.max_node_ms = self.max_node_ms.max(latency.elapsed_ms);
         self.nodes.push(latency);
     }
+}
+
+// ---------------------------------------------------------------------------
+// GraphHealthSummary
+// ---------------------------------------------------------------------------
+
+impl GraphHealthSummary {
+    /// Builds a node/tool health rollup from durable observations for one run.
+    ///
+    /// Counts every `node.started`, `node.completed`, and `node.failed`
+    /// observation per node, plus whether the run itself failed. Per-node
+    /// entries are sorted by node id so the summary is deterministic.
+    pub fn from_observations(observations: &[GraphObservation]) -> Self {
+        let mut per_node: HashMap<NodeId, GraphNodeHealth> = HashMap::new();
+        let mut summary = Self::default();
+
+        for obs in observations {
+            match &obs.event {
+                GraphEvent::NodeStarted { node, .. } => {
+                    entry_for(&mut per_node, node).started += 1;
+                    summary.total_started += 1;
+                }
+                GraphEvent::NodeCompleted { node, .. } => {
+                    entry_for(&mut per_node, node).completed += 1;
+                    summary.total_completed += 1;
+                }
+                GraphEvent::NodeFailed { node, .. } => {
+                    entry_for(&mut per_node, node).failed += 1;
+                    summary.total_failed += 1;
+                }
+                GraphEvent::RunFailed { .. } => {
+                    summary.run_failed = true;
+                }
+                _ => {}
+            }
+        }
+
+        summary.nodes = per_node.into_values().collect();
+        summary
+            .nodes
+            .sort_by(|a, b| a.node.as_str().cmp(b.node.as_str()));
+        summary
+    }
+}
+
+/// Returns the mutable health entry for `node`, inserting a zeroed one keyed by
+/// the node id if absent.
+fn entry_for<'a>(
+    per_node: &'a mut HashMap<NodeId, GraphNodeHealth>,
+    node: &NodeId,
+) -> &'a mut GraphNodeHealth {
+    per_node
+        .entry(node.clone())
+        .or_insert_with(|| GraphNodeHealth {
+            node: node.clone(),
+            started: 0,
+            completed: 0,
+            failed: 0,
+        })
 }
 
 // ---------------------------------------------------------------------------
