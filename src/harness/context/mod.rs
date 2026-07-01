@@ -198,10 +198,21 @@ impl<Ctx> RunContext<Ctx> {
 
     /// Requests a [`MiddlewareControl`] outcome. The agent loop drains and acts
     /// on it at its next safe checkpoint (after the current model response).
-    /// A later request overwrites an undrained earlier one.
+    ///
+    /// When an undrained request is already pending, the higher-precedence one
+    /// wins (see [`MiddlewareControl::precedence`]); ties keep the earlier
+    /// request. This gives competing middleware layers a deterministic outcome
+    /// instead of last-writer-wins — e.g. a pause request is never downgraded to
+    /// a stop by a later, weaker request.
     pub fn request_control(&self, control: MiddlewareControl) {
         if let Ok(mut guard) = self.control.lock() {
-            *guard = Some(control);
+            let replace = match guard.as_ref() {
+                Some(existing) => control.precedence() > existing.precedence(),
+                None => true,
+            };
+            if replace {
+                *guard = Some(control);
+            }
         }
     }
 

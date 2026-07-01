@@ -146,6 +146,18 @@ pub enum AgentEvent {
         error: Option<String>,
     },
 
+    /// The agent loop honored a
+    /// [`MiddlewareControl`][crate::harness::context::MiddlewareControl] request
+    /// at a safe checkpoint (for example an early-exit stop or a pause). Recorded
+    /// so control decisions are auditable and replayable from the journal.
+    ControlApplied {
+        /// Stable label of the control outcome (see
+        /// [`MiddlewareControl::kind`][crate::harness::context::MiddlewareControl::kind]).
+        control: String,
+        /// Human-readable detail (the final text, or the interrupt node/message).
+        detail: String,
+    },
+
     /// Agent or graph-node state was mutated.
     ///
     /// Emitted after state transitions so downstream subscribers can
@@ -426,6 +438,7 @@ impl AgentEvent {
             AgentEvent::ModelStarted { .. } => "model.started",
             AgentEvent::ModelDelta { .. } => "model.delta",
             AgentEvent::ModelCompleted { .. } => "model.completed",
+            AgentEvent::ControlApplied { .. } => "control.applied",
             AgentEvent::ToolsFiltered { .. } => "tool.filtered",
             AgentEvent::ToolStarted { .. } => "tool.started",
             AgentEvent::ToolCompleted { .. } => "tool.completed",

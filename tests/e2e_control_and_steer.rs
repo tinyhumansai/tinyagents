@@ -117,6 +117,11 @@ async fn stop_with_final_control_ends_run_before_tools() {
         "a StopWithFinal run must still emit a run.completed event, got {:?}",
         recorder.kinds()
     );
+    assert!(
+        recorder.kinds().iter().any(|k| k == "control.applied"),
+        "honoring a control outcome must be journaled as control.applied, got {:?}",
+        recorder.kinds()
+    );
 }
 
 #[tokio::test]

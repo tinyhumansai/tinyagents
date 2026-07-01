@@ -110,3 +110,34 @@ fn with_events_shares_sink() {
     assert_eq!(recorder.events().len(), 1);
     assert_eq!(shared.len(), 1);
 }
+
+#[test]
+fn request_control_keeps_highest_precedence() {
+    let ctx: RunContext = RunContext::new(RunConfig::new("run-ctrl"), ());
+
+    // A stronger Interrupt is not downgraded by a later, weaker StopWithFinal.
+    ctx.request_control(MiddlewareControl::Interrupt {
+        node: "review".into(),
+        message: "hold".into(),
+    });
+    ctx.request_control(MiddlewareControl::StopWithFinal("stop".into()));
+    assert!(matches!(
+        ctx.take_control(),
+        Some(MiddlewareControl::Interrupt { .. })
+    ));
+    assert!(
+        ctx.take_control().is_none(),
+        "take_control clears the request"
+    );
+
+    // A stronger request does replace a weaker pending one.
+    ctx.request_control(MiddlewareControl::StopWithFinal("stop".into()));
+    ctx.request_control(MiddlewareControl::Interrupt {
+        node: "review".into(),
+        message: "hold".into(),
+    });
+    assert!(matches!(
+        ctx.take_control(),
+        Some(MiddlewareControl::Interrupt { .. })
+    ));
+}

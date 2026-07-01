@@ -476,6 +476,16 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // during this turn (for example an early-exit tool or a budget stop
             // hook), before executing further tools.
             if let Some(control) = ctx.take_control() {
+                let record = ctx.emit(AgentEvent::ControlApplied {
+                    control: control.kind().to_string(),
+                    detail: match &control {
+                        MiddlewareControl::StopWithFinal(text) => text.clone(),
+                        MiddlewareControl::Interrupt { node, message } => {
+                            format!("{node}: {message}")
+                        }
+                    },
+                });
+                status.set_last_event(record.id);
                 match control {
                     MiddlewareControl::StopWithFinal(text) => {
                         run.final_response = Some(ModelResponse::assistant(text));

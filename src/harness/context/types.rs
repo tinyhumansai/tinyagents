@@ -115,6 +115,28 @@ pub enum MiddlewareControl {
     },
 }
 
+impl MiddlewareControl {
+    /// A stable label for this control outcome, used in audit events.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            MiddlewareControl::StopWithFinal(_) => "stop_with_final",
+            MiddlewareControl::Interrupt { .. } => "interrupt",
+        }
+    }
+
+    /// Precedence rank for resolving competing control requests within one
+    /// turn. Higher wins. [`Interrupt`](Self::Interrupt) outranks
+    /// [`StopWithFinal`](Self::StopWithFinal) because pausing to preserve state
+    /// for a later resume is stronger than terminating with a final answer, so
+    /// a pause request is never silently downgraded to a stop.
+    pub fn precedence(&self) -> u8 {
+        match self {
+            MiddlewareControl::StopWithFinal(_) => 1,
+            MiddlewareControl::Interrupt { .. } => 2,
+        }
+    }
+}
+
 /// Live, in-process handle threaded through every step of a harness run.
 ///
 /// A `RunContext` bundles the declarative [`RunConfig`] with the runtime
