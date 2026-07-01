@@ -286,6 +286,44 @@ pub struct DynamicToolSelectionMiddleware {
     pub(crate) predicate: ToolPredicate,
 }
 
+// ── ContextualToolSelectionMiddleware ─────────────────────────────────────────
+
+/// Run/agent/model context a [`ContextualToolPredicate`] can inspect when
+/// deciding whether to expose a tool.
+///
+/// This closes the gap left by [`DynamicToolSelectionMiddleware`], whose
+/// predicate sees only the [`ToolSchema`] and therefore cannot vary exposure by
+/// recursion depth, run tags (security tier / background vs interactive), or the
+/// model being called.
+#[derive(Clone, Debug)]
+pub struct ToolSelectionContext {
+    /// The current run id.
+    pub run_id: String,
+    /// Recursion depth (0 for a top-level run; deeper for sub-agents).
+    pub depth: usize,
+    /// Run tags (for example a security tier or `background` marker).
+    pub tags: Vec<String>,
+    /// The model this request will be sent to, when set on the request.
+    pub requested_model: Option<String>,
+}
+
+/// A predicate deciding whether a [`ToolSchema`] should be exposed, given run
+/// context.
+pub type ContextualToolPredicate =
+    Arc<dyn Fn(&ToolSchema, &ToolSelectionContext) -> bool + Send + Sync>;
+
+/// Lifecycle middleware that filters model-visible tools using a predicate that
+/// receives both the [`ToolSchema`] and the live [`ToolSelectionContext`].
+///
+/// Build one directly from a context-aware predicate with [`new`](Self::new),
+/// or from explicit allow/deny lists with
+/// [`from_lists`](Self::from_lists) (deny wins; when an allow-list is present a
+/// tool must appear in it — fail-closed for unknown tools).
+pub struct ContextualToolSelectionMiddleware {
+    pub(crate) label: &'static str,
+    pub(crate) predicate: ContextualToolPredicate,
+}
+
 // ── HumanApprovalMiddleware ───────────────────────────────────────────────────
 
 /// A callback consulted to approve or reject a flagged [`ToolCall`].

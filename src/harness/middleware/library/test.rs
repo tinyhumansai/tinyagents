@@ -297,6 +297,60 @@ async fn rate_limit_wait_then_proceed_with_advancing_clock() {
     assert_eq!(model_base.calls(), 1);
 }
 
+// ── ContextualToolSelectionMiddleware ───────────────────────────────────────
+
+fn schema_named(name: &str) -> ToolSchema {
+    ToolSchema {
+        name: name.to_string(),
+        description: String::new(),
+        parameters: json!({}),
+        format: crate::harness::tool::ToolFormat::Json,
+    }
+}
+
+#[tokio::test]
+async fn contextual_selection_from_lists_denies_and_fails_closed() {
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    // allow=[a,b], deny=[b] -> only `a` survives; unknown `c` is fail-closed out.
+    let mw = ContextualToolSelectionMiddleware::from_lists(Some(["a", "b"]), ["b"]);
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    let mut request = ModelRequest::new(Vec::new()).with_tools(vec![
+        schema_named("a"),
+        schema_named("b"),
+        schema_named("c"),
+    ]);
+    stack
+        .run_before_model(&mut ctx, &(), &mut request)
+        .await
+        .unwrap();
+    assert_eq!(request.tools.len(), 1);
+    assert_eq!(request.tools[0].name, "a");
+}
+
+#[tokio::test]
+async fn contextual_selection_varies_by_depth() {
+    use crate::harness::context::{RunConfig, RunContext};
+    // Sub-agent depth (>0) hides the privileged tool.
+    let ctx_data = RunContext::new(RunConfig::new("deep").with_depth(2), ());
+    let mut ctx = ctx_data;
+    let mw = ContextualToolSelectionMiddleware::new(Arc::new(|schema: &ToolSchema, sel| {
+        schema.name != "privileged" || sel.depth == 0
+    }));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    let mut request = ModelRequest::new(Vec::new())
+        .with_tools(vec![schema_named("safe"), schema_named("privileged")]);
+    stack
+        .run_before_model(&mut ctx, &(), &mut request)
+        .await
+        .unwrap();
+    assert_eq!(request.tools.len(), 1);
+    assert_eq!(request.tools[0].name, "safe");
+}
+
 // ── BudgetMiddleware ────────────────────────────────────────────────────────
 
 fn response_with_usage(model: &str, input: u64, output: u64) -> ModelResponse {

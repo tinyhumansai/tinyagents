@@ -685,6 +685,70 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx>
     }
 }
 
+// ── ContextualToolSelectionMiddleware ─────────────────────────────────────────
+
+impl ContextualToolSelectionMiddleware {
+    /// Creates a selection middleware from a context-aware predicate.
+    pub fn new(predicate: ContextualToolPredicate) -> Self {
+        Self {
+            label: "contextual_tool_selection",
+            predicate,
+        }
+    }
+
+    /// Builds a selection middleware from explicit allow/deny lists.
+    ///
+    /// Composition rules (fail-closed):
+    /// - a tool named in `deny` is always hidden;
+    /// - when `allow` is `Some`, a tool must be named in it to be exposed
+    ///   (unknown tools are hidden);
+    /// - when `allow` is `None`, everything not denied is exposed.
+    pub fn from_lists(
+        allow: Option<impl IntoIterator<Item = impl Into<String>>>,
+        deny: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let allow: Option<HashSet<String>> =
+            allow.map(|names| names.into_iter().map(Into::into).collect());
+        let deny: HashSet<String> = deny.into_iter().map(Into::into).collect();
+        Self::new(Arc::new(move |schema: &ToolSchema, _ctx| {
+            if deny.contains(&schema.name) {
+                return false;
+            }
+            match &allow {
+                Some(set) => set.contains(&schema.name),
+                None => true,
+            }
+        }))
+    }
+}
+
+#[async_trait]
+impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx>
+    for ContextualToolSelectionMiddleware
+{
+    fn name(&self) -> &str {
+        self.label
+    }
+
+    async fn before_model(
+        &self,
+        ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        request: &mut ModelRequest,
+    ) -> Result<()> {
+        let selection = ToolSelectionContext {
+            run_id: ctx.config.run_id.as_str().to_string(),
+            depth: ctx.config.depth,
+            tags: ctx.config.tags.clone(),
+            requested_model: request.model.clone(),
+        };
+        request
+            .tools
+            .retain(|schema| (self.predicate)(schema, &selection));
+        Ok(())
+    }
+}
+
 // ── HumanApprovalMiddleware ───────────────────────────────────────────────────
 
 impl HumanApprovalMiddleware {
