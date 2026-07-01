@@ -88,6 +88,20 @@ impl ModelCatalog {
             entry.model_id == model_id || entry.aliases.iter().any(|alias| alias == model_id)
         })
     }
+
+    /// Hydrates a runtime
+    /// [`ModelProfile`][crate::harness::model::ModelProfile] from the catalog
+    /// entry for `provider`/`model_id`, bridging offline catalog facts into the
+    /// capability profile resolution and fallback consume. Returns `None` when
+    /// no entry matches.
+    pub fn profile(
+        &self,
+        provider: &str,
+        model_id: &str,
+    ) -> Option<crate::harness::model::ModelProfile> {
+        self.get(provider, model_id)
+            .map(crate::harness::model::ModelProfile::from_catalog_entry)
+    }
 }
 
 /// The deserialized form of a model-catalog snapshot file.
@@ -260,5 +274,22 @@ mod tests {
         let by_alias = catalog.get_by_model_id("gemini-2.5-pro").unwrap();
 
         assert_eq!(by_id.model_id, by_alias.model_id);
+    }
+
+    #[test]
+    fn bridges_catalog_entry_into_runtime_profile() {
+        let catalog = ModelCatalog::seed().unwrap();
+        let entry = catalog.get("openai", "gpt-4.1").unwrap();
+
+        let profile = crate::harness::model::ModelProfile::from_catalog_entry(entry);
+        assert_eq!(profile.provider.as_deref(), Some("openai"));
+        assert_eq!(profile.model.as_deref(), Some("gpt-4.1"));
+        // The catalog's advertised capability flags carry across the bridge.
+        assert_eq!(profile.tool_calling, entry.capabilities.tool_calling);
+        assert_eq!(profile.max_input_tokens, entry.max_input_tokens);
+
+        // The convenience accessor returns the same bridged profile.
+        let via_catalog = catalog.profile("openai", "gpt-4.1").unwrap();
+        assert_eq!(via_catalog, profile);
     }
 }

@@ -78,6 +78,29 @@ fn tool_choice_defaults_to_auto() {
 }
 
 #[test]
+fn lifecycle_helpers_gate_retired_and_deprecated_models() {
+    use crate::harness::model::ModelStatus;
+
+    let stable = ModelProfile::default();
+    assert!(stable.is_usable());
+    assert!(!stable.is_deprecated());
+
+    let deprecated = ModelProfile {
+        status: ModelStatus::Deprecated,
+        ..ModelProfile::default()
+    };
+    assert!(deprecated.is_usable()); // still callable, but flagged
+    assert!(deprecated.is_deprecated());
+
+    let retired = ModelProfile {
+        status: ModelStatus::Retired,
+        ..ModelProfile::default()
+    };
+    assert!(!retired.is_usable());
+    assert!(retired.is_deprecated());
+}
+
+#[test]
 fn cacheable_prefix_ids_in_order() {
     let req = ModelRequest::new(vec![]).with_cache_segments(vec![
         PromptSegment {

@@ -81,6 +81,63 @@ impl ModelProfile {
         true
     }
 
+    /// Returns `true` when the model is usable for new calls: any status except
+    /// [`ModelStatus::Retired`].
+    ///
+    /// Resolution and fallback can use this to reject models a provider no
+    /// longer serves without a bespoke lookup table.
+    pub fn is_usable(&self) -> bool {
+        self.status != ModelStatus::Retired
+    }
+
+    /// Returns `true` when the model is deprecated (slated for removal) or
+    /// already retired — callers should prefer a successor.
+    pub fn is_deprecated(&self) -> bool {
+        matches!(self.status, ModelStatus::Deprecated | ModelStatus::Retired)
+    }
+
+    /// Builds a runtime [`ModelProfile`] from an offline
+    /// [`ModelCatalogEntry`][crate::registry::catalog::ModelCatalogEntry].
+    ///
+    /// This is the bridge between the two capability models: the checked-in
+    /// catalog (facts: pricing, context windows, deprecation, capability flags)
+    /// and the runtime profile used by resolution/fallback. A model that carries
+    /// no hardcoded profile can be hydrated from the catalog so capability
+    /// gating and lifecycle checks still apply. A published `deprecation_date`
+    /// maps to [`ModelStatus::Deprecated`] (retirement is not inferred from a
+    /// date, to avoid depending on the wall clock).
+    pub fn from_catalog_entry(entry: &crate::registry::catalog::ModelCatalogEntry) -> Self {
+        let caps = &entry.capabilities;
+        Self {
+            provider: Some(entry.provider.clone()),
+            model: Some(entry.model_id.clone()),
+            display_name: None,
+            status: if entry.deprecation_date.is_some() {
+                ModelStatus::Deprecated
+            } else {
+                ModelStatus::Stable
+            },
+            release_date: None,
+            modalities: Modalities {
+                text_in: true,
+                text_out: true,
+                image_in: caps.vision,
+                image_out: false,
+                audio_in: caps.audio_input,
+                audio_out: caps.audio_output,
+            },
+            tool_calling: caps.tool_calling,
+            parallel_tool_calls: caps.parallel_tool_calling,
+            streaming: caps.streaming,
+            streaming_tool_chunks: caps.streaming && caps.tool_calling,
+            native_structured_output: caps.json_schema,
+            json_schema: caps.json_schema,
+            reasoning: caps.reasoning,
+            max_input_tokens: entry.max_input_tokens,
+            max_output_tokens: entry.max_output_tokens,
+        }
+    }
+
     /// A permissive profile that advertises every capability and broad
     /// modalities. Useful for mocks and tests.
     pub fn permissive() -> Self {
