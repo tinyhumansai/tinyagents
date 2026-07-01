@@ -166,3 +166,62 @@ async fn spawn_and_status_run_through_tool_trait() {
 
     assert_eq!(inspected.raw.unwrap()["status"], "pending");
 }
+
+#[tokio::test]
+async fn steer_tool_delivers_command_through_steering_registry() {
+    use crate::harness::steering::{SteeringCommand, SteeringHandle};
+
+    let store: Arc<dyn TaskStore> = Arc::new(InMemoryTaskStore::new());
+    let steering = SteeringRegistry::new();
+
+    // Spawn a task and mark it running; register a steering handle for it.
+    let task_id = TaskId::new("child-1");
+    store.insert(graph_spec(task_id.as_str())).unwrap();
+    store.mark_running(&task_id).unwrap();
+    let handle = SteeringHandle::allow_all();
+    steering.register(task_id.clone(), handle.clone());
+
+    let steer = OrchestrationTool::new(OrchestrationToolKind::Steer, store.clone())
+        .with_steering(steering.clone());
+
+    let result = steer
+        .call(
+            &(),
+            ToolCall::new(
+                "call-steer",
+                "orchestrate_steer",
+                json!({ "task_id": task_id.as_str(), "command": "pause" }),
+            ),
+        )
+        .await
+        .unwrap();
+
+    // The command was accepted and actually delivered to the live handle.
+    assert_eq!(result.raw.as_ref().unwrap()["accepted"], true);
+    let drained = handle.drain();
+    assert_eq!(drained.len(), 1);
+    assert!(matches!(drained[0], SteeringCommand::Pause));
+}
+
+#[tokio::test]
+async fn steer_tool_reports_not_delivered_without_registered_handle() {
+    let store: Arc<dyn TaskStore> = Arc::new(InMemoryTaskStore::new());
+    let task_id = TaskId::new("child-2");
+    store.insert(graph_spec(task_id.as_str())).unwrap();
+    store.mark_running(&task_id).unwrap();
+
+    // No steering registry attached -> recorded but not delivered.
+    let steer = OrchestrationTool::new(OrchestrationToolKind::Steer, store.clone());
+    let result = steer
+        .call(
+            &(),
+            ToolCall::new(
+                "call-steer",
+                "orchestrate_steer",
+                json!({ "task_id": task_id.as_str(), "command": "pause" }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.raw.as_ref().unwrap()["accepted"], false);
+}

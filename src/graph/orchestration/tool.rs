@@ -1,16 +1,55 @@
 //! Ordinary harness tools for graph orchestration controls.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::harness::ids::{GraphId, TaskId, new_call_id, next_seq};
+use crate::harness::steering::{SteeringCommand, SteeringHandle};
 use crate::harness::tool::{Tool, ToolCall, ToolRegistry, ToolResult, ToolSchema};
 use crate::{Result, TinyAgentsError};
 
 use super::store::{TaskStore, orchestration_not_found};
 use super::types::*;
+
+/// A registry mapping managed task ids to the live [`SteeringHandle`] of the
+/// run executing that task.
+///
+/// This is the bridge that lets the model-visible `orchestrate_steer` tool
+/// deliver a real [`SteeringCommand`] into a running child, instead of merely
+/// recording that steering was requested. An executor that spawns a task
+/// registers its run's steering handle here; the steer tool looks it up by task
+/// id and enqueues the command. Cheaply clonable through an inner [`Arc`].
+#[derive(Clone, Default)]
+pub struct SteeringRegistry {
+    inner: Arc<Mutex<HashMap<TaskId, SteeringHandle>>>,
+}
+
+impl SteeringRegistry {
+    /// Creates an empty steering registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers the steering handle for `task_id`, replacing any prior handle.
+    pub fn register(&self, task_id: TaskId, handle: SteeringHandle) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.insert(task_id, handle);
+        }
+    }
+
+    /// Removes and returns the handle registered for `task_id`, if any.
+    pub fn deregister(&self, task_id: &TaskId) -> Option<SteeringHandle> {
+        self.inner.lock().ok().and_then(|mut g| g.remove(task_id))
+    }
+
+    /// Returns the handle registered for `task_id`, if any.
+    pub fn get(&self, task_id: &TaskId) -> Option<SteeringHandle> {
+        self.inner.lock().ok().and_then(|g| g.get(task_id).cloned())
+    }
+}
 
 /// A standard harness [`Tool`] for one orchestration control.
 ///
@@ -21,12 +60,24 @@ use super::types::*;
 pub struct OrchestrationTool {
     kind: OrchestrationToolKind,
     store: Arc<dyn TaskStore>,
+    steering: Option<SteeringRegistry>,
 }
 
 impl OrchestrationTool {
     /// Creates one orchestration tool backed by `store`.
     pub fn new(kind: OrchestrationToolKind, store: Arc<dyn TaskStore>) -> Self {
-        Self { kind, store }
+        Self {
+            kind,
+            store,
+            steering: None,
+        }
+    }
+
+    /// Attaches a [`SteeringRegistry`] so the `steer` control can deliver real
+    /// steering commands to the run executing a task.
+    pub fn with_steering(mut self, steering: SteeringRegistry) -> Self {
+        self.steering = Some(steering);
+        self
     }
 
     /// The control kind this tool implements.
@@ -200,14 +251,62 @@ impl OrchestrationTool {
             .store
             .get(&task_id)
             .ok_or_else(|| orchestration_not_found(&task_id))?;
+        let command_label = required_str(args, "command")?;
+
+        // Deliver the command to the running child when a steering handle is
+        // registered for this task and the task is still live; otherwise the
+        // request is recorded but not delivered (accepted = false).
+        let delivered = if record.status.is_live() {
+            match self.steering.as_ref().and_then(|reg| reg.get(&task_id)) {
+                Some(handle) => {
+                    let command = parse_steering_command(command_label, args)?;
+                    handle.send(command);
+                    true
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+
         Ok(json!({
             "task_id": task_id,
             "status": record.status,
-            "command": required_str(args, "command")?,
-            "accepted": record.status.is_live(),
+            "command": command_label,
+            "accepted": delivered,
             "steering_id": new_call_id(),
         }))
     }
+}
+
+/// Parses a model-supplied steering command label + args into a
+/// [`SteeringCommand`].
+fn parse_steering_command(command: &str, args: &Value) -> Result<SteeringCommand> {
+    match command {
+        "pause" => Ok(SteeringCommand::Pause),
+        "resume" => Ok(SteeringCommand::Resume),
+        "cancel" => Ok(SteeringCommand::Cancel),
+        "redirect" => Ok(SteeringCommand::Redirect {
+            instruction: required_str(args, "instruction")?.to_string(),
+        }),
+        other => Err(TinyAgentsError::Validation(format!(
+            "unknown steering command `{other}` (expected pause, resume, cancel, or redirect)"
+        ))),
+    }
+}
+
+/// Builds every built-in orchestration control, wiring `steering` into the
+/// `steer` control so it can deliver real steering commands.
+pub fn orchestration_tools_with_steering(
+    store: Arc<dyn TaskStore>,
+    steering: SteeringRegistry,
+) -> Vec<Arc<OrchestrationTool>> {
+    OrchestrationToolKind::ALL
+        .into_iter()
+        .map(|kind| {
+            Arc::new(OrchestrationTool::new(kind, store.clone()).with_steering(steering.clone()))
+        })
+        .collect()
 }
 
 /// Returns model-visible schemas for all built-in orchestration tools.

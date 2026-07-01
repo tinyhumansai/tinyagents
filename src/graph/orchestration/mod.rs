@@ -16,8 +16,8 @@ mod types;
 
 pub use store::{InMemoryTaskStore, JsonlTaskStore, TaskStore};
 pub use tool::{
-    OrchestrationTool, orchestration_tool_schema, orchestration_tool_schemas, orchestration_tools,
-    register_orchestration_tools,
+    OrchestrationTool, SteeringRegistry, orchestration_tool_schema, orchestration_tool_schemas,
+    orchestration_tools, orchestration_tools_with_steering, register_orchestration_tools,
 };
 pub use types::*;
 

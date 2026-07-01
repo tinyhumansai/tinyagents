@@ -65,9 +65,9 @@ pub use observability::{
 pub use orchestration::{
     InMemoryTaskStore, JsonlTaskStore, OrchestrationControlOutcome, OrchestrationTaskFilter,
     OrchestrationTaskKind, OrchestrationTaskRecord, OrchestrationTaskResult, OrchestrationTaskSpec,
-    OrchestrationTaskStatus, OrchestrationTool, OrchestrationToolKind, TaskStore,
+    OrchestrationTaskStatus, OrchestrationTool, OrchestrationToolKind, SteeringRegistry, TaskStore,
     orchestration_tool_schema, orchestration_tool_schemas, orchestration_tools,
-    register_orchestration_tools,
+    orchestration_tools_with_steering, register_orchestration_tools,
 };
 pub use recursion::{
     ChildRun, ChildRunSink, RecursionFrame, RecursionPolicy, RecursionStack, RunTree,
