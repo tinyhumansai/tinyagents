@@ -73,6 +73,18 @@ pub enum AgentEvent {
         usage: Option<Usage>,
     },
 
+    /// A tool-selection middleware filtered the model-visible tool set before a
+    /// model call. Makes exposure decisions auditable: a UI or log can see
+    /// which tools were withheld from the model and by which policy.
+    ToolsFiltered {
+        /// Name of the middleware/policy that made the decision.
+        by: String,
+        /// Tools removed from the model-visible set, in their original order.
+        excluded: Vec<String>,
+        /// Number of tools left exposed to the model.
+        remaining: usize,
+    },
+
     /// A tool invocation has been dispatched.
     ToolStarted {
         /// Identifier for this tool call, correlates with completion.
@@ -414,6 +426,7 @@ impl AgentEvent {
             AgentEvent::ModelStarted { .. } => "model.started",
             AgentEvent::ModelDelta { .. } => "model.delta",
             AgentEvent::ModelCompleted { .. } => "model.completed",
+            AgentEvent::ToolsFiltered { .. } => "tool.filtered",
             AgentEvent::ToolStarted { .. } => "tool.started",
             AgentEvent::ToolCompleted { .. } => "tool.completed",
             AgentEvent::UnknownToolCall { .. } => "tool.unknown",

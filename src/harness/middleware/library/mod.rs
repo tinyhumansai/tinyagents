@@ -710,6 +710,44 @@ impl ContextualToolSelectionMiddleware {
         let allow: Option<HashSet<String>> =
             allow.map(|names| names.into_iter().map(Into::into).collect());
         let deny: HashSet<String> = deny.into_iter().map(Into::into).collect();
+        Self::from_resolved_lists(allow, deny)
+    }
+
+    /// Builds a selection middleware whose effective policy is a child allow/deny
+    /// pair *composed with* an inherited parent policy, so a delegated sub-agent
+    /// can only ever narrow — never widen — the tools its parent allowed.
+    ///
+    /// Inheritance rules:
+    /// - **deny is additive**: the effective denylist is `parent_deny ∪ child_deny`
+    ///   (a child cannot un-deny what the parent denied);
+    /// - **allow is intersective**: if both parent and child restrict to an
+    ///   allowlist, the effective allowlist is their intersection; if only one
+    ///   restricts, that allowlist applies; if neither does, all-not-denied is
+    ///   exposed.
+    ///
+    /// The result is fail-closed for the same reasons as [`Self::from_lists`].
+    pub fn inheriting(
+        parent_allow: Option<impl IntoIterator<Item = impl Into<String>>>,
+        parent_deny: impl IntoIterator<Item = impl Into<String>>,
+        child_allow: Option<impl IntoIterator<Item = impl Into<String>>>,
+        child_deny: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let parent_allow: Option<HashSet<String>> =
+            parent_allow.map(|n| n.into_iter().map(Into::into).collect());
+        let child_allow: Option<HashSet<String>> =
+            child_allow.map(|n| n.into_iter().map(Into::into).collect());
+        let allow = match (parent_allow, child_allow) {
+            (Some(p), Some(c)) => Some(p.intersection(&c).cloned().collect()),
+            (Some(p), None) => Some(p),
+            (None, Some(c)) => Some(c),
+            (None, None) => None,
+        };
+        let mut deny: HashSet<String> = parent_deny.into_iter().map(Into::into).collect();
+        deny.extend(child_deny.into_iter().map(Into::into));
+        Self::from_resolved_lists(allow, deny)
+    }
+
+    fn from_resolved_lists(allow: Option<HashSet<String>>, deny: HashSet<String>) -> Self {
         Self::new(Arc::new(move |schema: &ToolSchema, _ctx| {
             if deny.contains(&schema.name) {
                 return false;
@@ -742,9 +780,22 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx>
             tags: ctx.config.tags.clone(),
             requested_model: request.model.clone(),
         };
-        request
-            .tools
-            .retain(|schema| (self.predicate)(schema, &selection));
+        let mut excluded = Vec::new();
+        request.tools.retain(|schema| {
+            let keep = (self.predicate)(schema, &selection);
+            if !keep {
+                excluded.push(schema.name.clone());
+            }
+            keep
+        });
+        // Make the exposure decision auditable when it actually withheld tools.
+        if !excluded.is_empty() {
+            ctx.emit(AgentEvent::ToolsFiltered {
+                by: self.label.to_string(),
+                excluded,
+                remaining: request.tools.len(),
+            });
+        }
         Ok(())
     }
 }

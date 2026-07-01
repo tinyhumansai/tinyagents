@@ -330,6 +330,66 @@ async fn contextual_selection_from_lists_denies_and_fails_closed() {
 }
 
 #[tokio::test]
+async fn contextual_selection_emits_exposure_event() {
+    let (mut ctx, recorder) = ctx_with_recorder();
+    let mw = ContextualToolSelectionMiddleware::from_lists(Some(["a"]), ["b"]);
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    let mut request = ModelRequest::new(Vec::new()).with_tools(vec![
+        schema_named("a"),
+        schema_named("b"),
+        schema_named("c"),
+    ]);
+    stack
+        .run_before_model(&mut ctx, &(), &mut request)
+        .await
+        .unwrap();
+
+    let filtered = recorder.events().into_iter().find_map(|r| match r.event {
+        AgentEvent::ToolsFiltered {
+            excluded,
+            remaining,
+            ..
+        } => Some((excluded, remaining)),
+        _ => None,
+    });
+    let (excluded, remaining) = filtered.expect("an exposure event should be emitted");
+    assert_eq!(remaining, 1);
+    assert_eq!(excluded, vec!["b".to_string(), "c".to_string()]);
+}
+
+#[tokio::test]
+async fn contextual_selection_inheriting_narrows_never_widens() {
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    // Parent allows [a,b,c]; child tries to allow [b,c,d] and un-deny nothing.
+    // Parent denies [c]. Effective: allow = {a,b,c} ∩ {b,c,d} = {b,c}; deny adds
+    // parent's c -> {c}. So only `b` survives; `d` (never parent-allowed) and
+    // `c` (parent-denied) are withheld.
+    let mw = ContextualToolSelectionMiddleware::inheriting(
+        Some(["a", "b", "c"]),
+        ["c"],
+        Some(["b", "c", "d"]),
+        Vec::<String>::new(),
+    );
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    let mut request = ModelRequest::new(Vec::new()).with_tools(vec![
+        schema_named("a"),
+        schema_named("b"),
+        schema_named("c"),
+        schema_named("d"),
+    ]);
+    stack
+        .run_before_model(&mut ctx, &(), &mut request)
+        .await
+        .unwrap();
+    let names: Vec<_> = request.tools.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["b"]);
+}
+
+#[tokio::test]
 async fn contextual_selection_varies_by_depth() {
     use crate::harness::context::{RunConfig, RunContext};
     // Sub-agent depth (>0) hides the privileged tool.
