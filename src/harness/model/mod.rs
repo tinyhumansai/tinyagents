@@ -558,6 +558,9 @@ impl<State: Send + Sync> Default for ModelRegistry<State> {
 pub struct StreamAccumulator {
     /// Concatenated text fragments.
     text: String,
+    /// Accumulated reasoning/thinking fragments (side channel; not merged into
+    /// the final message text).
+    reasoning: String,
     /// Per-call-id accumulated tool-call argument fragments, in first-seen
     /// order.
     tool_chunks: Vec<(String, String)>,
@@ -581,6 +584,7 @@ impl StreamAccumulator {
             ModelStreamItem::Started => {}
             ModelStreamItem::MessageDelta(delta) => {
                 self.text.push_str(&delta.text);
+                self.reasoning.push_str(&delta.reasoning);
                 if let Some(tool_call) = &delta.tool_call {
                     self.push_tool_chunk(&tool_call.call_id, &tool_call.content);
                 }
@@ -627,6 +631,12 @@ impl StreamAccumulator {
     /// folded in.
     pub fn is_terminal(&self) -> bool {
         self.completed.is_some() || self.failed.is_some()
+    }
+
+    /// Returns the accumulated reasoning/thinking text streamed so far (the
+    /// side channel kept out of the final message text).
+    pub fn reasoning(&self) -> &str {
+        &self.reasoning
     }
 
     /// Consumes the accumulator and returns the merged response.

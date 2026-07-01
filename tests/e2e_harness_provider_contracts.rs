@@ -233,6 +233,7 @@ async fn model_request_response_registry_and_stream_contracts_are_stable() {
     accumulator.push(&ModelStreamItem::Started);
     accumulator.push(&ModelStreamItem::MessageDelta(MessageDelta {
         text: "hel".into(),
+        reasoning: String::new(),
         tool_call: None,
     }));
     accumulator.push(&ModelStreamItem::ToolCallDelta(ToolDelta {
@@ -246,6 +247,7 @@ async fn model_request_response_registry_and_stream_contracts_are_stable() {
     accumulator.push(&ModelStreamItem::UsageDelta(Usage::new(4, 5)));
     accumulator.push(&ModelStreamItem::MessageDelta(MessageDelta {
         text: "lo".into(),
+        reasoning: String::new(),
         tool_call: None,
     }));
     assert!(!accumulator.is_terminal());
@@ -310,6 +312,7 @@ fn model_profiles_stream_chunks_usage_and_cost_are_additive() {
         StreamChunk::Updates(json!({ "state": 2 })),
         StreamChunk::Message(MessageDelta {
             text: "delta".into(),
+            reasoning: String::new(),
             tool_call: Some(ToolDelta {
                 call_id: "tool-1".into(),
                 content: "partial".into(),

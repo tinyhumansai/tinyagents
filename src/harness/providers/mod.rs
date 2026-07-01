@@ -285,10 +285,12 @@ impl<State: Send + Sync> ChatModel<State> for MockModel {
             let second: String = chars[mid..].iter().collect();
             items.push(ModelStreamItem::MessageDelta(MessageDelta {
                 text: first,
+                reasoning: String::new(),
                 tool_call: None,
             }));
             items.push(ModelStreamItem::MessageDelta(MessageDelta {
                 text: second,
+                reasoning: String::new(),
                 tool_call: None,
             }));
         }

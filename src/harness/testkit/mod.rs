@@ -73,6 +73,7 @@ impl StreamingMock {
             full.push_str(&text);
             items.push(ModelStreamItem::MessageDelta(MessageDelta {
                 text,
+                reasoning: String::new(),
                 tool_call: None,
             }));
         }

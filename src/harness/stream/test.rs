@@ -15,6 +15,7 @@ fn smoke_sink_filters_by_mode() {
 
     sink.push(StreamChunk::Message(MessageDelta {
         text: "hello".into(),
+        reasoning: String::new(),
         tool_call: None,
     }));
     // Debug chunk should be discarded (mode not active).
@@ -49,6 +50,7 @@ fn smoke_stream_helper_filters() {
     let chunks = vec![
         StreamChunk::Message(MessageDelta {
             text: "tok".into(),
+            reasoning: String::new(),
             tool_call: None,
         }),
         StreamChunk::Debug("trace".into()),

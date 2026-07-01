@@ -523,3 +523,30 @@ async fn registry_rejects_unknown_profiles_when_capabilities_are_required() {
 
     assert!(registry.resolve_request(&request, None, None).is_none());
 }
+
+#[test]
+fn stream_accumulator_collects_reasoning_side_channel() {
+    use crate::harness::message::MessageDelta;
+
+    let mut acc = StreamAccumulator::new();
+    acc.push(&ModelStreamItem::Started);
+    acc.push(&ModelStreamItem::MessageDelta(MessageDelta::reasoning(
+        "thinking...",
+    )));
+    acc.push(&ModelStreamItem::MessageDelta(MessageDelta::text(
+        "visible",
+    )));
+    acc.push(&ModelStreamItem::MessageDelta(MessageDelta {
+        text: " answer".into(),
+        reasoning: " more".into(),
+        tool_call: None,
+    }));
+    acc.push(&ModelStreamItem::Completed(ModelResponse::assistant(
+        "visible answer",
+    )));
+
+    // Reasoning is a side channel, kept out of the final message text.
+    assert_eq!(acc.reasoning(), "thinking... more");
+    let response = acc.finish().unwrap();
+    assert_eq!(response.text(), "visible answer");
+}

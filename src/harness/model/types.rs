@@ -530,6 +530,7 @@ pub trait ChatModel<State: Send + Sync>: Send + Sync {
         let response = self.invoke(state, request).await?;
         let delta = MessageDelta {
             text: response.text(),
+            reasoning: String::new(),
             tool_call: None,
         };
         let items = vec![

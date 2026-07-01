@@ -724,6 +724,7 @@ impl OpenAiStreamAcc {
                 self.text.push_str(&content);
                 pending.push_back(ModelStreamItem::MessageDelta(MessageDelta {
                     text: content,
+                    reasoning: String::new(),
                     tool_call: None,
                 }));
             }

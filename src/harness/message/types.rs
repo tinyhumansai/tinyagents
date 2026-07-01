@@ -93,12 +93,41 @@ pub enum Message {
 }
 
 /// An incremental message update used for streaming model output.
+///
+/// The delta carries three provider-neutral channels so UI consumers can render
+/// visible text, reasoning/thinking, and tool-call assembly from one stream:
+/// [`text`](Self::text) (visible assistant output),
+/// [`reasoning`](Self::reasoning) (thinking output, kept out of the final
+/// message text), and [`tool_call`](Self::tool_call) (streamed tool-call
+/// fragments).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MessageDelta {
-    /// Incremental text fragment.
+    /// Incremental visible text fragment.
     #[serde(default)]
     pub text: String,
+    /// Incremental reasoning/thinking fragment, when the provider streams
+    /// reasoning separately from visible text.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning: String,
     /// Incremental tool-call fragment, when the provider streams tool calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call: Option<crate::harness::tool::ToolDelta>,
+}
+
+impl MessageDelta {
+    /// Creates a delta carrying only a visible text fragment.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Creates a delta carrying only a reasoning/thinking fragment.
+    pub fn reasoning(reasoning: impl Into<String>) -> Self {
+        Self {
+            reasoning: reasoning.into(),
+            ..Self::default()
+        }
+    }
 }

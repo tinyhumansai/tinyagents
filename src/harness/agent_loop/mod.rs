@@ -928,6 +928,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 ModelStreamItem::MessageDelta(delta) => Some(delta.clone()),
                 ModelStreamItem::ToolCallDelta(tool_delta) => Some(MessageDelta {
                     text: String::new(),
+                    reasoning: String::new(),
                     tool_call: Some(tool_delta.clone()),
                 }),
                 _ => None,
