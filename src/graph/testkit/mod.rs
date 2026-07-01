@@ -37,6 +37,7 @@
 //! single [`GraphRun`] is the test truth — execution, events, and checkpoints
 //! all read from it.
 
+pub mod conformance;
 mod types;
 
 pub use types::{
