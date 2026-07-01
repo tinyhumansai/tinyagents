@@ -67,6 +67,31 @@ fn smoke_event_sink_records_events() {
 }
 
 #[test]
+fn stream_id_prefix_makes_event_ids_stable_and_collision_free() {
+    // Two independent "processes" replaying the same run re-mint identical ids
+    // for the same (stream_id, offset) — stable across restart.
+    let first = EventSink::with_stream_id("run-42");
+    let second = EventSink::with_stream_id("run-42");
+    let a = first.emit(AgentEvent::StateUpdate);
+    let b = second.emit(AgentEvent::StateUpdate);
+    assert_eq!(a.id, b.id);
+    assert_eq!(a.id.as_str(), "run-42-evt-0");
+
+    // A different run never collides even though both restart at offset 0.
+    let other = EventSink::with_stream_id("run-99");
+    assert_ne!(other.emit(AgentEvent::StateUpdate).id, a.id);
+
+    // Default sinks get distinct process-unique prefixes, so two default sinks
+    // do not collide at offset 0 either.
+    let d1 = EventSink::new();
+    let d2 = EventSink::new();
+    assert_ne!(
+        d1.emit(AgentEvent::StateUpdate).id,
+        d2.emit(AgentEvent::StateUpdate).id
+    );
+}
+
+#[test]
 fn smoke_event_journal_replay() {
     let journal = EventJournal::new();
 

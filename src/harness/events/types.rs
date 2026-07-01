@@ -519,6 +519,11 @@ pub struct EventSink {
 
 /// Interior state shared among all clones of an [`EventSink`].
 pub(crate) struct EventSinkInner {
+    /// Stream-scoping prefix for emitted [`EventId`]s. Combined with the
+    /// per-emit `offset` to form ids of the form `{stream_id}-evt-{offset}`,
+    /// so ids stay unique across sinks and, when the prefix is a stable
+    /// run/thread id, across process restarts (see [`EventSink::with_stream_id`]).
+    pub(crate) stream_id: String,
     /// Next offset to assign; incremented atomically on each `emit`.
     pub(crate) next_offset: u64,
     /// Registered listeners, notified in insertion order.

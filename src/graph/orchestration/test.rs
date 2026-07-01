@@ -212,11 +212,7 @@ async fn list_tool_honors_created_window_and_kind() {
     let none = list
         .call(
             &(),
-            ToolCall::new(
-                "l2",
-                "orchestrate_list",
-                json!({ "created_before_ms": 0 }),
-            ),
+            ToolCall::new("l2", "orchestrate_list", json!({ "created_before_ms": 0 })),
         )
         .await
         .unwrap();
@@ -226,11 +222,7 @@ async fn list_tool_honors_created_window_and_kind() {
     let all = list
         .call(
             &(),
-            ToolCall::new(
-                "l3",
-                "orchestrate_list",
-                json!({ "created_after_ms": 0 }),
-            ),
+            ToolCall::new("l3", "orchestrate_list", json!({ "created_after_ms": 0 })),
         )
         .await
         .unwrap();

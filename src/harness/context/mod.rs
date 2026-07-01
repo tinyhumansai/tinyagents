@@ -163,11 +163,15 @@ impl<Ctx> RunContext<Ctx> {
     /// [`Self::with_events`] to inject shared instances instead.
     pub fn new(config: RunConfig, data: Ctx) -> Self {
         let limits = LimitTracker::new(config.to_run_limits());
+        // Seed the owned sink's event-id prefix from the run id so this run's
+        // event ids are stable and collision-free across process restarts
+        // (a durable journal replayed after a restart re-mints the same ids).
+        let events = EventSink::with_stream_id(config.run_id.as_str());
         Self {
             config,
             data,
             stores: StoreRegistry::new(),
-            events: EventSink::new(),
+            events,
             limits,
             steering: None,
             cancellation: CancellationToken::new(),

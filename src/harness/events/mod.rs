@@ -47,9 +47,26 @@ use crate::harness::usage::UsageTotals;
 
 impl EventSink {
     /// Creates a new, empty event sink with no registered listeners.
+    ///
+    /// The sink is given a process-unique stream prefix (`s<n>`), so distinct
+    /// sinks never mint colliding [`EventId`]s within one process. For ids that
+    /// stay unique *across process restarts* — the case that matters for a
+    /// durable journal aggregating many runs — construct the sink with
+    /// [`Self::with_stream_id`] seeded from a stable run/thread id instead.
     pub fn new() -> Self {
+        Self::with_stream_id(format!("s{}", crate::harness::ids::next_seq()))
+    }
+
+    /// Creates a new, empty event sink whose emitted [`EventId`]s are prefixed
+    /// with `stream_id`. Passing a stable, unique identifier (typically the
+    /// run's or root run's id) makes event ids reproducible and collision-free
+    /// across restarts: the same logical event re-emitted for the same
+    /// `(stream_id, offset)` gets the same id, and two different runs never
+    /// share ids even if both restart their offset counter at zero.
+    pub fn with_stream_id(stream_id: impl Into<String>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(EventSinkInner {
+                stream_id: stream_id.into(),
                 next_offset: 0,
                 listeners: Vec::new(),
             })),
@@ -77,7 +94,7 @@ impl EventSink {
             let mut inner = self.inner.lock().expect("EventSink lock poisoned");
             let offset = inner.next_offset;
             inner.next_offset += 1;
-            let id = crate::harness::ids::EventId::new(format!("evt-{offset}"));
+            let id = crate::harness::ids::EventId::new(format!("{}-evt-{offset}", inner.stream_id));
             let record = EventRecord { id, offset, event };
             (record, inner.listeners.clone())
         };
