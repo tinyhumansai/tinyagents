@@ -73,7 +73,10 @@ pub mod repl;
 pub use error::{Result, TinyAgentsError};
 
 // --- Registry: named capability catalog (.rag/.ragsh binding by name) ---
-pub use registry::{CapabilityRegistry, ComponentId, ComponentKind, ComponentMetadata};
+pub use registry::{
+    CapabilityRegistry, ComponentId, ComponentKind, ComponentMetadata, DiagnosticSeverity,
+    RegistryDiagnostic, RegistrySnapshot,
+};
 
 // --- Language: registry → blueprint binding façade ---
 // The strict, registry-backed entry points the REPL and orchestrators use to

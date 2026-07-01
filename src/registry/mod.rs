@@ -24,6 +24,7 @@
 pub mod capability;
 pub mod catalog;
 pub mod component;
+pub mod diagnostics;
 
 pub use capability::CapabilityRegistry;
 pub use catalog::{
@@ -31,3 +32,4 @@ pub use catalog::{
     ModelPricing,
 };
 pub use component::{ComponentId, ComponentKind, ComponentMetadata};
+pub use diagnostics::{DiagnosticSeverity, RegistryDiagnostic, RegistrySnapshot};

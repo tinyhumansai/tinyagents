@@ -237,3 +237,38 @@ fn capability_resolver_includes_names_and_aliases() {
     assert!(resolver.tool_allowed("lookup_user"));
     assert!(!resolver.tool_allowed("unknown"));
 }
+
+#[test]
+fn snapshot_lists_components_sorted_by_kind_and_name() {
+    let mut reg = CapabilityRegistry::<()>::new();
+    reg.register_model("gpt-4o", Arc::new(FakeModel("m")))
+        .unwrap();
+    reg.register_tool(Arc::new(FakeTool("lookup_user")))
+        .unwrap();
+    reg.register_router("classify").unwrap();
+
+    let snapshot = reg.snapshot();
+    assert_eq!(snapshot.len(), 3);
+    assert_eq!(snapshot.count(ComponentKind::Model), 1);
+    assert_eq!(snapshot.by_kind(ComponentKind::Tool)[0].id.0, "lookup_user");
+    // Round-trips for audit logs / UIs.
+    let json = serde_json::to_string(&snapshot).unwrap();
+    let back: crate::registry::RegistrySnapshot = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, snapshot);
+    // DOT export clusters every registered kind.
+    let dot = snapshot.to_dot();
+    assert!(dot.contains("digraph registry"));
+    assert!(dot.contains("cluster_model"));
+}
+
+#[test]
+fn diagnostics_are_clean_for_a_healthy_registry() {
+    // `alias()` is fail-closed against shadowing and dangling targets, so a
+    // registry built through the public API always passes the integrity check.
+    let mut reg = CapabilityRegistry::<()>::new();
+    reg.register_model("gpt-4o", Arc::new(FakeModel("m")))
+        .unwrap();
+    reg.alias(ComponentKind::Model, "default", "gpt-4o")
+        .unwrap();
+    assert!(reg.diagnostics().is_empty());
+}

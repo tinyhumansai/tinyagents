@@ -439,6 +439,39 @@ impl<State: Send + Sync> CapabilityRegistry<State> {
     pub fn capability_resolver(&self) -> CapabilityResolver {
         CapabilityResolver::from_registry(self)
     }
+
+    // -----------------------------------------------------------------------
+    // Introspection / diagnostics
+    // -----------------------------------------------------------------------
+
+    /// Exports a serializable [`RegistrySnapshot`] of every registered
+    /// component's metadata, sorted by `(kind, name)`.
+    ///
+    /// This is the machine-readable view a CLI or UI renders to show exactly
+    /// what capabilities are active, and what an audit log records.
+    pub fn snapshot(&self) -> crate::registry::diagnostics::RegistrySnapshot {
+        let mut components: Vec<ComponentMetadata> = self.meta.values().cloned().collect();
+        components.sort_by(|a, b| (a.kind, &a.id.0).cmp(&(b.kind, &b.id.0)));
+        crate::registry::diagnostics::RegistrySnapshot { components }
+    }
+
+    /// Returns registry health diagnostics: aliases that shadow a registered
+    /// component of the same name (warning) and aliases whose canonical target
+    /// is not registered (error).
+    pub fn diagnostics(&self) -> Vec<crate::registry::diagnostics::RegistryDiagnostic> {
+        use crate::registry::diagnostics::{alias_shadows_component, dangling_alias};
+        let mut out = Vec::new();
+        for ((kind, alias), canonical) in &self.aliases {
+            if self.meta.contains_key(&(*kind, alias.clone())) {
+                out.push(alias_shadows_component(*kind, alias));
+            }
+            if !self.meta.contains_key(&(*kind, canonical.clone())) {
+                out.push(dangling_alias(*kind, alias, canonical));
+            }
+        }
+        out.sort_by(|a, b| (a.kind, &a.name).cmp(&(b.kind, &b.name)));
+        out
+    }
 }
 
 impl<State: Send + Sync> Default for CapabilityRegistry<State> {
