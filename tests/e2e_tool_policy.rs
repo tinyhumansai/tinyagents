@@ -19,6 +19,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
+use tinyagents::harness::context::{RunConfig, RunContext};
 use tinyagents::harness::message::{AssistantMessage, ContentBlock, Message};
 use tinyagents::harness::middleware::ToolPolicyMiddleware;
 use tinyagents::harness::model::ModelResponse;
@@ -26,9 +27,11 @@ use tinyagents::harness::runtime::AgentHarness;
 use tinyagents::harness::testkit::ScriptedModel;
 use tinyagents::harness::tool::ToolCall as TC;
 use tinyagents::harness::tool::{
-    Tool, ToolAccess, ToolCall, ToolPolicy, ToolResult, ToolSchema, ToolSideEffects,
+    SandboxMode, Tool, ToolAccess, ToolCall, ToolPolicy, ToolResult, ToolRuntime, ToolSchema,
+    ToolSideEffects,
 };
 use tinyagents::harness::usage::Usage;
+use tinyagents::harness::workspace::WorkspaceDescriptor;
 use tinyagents::{Result, TinyAgentsError};
 
 // ── Model response builders (verbatim from the task spec) ─────────────────────
@@ -301,6 +304,219 @@ async fn require_background_safe_hides_foreground_only_tool() {
         exposed,
         vec!["safe"],
         "the non-background-safe tool must be hidden"
+    );
+}
+
+/// A classified tool that must run inside a sandbox.
+struct SandboxedTool;
+
+#[async_trait]
+impl Tool<()> for SandboxedTool {
+    fn name(&self) -> &str {
+        "shell"
+    }
+
+    fn description(&self) -> &str {
+        "Runs a command; must be sandboxed."
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(self.name(), self.description(), json!({"type": "object"}))
+    }
+
+    fn policy(&self) -> ToolPolicy {
+        ToolPolicy::classified().with_runtime(ToolRuntime {
+            sandbox: SandboxMode::Required,
+            ..ToolRuntime::default()
+        })
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        Ok(ToolResult::text(call.id, self.name(), "ran"))
+    }
+}
+
+/// A classified tool that requires human approval before execution.
+struct DeployTool;
+
+#[async_trait]
+impl Tool<()> for DeployTool {
+    fn name(&self) -> &str {
+        "deploy"
+    }
+
+    fn description(&self) -> &str {
+        "Ships to production; requires approval."
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(self.name(), self.description(), json!({"type": "object"}))
+    }
+
+    fn policy(&self) -> ToolPolicy {
+        ToolPolicy::classified().with_access(ToolAccess {
+            approval_required: true,
+            ..ToolAccess::default()
+        })
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        Ok(ToolResult::text(call.id, self.name(), "deployed"))
+    }
+}
+
+/// A classified tool whose declared `max_result_bytes` is smaller than the
+/// content it returns, so `enforce_result_bytes` must truncate it.
+struct BigReaderTool;
+
+#[async_trait]
+impl Tool<()> for BigReaderTool {
+    fn name(&self) -> &str {
+        "reader"
+    }
+
+    fn description(&self) -> &str {
+        "Returns a large payload capped by max_result_bytes."
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(self.name(), self.description(), json!({"type": "object"}))
+    }
+
+    fn policy(&self) -> ToolPolicy {
+        ToolPolicy::classified().with_runtime(ToolRuntime {
+            max_result_bytes: Some(4),
+            ..ToolRuntime::default()
+        })
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        Ok(ToolResult::text(call.id, self.name(), "abcdefgh"))
+    }
+}
+
+/// `require_sandbox(true)` blocks a sandbox-required tool when the run has no
+/// sandboxed workspace, and admits it once a `SandboxMode::Required` workspace
+/// is threaded through the [`RunContext`].
+#[tokio::test]
+async fn require_sandbox_blocks_without_workspace_and_admits_with_one() {
+    fn build_harness() -> (Arc<ScriptedModel>, AgentHarness<()>) {
+        let scripted = Arc::new(ScriptedModel::new(vec![
+            tool_call_response("c1", "shell", json!({})),
+            text_response("done"),
+        ]));
+        let mut h: AgentHarness<()> = AgentHarness::new();
+        h.register_model("mock", scripted.clone());
+        h.register_tool(Arc::new(SandboxedTool));
+        let mw = ToolPolicyMiddleware::new(h.tools().policies()).require_sandbox(true);
+        h.push_middleware(Arc::new(mw));
+        (scripted, h)
+    }
+
+    // No workspace on the run -> the sandbox requirement fails closed.
+    let (_scripted, h) = build_harness();
+    let bare = RunContext::new(RunConfig::new("no-sandbox"), ());
+    let err = h
+        .invoke_in_context(&(), bare, vec![Message::user("go")])
+        .await
+        .expect_err("a sandbox-required tool must be blocked without a sandbox");
+    assert!(
+        matches!(err, TinyAgentsError::Validation(_)),
+        "expected a Validation error, got {err:?}"
+    );
+
+    // A sandboxed workspace satisfies the requirement and the tool runs.
+    let (_scripted, h) = build_harness();
+    let sandboxed = RunContext::new(RunConfig::new("sandboxed"), ())
+        .with_workspace(WorkspaceDescriptor::new("/work").with_sandbox(SandboxMode::Required));
+    let run = h
+        .invoke_in_context(&(), sandboxed, vec![Message::user("go")])
+        .await
+        .expect("a sandboxed run admits the tool");
+    assert_eq!(run.tool_calls, 1, "the sandboxed tool ran");
+    assert_eq!(run.text(), Some("done".to_string()));
+}
+
+/// `require_approval` blocks an approval-required tool the model tries to call
+/// when it is not in the approved set, surfacing a [`TinyAgentsError::Validation`].
+#[tokio::test]
+async fn require_approval_blocks_unapproved_tool() {
+    let scripted = Arc::new(ScriptedModel::new(vec![
+        tool_call_response("c1", "deploy", json!({})),
+        text_response("done"),
+    ]));
+
+    let mut h: AgentHarness<()> = AgentHarness::new();
+    h.register_model("mock", scripted.clone());
+    h.register_tool(Arc::new(DeployTool));
+
+    // Only "other" is pre-approved, so "deploy" is denied at execution time.
+    let mw = ToolPolicyMiddleware::new(h.tools().policies()).require_approval(["other"]);
+    h.push_middleware(Arc::new(mw));
+
+    let err = h
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect_err("an unapproved approval-required tool must be denied");
+    assert!(
+        matches!(err, TinyAgentsError::Validation(_)),
+        "expected a Validation error, got {err:?}"
+    );
+}
+
+/// `require_approval` admits a tool that is in the approved set, and it runs to
+/// completion.
+#[tokio::test]
+async fn require_approval_admits_preapproved_tool() {
+    let scripted = Arc::new(ScriptedModel::new(vec![
+        tool_call_response("c1", "deploy", json!({})),
+        text_response("shipped"),
+    ]));
+
+    let mut h: AgentHarness<()> = AgentHarness::new();
+    h.register_model("mock", scripted.clone());
+    h.register_tool(Arc::new(DeployTool));
+
+    let mw = ToolPolicyMiddleware::new(h.tools().policies()).require_approval(["deploy"]);
+    h.push_middleware(Arc::new(mw));
+
+    let run = h
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("a pre-approved tool runs");
+    assert_eq!(run.tool_calls, 1);
+    assert_eq!(run.text(), Some("shipped".to_string()));
+}
+
+/// `enforce_result_bytes(true)` truncates a tool result larger than its
+/// declared `max_result_bytes` cap, and the truncated content (with a note
+/// about the cap) is what lands in the run transcript.
+#[tokio::test]
+async fn enforce_result_bytes_truncates_oversized_tool_result() {
+    let scripted = Arc::new(ScriptedModel::new(vec![
+        tool_call_response("c1", "reader", json!({})),
+        text_response("done"),
+    ]));
+
+    let mut h: AgentHarness<()> = AgentHarness::new();
+    h.register_model("mock", scripted.clone());
+    h.register_tool(Arc::new(BigReaderTool));
+
+    let mw = ToolPolicyMiddleware::new(h.tools().policies()).enforce_result_bytes(true);
+    h.push_middleware(Arc::new(mw));
+
+    let run = h
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("the run completes after the tool result is truncated");
+
+    // The 8-byte "abcdefgh" content is truncated to the 4-byte cap "abcd".
+    assert!(
+        run.messages.iter().any(|m| {
+            let text = m.text();
+            text.contains("abcd") && !text.contains("abcdefgh")
+        }),
+        "the oversized tool result should be truncated to `abcd` in the transcript"
     );
 }
 

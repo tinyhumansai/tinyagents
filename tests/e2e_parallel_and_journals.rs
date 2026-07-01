@@ -21,8 +21,8 @@ use tinyagents::harness::providers::MockModel;
 use tinyagents::harness::runtime::AgentHarness;
 use tinyagents::harness::testkit::EventRecorder;
 use tinyagents::{
-    AgentObservation, FailurePolicy, HarnessEventJournal, HarnessStatusStore, InMemoryEventJournal,
-    InMemoryStatusStore, ParallelOptions, TinyAgentsError, map_reduce,
+    AgentObservation, CancellationToken, FailurePolicy, HarnessEventJournal, HarnessStatusStore,
+    InMemoryEventJournal, InMemoryStatusStore, ParallelOptions, TinyAgentsError, map_reduce,
 };
 
 // ---------------------------------------------------------------------------
@@ -256,6 +256,89 @@ async fn map_reduce_bounds_concurrency() {
     assert!(
         observed_peak >= 1,
         "at least one closure must have run (peak was {observed_peak})"
+    );
+}
+
+/// Test 4b: a per-item timeout converts only the slow item into a recoverable
+/// failure while the fast items still perform real harness work and succeed
+/// (CollectAll). Time is virtual (`start_paused`) so the batch is deterministic.
+#[tokio::test(start_paused = true)]
+async fn map_reduce_item_timeout_fails_only_the_slow_item() {
+    let harness = Arc::new(constant_harness("ok"));
+    // The middle item sleeps for an hour; the per-item timeout is 50ms.
+    let out = map_reduce(
+        vec![0u64, 3_600_000, 0],
+        ParallelOptions::default()
+            .with_failure_policy(FailurePolicy::CollectAll)
+            .with_item_timeout(Duration::from_millis(50)),
+        move |index, ms| {
+            let harness = harness.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                let run = harness
+                    .invoke_default(&(), vec![Message::user(format!("n{index}"))])
+                    .await?;
+                Ok::<_, TinyAgentsError>(run.text().unwrap_or_default())
+            }
+        },
+    )
+    .await
+    .expect("CollectAll never errors even when an item times out");
+
+    assert_eq!(out.success_count(), 2, "the two fast items complete");
+    assert_eq!(out.failure_count(), 1, "the hanging item times out");
+    assert!(!out.outcomes[1].is_ok(), "index 1 is the timed-out item");
+    // The per-item outcome carries the stringified Timeout error.
+    let message = out.outcomes[1]
+        .result
+        .as_ref()
+        .expect_err("the slow item is a failure");
+    assert!(
+        message.contains("timed out"),
+        "the slow item's error should describe a timeout, got {message:?}"
+    );
+}
+
+/// Test 4c: a total (batch-wide) timeout aborts the whole `map_reduce` and
+/// surfaces [`TinyAgentsError::Timeout`].
+#[tokio::test(start_paused = true)]
+async fn map_reduce_total_timeout_aborts_the_batch() {
+    let err = map_reduce(
+        vec![3_600_000u64],
+        ParallelOptions::default().with_total_timeout(Duration::from_millis(20)),
+        |_index, ms| async move {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            Ok::<_, TinyAgentsError>(ms)
+        },
+    )
+    .await
+    .expect_err("the total timeout must abort the batch");
+    assert!(
+        matches!(err, TinyAgentsError::Timeout(_)),
+        "expected Timeout, got {err:?}"
+    );
+}
+
+/// Test 4d: a pre-cancelled [`CancellationToken`] aborts the batch cooperatively
+/// and surfaces [`TinyAgentsError::Cancelled`].
+#[tokio::test]
+async fn map_reduce_cancellation_token_stops_the_batch() {
+    let token = CancellationToken::new();
+    token.cancel();
+
+    let err = map_reduce(
+        vec![0u64],
+        ParallelOptions::default().with_cancellation(token),
+        |_index, _n| async move {
+            tokio::time::sleep(Duration::from_secs(3_600)).await;
+            Ok::<_, TinyAgentsError>(0u64)
+        },
+    )
+    .await
+    .expect_err("a pre-cancelled token must abort the batch");
+    assert!(
+        matches!(err, TinyAgentsError::Cancelled),
+        "expected Cancelled, got {err:?}"
     );
 }
 

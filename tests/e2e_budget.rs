@@ -385,3 +385,163 @@ async fn below_threshold_run_completes_without_exceeding() {
         "no BudgetWarning event should be emitted well under the warn threshold"
     );
 }
+
+// ── Test 5: input-token reservation blocks an oversized call in a live run ─────
+
+/// With `max_input_tokens` set, the preflight estimates the request's input
+/// tokens and reserves against the budget. A prompt that estimates over the
+/// budget is blocked *before* any model call is dispatched, failing the run
+/// with `LimitExceeded` and emitting `BudgetExceeded { blocked: true }`.
+#[tokio::test]
+async fn input_reservation_blocks_oversized_call_in_a_live_run() {
+    let recorder = EventRecorder::new();
+
+    let mw = BudgetMiddleware::new(BudgetLimits {
+        max_input_tokens: Some(5),
+        ..Default::default()
+    });
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness
+        .register_model("mock", Arc::new(MockModel::constant("unused")))
+        .set_default_model("mock")
+        .push_middleware(Arc::new(mw));
+
+    // A long prompt estimates well over the 5-token input reservation budget.
+    let big = "word ".repeat(200);
+    let ctx = RunContext::new(RunConfig::new("reserve-block"), ()).with_events(recorder.sink());
+    let err = harness
+        .invoke_in_context(&(), ctx, vec![Message::user(big)])
+        .await
+        .expect_err("the reservation preflight must block an oversized prompt");
+
+    assert!(
+        matches!(err, TinyAgentsError::LimitExceeded(_)),
+        "expected LimitExceeded, got {err:?}"
+    );
+    assert!(
+        any_event(&recorder, |e| matches!(
+            e,
+            AgentEvent::BudgetExceeded { blocked: true, .. }
+        )),
+        "the blocking reservation preflight must emit BudgetExceeded {{ blocked: true }}"
+    );
+}
+
+// ── Test 6: a fitting call reserves then reconciles against actual usage ───────
+
+/// A run whose prompt fits the input reservation budget reserves input tokens
+/// on the preflight (`BudgetReserved`) and reconciles against the actual
+/// reported usage after the model responds (`BudgetReconciled`).
+#[tokio::test]
+async fn fitting_call_emits_reserved_and_reconciled_events() {
+    let recorder = EventRecorder::new();
+
+    let mw = BudgetMiddleware::new(BudgetLimits {
+        max_input_tokens: Some(1_000),
+        ..Default::default()
+    });
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness
+        .register_model(
+            "mock",
+            Arc::new(MockModel::with_responses(vec![text_response("done", 3, 1)])),
+        )
+        .set_default_model("mock")
+        .push_middleware(Arc::new(mw));
+
+    let ctx = RunContext::new(RunConfig::new("reserve-ok"), ()).with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("a small prompt fits the reservation and completes");
+    assert!(run.final_response.is_some(), "the run produced a response");
+
+    assert!(
+        any_event(&recorder, |e| matches!(
+            e,
+            AgentEvent::BudgetReserved { .. }
+        )),
+        "the preflight must emit BudgetReserved when max_input_tokens is set"
+    );
+    assert!(
+        any_event(&recorder, |e| matches!(
+            e,
+            AgentEvent::BudgetReconciled {
+                actual_input_tokens: 3,
+                ..
+            }
+        )),
+        "after_model must reconcile the reservation against the actual 3 input tokens"
+    );
+}
+
+// ── Test 7: cached-input token budget enforcement via the middleware stack ─────
+
+/// The `max_cached_input_tokens` budget tracks `cache_read_tokens` reported in
+/// usage and blocks the next preflight once the cached-input budget is
+/// exhausted. Driven directly through a [`MiddlewareStack`] so the response can
+/// carry a non-zero `cache_read_tokens` count.
+#[tokio::test]
+async fn cached_input_budget_blocks_next_call() {
+    let recorder = EventRecorder::new();
+    let mut ctx = RunContext::new(RunConfig::new("cached-budget"), ()).with_events(recorder.sink());
+
+    let mw = BudgetMiddleware::new(BudgetLimits {
+        max_cached_input_tokens: Some(10),
+        ..Default::default()
+    });
+    let tracker = mw.tracker();
+
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    // A response reporting 12 cache-read tokens exhausts the 10-token cached budget.
+    let mut resp = ModelResponse {
+        message: AssistantMessage {
+            id: None,
+            content: vec![ContentBlock::Text("cached".into())],
+            tool_calls: Vec::new(),
+            usage: Some(Usage {
+                cache_read_tokens: 12,
+                ..Usage::new(2, 1)
+            }),
+        },
+        usage: Some(Usage {
+            cache_read_tokens: 12,
+            ..Usage::new(2, 1)
+        }),
+        finish_reason: Some("stop".into()),
+        raw: None,
+        resolved_model: None,
+    };
+    stack
+        .run_after_model(&mut ctx, &(), &mut resp)
+        .await
+        .expect("recording cached usage does not fail");
+
+    assert_eq!(
+        tracker.snapshot().usage.usage.cache_read_tokens,
+        12,
+        "the tracker accumulates the reported cache-read tokens"
+    );
+
+    // The next preflight blocks because 12 >= the 10-token cached-input budget.
+    let mut req = ModelRequest::new(vec![Message::user("next")]);
+    let err = stack
+        .run_before_model(&mut ctx, &(), &mut req)
+        .await
+        .expect_err("the cached-input budget must block the next model call");
+    assert!(
+        matches!(err, TinyAgentsError::LimitExceeded(_)),
+        "expected LimitExceeded, got {err:?}"
+    );
+    assert!(
+        any_event(&recorder, |e| matches!(
+            e,
+            AgentEvent::BudgetExceeded { blocked: true, .. }
+        )),
+        "the blocking preflight emits BudgetExceeded {{ blocked: true }}"
+    );
+}

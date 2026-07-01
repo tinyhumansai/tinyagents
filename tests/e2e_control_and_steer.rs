@@ -23,6 +23,7 @@ use tinyagents::graph::orchestration::{
     OrchestrationToolKind, SteeringRegistry, TaskStore,
 };
 use tinyagents::harness::context::{MiddlewareControl, RunConfig, RunContext};
+use tinyagents::harness::events::AgentEvent;
 use tinyagents::harness::ids::TaskId;
 use tinyagents::harness::message::Message;
 use tinyagents::harness::middleware::Middleware;
@@ -78,6 +79,85 @@ impl Middleware<(), ()> for InterruptControlMiddleware {
             message: "needs approval".into(),
         });
         Ok(())
+    }
+}
+
+/// Middleware that requests two controls in one turn to exercise precedence:
+/// the order is configurable, but the higher-precedence [`Interrupt`] must
+/// always win over [`StopWithFinal`].
+///
+/// [`Interrupt`]: MiddlewareControl::Interrupt
+/// [`StopWithFinal`]: MiddlewareControl::StopWithFinal
+struct TwoControlMiddleware {
+    interrupt_first: bool,
+}
+
+#[async_trait]
+impl Middleware<(), ()> for TwoControlMiddleware {
+    fn name(&self) -> &str {
+        "two_control"
+    }
+
+    async fn after_model(
+        &self,
+        ctx: &mut RunContext<()>,
+        _state: &(),
+        _response: &mut ModelResponse,
+    ) -> Result<()> {
+        let stop = MiddlewareControl::StopWithFinal("stopped".into());
+        let interrupt = MiddlewareControl::Interrupt {
+            node: "review".into(),
+            message: "needs approval".into(),
+        };
+        if self.interrupt_first {
+            ctx.request_control(interrupt);
+            ctx.request_control(stop);
+        } else {
+            ctx.request_control(stop);
+            ctx.request_control(interrupt);
+        }
+        Ok(())
+    }
+}
+
+/// When two controls are requested in a single turn, the higher-precedence
+/// `Interrupt` wins regardless of request order, the run surfaces as
+/// [`TinyAgentsError::Interrupted`], and the honored control is journaled as a
+/// `control.applied` event carrying the interrupt detail.
+#[tokio::test]
+async fn higher_precedence_control_wins_and_is_journaled() {
+    for interrupt_first in [true, false] {
+        let mut harness: AgentHarness<()> = AgentHarness::new();
+        harness.register_model("mock", Arc::new(MockModel::constant("hi")));
+        harness.push_middleware(Arc::new(TwoControlMiddleware { interrupt_first }));
+
+        let recorder = EventRecorder::new();
+        let ctx = RunContext::new(RunConfig::new("precedence"), ()).with_events(recorder.sink());
+
+        let err = harness
+            .invoke_in_context(&(), ctx, vec![Message::user("go")])
+            .await
+            .expect_err("the interrupt control must win and surface as an error");
+
+        match err {
+            TinyAgentsError::Interrupted { node, message } => {
+                assert_eq!(node, "review", "interrupt_first={interrupt_first}");
+                assert_eq!(message, "needs approval");
+            }
+            other => {
+                panic!("expected Interrupted, got {other:?} (interrupt_first={interrupt_first})")
+            }
+        }
+
+        // The honored control was journaled, and it is the interrupt (not the
+        // stop) that was applied.
+        let applied = recorder.events().into_iter().find_map(|e| match e {
+            AgentEvent::ControlApplied { control, detail } => Some((control, detail)),
+            _ => None,
+        });
+        let (control, detail) = applied.expect("a control.applied event must be emitted");
+        assert_eq!(control, "interrupt", "the interrupt control was applied");
+        assert_eq!(detail, "review: needs approval");
     }
 }
 
@@ -299,5 +379,108 @@ async fn preloaded_cancel_steering_cancels_a_real_run() {
     assert!(
         matches!(err, TinyAgentsError::Cancelled),
         "steered Cancel must surface as Cancelled, got {err:?}"
+    );
+}
+
+// ── Part C: orchestrate_list kind + created-window filtering ──────────────────
+
+/// Inserts one sub-agent task and one tool task into a fresh store and returns
+/// the store behind the shared [`TaskStore`] handle.
+fn store_with_two_kinds() -> Arc<dyn TaskStore> {
+    let store: Arc<dyn TaskStore> = Arc::new(InMemoryTaskStore::new());
+    store
+        .insert(OrchestrationTaskSpec::new(
+            "task-sub",
+            OrchestrationTaskKind::SubAgent {
+                agent: "worker".into(),
+            },
+        ))
+        .expect("insert sub-agent task");
+    store
+        .insert(OrchestrationTaskSpec::new(
+            "task-tool",
+            OrchestrationTaskKind::Tool {
+                tool: "lookup".into(),
+            },
+        ))
+        .expect("insert tool task");
+    store
+}
+
+/// Drives the `orchestrate_list` tool with `args` and returns the JSON array of
+/// task records from the result payload.
+async fn list_records(tool: &OrchestrationTool, args: serde_json::Value) -> Vec<serde_json::Value> {
+    let call = ToolCall::new("call-list", "orchestrate_list", args);
+    let result = Tool::<()>::call(tool, &(), call)
+        .await
+        .expect("orchestrate_list call succeeds");
+    result
+        .raw
+        .and_then(|raw| raw.as_array().cloned())
+        .expect("orchestrate_list returns a JSON array of records")
+}
+
+#[tokio::test]
+async fn orchestrate_list_filters_by_kind() {
+    let store = store_with_two_kinds();
+    let tool = OrchestrationTool::new(OrchestrationToolKind::List, store);
+
+    // Filtering by the `sub_agent` kind returns only the sub-agent task.
+    let subs = list_records(&tool, json!({ "kind": "sub_agent" })).await;
+    assert_eq!(subs.len(), 1, "only the sub-agent task matches the kind");
+    assert_eq!(subs[0]["spec"]["task_id"], "task-sub");
+    assert_eq!(subs[0]["spec"]["kind"]["type"], "sub_agent");
+
+    // The `tool` kind selects the other task.
+    let tools = list_records(&tool, json!({ "kind": "tool" })).await;
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["spec"]["task_id"], "task-tool");
+
+    // An unlisted kind matches nothing.
+    let graphs = list_records(&tool, json!({ "kind": "graph" })).await;
+    assert!(graphs.is_empty(), "no graph tasks were inserted");
+}
+
+#[tokio::test]
+async fn orchestrate_list_filters_by_created_window() {
+    let store = store_with_two_kinds();
+    let tool = OrchestrationTool::new(OrchestrationToolKind::List, store);
+
+    // A window opening at the epoch and closing far in the future admits every
+    // record (both were created between those bounds).
+    let far_future_ms: u64 = 4_000_000_000_000; // year ~2096
+    let all = list_records(
+        &tool,
+        json!({ "created_after_ms": 0, "created_before_ms": far_future_ms }),
+    )
+    .await;
+    assert_eq!(all.len(), 2, "both tasks fall inside the open window");
+
+    // Combining the kind filter with the window narrows to a single record.
+    let sub_in_window = list_records(
+        &tool,
+        json!({
+            "kind": "sub_agent",
+            "created_after_ms": 0,
+            "created_before_ms": far_future_ms
+        }),
+    )
+    .await;
+    assert_eq!(sub_in_window.len(), 1);
+    assert_eq!(sub_in_window[0]["spec"]["task_id"], "task-sub");
+
+    // A window that closes at the epoch (created_before_ms = 0) excludes every
+    // record created after the epoch — i.e. all of them.
+    let none = list_records(&tool, json!({ "created_before_ms": 0 })).await;
+    assert!(
+        none.is_empty(),
+        "records created after the epoch fall outside a window closing at the epoch"
+    );
+
+    // A window opening in the far future (created_after_ms) likewise excludes all.
+    let future_only = list_records(&tool, json!({ "created_after_ms": far_future_ms })).await;
+    assert!(
+        future_only.is_empty(),
+        "no records were created at or after the far-future lower bound"
     );
 }
