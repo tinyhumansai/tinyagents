@@ -14,7 +14,7 @@ mod store;
 mod tool;
 mod types;
 
-pub use store::{InMemoryTaskStore, TaskStore};
+pub use store::{InMemoryTaskStore, JsonlTaskStore, TaskStore};
 pub use tool::{
     OrchestrationTool, orchestration_tool_schema, orchestration_tool_schemas, orchestration_tools,
     register_orchestration_tools,

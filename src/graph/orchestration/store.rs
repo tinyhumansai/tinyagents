@@ -25,6 +25,15 @@ pub trait TaskStore: Send + Sync {
     /// Lists tasks matching `filter`.
     fn list(&self, filter: OrchestrationTaskFilter) -> Vec<OrchestrationTaskRecord>;
 
+    /// Returns the lifecycle history (oldest → newest) for one task.
+    ///
+    /// The default returns just the current record (latest-only). Durable
+    /// append-log backends such as [`JsonlTaskStore`] override this to return
+    /// every recorded transition so supervisors can reconstruct the timeline.
+    fn history(&self, task_id: &TaskId) -> Vec<OrchestrationTaskRecord> {
+        self.get(task_id).into_iter().collect()
+    }
+
     /// Marks a pending task as running.
     fn mark_running(&self, task_id: &TaskId) -> Result<OrchestrationTaskRecord>;
 
@@ -67,6 +76,18 @@ impl InMemoryTaskStore {
     /// Creates an empty in-memory task store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Seeds a store from existing records (used by durable replay). Later
+    /// records for the same task id overwrite earlier ones.
+    pub fn from_records(records: impl IntoIterator<Item = OrchestrationTaskRecord>) -> Self {
+        let store = Self::new();
+        if let Ok(mut guard) = store.inner.lock() {
+            for record in records {
+                guard.insert(record.spec.task_id.clone(), record);
+            }
+        }
+        store
     }
 
     fn with_task<R>(
@@ -247,6 +268,181 @@ impl TaskStore for InMemoryTaskStore {
             record.updated_at = SystemTime::now();
             Ok(record.clone())
         })
+    }
+}
+
+/// Durable, append-only JSONL-backed [`TaskStore`].
+///
+/// Every lifecycle transition appends a full [`OrchestrationTaskRecord`] snapshot
+/// as one JSON line to a log file, so:
+///
+/// - a process restart re-hydrates all task state via [`JsonlTaskStore::open`]
+///   (replaying the log; the latest snapshot per task id wins), and
+/// - [`TaskStore::history`] returns the complete oldest → newest timeline for a
+///   task, not just its latest state.
+///
+/// The in-memory state machine (transition validation, filtering) is reused from
+/// [`InMemoryTaskStore`]; this type layers durability and history on top.
+pub struct JsonlTaskStore {
+    inner: InMemoryTaskStore,
+    file: Arc<Mutex<std::fs::File>>,
+    history: Arc<Mutex<HashMap<TaskId, Vec<OrchestrationTaskRecord>>>>,
+}
+
+impl JsonlTaskStore {
+    /// Opens (creating if necessary) a JSONL task log at `path`, replaying any
+    /// existing records to reconstruct current state and per-task history.
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        use std::io::{BufRead, BufReader};
+
+        let path = path.as_ref();
+        let mut history: HashMap<TaskId, Vec<OrchestrationTaskRecord>> = HashMap::new();
+        let mut latest: Vec<OrchestrationTaskRecord> = Vec::new();
+
+        if path.exists() {
+            let file = std::fs::File::open(path)
+                .map_err(|e| TinyAgentsError::Graph(format!("open task log: {e}")))?;
+            for line in BufReader::new(file).lines() {
+                let line =
+                    line.map_err(|e| TinyAgentsError::Graph(format!("read task log: {e}")))?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let record: OrchestrationTaskRecord = serde_json::from_str(&line)
+                    .map_err(|e| TinyAgentsError::Graph(format!("parse task log: {e}")))?;
+                history
+                    .entry(record.spec.task_id.clone())
+                    .or_default()
+                    .push(record.clone());
+                latest.push(record);
+            }
+        }
+
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| TinyAgentsError::Graph(format!("open task log for append: {e}")))?;
+
+        Ok(Self {
+            inner: InMemoryTaskStore::from_records(latest),
+            file: Arc::new(Mutex::new(file)),
+            history: Arc::new(Mutex::new(history)),
+        })
+    }
+
+    fn persist(&self, record: &OrchestrationTaskRecord) -> Result<()> {
+        use std::io::Write;
+
+        let line = serde_json::to_string(record)
+            .map_err(|e| TinyAgentsError::Graph(format!("serialize task record: {e}")))?;
+        {
+            let mut file = self
+                .file
+                .lock()
+                .map_err(|_| TinyAgentsError::Graph("task log file lock poisoned".into()))?;
+            writeln!(file, "{line}")
+                .map_err(|e| TinyAgentsError::Graph(format!("append task log: {e}")))?;
+            file.flush()
+                .map_err(|e| TinyAgentsError::Graph(format!("flush task log: {e}")))?;
+        }
+        if let Ok(mut hist) = self.history.lock() {
+            hist.entry(record.spec.task_id.clone())
+                .or_default()
+                .push(record.clone());
+        }
+        Ok(())
+    }
+
+    /// Persists the current snapshot of `task_id` after a control transition
+    /// (used by `request_cancel`/`kill`, which return an outcome, not a record).
+    fn persist_current(&self, task_id: &TaskId) -> Result<()> {
+        if let Some(record) = self.inner.get(task_id) {
+            self.persist(&record)?;
+        }
+        Ok(())
+    }
+}
+
+impl TaskStore for JsonlTaskStore {
+    fn insert(&self, spec: OrchestrationTaskSpec) -> Result<OrchestrationTaskRecord> {
+        let record = self.inner.insert(spec)?;
+        self.persist(&record)?;
+        Ok(record)
+    }
+
+    fn get(&self, task_id: &TaskId) -> Option<OrchestrationTaskRecord> {
+        self.inner.get(task_id)
+    }
+
+    fn list(&self, filter: OrchestrationTaskFilter) -> Vec<OrchestrationTaskRecord> {
+        self.inner.list(filter)
+    }
+
+    fn history(&self, task_id: &TaskId) -> Vec<OrchestrationTaskRecord> {
+        self.history
+            .lock()
+            .ok()
+            .and_then(|hist| hist.get(task_id).cloned())
+            .unwrap_or_default()
+    }
+
+    fn mark_running(&self, task_id: &TaskId) -> Result<OrchestrationTaskRecord> {
+        let record = self.inner.mark_running(task_id)?;
+        self.persist(&record)?;
+        Ok(record)
+    }
+
+    fn mark_awaiting(&self, task_id: &TaskId) -> Result<OrchestrationTaskRecord> {
+        let record = self.inner.mark_awaiting(task_id)?;
+        self.persist(&record)?;
+        Ok(record)
+    }
+
+    fn complete(
+        &self,
+        task_id: &TaskId,
+        result: OrchestrationTaskResult,
+    ) -> Result<OrchestrationTaskRecord> {
+        let record = self.inner.complete(task_id, result)?;
+        self.persist(&record)?;
+        Ok(record)
+    }
+
+    fn fail(&self, task_id: &TaskId, error: String) -> Result<OrchestrationTaskRecord> {
+        let record = self.inner.fail(task_id, error)?;
+        self.persist(&record)?;
+        Ok(record)
+    }
+
+    fn timeout(&self, task_id: &TaskId, error: String) -> Result<OrchestrationTaskRecord> {
+        let record = self.inner.timeout(task_id, error)?;
+        self.persist(&record)?;
+        Ok(record)
+    }
+
+    fn request_cancel(&self, task_id: &TaskId) -> Result<OrchestrationControlOutcome> {
+        let outcome = self.inner.request_cancel(task_id)?;
+        self.persist_current(task_id)?;
+        Ok(outcome)
+    }
+
+    fn mark_cancelled(&self, task_id: &TaskId) -> Result<OrchestrationTaskRecord> {
+        let record = self.inner.mark_cancelled(task_id)?;
+        self.persist(&record)?;
+        Ok(record)
+    }
+
+    fn kill(&self, task_id: &TaskId) -> Result<OrchestrationControlOutcome> {
+        let outcome = self.inner.kill(task_id)?;
+        self.persist_current(task_id)?;
+        Ok(outcome)
+    }
+
+    fn set_timeout_ms(&self, task_id: &TaskId, timeout_ms: u64) -> Result<OrchestrationTaskRecord> {
+        let record = self.inner.set_timeout_ms(task_id, timeout_ms)?;
+        self.persist(&record)?;
+        Ok(record)
     }
 }
 

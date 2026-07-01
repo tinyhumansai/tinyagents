@@ -142,6 +142,9 @@ impl OrchestrationTool {
             thread_id: optional_string(args, "thread_id")?.map(Into::into),
             node_id: optional_string(args, "node_id")?.map(Into::into),
             status: optional_status(args, "status")?,
+            kind: optional_string(args, "kind")?,
+            created_after: None,
+            created_before: None,
         };
         serde_json::to_value(self.store.list(filter)).map_err(Into::into)
     }

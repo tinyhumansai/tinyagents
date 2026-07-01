@@ -282,9 +282,33 @@ pub struct OrchestrationTaskFilter {
     pub node_id: Option<NodeId>,
     /// Restrict to tasks currently in one status.
     pub status: Option<OrchestrationTaskStatus>,
+    /// Restrict to a task-kind discriminant label (see
+    /// [`OrchestrationTaskKind::as_str`]), for example `"sub_agent"`.
+    pub kind: Option<String>,
+    /// Restrict to tasks created at or after this instant (inclusive).
+    pub created_after: Option<SystemTime>,
+    /// Restrict to tasks created at or before this instant (inclusive).
+    pub created_before: Option<SystemTime>,
 }
 
 impl OrchestrationTaskFilter {
+    /// Restricts the filter to a task-kind discriminant label.
+    pub fn with_kind(mut self, kind: impl Into<String>) -> Self {
+        self.kind = Some(kind.into());
+        self
+    }
+
+    /// Restricts the filter to a created-at window (inclusive bounds).
+    pub fn created_between(
+        mut self,
+        after: Option<SystemTime>,
+        before: Option<SystemTime>,
+    ) -> Self {
+        self.created_after = after;
+        self.created_before = before;
+        self
+    }
+
     /// Returns `true` when `record` matches every configured filter field.
     pub fn matches(&self, record: &OrchestrationTaskRecord) -> bool {
         if let Some(parent) = &self.parent_run_id
@@ -309,6 +333,21 @@ impl OrchestrationTaskFilter {
         }
         if let Some(status) = self.status
             && record.status != status
+        {
+            return false;
+        }
+        if let Some(kind) = &self.kind
+            && record.spec.kind.as_str() != kind
+        {
+            return false;
+        }
+        if let Some(after) = self.created_after
+            && record.created_at < after
+        {
+            return false;
+        }
+        if let Some(before) = self.created_before
+            && record.created_at > before
         {
             return false;
         }
