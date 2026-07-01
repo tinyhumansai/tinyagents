@@ -452,14 +452,31 @@ impl<State: Send + Sync> CapabilityRegistry<State> {
     pub fn snapshot(&self) -> crate::registry::diagnostics::RegistrySnapshot {
         let mut components: Vec<ComponentMetadata> = self.meta.values().cloned().collect();
         components.sort_by(|a, b| (a.kind, &a.id.0).cmp(&(b.kind, &b.id.0)));
-        crate::registry::diagnostics::RegistrySnapshot { components }
+        let mut aliases: Vec<crate::registry::diagnostics::AliasBinding> = self
+            .aliases
+            .iter()
+            .map(
+                |((kind, alias), canonical)| crate::registry::diagnostics::AliasBinding {
+                    kind: *kind,
+                    alias: alias.clone(),
+                    canonical: canonical.clone(),
+                },
+            )
+            .collect();
+        aliases.sort_by(|a, b| (a.kind, &a.alias).cmp(&(b.kind, &b.alias)));
+        crate::registry::diagnostics::RegistrySnapshot {
+            components,
+            aliases,
+        }
     }
 
     /// Returns registry health diagnostics: aliases that shadow a registered
     /// component of the same name (warning) and aliases whose canonical target
     /// is not registered (error).
     pub fn diagnostics(&self) -> Vec<crate::registry::diagnostics::RegistryDiagnostic> {
-        use crate::registry::diagnostics::{alias_shadows_component, dangling_alias};
+        use crate::registry::diagnostics::{
+            alias_shadows_component, dangling_alias, name_reused_across_kinds,
+        };
         let mut out = Vec::new();
         for ((kind, alias), canonical) in &self.aliases {
             if self.meta.contains_key(&(*kind, alias.clone())) {
@@ -467,6 +484,20 @@ impl<State: Send + Sync> CapabilityRegistry<State> {
             }
             if !self.meta.contains_key(&(*kind, canonical.clone())) {
                 out.push(dangling_alias(*kind, alias, canonical));
+            }
+        }
+        // Surface names registered under more than one kind. Registration
+        // rejects same-(kind, name) duplicates, but the same name across
+        // different kinds is legal and worth flagging for audits.
+        let mut kinds_by_name: std::collections::BTreeMap<&str, Vec<ComponentKind>> =
+            std::collections::BTreeMap::new();
+        for (kind, name) in self.meta.keys() {
+            kinds_by_name.entry(name.as_str()).or_default().push(*kind);
+        }
+        for (name, mut kinds) in kinds_by_name {
+            if kinds.len() > 1 {
+                kinds.sort();
+                out.push(name_reused_across_kinds(name, &kinds));
             }
         }
         out.sort_by(|a, b| (a.kind, &a.name).cmp(&(b.kind, &b.name)));

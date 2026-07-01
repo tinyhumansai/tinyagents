@@ -41,6 +41,14 @@ pub enum ComponentKind {
     Store,
     /// An executable agent configuration descriptor (name-only for now).
     Agent,
+    /// A middleware descriptor (name-only for now).
+    Middleware,
+    /// A graph/harness checkpointer descriptor (name-only for now).
+    Checkpointer,
+    /// An orchestration task-store descriptor (name-only for now).
+    TaskStore,
+    /// An event listener descriptor (name-only for now).
+    Listener,
 }
 
 /// Discovery and UI metadata for one registered capability.

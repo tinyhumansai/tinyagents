@@ -20,6 +20,21 @@ use crate::registry::component::{ComponentKind, ComponentMetadata};
 pub struct RegistrySnapshot {
     /// All registered components' metadata, sorted by `(kind, id)`.
     pub components: Vec<ComponentMetadata>,
+    /// All registered aliases, sorted by `(kind, alias)`, so a CLI/UI can
+    /// enumerate the alternate names that resolve to a canonical component.
+    #[serde(default)]
+    pub aliases: Vec<AliasBinding>,
+}
+
+/// One alias → canonical binding in a [`RegistrySnapshot`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AliasBinding {
+    /// The kind the alias is scoped to.
+    pub kind: ComponentKind,
+    /// The alternate name.
+    pub alias: String,
+    /// The canonical component name the alias resolves to.
+    pub canonical: String,
 }
 
 impl RegistrySnapshot {
@@ -113,6 +128,24 @@ pub(crate) fn alias_shadows_component(kind: ComponentKind, alias: &str) -> Regis
             "alias `{alias}` shadows a registered {} of the same name; \
              the component takes precedence and the alias is unreachable",
             kind_label(kind)
+        ),
+    }
+}
+
+pub(crate) fn name_reused_across_kinds(name: &str, kinds: &[ComponentKind]) -> RegistryDiagnostic {
+    let rendered = kinds
+        .iter()
+        .map(|k| k.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    RegistryDiagnostic {
+        severity: DiagnosticSeverity::Warning,
+        // Attribute the finding to the first kind for stable sorting.
+        kind: kinds[0],
+        name: name.to_string(),
+        message: format!(
+            "name `{name}` is registered under multiple kinds ({rendered}); \
+             ensure callers disambiguate by kind"
         ),
     }
 }

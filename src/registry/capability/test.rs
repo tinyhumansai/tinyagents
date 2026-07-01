@@ -262,6 +262,38 @@ fn snapshot_lists_components_sorted_by_kind_and_name() {
 }
 
 #[test]
+fn snapshot_enumerates_aliases() {
+    let mut reg = CapabilityRegistry::<()>::new();
+    reg.register_model("gpt-4o", Arc::new(FakeModel("m")))
+        .unwrap();
+    reg.alias(ComponentKind::Model, "default", "gpt-4o")
+        .unwrap();
+
+    let snapshot = reg.snapshot();
+    assert_eq!(snapshot.aliases.len(), 1);
+    assert_eq!(snapshot.aliases[0].alias, "default");
+    assert_eq!(snapshot.aliases[0].canonical, "gpt-4o");
+    assert_eq!(snapshot.aliases[0].kind, ComponentKind::Model);
+    // Aliases survive serialization round-trips for audit logs.
+    let json = serde_json::to_string(&snapshot).unwrap();
+    let back: crate::registry::RegistrySnapshot = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, snapshot);
+}
+
+#[test]
+fn diagnostics_flag_name_reused_across_kinds() {
+    let mut reg = CapabilityRegistry::<()>::new();
+    reg.register_model("shared", Arc::new(FakeModel("m")))
+        .unwrap();
+    reg.register_router("shared").unwrap();
+
+    let diags = reg.diagnostics();
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].name, "shared");
+    assert!(diags[0].message.contains("multiple kinds"));
+}
+
+#[test]
 fn diagnostics_are_clean_for_a_healthy_registry() {
     // `alias()` is fail-closed against shadowing and dangling targets, so a
     // registry built through the public API always passes the integrity check.
