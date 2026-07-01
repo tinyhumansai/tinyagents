@@ -118,7 +118,7 @@ impl StreamChunk {
 /// use tinyagents::harness::message::MessageDelta;
 ///
 /// let sink = StreamSink::new(vec![StreamMode::Messages]);
-/// sink.push(StreamChunk::Message(MessageDelta { text: "hello".into(), tool_call: None }));
+/// sink.push(StreamChunk::Message(MessageDelta::text("hello")));
 /// sink.push(StreamChunk::Debug("ignored".into()));
 ///
 /// let chunks = sink.drain();

@@ -123,7 +123,7 @@ impl StreamSink {
 /// use tinyagents::harness::message::MessageDelta;
 ///
 /// let chunks = vec![
-///     StreamChunk::Message(MessageDelta { text: "hi".into(), tool_call: None }),
+///     StreamChunk::Message(MessageDelta::text("hi")),
 ///     StreamChunk::Debug("trace".into()),
 ///     StreamChunk::Updates(serde_json::json!({"key": "value"})),
 /// ];
