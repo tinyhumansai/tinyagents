@@ -171,6 +171,8 @@ pub struct ToolAllowlistMiddleware {
 pub struct BudgetLimits {
     /// Maximum cumulative input tokens.
     pub max_input_tokens: Option<u64>,
+    /// Maximum cumulative cache-read (cached) input tokens.
+    pub max_cached_input_tokens: Option<u64>,
     /// Maximum cumulative output tokens.
     pub max_output_tokens: Option<u64>,
     /// Maximum cumulative total (effective) tokens.
@@ -202,6 +204,9 @@ pub struct BudgetSpend {
     pub cost: crate::harness::cost::CostTotals,
     /// Whether a warning has already been emitted (warn-once).
     pub warned: bool,
+    /// Input tokens reserved by the most recent preflight, awaiting
+    /// reconciliation against the provider-reported usage in `after_model`.
+    pub last_reserved_input: u64,
 }
 
 /// Around-nothing lifecycle middleware that enforces a token/money

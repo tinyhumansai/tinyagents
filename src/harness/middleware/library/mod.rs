@@ -354,6 +354,14 @@ impl BudgetLimits {
         {
             return Some(format!("input tokens {} >= budget {max}", u.input_tokens));
         }
+        if let Some(max) = self.max_cached_input_tokens
+            && u.cache_read_tokens >= max
+        {
+            return Some(format!(
+                "cached input tokens {} >= budget {max}",
+                u.cache_read_tokens
+            ));
+        }
         if let Some(max) = self.max_output_tokens
             && u.output_tokens >= max
         {
@@ -396,6 +404,9 @@ impl BudgetLimits {
         if over(u.input_tokens as f64, self.max_input_tokens) {
             return Some("input token budget".to_string());
         }
+        if over(u.cache_read_tokens as f64, self.max_cached_input_tokens) {
+            return Some("cached input token budget".to_string());
+        }
         if over(u.output_tokens as f64, self.max_output_tokens) {
             return Some("output token budget".to_string());
         }
@@ -413,6 +424,17 @@ impl BudgetLimits {
         }
         None
     }
+}
+
+/// Estimates the input tokens a request will consume by summing a
+/// heuristic token estimate over every message's text. Used for budget
+/// preflight reservation, which only needs an order-of-magnitude bound.
+fn estimated_input_tokens(request: &ModelRequest) -> u64 {
+    request
+        .messages
+        .iter()
+        .map(|m| crate::harness::summarization::estimate_tokens(&m.text()))
+        .sum()
 }
 
 impl BudgetMiddleware {
@@ -473,9 +495,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for BudgetMidd
         &self,
         ctx: &mut RunContext<Ctx>,
         _state: &State,
-        _request: &mut ModelRequest,
+        request: &mut ModelRequest,
     ) -> Result<()> {
         let spend = self.tracker.snapshot();
+        // (1) Already exhausted before this call.
         if let Some(reason) = self.limits.exceeded_reason(&spend) {
             ctx.emit(AgentEvent::BudgetExceeded {
                 reason: reason.clone(),
@@ -485,6 +508,32 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for BudgetMidd
                 "budget exhausted: {reason}"
             )));
         }
+
+        // (2) Preflight reservation: estimate this call's input tokens and block
+        // *before* dispatching if the reservation would breach the input budget,
+        // so a single large call cannot overshoot arbitrarily.
+        let estimated = estimated_input_tokens(request);
+        if let Some(max) = self.limits.max_input_tokens
+            && spend.usage.usage.input_tokens + estimated > max
+        {
+            let reason = format!(
+                "reserved input tokens {} + {estimated} > budget {max}",
+                spend.usage.usage.input_tokens
+            );
+            ctx.emit(AgentEvent::BudgetExceeded {
+                reason: reason.clone(),
+                blocked: true,
+            });
+            return Err(TinyAgentsError::LimitExceeded(format!(
+                "budget reservation exceeded: {reason}"
+            )));
+        }
+        if let Ok(mut guard) = self.tracker.inner.lock() {
+            guard.last_reserved_input = estimated;
+        }
+        ctx.emit(AgentEvent::BudgetReserved {
+            estimated_input_tokens: estimated,
+        });
         Ok(())
     }
 
@@ -498,6 +547,17 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for BudgetMidd
             return Ok(());
         };
         let cost = self.price(response);
+        // Reconcile the preflight reservation against the actual usage.
+        let reserved = self
+            .tracker
+            .inner
+            .lock()
+            .map(|mut guard| std::mem::take(&mut guard.last_reserved_input))
+            .unwrap_or(0);
+        ctx.emit(AgentEvent::BudgetReconciled {
+            estimated_input_tokens: reserved,
+            actual_input_tokens: usage.input_tokens,
+        });
         self.tracker.record(usage, cost);
 
         ctx.emit(AgentEvent::UsageRecorded { usage });

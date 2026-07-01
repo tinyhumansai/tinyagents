@@ -519,6 +519,86 @@ async fn budget_prices_usage_and_enforces_cost() {
     assert!(matches!(err, TinyAgentsError::LimitExceeded(_)));
 }
 
+#[tokio::test]
+async fn budget_enforces_cached_input_token_limit() {
+    use crate::harness::usage::Usage;
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let mw = BudgetMiddleware::new(BudgetLimits {
+        max_cached_input_tokens: Some(10),
+        ..BudgetLimits::default()
+    });
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    // A response reporting 12 cache-read tokens exhausts the cached budget.
+    let mut resp = response_with_usage("m", 2, 1);
+    if let Some(u) = resp.usage.as_mut() {
+        *u = Usage {
+            cache_read_tokens: 12,
+            ..*u
+        };
+    }
+    stack
+        .run_after_model(&mut ctx, &(), &mut resp)
+        .await
+        .unwrap();
+
+    let mut req = ModelRequest::new(vec![Message::user("next")]);
+    let err = stack
+        .run_before_model(&mut ctx, &(), &mut req)
+        .await
+        .expect_err("cached input budget exhausted should block");
+    assert!(matches!(err, TinyAgentsError::LimitExceeded(_)));
+}
+
+#[tokio::test]
+async fn budget_preflight_reserves_and_reconciles() {
+    let (mut ctx, recorder) = ctx_with_recorder();
+    // A tiny input budget so a large prompt trips the reservation preflight.
+    let mw = BudgetMiddleware::new(BudgetLimits {
+        max_input_tokens: Some(5),
+        ..BudgetLimits::default()
+    });
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    // A long prompt estimates well over 5 input tokens -> reservation blocks it
+    // before any call is dispatched.
+    let big = "word ".repeat(200);
+    let mut req = ModelRequest::new(vec![Message::user(big)]);
+    let err = stack
+        .run_before_model(&mut ctx, &(), &mut req)
+        .await
+        .expect_err("reservation should block an oversized call");
+    assert!(matches!(err, TinyAgentsError::LimitExceeded(_)));
+    assert!(
+        events(&recorder)
+            .iter()
+            .any(|e| matches!(e, AgentEvent::BudgetExceeded { blocked: true, .. }))
+    );
+
+    // A small prompt reserves, then reconciles against the actual usage.
+    let mut small = ModelRequest::new(vec![Message::user("hi")]);
+    stack
+        .run_before_model(&mut ctx, &(), &mut small)
+        .await
+        .expect("small call fits the reservation");
+    let mut resp = response_with_usage("m", 1, 1);
+    stack
+        .run_after_model(&mut ctx, &(), &mut resp)
+        .await
+        .unwrap();
+
+    let evs = events(&recorder);
+    assert!(
+        evs.iter()
+            .any(|e| matches!(e, AgentEvent::BudgetReserved { .. }))
+    );
+    assert!(evs.iter().any(
+        |e| matches!(e, AgentEvent::BudgetReconciled { actual_input_tokens, .. } if *actual_input_tokens == 1)
+    ));
+}
+
 // ── ToolAllowlistMiddleware ─────────────────────────────────────────────────
 
 #[tokio::test]

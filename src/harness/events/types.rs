@@ -325,6 +325,25 @@ pub enum AgentEvent {
         reason: String,
     },
 
+    /// Budget preflight reserved an estimate of the upcoming model call's input
+    /// tokens against the run budget, before dispatching the call. Lets a budget
+    /// bound a call *before* it overshoots, rather than only detecting the
+    /// overshoot afterward.
+    BudgetReserved {
+        /// Estimated input tokens reserved for the upcoming call.
+        estimated_input_tokens: u64,
+    },
+
+    /// Budget reconciled a prior reservation against the provider-reported usage
+    /// after the call returned, so the difference between the estimate and the
+    /// actual is auditable.
+    BudgetReconciled {
+        /// Tokens that had been reserved (estimated) for the call.
+        estimated_input_tokens: u64,
+        /// Input tokens the provider actually reported.
+        actual_input_tokens: u64,
+    },
+
     /// A budget limit was reached. When emitted from budget preflight the run is
     /// about to be blocked with
     /// [`TinyAgentsError::LimitExceeded`][crate::error::TinyAgentsError::LimitExceeded];
@@ -448,6 +467,8 @@ impl AgentEvent {
             AgentEvent::ToolCompleted { .. } => "tool.completed",
             AgentEvent::UnknownToolCall { .. } => "tool.unknown",
             AgentEvent::BudgetWarning { .. } => "budget.warning",
+            AgentEvent::BudgetReserved { .. } => "budget.reserved",
+            AgentEvent::BudgetReconciled { .. } => "budget.reconciled",
             AgentEvent::BudgetExceeded { .. } => "budget.exceeded",
             AgentEvent::WorkspacePrepared { .. } => "workspace.prepared",
             AgentEvent::WorkspaceViolation { .. } => "workspace.violation",
