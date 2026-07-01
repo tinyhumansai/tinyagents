@@ -4,8 +4,8 @@
 //! This composes the **durable graph builder/executor** (`with_parallel`),
 //! the **command** model (`Command::goto` fan-out), the **reducer**
 //! (concurrent partial-update merge), and the **fork identity** carried on
-//! [`NodeContext`]. No model or network is involved, so this test runs (and
-//! must pass) under any feature set, including `--features openai` with no key.
+//! [`NodeContext`]. No model or network is involved, so this test always runs
+//! and must pass, with or without `OPENAI_API_KEY`.
 //!
 //! Topology built by [`fanout_graph`]:
 //!
