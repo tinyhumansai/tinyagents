@@ -195,8 +195,8 @@ impl OrchestrationTool {
             node_id: optional_string(args, "node_id")?.map(Into::into),
             status: optional_status(args, "status")?,
             kind: optional_string(args, "kind")?,
-            created_after: None,
-            created_before: None,
+            created_after: optional_epoch_ms(args, "created_after_ms")?,
+            created_before: optional_epoch_ms(args, "created_before_ms")?,
         };
         serde_json::to_value(self.store.list(filter)).map_err(Into::into)
     }
@@ -427,7 +427,10 @@ fn orchestration_parameters(kind: OrchestrationToolKind) -> Value {
                         "timed_out",
                         "abandoned"
                     ]
-                }
+                },
+                "kind": { "type": "string" },
+                "created_after_ms": { "type": "integer", "minimum": 0 },
+                "created_before_ms": { "type": "integer", "minimum": 0 }
             },
             "additionalProperties": false
         }),
@@ -547,6 +550,14 @@ fn optional_u64(args: &Value, field: &str) -> Result<Option<u64>> {
         }),
         None => Ok(None),
     }
+}
+
+/// Parses an optional Unix-epoch-millisecond bound into a `SystemTime`,
+/// matching the wall-clock unit of a task record's `created_at`. Used for the
+/// `created_after_ms`/`created_before_ms` window on `orchestrate_list`.
+fn optional_epoch_ms(args: &Value, field: &str) -> Result<Option<std::time::SystemTime>> {
+    Ok(optional_u64(args, field)?
+        .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms)))
 }
 
 fn optional_bool(args: &Value, field: &str) -> Result<Option<bool>> {

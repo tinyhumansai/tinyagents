@@ -168,6 +168,76 @@ async fn spawn_and_status_run_through_tool_trait() {
 }
 
 #[tokio::test]
+async fn list_tool_honors_created_window_and_kind() {
+    let store: Arc<dyn TaskStore> = Arc::new(InMemoryTaskStore::new());
+    let spawn = OrchestrationTool::new(OrchestrationToolKind::Spawn, store.clone());
+    let list = OrchestrationTool::new(OrchestrationToolKind::List, store);
+
+    spawn
+        .call(
+            &(),
+            ToolCall::new(
+                "s1",
+                "orchestrate_spawn",
+                json!({ "kind": "graph", "target": "planner" }),
+            ),
+        )
+        .await
+        .unwrap();
+    spawn
+        .call(
+            &(),
+            ToolCall::new(
+                "s2",
+                "orchestrate_spawn",
+                json!({ "kind": "sub_agent", "target": "writer" }),
+            ),
+        )
+        .await
+        .unwrap();
+
+    // Kind filter routes through the tool.
+    let sub_agents = list
+        .call(
+            &(),
+            ToolCall::new("l1", "orchestrate_list", json!({ "kind": "sub_agent" })),
+        )
+        .await
+        .unwrap();
+    let sub_agents = sub_agents.raw.unwrap();
+    assert_eq!(sub_agents.as_array().unwrap().len(), 1);
+    assert_eq!(sub_agents[0]["spec"]["kind"]["type"], "sub_agent");
+
+    // An impossibly-early upper bound excludes everything created just now.
+    let none = list
+        .call(
+            &(),
+            ToolCall::new(
+                "l2",
+                "orchestrate_list",
+                json!({ "created_before_ms": 0 }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(none.raw.unwrap().as_array().unwrap().is_empty());
+
+    // A window opening at the epoch includes both tasks.
+    let all = list
+        .call(
+            &(),
+            ToolCall::new(
+                "l3",
+                "orchestrate_list",
+                json!({ "created_after_ms": 0 }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(all.raw.unwrap().as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn steer_tool_delivers_command_through_steering_registry() {
     use crate::harness::steering::{SteeringCommand, SteeringHandle};
 
