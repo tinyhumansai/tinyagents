@@ -644,6 +644,101 @@ async fn tool_policy_denies_declared_side_effect() {
     assert!(matches!(err, TinyAgentsError::Validation(_)));
 }
 
+#[tokio::test]
+async fn tool_policy_blocks_unapproved_approval_required_tool() {
+    use crate::harness::tool::{ToolAccess, ToolPolicy};
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let mut policies = std::collections::HashMap::new();
+    policies.insert(
+        "deploy".to_string(),
+        ToolPolicy::classified().with_access(ToolAccess {
+            approval_required: true,
+            ..ToolAccess::default()
+        }),
+    );
+    // Approval is required but only "other" is approved -> deploy is blocked.
+    let mw = ToolPolicyMiddleware::new(policies).require_approval(["other"]);
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    let mut call = tool_call("deploy");
+    let err = stack
+        .run_before_tool(&mut ctx, &(), &mut call)
+        .await
+        .expect_err("approval-required tool blocked without grant");
+    assert!(matches!(err, TinyAgentsError::Validation(_)));
+}
+
+#[tokio::test]
+async fn tool_policy_requires_sandbox_for_sandboxed_tool() {
+    use crate::harness::context::{RunConfig, RunContext};
+    use crate::harness::tool::{SandboxMode, ToolPolicy, ToolRuntime};
+    use crate::harness::workspace::WorkspaceDescriptor;
+
+    let mut policies = std::collections::HashMap::new();
+    policies.insert(
+        "shell".to_string(),
+        ToolPolicy::classified().with_runtime(ToolRuntime {
+            sandbox: SandboxMode::Required,
+            ..ToolRuntime::default()
+        }),
+    );
+    let mw = Arc::new(ToolPolicyMiddleware::new(policies).require_sandbox(true));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw);
+
+    // No workspace -> the sandboxed tool is blocked (fail closed).
+    let mut bare: RunContext = RunContext::new(RunConfig::new("no-sandbox"), ());
+    let mut call = tool_call("shell");
+    assert!(
+        stack
+            .run_before_tool(&mut bare, &(), &mut call)
+            .await
+            .is_err()
+    );
+
+    // A sandboxed workspace satisfies the requirement.
+    let mut sandboxed: RunContext = RunContext::new(RunConfig::new("sandboxed"), ())
+        .with_workspace(WorkspaceDescriptor::new("/work").with_sandbox(SandboxMode::Required));
+    let mut call = tool_call("shell");
+    stack
+        .run_before_tool(&mut sandboxed, &(), &mut call)
+        .await
+        .expect("sandboxed run admits the tool");
+}
+
+#[tokio::test]
+async fn tool_policy_truncates_oversized_results() {
+    use crate::harness::tool::{ToolPolicy, ToolResult, ToolRuntime};
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let mut policies = std::collections::HashMap::new();
+    policies.insert(
+        "reader".to_string(),
+        ToolPolicy::classified().with_runtime(ToolRuntime {
+            max_result_bytes: Some(4),
+            ..ToolRuntime::default()
+        }),
+    );
+    let mw = Arc::new(ToolPolicyMiddleware::new(policies).enforce_result_bytes(true));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw);
+
+    let mut result = ToolResult {
+        call_id: "c1".into(),
+        name: "reader".into(),
+        content: "abcdefgh".into(),
+        raw: None,
+        error: None,
+        elapsed_ms: 0,
+    };
+    stack
+        .run_after_tool(&mut ctx, &(), &mut result)
+        .await
+        .expect("after_tool runs");
+    assert_eq!(result.content, "abcd");
+    assert!(result.error.unwrap().contains("max_result_bytes"));
+}
+
 // ── HumanApprovalMiddleware ─────────────────────────────────────────────────
 
 #[tokio::test]

@@ -545,6 +545,10 @@ impl ToolPolicyMiddleware {
             require_classification: false,
             require_background_safe: false,
             deny: crate::harness::tool::ToolSideEffects::default(),
+            require_sandbox: false,
+            require_approval: false,
+            approved: std::collections::HashSet::new(),
+            enforce_result_bytes: false,
         }
     }
 
@@ -563,6 +567,10 @@ impl ToolPolicyMiddleware {
                 payment: true,
                 ..crate::harness::tool::ToolSideEffects::default()
             },
+            require_sandbox: false,
+            require_approval: false,
+            approved: std::collections::HashSet::new(),
+            enforce_result_bytes: false,
         }
     }
 
@@ -582,6 +590,33 @@ impl ToolPolicyMiddleware {
     /// Denies tools declaring any side effect present in `mask`.
     pub fn deny_side_effects(mut self, mask: crate::harness::tool::ToolSideEffects) -> Self {
         self.deny = mask;
+        self
+    }
+
+    /// Enforces that a tool declaring
+    /// [`SandboxMode::Required`][crate::harness::tool::SandboxMode::Required]
+    /// only runs when the run carries a sandboxed workspace (fail closed
+    /// otherwise). See [`RunContext::with_workspace`][crate::harness::context::RunContext::with_workspace].
+    pub fn require_sandbox(mut self, require: bool) -> Self {
+        self.require_sandbox = require;
+        self
+    }
+
+    /// Blocks any tool declaring `approval_required` unless its name is in
+    /// `approved`, turning the declarative approval flag into a fail-closed gate.
+    pub fn require_approval(
+        mut self,
+        approved: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.require_approval = true;
+        self.approved = approved.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Enforces each tool's declared `max_result_bytes` cap by truncating and
+    /// flagging oversized results in `after_tool`.
+    pub fn enforce_result_bytes(mut self, enforce: bool) -> Self {
+        self.enforce_result_bytes = enforce;
         self
     }
 
@@ -612,7 +647,42 @@ impl ToolPolicyMiddleware {
         if self.require_background_safe && !policy.access.background_safe {
             return Err(format!("tool `{name}` is not background-safe"));
         }
+        if self.require_approval && policy.access.approval_required && !self.approved.contains(name)
+        {
+            return Err(format!(
+                "tool `{name}` requires approval that was not granted"
+            ));
+        }
         Ok(())
+    }
+
+    /// The context-aware slice of policy enforcement: the sandbox requirement
+    /// depends on the run's workspace, which `evaluate` (name-only) cannot see.
+    fn evaluate_sandbox<Ctx>(
+        &self,
+        name: &str,
+        ctx: &RunContext<Ctx>,
+    ) -> std::result::Result<(), String> {
+        if !self.require_sandbox {
+            return Ok(());
+        }
+        let Some(policy) = self.policies.get(name) else {
+            return Ok(());
+        };
+        if policy.runtime.sandbox != crate::harness::tool::SandboxMode::Required {
+            return Ok(());
+        }
+        let sandboxed = ctx
+            .workspace
+            .as_ref()
+            .is_some_and(|ws| ws.sandbox == crate::harness::tool::SandboxMode::Required);
+        if sandboxed {
+            Ok(())
+        } else {
+            Err(format!(
+                "tool `{name}` requires a sandbox but the run has none"
+            ))
+        }
     }
 }
 
@@ -624,24 +694,54 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for ToolPolicy
 
     async fn before_model(
         &self,
-        _ctx: &mut RunContext<Ctx>,
+        ctx: &mut RunContext<Ctx>,
         _state: &State,
         request: &mut ModelRequest,
     ) -> Result<()> {
-        request
-            .tools
-            .retain(|schema| self.evaluate(&schema.name).is_ok());
+        request.tools.retain(|schema| {
+            self.evaluate(&schema.name).is_ok() && self.evaluate_sandbox(&schema.name, ctx).is_ok()
+        });
         Ok(())
     }
 
     async fn before_tool(
         &self,
-        _ctx: &mut RunContext<Ctx>,
+        ctx: &mut RunContext<Ctx>,
         _state: &State,
         call: &mut ToolCall,
     ) -> Result<()> {
         self.evaluate(&call.name)
+            .and_then(|_| self.evaluate_sandbox(&call.name, ctx))
             .map_err(TinyAgentsError::Validation)
+    }
+
+    async fn after_tool(
+        &self,
+        _ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        result: &mut ToolResult,
+    ) -> Result<()> {
+        if !self.enforce_result_bytes {
+            return Ok(());
+        }
+        if let Some(policy) = self.policies.get(&result.name)
+            && let Some(limit) = policy.runtime.max_result_bytes
+            && result.content.len() > limit
+        {
+            // Truncate on a char boundary at or below the byte limit so the
+            // enforced payload is still valid UTF-8.
+            let mut end = limit;
+            while end > 0 && !result.content.is_char_boundary(end) {
+                end -= 1;
+            }
+            result.content.truncate(end);
+            let note = format!("tool result exceeded max_result_bytes ({limit}); truncated");
+            result.error = Some(match result.error.take() {
+                Some(existing) => format!("{existing}; {note}"),
+                None => note,
+            });
+        }
+        Ok(())
     }
 }
 

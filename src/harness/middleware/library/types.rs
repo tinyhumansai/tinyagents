@@ -262,6 +262,19 @@ pub struct ToolPolicyMiddleware {
     pub(crate) require_classification: bool,
     pub(crate) require_background_safe: bool,
     pub(crate) deny: crate::harness::tool::ToolSideEffects,
+    /// When `true`, a tool whose runtime declares
+    /// [`SandboxMode::Required`][crate::harness::tool::SandboxMode::Required] is
+    /// blocked unless the run carries a workspace whose sandbox is `Required`.
+    pub(crate) require_sandbox: bool,
+    /// When `true`, a tool declaring `approval_required` is blocked unless its
+    /// name is in [`approved`](Self::approved).
+    pub(crate) require_approval: bool,
+    /// Tools pre-approved for calls when [`require_approval`](Self::require_approval)
+    /// is set.
+    pub(crate) approved: std::collections::HashSet<String>,
+    /// When `true`, a tool result larger than its declared `max_result_bytes` is
+    /// truncated and flagged, enforcing the declared payload cap.
+    pub(crate) enforce_result_bytes: bool,
 }
 
 // ── DynamicToolSelectionMiddleware ────────────────────────────────────────────
