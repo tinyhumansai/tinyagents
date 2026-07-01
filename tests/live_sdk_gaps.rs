@@ -248,3 +248,30 @@ async fn live_streaming_reasoning_channel_smoke() {
         "expected non-empty final streamed text"
     );
 }
+
+/// LIVE: the provider's list-models endpoint returns a non-empty catalog and
+/// includes the configured chat model.
+///
+/// Hits `GET {base_url}/models` on the real provider via
+/// [`OpenAiModel::list_models`]. Skips (early return) when `OPENAI_API_KEY` is
+/// unset, so the default `cargo test` passes with no key configured.
+#[tokio::test]
+async fn live_list_models_returns_catalog() {
+    use tinyagents::harness::providers::openai::OpenAiModel;
+
+    let _ = dotenvy::dotenv();
+    if std::env::var("OPENAI_API_KEY").is_err() {
+        eprintln!("skipping live_list_models_returns_catalog: OPENAI_API_KEY is not set");
+        return;
+    }
+
+    let model = OpenAiModel::from_env().expect("OPENAI_API_KEY present");
+    let models = model
+        .list_models()
+        .await
+        .expect("list_models succeeds against the real provider");
+
+    assert!(!models.is_empty(), "provider advertised at least one model");
+    // Every listing carries an id; ids are the values usable with `with_model`.
+    assert!(models.iter().all(|m| !m.id.is_empty()));
+}

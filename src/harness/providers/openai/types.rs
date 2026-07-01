@@ -254,3 +254,35 @@ pub struct PromptTokensDetailsWire {
     #[serde(default)]
     pub cached_tokens: u64,
 }
+
+// ---------------------------------------------------------------------------
+// Model-listing shapes (`GET {base_url}/models`)
+// ---------------------------------------------------------------------------
+
+/// One model advertised by a provider's list-models endpoint
+/// (`GET {base_url}/models`).
+///
+/// Returned by [`OpenAiModel::list_models`][super::OpenAiModel::list_models].
+/// The same shape is served by every OpenAI-compatible provider (Ollama,
+/// Together, Groq, OpenRouter, …); fields other than `id` are best-effort and
+/// may be absent depending on the provider.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelListing {
+    /// The model id (usable as [`OpenAiModel::with_model`][super::OpenAiModel::with_model]).
+    pub id: String,
+    /// Unix-epoch creation time, when the provider reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<u64>,
+    /// Owning organization/account, when the provider reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_by: Option<String>,
+}
+
+/// The `{ "object": "list", "data": [...] }` envelope returned by the
+/// list-models endpoint.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ModelListWire {
+    /// The advertised models.
+    #[serde(default)]
+    pub data: Vec<ModelListing>,
+}

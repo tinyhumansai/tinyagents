@@ -566,3 +566,24 @@ fn from_env_errors_when_api_key_missing() {
 
     assert!(matches!(result, Err(TinyAgentsError::Validation(_))));
 }
+
+#[test]
+fn parses_model_listing_envelope() {
+    // The `GET /models` shape shared by OpenAI and OpenAI-compatible providers.
+    let body = json!({
+        "object": "list",
+        "data": [
+            { "id": "gpt-4o", "object": "model", "created": 1715367049, "owned_by": "openai" },
+            { "id": "llama3.1", "object": "model" }
+        ]
+    });
+    let listing: ModelListWire = serde_json::from_value(body).unwrap();
+    assert_eq!(listing.data.len(), 2);
+    assert_eq!(listing.data[0].id, "gpt-4o");
+    assert_eq!(listing.data[0].created, Some(1715367049));
+    assert_eq!(listing.data[0].owned_by.as_deref(), Some("openai"));
+    // Providers that omit optional fields still parse (id only).
+    assert_eq!(listing.data[1].id, "llama3.1");
+    assert_eq!(listing.data[1].created, None);
+    assert_eq!(listing.data[1].owned_by, None);
+}

@@ -223,6 +223,51 @@ impl OpenAiModel {
         Self::from_spec(spec, api_key)
     }
 
+    /// Lists the models the provider advertises via `GET {base_url}/models`.
+    ///
+    /// This is a provider/account-level capability (independent of which model
+    /// this handle is bound to), so it uses the same credentials and base URL as
+    /// chat calls. Every OpenAI-compatible endpoint (Ollama, Together, Groq,
+    /// OpenRouter, …) serves the same shape, so this doubles as runtime model
+    /// discovery for local/self-hosted providers. Returned ids can be fed to
+    /// [`with_model`](Self::with_model).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TinyAgentsError::Model`] on transport failure or a non-2xx
+    /// status, and [`TinyAgentsError::Serialization`] when the body cannot be
+    /// decoded.
+    pub async fn list_models(&self) -> Result<Vec<ModelListing>> {
+        let url = format!("{}/models", self.base_url);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send()
+            .await
+            .map_err(|e| {
+                let error =
+                    self.provider_error(format!("request to {url} failed: {e}"), None, None, None);
+                TinyAgentsError::Model(self.provider_failure_message(&error))
+            })?;
+
+        let status = response.status();
+        let text = response.text().await.map_err(|e| {
+            TinyAgentsError::Model(format!("openai response body read failed: {e}"))
+        })?;
+
+        if !status.is_success() {
+            let error = self.parse_error_body(status.as_u16(), &text);
+            return Err(TinyAgentsError::Model(
+                self.provider_failure_message(&error),
+            ));
+        }
+
+        let listing: ModelListWire = serde_json::from_str(&text)?;
+        Ok(listing.data)
+    }
+
     // -----------------------------------------------------------------------
     // OpenAI-compatible provider presets
     //
