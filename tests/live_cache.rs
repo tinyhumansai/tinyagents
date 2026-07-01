@@ -16,7 +16,6 @@
 //! The whole test returns early (after an `eprintln!`) when `OPENAI_API_KEY`
 //! is unset, so the default `cargo test` passes with no key configured.
 
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

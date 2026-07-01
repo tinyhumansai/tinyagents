@@ -7,7 +7,6 @@
 //! cargo test --test live_steering -- --nocapture
 //! ```
 
-
 use std::sync::Arc;
 
 use tinyagents::harness::context::{RunConfig, RunContext};
