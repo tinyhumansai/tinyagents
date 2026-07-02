@@ -35,6 +35,7 @@ pub mod stream;
 pub mod subagent_node;
 pub mod subgraph;
 pub mod testkit;
+pub mod todos;
 
 // --- Durable execution model ---
 pub use builder::{
@@ -93,4 +94,8 @@ pub use testkit::{
     GraphAssertions, GraphEventRecorder, GraphRun, RetryCountingNode, StreamCollector,
     assert_graph, failing_node, fanout_node, interrupting_node, noop_node, run_recorded,
     scripted_route_node, scripted_update_node, subagent_fake_node, subgraph_test_node,
+};
+pub use todos::{
+    CardPatch, TaskApprovalMode, TaskBoard, TaskBoardCard, TaskCardStatus, TodosSnapshot,
+    normalise_board, parse_status, render_markdown,
 };
