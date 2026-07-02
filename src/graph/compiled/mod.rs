@@ -32,11 +32,37 @@
 //!   the fan-in / join: lower-index branches' updates are applied first.
 //! - The *lowest-index* branch that errors or interrupts is the step's terminal
 //!   outcome. Updates produced by lower-index successful branches are still
-//!   applied/persisted; an error aborts the run, an interrupt persists a
-//!   checkpoint whose pending nodes are that branch and every later active node.
+//!   applied/persisted; an error persists a resumable failure boundary (see
+//!   below) and aborts, an interrupt persists a checkpoint whose pending nodes
+//!   are that branch and every later active node.
 //! - Because branches run on cloned snapshots and never share mutable state,
 //!   concurrency is data-race free; the reducer alone resolves conflicting
 //!   writes (deterministically, by index).
+//!
+//! ## Network resilience and resumable failures
+//!
+//! Two opt-in mechanisms make a run durable under transient failure and
+//! restartable after a hard one:
+//!
+//! - **Node retry.** With
+//!   [`CompiledGraph::with_node_retry`], a node whose handler fails with a
+//!   [retryable][crate::harness::retry::is_retryable] error (a model or tool
+//!   error — the transient class) is re-run from its start up to the policy's
+//!   attempt cap, emitting
+//!   [`GraphEvent::NodeRetryScheduled`](crate::graph::stream::GraphEvent::NodeRetryScheduled)
+//!   and sleeping the opt-in backoff between attempts. A single network blip is
+//!   absorbed without touching the run.
+//! - **Resumable failure.** When a handler fails beyond the retry budget (or the
+//!   error is non-retryable), the executor does not discard the step. On a
+//!   checkpointed thread it folds the branches that already completed into
+//!   committed state and persists a failure-boundary checkpoint whose
+//!   `next_nodes` schedule the failed node (and the not-yet-run tail) for a
+//!   later [`CompiledGraph::resume`]/[`CompiledGraph::retry`], with the error
+//!   and failed node stamped into the checkpoint metadata. The run then reports
+//!   `Failed` (carrying that checkpoint id) and returns the error. A caller can
+//!   restart it as-is, or continue on operator feedback by editing state with
+//!   [`CompiledGraph::update_state`] before resuming. Without a checkpointer the
+//!   run aborts immediately, exactly as before.
 
 mod types;
 
