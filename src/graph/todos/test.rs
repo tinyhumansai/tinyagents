@@ -120,3 +120,235 @@ fn normalise_trims_generates_ids_and_recomputes_order() {
     assert_eq!(board.cards[1].order, 1);
     assert_eq!(board.cards[1].blocker.as_deref(), Some("waiting on user"));
 }
+
+mod store_tests {
+    use std::sync::Arc;
+
+    use super::super::store;
+    use super::super::types::{CardPatch, TaskBoardCard, TaskCardStatus};
+    use crate::harness::store::{InMemoryStore, Store};
+
+    fn store() -> Arc<dyn Store> {
+        Arc::new(InMemoryStore::default())
+    }
+
+    #[tokio::test]
+    async fn add_list_remove_round_trip() {
+        let s = store();
+        assert!(store::list(&s, "t").await.unwrap().cards.is_empty());
+
+        let snap = store::add(&s, "t", "Write the RFC", CardPatch::default())
+            .await
+            .unwrap();
+        assert_eq!(snap.thread_id, "t");
+        assert_eq!(snap.cards.len(), 1);
+        assert_eq!(snap.cards[0].title, "Write the RFC");
+        assert!(snap.markdown.contains("Write the RFC"));
+        let id = snap.cards[0].id.clone();
+
+        let listed = store::list(&s, "t").await.unwrap();
+        assert_eq!(listed.cards.len(), 1);
+
+        let after = store::remove(&s, "t", &id).await.unwrap();
+        assert!(after.cards.is_empty());
+        assert!(
+            store::remove(&s, "t", &id).await.is_err(),
+            "unknown id errors"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_rejects_empty_content_and_blank_thread() {
+        let s = store();
+        assert!(
+            store::add(&s, "t", "   ", CardPatch::default())
+                .await
+                .is_err()
+        );
+        assert!(
+            store::add(&s, "  ", "x", CardPatch::default())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn single_in_progress_invariant_is_enforced() {
+        let s = store();
+        let a = store::add(&s, "t", "A", CardPatch::default())
+            .await
+            .unwrap();
+        let a_id = a.cards[0].id.clone();
+        let b = store::add(&s, "t", "B", CardPatch::default())
+            .await
+            .unwrap();
+        let b_id = b.cards[1].id.clone();
+
+        store::update_status(&s, "t", &a_id, TaskCardStatus::InProgress)
+            .await
+            .unwrap();
+        // A second in-progress card is rejected, not silently fixed.
+        let err = store::update_status(&s, "t", &b_id, TaskCardStatus::InProgress)
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("in_progress"));
+        // The board still has exactly one in-progress card.
+        let listed = store::list(&s, "t").await.unwrap();
+        let in_progress = listed
+            .cards
+            .iter()
+            .filter(|c| c.status == TaskCardStatus::InProgress)
+            .count();
+        assert_eq!(in_progress, 1);
+    }
+
+    #[tokio::test]
+    async fn replace_enforces_invariant() {
+        let s = store();
+        let two_in_progress = vec![
+            TaskBoardCard {
+                status: TaskCardStatus::InProgress,
+                ..TaskBoardCard::new("A")
+            },
+            TaskBoardCard {
+                status: TaskCardStatus::InProgress,
+                ..TaskBoardCard::new("B")
+            },
+        ];
+        assert!(store::replace(&s, "t", two_in_progress).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn decide_plan_only_from_awaiting_approval() {
+        let s = store();
+        let snap = store::add(
+            &s,
+            "t",
+            "Gated work",
+            CardPatch {
+                status: Some(TaskCardStatus::AwaitingApproval),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let id = snap.cards[0].id.clone();
+
+        let approved = store::decide_plan(&s, "t", &id, true).await.unwrap();
+        assert_eq!(approved.cards[0].status, TaskCardStatus::Ready);
+        // A second decision on a now-Ready card errors (can't resurrect).
+        assert!(store::decide_plan(&s, "t", &id, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn revise_plan_rejects_all_awaiting_and_is_lenient_when_empty() {
+        let s = store();
+        store::add(
+            &s,
+            "t",
+            "Gated",
+            CardPatch {
+                status: Some(TaskCardStatus::AwaitingApproval),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let after = store::revise_plan(&s, "t").await.unwrap();
+        assert_eq!(after.cards[0].status, TaskCardStatus::Rejected);
+        // Nothing awaiting now → benign no-op.
+        let again = store::revise_plan(&s, "t").await.unwrap();
+        assert_eq!(again.cards[0].status, TaskCardStatus::Rejected);
+    }
+
+    #[tokio::test]
+    async fn claim_card_cas_accepts_then_rejects() {
+        let s = store();
+        let snap = store::add(
+            &s,
+            "t",
+            "Runnable",
+            CardPatch {
+                status: Some(TaskCardStatus::Ready),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let id = snap.cards[0].id.clone();
+
+        let claimed = store::claim_card(
+            &s,
+            "t",
+            &id,
+            &[TaskCardStatus::Ready],
+            TaskCardStatus::InProgress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(claimed.status, TaskCardStatus::InProgress);
+        // A second claim expecting Ready now fails (already in progress).
+        assert!(
+            store::claim_card(
+                &s,
+                "t",
+                &id,
+                &[TaskCardStatus::Ready],
+                TaskCardStatus::InProgress
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_leaves_unset_fields_untouched() {
+        let s = store();
+        let snap = store::add(
+            &s,
+            "t",
+            "Task",
+            CardPatch {
+                objective: Some("keep me".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let id = snap.cards[0].id.clone();
+        // Edit only the notes; objective is preserved.
+        let edited = store::edit(
+            &s,
+            "t",
+            &id,
+            CardPatch {
+                notes: Some("a note".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(edited.cards[0].objective.as_deref(), Some("keep me"));
+        assert_eq!(edited.cards[0].notes.as_deref(), Some("a note"));
+    }
+
+    #[tokio::test]
+    async fn set_session_thread_links_then_clears() {
+        let s = store();
+        let snap = store::add(&s, "t", "Task", CardPatch::default())
+            .await
+            .unwrap();
+        let id = snap.cards[0].id.clone();
+        let linked = store::set_session_thread(&s, "t", &id, Some("thread-xyz".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            linked.cards[0].session_thread_id.as_deref(),
+            Some("thread-xyz")
+        );
+        let cleared = store::set_session_thread(&s, "t", &id, Some("  ".into()))
+            .await
+            .unwrap();
+        assert_eq!(cleared.cards[0].session_thread_id, None);
+    }
+}

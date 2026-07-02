@@ -12,6 +12,7 @@
 //! coupling (progress events, RPC envelopes, in-memory scratch fallback): a
 //! board is always `(Store, thread_id)`.
 
+pub mod store;
 mod types;
 
 pub use types::{
