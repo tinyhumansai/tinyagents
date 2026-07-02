@@ -146,4 +146,6 @@ topology or executable code.
 - [Sub-agents, recursion, and depth tracking](subagents-recursion.md)
 - [Memory and stores boundary](memory-boundary.md)
 - [Visualization, introspection, and testkit](visualization-testkit.md)
+- [Per-thread goal and graph-native continuation](goals.md)
+- [Per-thread task board (kanban todos)](todos.md)
 - [Implementation milestones](milestones.md)
