@@ -26,7 +26,8 @@
 //! 2. **Graph runtime** ([`graph`]) — LangGraph-style durable typed state
 //!    graphs: [`START`]/[`END`], nodes, conditional routing, [`Command`]s,
 //!    fan-out, reducers/channels, [`Checkpoint`]s, [`Interrupt`]s, subgraphs,
-//!    streaming, and topology export.
+//!    streaming, topology export, and a per-thread durable [`ThreadGoal`] with
+//!    graph-native continuation, exposed as harness tools.
 //! 3. **Registry** ([`registry`]) — a named capability catalog (models, tools,
 //!    agents, graphs, stores, middleware, policy) that `.rag`/`.ragsh` bind by
 //!    name.
@@ -182,6 +183,16 @@ pub use graph::{
     OrchestrationTaskStatus, OrchestrationTool, OrchestrationToolKind, SteeringRegistry, TaskStore,
     orchestration_tool_schema, orchestration_tool_schemas, orchestration_tools,
     orchestration_tools_with_steering, register_orchestration_tools,
+};
+
+// --- Graph: per-thread goal (durable objective + graph-native continuation) ---
+// `goal_store` is the programmatic CRUD surface (get/set/complete/account_usage);
+// the tools and continuation helpers are re-exported flat for discoverability.
+pub use graph::goals::store as goal_store;
+pub use graph::{
+    GoalProgress, GoalTool, GoalToolKind, ThreadGoal, ThreadGoalStatus, TurnOutcome,
+    active_goal_context_block, goal_gate_node, goal_tools, note_user_turn, register_goal_tools,
+    run_continuation_tick,
 };
 
 // --- Graph: parallel map/reduce helper ---
