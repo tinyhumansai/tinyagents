@@ -13,7 +13,9 @@
 //! interrupts ([`command`]), a builder/compile contract ([`builder`]), a
 //! superstep executor ([`compiled`]), checkpointing ([`checkpoint`]),
 //! streaming/events ([`stream`]), run-status snapshots ([`status`]), graph
-//! export/visualization ([`export`]), and subgraph embedding ([`subgraph`]).
+//! export/visualization ([`export`]), subgraph embedding ([`subgraph`]), and
+//! per-thread productivity primitives — a durable goal ([`goals`]) and a kanban
+//! task board ([`todos`]) — exposed as harness tools.
 //!
 //! Each concern lives in its own submodule with `types.rs` (definitions),
 //! `mod.rs` (implementations), and `test.rs` (unit tests).
@@ -24,6 +26,7 @@ pub mod checkpoint;
 pub mod command;
 pub mod compiled;
 pub mod export;
+pub mod goals;
 pub mod observability;
 pub mod orchestration;
 pub mod parallel;
@@ -34,6 +37,7 @@ pub mod stream;
 pub mod subagent_node;
 pub mod subgraph;
 pub mod testkit;
+pub mod todos;
 
 // --- Durable execution model ---
 pub use builder::{
@@ -56,6 +60,11 @@ pub use export::{
     ChannelInfo, ConditionalEdgeInfo, EdgeInfo, GraphPolicySummary, GraphTopology, NodeInfo,
     NodePolicySummary, RouteInfo, ValidationReport, WaitingEdgeInfo, blueprint_to_json,
     blueprint_to_mermaid, blueprint_to_topology, from_json, to_json, to_mermaid,
+};
+pub use goals::{
+    GoalProgress, GoalTool, GoalToolKind, ThreadGoal, ThreadGoalStatus, TurnOutcome,
+    active_goal_context_block, goal_gate_node, goal_tools, note_user_turn, register_goal_tools,
+    run_continuation_tick,
 };
 pub use observability::{
     GraphEventJournal, GraphHealthSummary, GraphLangfuseExporter, GraphLatencyMetrics,
@@ -87,4 +96,8 @@ pub use testkit::{
     GraphAssertions, GraphEventRecorder, GraphRun, RetryCountingNode, StreamCollector,
     assert_graph, failing_node, fanout_node, interrupting_node, noop_node, run_recorded,
     scripted_route_node, scripted_update_node, subagent_fake_node, subgraph_test_node,
+};
+pub use todos::{
+    CardPatch, TaskApprovalMode, TaskBoard, TaskBoardCard, TaskCardStatus, TodoTool, TodosSnapshot,
+    normalise_board, parse_status, register_todo_tools, render_markdown, todo_tools,
 };
