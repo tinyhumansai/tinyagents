@@ -425,6 +425,27 @@ where
             .await
     }
 
+    /// Retries a failed run from its latest (failure-boundary) checkpoint,
+    /// re-running the node that failed and the not-yet-run tail of that step.
+    ///
+    /// This is the resume counterpart for the *failure* path (as opposed to a
+    /// human interrupt): after a node handler aborts a checkpointed run — a
+    /// transient outage that outlived the node-retry policy, or a hard crash —
+    /// the run leaves a resumable checkpoint (see
+    /// [`CompiledGraph::with_node_retry`]). Calling `retry` re-runs exactly what
+    /// did not complete, carrying no resume value. It is shorthand for
+    /// [`CompiledGraph::resume`] with an empty [`Command`].
+    ///
+    /// To continue on *user feedback* instead of a bare retry, first inspect the
+    /// committed state with
+    /// [`get_state`](CompiledGraph::get_state), edit it with
+    /// [`update_state`](CompiledGraph::update_state), then call `retry` (or
+    /// `resume`) — the edited state is what the re-run sees.
+    pub async fn retry(&self, thread_id: impl Into<ThreadId>) -> Result<GraphExecution<State>> {
+        self.resume_from(thread_id, ResumeTarget::Latest, Command::new())
+            .await
+    }
+
     /// Resumes a run from a specific checkpoint (time-travel resume).
     ///
     /// [`ResumeTarget::Latest`] behaves exactly like [`CompiledGraph::resume`];
