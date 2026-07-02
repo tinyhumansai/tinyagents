@@ -66,6 +66,33 @@ impl RetryPolicy {
         self
     }
 
+    /// Enables or disables actually sleeping for the computed backoff between
+    /// retries.
+    ///
+    /// Off by default so tests stay deterministic and fast. Enable it in
+    /// production so a transient failure is retried after a real, growing delay
+    /// rather than back-to-back. See [`RetryPolicy::backoff_sleep`].
+    pub fn with_backoff_sleep(mut self, sleep: bool) -> Self {
+        self.backoff_sleep = sleep;
+        self
+    }
+
+    /// Sleeps for this policy's backoff before the given retry `attempt`, but
+    /// only when [`RetryPolicy::backoff_sleep`] is enabled.
+    ///
+    /// A single, reusable helper so every retry loop that honors a
+    /// [`RetryPolicy`] gets identical, opt-in backoff behavior. A no-op (returns
+    /// immediately) when sleeping is disabled or the computed backoff is zero.
+    pub async fn sleep_backoff(&self, attempt: usize) {
+        if !self.backoff_sleep {
+            return;
+        }
+        let backoff = self.backoff_for_attempt(attempt);
+        if backoff > Duration::ZERO {
+            tokio::time::sleep(backoff).await;
+        }
+    }
+
     /// Returns `true` when another attempt should be made.
     ///
     /// `attempt` is zero-indexed: `0` is the first attempt, `1` is the first

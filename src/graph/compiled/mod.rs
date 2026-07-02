@@ -32,11 +32,37 @@
 //!   the fan-in / join: lower-index branches' updates are applied first.
 //! - The *lowest-index* branch that errors or interrupts is the step's terminal
 //!   outcome. Updates produced by lower-index successful branches are still
-//!   applied/persisted; an error aborts the run, an interrupt persists a
-//!   checkpoint whose pending nodes are that branch and every later active node.
+//!   applied/persisted; an error persists a resumable failure boundary (see
+//!   below) and aborts, an interrupt persists a checkpoint whose pending nodes
+//!   are that branch and every later active node.
 //! - Because branches run on cloned snapshots and never share mutable state,
 //!   concurrency is data-race free; the reducer alone resolves conflicting
 //!   writes (deterministically, by index).
+//!
+//! ## Network resilience and resumable failures
+//!
+//! Two opt-in mechanisms make a run durable under transient failure and
+//! restartable after a hard one:
+//!
+//! - **Node retry.** With
+//!   [`CompiledGraph::with_node_retry`], a node whose handler fails with a
+//!   [retryable][crate::harness::retry::is_retryable] error (a model or tool
+//!   error — the transient class) is re-run from its start up to the policy's
+//!   attempt cap, emitting
+//!   [`GraphEvent::NodeRetryScheduled`](crate::graph::stream::GraphEvent::NodeRetryScheduled)
+//!   and sleeping the opt-in backoff between attempts. A single network blip is
+//!   absorbed without touching the run.
+//! - **Resumable failure.** When a handler fails beyond the retry budget (or the
+//!   error is non-retryable), the executor does not discard the step. On a
+//!   checkpointed thread it folds the branches that already completed into
+//!   committed state and persists a failure-boundary checkpoint whose
+//!   `next_nodes` schedule the failed node (and the not-yet-run tail) for a
+//!   later [`CompiledGraph::resume`]/[`CompiledGraph::retry`], with the error
+//!   and failed node stamped into the checkpoint metadata. The run then reports
+//!   `Failed` (carrying that checkpoint id) and returns the error. A caller can
+//!   restart it as-is, or continue on operator feedback by editing state with
+//!   [`CompiledGraph::update_state`] before resuming. Without a checkpointer the
+//!   run aborts immediately, exactly as before.
 
 mod types;
 
@@ -48,7 +74,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use crate::graph::builder::{
-    Branch, BuilderNode, END, ForkId, NodeContext, NodeFuture, NodeMeta, START,
+    Branch, BuilderNode, END, ForkId, NodeContext, NodeFuture, NodeHandler, NodeMeta, START,
 };
 use crate::graph::checkpoint::{
     Checkpoint, CheckpointConfig, CheckpointTuple, Checkpointer, DurabilityMode,
@@ -63,6 +89,7 @@ use crate::graph::stream::{GraphEvent, GraphEventSink};
 use crate::harness::ids::{
     CheckpointId, ExecutionStatus, GraphId, InterruptId, NodeId, RunId, ThreadId,
 };
+use crate::harness::retry::is_retryable;
 use crate::{Result, TinyAgentsError};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -110,6 +137,26 @@ struct StepRun<Update> {
     goto_map: HashMap<NodeId, Vec<RouteTarget>>,
     /// The lowest-index branch interrupt, if any (its active-set index + value).
     interrupt: Option<(usize, Interrupt)>,
+    /// A node-handler failure that survived the node-retry policy, if any. When
+    /// set, `updates` still carries the updates of the branches that completed
+    /// *before* the failing branch, so the executor can fold that partial
+    /// progress into committed state and persist a resumable failure boundary.
+    failure: Option<StepFailure>,
+}
+
+/// A node-handler failure captured by a runner so the executor can persist a
+/// resumable failure-boundary checkpoint instead of discarding partial progress.
+struct StepFailure {
+    /// The node whose handler ultimately failed (after any retries).
+    failed_node: NodeId,
+    /// Nodes that completed successfully before the failure, in active-set order
+    /// (recorded as the checkpoint's completed tasks).
+    completed: Vec<NodeId>,
+    /// Nodes to re-run on resume: the failed node first, then the not-yet-folded
+    /// members of the step (recorded as the checkpoint's next nodes).
+    pending: Vec<NodeId>,
+    /// The escalated error.
+    error: TinyAgentsError,
 }
 
 /// One scheduled activation in the active set: the node plus an optional
@@ -184,6 +231,7 @@ impl<State, Update> CompiledGraph<State, Update> {
             max_concurrency,
             node_timeout,
             durability: crate::graph::checkpoint::DurabilityMode::default(),
+            node_retry: None,
         }
     }
 
@@ -229,6 +277,27 @@ impl<State, Update> CompiledGraph<State, Update> {
     /// for resume), skipping intermediate boundaries.
     pub fn with_durability(mut self, durability: DurabilityMode) -> Self {
         self.durability = durability;
+        self
+    }
+
+    /// Sets the per-node [`RetryPolicy`] applied around every node handler.
+    ///
+    /// Opt-in network resilience for the graph: when a node handler fails with a
+    /// [retryable][crate::harness::retry::is_retryable] error (a model or tool
+    /// error — the transient class), the executor re-runs the node from its
+    /// start up to the policy's attempt cap, emitting a
+    /// [`GraphEvent::NodeRetryScheduled`](crate::graph::stream::GraphEvent::NodeRetryScheduled)
+    /// before each retry. Backoff between attempts is slept on only when the
+    /// policy opts in via
+    /// [`RetryPolicy::with_backoff_sleep`](crate::harness::retry::RetryPolicy::with_backoff_sleep).
+    ///
+    /// Non-retryable errors, and retryable errors once attempts are exhausted,
+    /// escalate — and, on a checkpointed thread, leave a resumable
+    /// failure-boundary checkpoint (see [`CompiledGraph::resume`]) so the run can
+    /// be restarted or continued rather than lost. Without a policy (the
+    /// default) the first node error aborts the run immediately.
+    pub fn with_node_retry(mut self, policy: crate::harness::retry::RetryPolicy) -> Self {
+        self.node_retry = Some(policy);
         self
     }
 
@@ -379,6 +448,27 @@ where
         command: Command<Update>,
     ) -> Result<GraphExecution<State>> {
         self.resume_from(thread_id, ResumeTarget::Latest, command)
+            .await
+    }
+
+    /// Retries a failed run from its latest (failure-boundary) checkpoint,
+    /// re-running the node that failed and the not-yet-run tail of that step.
+    ///
+    /// This is the resume counterpart for the *failure* path (as opposed to a
+    /// human interrupt): after a node handler aborts a checkpointed run — a
+    /// transient outage that outlived the node-retry policy, or a hard crash —
+    /// the run leaves a resumable checkpoint (see
+    /// [`CompiledGraph::with_node_retry`]). Calling `retry` re-runs exactly what
+    /// did not complete, carrying no resume value. It is shorthand for
+    /// [`CompiledGraph::resume`] with an empty [`Command`].
+    ///
+    /// To continue on *user feedback* instead of a bare retry, first inspect the
+    /// committed state with
+    /// [`get_state`](CompiledGraph::get_state), edit it with
+    /// [`update_state`](CompiledGraph::update_state), then call `retry` (or
+    /// `resume`) — the edited state is what the re-run sees.
+    pub async fn retry(&self, thread_id: impl Into<ThreadId>) -> Result<GraphExecution<State>> {
+        self.resume_from(thread_id, ResumeTarget::Latest, Command::new())
             .await
     }
 
@@ -776,7 +866,7 @@ where
             self.emit(GraphEvent::RunStarted {
                 run_id: run_id.clone(),
             });
-            self.fail_run(&run_id, &thread_id, started_at, steps, &err)
+            self.fail_run(&run_id, &thread_id, started_at, steps, &err, None)
                 .await;
             return Err(err);
         }
@@ -820,14 +910,14 @@ where
                 .min(self.recursion_policy.max_total_steps);
             if steps >= step_limit {
                 let err = TinyAgentsError::RecursionLimit(step_limit);
-                self.fail_run(&run_id, &thread_id, started_at, steps, &err)
+                self.fail_run(&run_id, &thread_id, started_at, steps, &err, None)
                     .await;
                 return Err(err);
             }
             // Node-loop recursion: enforce `max_visits_per_node` per activation.
             for activation in &active {
                 if let Err(err) = recursion.record_node_visit(&mut node_visits, &activation.node) {
-                    self.fail_run(&run_id, &thread_id, started_at, steps, &err)
+                    self.fail_run(&run_id, &thread_id, started_at, steps, &err, None)
                         .await;
                     return Err(err);
                 }
@@ -871,10 +961,11 @@ where
                 updates,
                 goto_map,
                 interrupt,
+                failure,
             } = match run_result {
                 Ok(step_run) => step_run,
                 Err(err) => {
-                    self.fail_run(&run_id, &thread_id, started_at, steps, &err)
+                    self.fail_run(&run_id, &thread_id, started_at, steps, &err, None)
                         .await;
                     return Err(err);
                 }
@@ -893,12 +984,53 @@ where
             let child_runs_meta =
                 serde_json::to_value(&step_child_runs).unwrap_or(serde_json::Value::Null);
 
+            // Node-handler failure (survived any node-retry policy): the updates
+            // of the branches that completed before it are already folded into
+            // `state` above, so persist a resumable failure-boundary checkpoint
+            // scheduling the failed node (and the not-yet-run tail) for a later
+            // `resume`/`retry`, record a `Failed` status carrying the error and
+            // that checkpoint, and abort. Without a checkpointer/thread the
+            // checkpoint is a no-op and the run aborts exactly as before.
+            if let Some(fail) = failure {
+                let StepFailure {
+                    failed_node,
+                    completed,
+                    pending,
+                    error,
+                } = fail;
+                let checkpoint_id = self
+                    .persist_failure_checkpoint(
+                        &thread_id,
+                        &run_id,
+                        &state,
+                        &pending,
+                        &completed,
+                        parent_checkpoint.clone(),
+                        steps,
+                        &failed_node,
+                        &error,
+                        &recursion_meta,
+                        &child_runs_meta,
+                    )
+                    .await?;
+                self.fail_run(
+                    &run_id,
+                    &thread_id,
+                    started_at,
+                    steps,
+                    &error,
+                    checkpoint_id,
+                )
+                .await;
+                return Err(error);
+            }
+
             // Interrupt: persist a checkpoint whose next nodes are the
             // not-yet-completed members of this step (interrupted node first),
             // then return control to the caller.
             if let Some((index, emitted)) = interrupt {
                 if let Err(err) = self.require_interrupt_durability(&thread_id) {
-                    self.fail_run(&run_id, &thread_id, started_at, steps, &err)
+                    self.fail_run(&run_id, &thread_id, started_at, steps, &err, None)
                         .await;
                     return Err(err);
                 }
@@ -1052,6 +1184,11 @@ where
 
     /// Emits a [`GraphEvent::RunFailed`] and records a terminal `Failed` status
     /// for a run that aborted with `err`.
+    ///
+    /// `checkpoint_id` is the resumable failure-boundary checkpoint when the run
+    /// left one (a node-handler failure on a checkpointed thread), or `None` for
+    /// a structural/non-resumable abort. When present it is recorded on the
+    /// status so an observer can locate the checkpoint to `resume`/`retry` from.
     async fn fail_run(
         &self,
         run_id: &RunId,
@@ -1059,6 +1196,7 @@ where
         started_at: SystemTime,
         steps: usize,
         err: &TinyAgentsError,
+        checkpoint_id: Option<CheckpointId>,
     ) {
         self.emit(GraphEvent::RunFailed {
             run_id: run_id.clone(),
@@ -1069,7 +1207,64 @@ where
         status.current_step = steps;
         status.ended_at = Some(SystemTime::now());
         status.error = Some(err.to_string());
+        status.checkpoint_id = checkpoint_id;
         self.save_status(status).await;
+    }
+
+    /// Persists a resumable failure-boundary checkpoint for a node-handler
+    /// failure that survived the node-retry policy.
+    ///
+    /// Mirrors the interrupt boundary: `next_nodes` schedules the failed node
+    /// (and any not-yet-run members of the step) so `resume`/`retry` re-runs
+    /// exactly what did not complete, while `completed_tasks` records the
+    /// branches that already succeeded (their updates are folded into `state`
+    /// before this is called). The rendered error and failed node id are stamped
+    /// into the checkpoint metadata for diagnosis. A no-op returning `None` when
+    /// no checkpointer/thread is configured — the run then aborts without a
+    /// resumable checkpoint, exactly as before this policy existed.
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_failure_checkpoint(
+        &self,
+        thread_id: &Option<ThreadId>,
+        run_id: &RunId,
+        state: &State,
+        next_nodes: &[NodeId],
+        completed_tasks: &[NodeId],
+        parent: Option<String>,
+        step: usize,
+        failed_node: &NodeId,
+        error: &TinyAgentsError,
+        recursion: &serde_json::Value,
+        child_runs: &serde_json::Value,
+    ) -> Result<Option<CheckpointId>> {
+        let (Some(checkpointer), Some(thread)) = (&self.checkpointer, thread_id) else {
+            return Ok(None);
+        };
+        let checkpoint = Checkpoint {
+            thread_id: thread.to_string(),
+            checkpoint_id: next_id("ckpt"),
+            run_id: Some(run_id.to_string()),
+            parent_checkpoint_id: parent,
+            namespace: self.namespace.clone(),
+            state: state.clone(),
+            next_nodes: next_nodes.to_vec(),
+            completed_tasks: completed_tasks.to_vec(),
+            pending_writes: Vec::new(),
+            interrupts: Vec::new(),
+            metadata: serde_json::json!({
+                "source": "loop",
+                "step": step,
+                "recursion": recursion,
+                "child_runs": child_runs,
+                "failed_node": failed_node.as_str(),
+                "error": error.to_string(),
+            }),
+        };
+        let id = checkpointer.put(checkpoint).await?;
+        self.emit(GraphEvent::CheckpointSaved {
+            checkpoint_id: id.clone(),
+        });
+        Ok(Some(id))
     }
 
     /// Builds the per-task [`NodeContext`] for `node_id` at the given branch.
@@ -1120,6 +1315,51 @@ where
                 ))),
             },
             None => fut.await,
+        }
+    }
+
+    /// Runs one node handler under the graph's node-retry policy.
+    ///
+    /// Builds a fresh handler future (and re-clones the context) for each
+    /// attempt, so a retried node re-runs from its start — matching the durable
+    /// execution model, where a node is never suspended mid-flight. On a
+    /// [retryable][crate::harness::retry::is_retryable] error, when a
+    /// [`RetryPolicy`](crate::harness::retry::RetryPolicy) is configured and
+    /// permits another attempt, it emits
+    /// [`GraphEvent::NodeRetryScheduled`], sleeps the (opt-in) backoff, and
+    /// retries. Non-retryable errors, absence of a policy, or an exhausted
+    /// attempt budget return the error unchanged. The per-node timeout still
+    /// bounds every individual attempt via [`Self::run_node_future`].
+    async fn run_node_with_retry(
+        &self,
+        node_id: &NodeId,
+        handler: &Arc<NodeHandler<State, Update>>,
+        state: &State,
+        ctx: NodeContext,
+        step: usize,
+    ) -> Result<NodeResult<Update>> {
+        let mut attempt = 0usize;
+        loop {
+            let fut = handler(state.clone(), ctx.clone());
+            match self.run_node_future(node_id, fut).await {
+                Ok(result) => return Ok(result),
+                Err(error) => {
+                    let retry = self
+                        .node_retry
+                        .as_ref()
+                        .filter(|policy| policy.should_retry(attempt) && is_retryable(&error));
+                    let Some(policy) = retry else {
+                        return Err(error);
+                    };
+                    attempt += 1;
+                    self.emit(GraphEvent::NodeRetryScheduled {
+                        node: node_id.clone(),
+                        step,
+                        attempt,
+                    });
+                    policy.sleep_backoff(attempt).await;
+                }
+            }
         }
     }
 
@@ -1196,6 +1436,7 @@ where
         let mut updates: Vec<Update> = Vec::new();
         let mut goto_map: HashMap<NodeId, Vec<RouteTarget>> = HashMap::new();
         let mut interrupt: Option<(usize, Interrupt)> = None;
+        let mut failure: Option<StepFailure> = None;
 
         for (index, activation) in active.iter().enumerate() {
             let node_id = &activation.node;
@@ -1226,7 +1467,7 @@ where
                 child_runs,
             );
             let result = match self
-                .run_node_future(node_id, (node.handler)(state.clone(), ctx))
+                .run_node_with_retry(node_id, &node.handler, state, ctx, step)
                 .await
             {
                 Ok(result) => result,
@@ -1236,7 +1477,16 @@ where
                         step,
                         error: error.to_string(),
                     });
-                    return Err(error);
+                    // Preserve the progress of the branches that already ran:
+                    // record them as completed and schedule this node plus the
+                    // not-yet-run tail for a resumable retry.
+                    failure = Some(StepFailure {
+                        failed_node: node_id.clone(),
+                        completed: activation_nodes(&active[..index]),
+                        pending: activation_nodes(&active[index..]),
+                        error,
+                    });
+                    break;
                 }
             };
 
@@ -1258,6 +1508,7 @@ where
             updates,
             goto_map,
             interrupt,
+            failure,
         })
     }
 
@@ -1287,9 +1538,11 @@ where
         frames: &[RecursionFrame],
         child_runs: &ChildRunSink,
     ) -> Result<StepRun<Update>> {
-        let timeout = self.node_timeout;
         // Build one forked context + future per branch. Node lookup and resume
-        // consumption happen up front so the futures borrow nothing local.
+        // consumption happen up front so the futures borrow nothing mutable; each
+        // branch drives its handler through the node-retry policy (which also
+        // applies the per-node timeout), so a transient failure in one branch is
+        // retried without disturbing its siblings.
         let mut futures = Vec::with_capacity(active.len());
         for (index, activation) in active.iter().enumerate() {
             let node_id = &activation.node;
@@ -1325,18 +1578,11 @@ where
                 frames,
                 child_runs,
             );
-            let raw = (node.handler)(state.clone(), ctx);
+            let handler = node.handler.clone();
             let owned_node = node_id.clone();
             futures.push(async move {
-                match timeout {
-                    Some(d) => match tokio::time::timeout(d, raw).await {
-                        Ok(result) => result,
-                        Err(_) => Err(TinyAgentsError::Timeout(format!(
-                            "node `{owned_node}` exceeded its {d:?} timeout"
-                        ))),
-                    },
-                    None => raw.await,
-                }
+                self.run_node_with_retry(&owned_node, &handler, state, ctx, step)
+                    .await
             });
         }
 
@@ -1361,6 +1607,7 @@ where
         let mut updates: Vec<Update> = Vec::new();
         let mut goto_map: HashMap<NodeId, Vec<RouteTarget>> = HashMap::new();
         let mut interrupt: Option<(usize, Interrupt)> = None;
+        let mut failure: Option<StepFailure> = None;
 
         for (index, (activation, result)) in active.iter().zip(results).enumerate() {
             let node_id = &activation.node;
@@ -1372,7 +1619,16 @@ where
                         step,
                         error: error.to_string(),
                     });
-                    return Err(error);
+                    // The lowest-index failing branch is terminal: fold the
+                    // lower-index successes (already applied above) and schedule
+                    // this branch plus the rest for a resumable retry.
+                    failure = Some(StepFailure {
+                        failed_node: node_id.clone(),
+                        completed: activation_nodes(&active[..index]),
+                        pending: activation_nodes(&active[index..]),
+                        error,
+                    });
+                    break;
                 }
             };
 
@@ -1394,6 +1650,7 @@ where
             updates,
             goto_map,
             interrupt,
+            failure,
         })
     }
 

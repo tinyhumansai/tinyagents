@@ -50,10 +50,12 @@
 //! # Backoff
 //!
 //! Retry backoff durations are *computed* via
-//! [`crate::harness::retry::RetryPolicy::backoff_for_attempt`] but the loop does
-//! **not** sleep: keeping the loop sleep-free makes tests fast and
-//! deterministic. A real provider integration may choose to sleep for the
-//! computed duration before retrying.
+//! [`crate::harness::retry::RetryPolicy::backoff_for_attempt`]. Whether the loop
+//! actually sleeps for that duration is opt-in: it is off by default (keeping
+//! tests fast and deterministic) and enabled per policy via
+//! [`crate::harness::retry::RetryPolicy::with_backoff_sleep`], so a real
+//! provider integration retries after a genuine, growing delay while unit tests
+//! stay sleep-free.
 
 mod types;
 
@@ -811,9 +813,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                                 call_id: call_id.clone(),
                                 attempt,
                             });
-                            // Compute (but do not sleep on) the backoff so the
-                            // loop stays fast and deterministic in tests.
-                            let _ = self.policy.retry.backoff_for_attempt(attempt);
+                            // Sleep for the backoff only when the policy opts in
+                            // (`with_backoff_sleep`); otherwise this is a no-op so
+                            // the loop stays fast and deterministic in tests.
+                            self.policy.retry.sleep_backoff(attempt).await;
                             continue;
                         }
                         break Err(error);

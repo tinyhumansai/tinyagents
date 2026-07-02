@@ -228,6 +228,8 @@ All live in [`examples/`](examples/):
 - **`basic_graph`** — a minimal typed state graph: `START`, nodes, edges, `END`.
 - **`complex_graph`** — conditional routing, fanout, and richer topology.
 - **`durable_graph`** — checkpoints, resume, and time-travel over supersteps.
+- **`resilient_graph`** — node-level retry over transient failures, plus a
+  resumable failure checkpoint that `retry` restarts after an outage clears.
 - **`agent_loop_tools`** — the agent ↔ tool loop the harness runs.
 - **`orchestrator_subagents`** — **recursion in action:** an orchestrator agent
   that calls sub-agents as tools, with depth tracking and rolled-up usage.

@@ -9,6 +9,7 @@ use crate::graph::command::{Command, Interrupt, NodeResult, Send};
 use crate::graph::reducer::ClosureStateReducer;
 use crate::graph::stream::{CollectingSink, GraphEvent};
 use crate::harness::ids::ExecutionStatus;
+use crate::harness::retry::RetryPolicy;
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -1315,4 +1316,190 @@ async fn node_timeout_fails_slow_handler() {
 
     let err = graph.run(0).await.unwrap_err();
     assert!(matches!(err, TinyAgentsError::Timeout(_)));
+}
+
+// ── Network resilience: node retry + resumable failures ──────────────────────
+
+/// A single-node graph whose handler fails (with a retryable model error) the
+/// first `fail_times` invocations, then succeeds with `+1`. The shared counter
+/// lets a test observe how many attempts were made.
+fn flaky_graph(fail_times: usize, attempts: Arc<AtomicUsize>) -> CompiledGraph<i32, i32> {
+    GraphBuilder::<i32, i32>::overwrite()
+        .add_node("flaky", move |s, _c: NodeContext| {
+            let attempts = attempts.clone();
+            async move {
+                let n = attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                if n < fail_times {
+                    Err(TinyAgentsError::Model(format!("transient blip {n}")))
+                } else {
+                    Ok(NodeResult::Update(s + 1))
+                }
+            }
+        })
+        .set_entry("flaky")
+        .set_finish("flaky")
+        .compile()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn node_retry_recovers_transient_failure() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let sink = Arc::new(CollectingSink::new());
+    // Fail twice, succeed on the third attempt; the policy allows 1 try + 3
+    // retries, so recovery is within budget.
+    let graph = flaky_graph(2, attempts.clone())
+        .with_node_retry(RetryPolicy::default().with_max_attempts(4))
+        .with_event_sink(sink.clone());
+
+    let run = graph.run(10).await.unwrap();
+    assert_eq!(run.state, 11);
+    assert_eq!(run.status.status, ExecutionStatus::Completed);
+    assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
+
+    let retries = sink
+        .events()
+        .into_iter()
+        .filter(|e| matches!(e, GraphEvent::NodeRetryScheduled { .. }))
+        .count();
+    assert_eq!(retries, 2, "one retry per transient failure");
+}
+
+#[tokio::test]
+async fn exhausted_retries_leave_a_resumable_failure_checkpoint() {
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    // Fail the first 3 invocations. With 1 try + 1 retry the first run exhausts
+    // its budget (2 attempts: n=0,1) and aborts, leaving a resumable checkpoint.
+    let graph = flaky_graph(3, attempts.clone())
+        .with_node_retry(RetryPolicy::default().with_max_attempts(2))
+        .with_checkpointer(cp.clone());
+
+    let err = graph.run_with_thread("net", 100).await.unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
+    assert_eq!(attempts.load(AtomicOrdering::SeqCst), 2, "1 try + 1 retry");
+
+    // The failure boundary is durable: the checkpoint schedules the failed node
+    // for re-run at the first superstep.
+    let list = cp.list("net").await.unwrap();
+    let last = list.last().expect("a failure checkpoint was persisted");
+    assert_eq!(last.next_nodes, vec![NodeId::from("flaky")]);
+    let snapshot = graph.get_state("net", None).await.unwrap().unwrap();
+    assert_eq!(
+        snapshot.metadata.step, 1,
+        "failure boundary is at the first superstep"
+    );
+
+    // Retry: attempt n=2 fails, retry n=3 (3<3 is false) succeeds — the run
+    // completes without losing the earlier progress.
+    let resumed = graph.retry("net").await.unwrap();
+    assert_eq!(
+        resumed.state, 101,
+        "resume re-runs the failed node to success"
+    );
+    assert_eq!(resumed.status.status, ExecutionStatus::Completed);
+    assert_eq!(attempts.load(AtomicOrdering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn node_failure_without_retry_policy_is_resumable() {
+    // No node-retry policy configured: the first failure aborts the run, but a
+    // checkpointed thread still leaves a resumable failure boundary (the
+    // "resumable abort" default) rather than losing the run.
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let graph = flaky_graph(1, attempts.clone()).with_checkpointer(cp.clone());
+
+    let err = graph.run_with_thread("once", 7).await.unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
+    assert_eq!(
+        attempts.load(AtomicOrdering::SeqCst),
+        1,
+        "no retries attempted"
+    );
+
+    // Failed status carries the resumable checkpoint id.
+    let status = graph.get_state("once", None).await.unwrap().unwrap();
+    assert_eq!(status.next_nodes, vec![NodeId::from("flaky")]);
+
+    // The transient condition has cleared; retry completes the run.
+    let resumed = graph.retry("once").await.unwrap();
+    assert_eq!(resumed.state, 8);
+    assert_eq!(resumed.status.status, ExecutionStatus::Completed);
+}
+
+#[tokio::test]
+async fn edit_state_then_retry_uses_the_edited_state() {
+    // User-feedback continuation: after a failure, the operator edits committed
+    // state via update_state, then retries; the re-run sees the edited value.
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let graph = flaky_graph(1, attempts.clone()).with_checkpointer(cp.clone());
+
+    graph.run_with_thread("feedback", 0).await.unwrap_err();
+
+    // Operator bumps the committed state by +40, inheriting the failure
+    // boundary's pending nodes (`flaky`), then retries. The node adds +1 to
+    // whatever state it now sees.
+    graph.update_state("feedback", 40, None).await.unwrap();
+    let resumed = graph.retry("feedback").await.unwrap();
+    assert_eq!(
+        resumed.state, 41,
+        "retry runs against the edited state (40) + 1"
+    );
+    assert_eq!(resumed.status.status, ExecutionStatus::Completed);
+}
+
+#[tokio::test]
+async fn parallel_partial_progress_is_preserved_on_failure() {
+    // A parallel step where one branch succeeds and a lower/higher-index branch
+    // fails: the successful branch's update is folded into committed state and
+    // the failure checkpoint schedules only the failed branch for re-run.
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let graph = GraphBuilder::<i32, i32>::new()
+        .with_parallel(true)
+        .set_reducer(ClosureStateReducer::new(|s: i32, u: i32| Ok(s + u)))
+        .add_node("seed", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Command(Command::goto(["ok", "flaky"])))
+        })
+        .add_node("ok", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(1))
+        })
+        .add_node("flaky", move |_s, _c: NodeContext| {
+            let attempts = attempts.clone();
+            async move {
+                // Fail on the first invocation, succeed on resume.
+                if attempts.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                    Err(TinyAgentsError::Model("branch blip".into()))
+                } else {
+                    Ok(NodeResult::Update(10))
+                }
+            }
+        })
+        .set_entry("seed")
+        .mark_command_routing("seed")
+        .set_finish("ok")
+        .set_finish("flaky")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    // First run: seed fans out; the "ok" branch commits +1, "flaky" aborts.
+    graph.run_with_thread("fanout", 0).await.unwrap_err();
+    let snapshot = graph.get_state("fanout", None).await.unwrap().unwrap();
+    assert_eq!(
+        snapshot.values, 1,
+        "the successful branch's +1 is preserved"
+    );
+    assert!(
+        snapshot.next_nodes.contains(&NodeId::from("flaky")),
+        "only the failed branch is scheduled for re-run: {:?}",
+        snapshot.next_nodes
+    );
+
+    // Resume: the flaky branch now succeeds (+10) without re-running "ok".
+    let resumed = graph.retry("fanout").await.unwrap();
+    assert_eq!(resumed.state, 11, "1 (preserved) + 10 (re-run branch)");
+    assert_eq!(resumed.status.status, ExecutionStatus::Completed);
 }

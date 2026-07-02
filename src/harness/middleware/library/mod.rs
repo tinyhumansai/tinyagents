@@ -19,7 +19,8 @@
 //! # Testability
 //!
 //! None of these middleware sleep on the wall clock in a way that tests cannot
-//! control: [`RetryMiddleware`] computes but never sleeps on backoff,
+//! control: [`RetryMiddleware`] sleeps on backoff only when its policy opts in
+//! via [`RetryPolicy::with_backoff_sleep`] (off by default),
 //! [`TimeoutMiddleware`] is exercised under `tokio::time` paused-time tests, and
 //! [`RateLimitMiddleware`] takes an injectable clock and a configurable poll
 //! interval so its wait loop can be driven deterministically.
@@ -66,8 +67,9 @@ impl RetryMiddleware {
 
     /// Returns the policy-derived backoff for the given retry `attempt`.
     ///
-    /// Exposed for callers that want to sleep before a retry; the middleware
-    /// itself never sleeps.
+    /// Exposed for callers that want to inspect the backoff. The middleware
+    /// itself sleeps between retries only when the policy opts in via
+    /// [`RetryPolicy::with_backoff_sleep`]; otherwise it retries back-to-back.
     pub fn backoff_for_attempt(&self, attempt: usize) -> Duration {
         self.policy.backoff_for_attempt(attempt)
     }
@@ -95,8 +97,9 @@ impl<State: Send + Sync, Ctx: Send + Sync> ModelMiddleware<State, Ctx> for Retry
                         attempt += 1;
                         let call_id = CallId::new(format!("{}-model", ctx.run_id()));
                         ctx.emit(AgentEvent::RetryScheduled { call_id, attempt });
-                        // Compute (but do not sleep on) the backoff.
-                        let _ = self.policy.backoff_for_attempt(attempt);
+                        // Sleep for the backoff only when the policy opts in
+                        // (`with_backoff_sleep`); a no-op otherwise.
+                        self.policy.sleep_backoff(attempt).await;
                         continue;
                     }
                     return Err(error);

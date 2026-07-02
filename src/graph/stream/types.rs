@@ -84,6 +84,17 @@ pub enum GraphEvent {
         /// Rendered error.
         error: String,
     },
+    /// A node handler failed with a retryable error and a retry was scheduled
+    /// under the graph's node-retry policy. Emitted before the (opt-in) backoff
+    /// wait and the re-run of the node from its start.
+    NodeRetryScheduled {
+        /// Node id.
+        node: NodeId,
+        /// Step number.
+        step: usize,
+        /// The 1-based retry attempt about to be made.
+        attempt: usize,
+    },
     /// A node produced a state update applied at the boundary.
     StateUpdated {
         /// Node id.
@@ -162,6 +173,7 @@ impl GraphEvent {
             GraphEvent::NodeStarted { .. } => "node.started",
             GraphEvent::NodeCompleted { .. } => "node.completed",
             GraphEvent::NodeFailed { .. } => "node.failed",
+            GraphEvent::NodeRetryScheduled { .. } => "node.retry_scheduled",
             GraphEvent::StateUpdated { .. } => "state.updated",
             GraphEvent::RouteSelected { .. } => "route.selected",
             GraphEvent::CheckpointSaved { .. } => "checkpoint.saved",
@@ -185,6 +197,7 @@ impl GraphEvent {
             | GraphEvent::NodeStarted { step, .. }
             | GraphEvent::NodeCompleted { step, .. }
             | GraphEvent::NodeFailed { step, .. }
+            | GraphEvent::NodeRetryScheduled { step, .. }
             | GraphEvent::StateUpdated { step, .. }
             | GraphEvent::ContextForked { step, .. } => Some(*step),
             GraphEvent::RunCompleted { steps, .. } => Some(*steps),

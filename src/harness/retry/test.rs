@@ -179,3 +179,35 @@ fn rate_limiter_refill_caps_at_capacity() {
     let later = start + Duration::from_secs(60);
     assert_eq!(limiter.available(later), 5);
 }
+
+#[test]
+fn backoff_sleep_defaults_off_and_is_opt_in() {
+    // Default policy does not sleep, keeping retry loops deterministic in tests.
+    assert!(!RetryPolicy::default().backoff_sleep);
+    // The builder flips it on for production callers.
+    assert!(
+        RetryPolicy::default()
+            .with_backoff_sleep(true)
+            .backoff_sleep
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn sleep_backoff_waits_only_when_enabled() {
+    use tokio::time::Instant as TokioInstant;
+
+    // Disabled (default): returns immediately with no virtual time elapsed.
+    let policy = RetryPolicy::default();
+    let t0 = TokioInstant::now();
+    policy.sleep_backoff(1).await;
+    assert_eq!(t0.elapsed(), Duration::ZERO);
+
+    // Enabled: advances virtual time by the computed backoff (attempt 1 =
+    // initial_backoff_ms with the default multiplier applied at attempt^power).
+    let sleeping = RetryPolicy::default().with_backoff_sleep(true);
+    let expected = sleeping.backoff_for_attempt(1);
+    let t1 = TokioInstant::now();
+    sleeping.sleep_backoff(1).await;
+    assert_eq!(t1.elapsed(), expected);
+    assert!(expected > Duration::ZERO);
+}
