@@ -12,6 +12,7 @@
 //! app-specific coupling (event bus, RPC envelopes, heartbeat scheduler): the
 //! primitive is provider-neutral and drives off the graph runtime.
 
+pub mod store;
 mod types;
 
 pub use types::{
