@@ -24,6 +24,7 @@ pub mod checkpoint;
 pub mod command;
 pub mod compiled;
 pub mod export;
+pub mod goals;
 pub mod observability;
 pub mod orchestration;
 pub mod parallel;
@@ -56,6 +57,9 @@ pub use export::{
     ChannelInfo, ConditionalEdgeInfo, EdgeInfo, GraphPolicySummary, GraphTopology, NodeInfo,
     NodePolicySummary, RouteInfo, ValidationReport, WaitingEdgeInfo, blueprint_to_json,
     blueprint_to_mermaid, blueprint_to_topology, from_json, to_json, to_mermaid,
+};
+pub use goals::{
+    GoalProgress, ThreadGoal, ThreadGoalStatus, TurnOutcome, active_goal_context_block,
 };
 pub use observability::{
     GraphEventJournal, GraphHealthSummary, GraphLangfuseExporter, GraphLatencyMetrics,
