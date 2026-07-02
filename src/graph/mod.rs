@@ -59,7 +59,9 @@ pub use export::{
     blueprint_to_mermaid, blueprint_to_topology, from_json, to_json, to_mermaid,
 };
 pub use goals::{
-    GoalProgress, ThreadGoal, ThreadGoalStatus, TurnOutcome, active_goal_context_block,
+    GoalProgress, GoalTool, GoalToolKind, ThreadGoal, ThreadGoalStatus, TurnOutcome,
+    active_goal_context_block, goal_gate_node, goal_tools, note_user_turn, register_goal_tools,
+    run_continuation_tick,
 };
 pub use observability::{
     GraphEventJournal, GraphHealthSummary, GraphLangfuseExporter, GraphLatencyMetrics,

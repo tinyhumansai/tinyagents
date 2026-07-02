@@ -12,10 +12,12 @@
 //! app-specific coupling (event bus, RPC envelopes, heartbeat scheduler): the
 //! primitive is provider-neutral and drives off the graph runtime.
 
+mod continuation;
 pub mod store;
 mod tool;
 mod types;
 
+pub use continuation::{goal_gate_node, note_user_turn, run_continuation_tick};
 pub use tool::{GoalTool, GoalToolKind, goal_tools, register_goal_tools};
 pub use types::{
     GoalProgress, ThreadGoal, ThreadGoalStatus, TurnOutcome, active_goal_context_block,

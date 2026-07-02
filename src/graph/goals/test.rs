@@ -389,3 +389,242 @@ mod tool_tests {
         assert!(res.content.contains("missing 'objective'"));
     }
 }
+
+mod continuation_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::super::store;
+    use super::super::types::{GoalProgress, ThreadGoalStatus, TurnOutcome};
+    use super::super::{goal_gate_node, note_user_turn, run_continuation_tick};
+    use crate::error::TinyAgentsError;
+    use crate::graph::GraphBuilder;
+    use crate::graph::command::NodeResult;
+    use crate::harness::store::{InMemoryStore, Store};
+
+    fn store() -> Arc<dyn Store> {
+        Arc::new(InMemoryStore::default())
+    }
+
+    /// State overwritten by each work iteration: the tokens it "spent" and
+    /// whether it made progress. The gate's `progress` closure reads these.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct GateState {
+        iters: usize,
+        tokens: u64,
+        progress: bool,
+    }
+
+    /// Builds and runs `work_node -> gate` under `thread_id`, looping until the
+    /// gate routes to END or the recursion limit trips. `work` is the per-iteration
+    /// behavior producing the next [`GateState`].
+    async fn run_gate<W, Fut>(
+        s: &Arc<dyn Store>,
+        thread_id: &str,
+        recursion_limit: usize,
+        per_iter_tokens: u64,
+        made_progress: bool,
+        work: W,
+    ) -> crate::error::Result<GateState>
+    where
+        W: Fn(usize) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let work = Arc::new(work);
+        let work_node = {
+            let counter = counter.clone();
+            let work = work.clone();
+            move |_state: GateState, _ctx| {
+                let counter = counter.clone();
+                let work = work.clone();
+                Box::pin(async move {
+                    let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    work(n).await;
+                    Ok(NodeResult::Update(GateState {
+                        iters: n,
+                        tokens: per_iter_tokens,
+                        progress: made_progress,
+                    }))
+                }) as crate::graph::NodeFuture<GateState>
+            }
+        };
+
+        let gate = goal_gate_node::<GateState, GateState>(s.clone(), "work", |st: &GateState| {
+            GoalProgress {
+                tokens_used: st.tokens,
+                elapsed_secs: 0,
+                made_progress: st.progress,
+            }
+        });
+
+        let graph = GraphBuilder::<GateState, GateState>::overwrite()
+            .with_recursion_limit(recursion_limit)
+            .add_node("work", work_node)
+            .add_node("gate", gate)
+            .set_entry("work")
+            .add_edge("work", "gate")
+            .with_command_destinations("gate", ["work", crate::graph::END])
+            .compile()?;
+
+        let exec = graph
+            .run_with_thread(thread_id, GateState::default())
+            .await?;
+        Ok(exec.state)
+    }
+
+    #[tokio::test]
+    async fn gate_loops_while_active_then_stops_on_complete() {
+        let s = store();
+        store::set(&s, "t", "obj", None).await.unwrap();
+        let s2 = s.clone();
+        let final_state = run_gate(&s, "t", 100, 10, true, move |n| {
+            let s2 = s2.clone();
+            async move {
+                if n >= 3 {
+                    store::complete(&s2, "t").await.unwrap();
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            final_state.iters, 3,
+            "runs the work node until goal completes"
+        );
+        let goal = store::get(&s, "t").await.unwrap().unwrap();
+        assert_eq!(goal.status, ThreadGoalStatus::Complete);
+    }
+
+    #[tokio::test]
+    async fn gate_stops_on_budget_cap() {
+        let s = store();
+        store::set(&s, "t", "obj", Some(100)).await.unwrap();
+        let final_state = run_gate(&s, "t", 100, 40, true, |_n| async {})
+            .await
+            .unwrap();
+        assert_eq!(final_state.iters, 3, "40*3 = 120 crosses the 100 budget");
+        let goal = store::get(&s, "t").await.unwrap().unwrap();
+        assert_eq!(goal.status, ThreadGoalStatus::BudgetLimited);
+        assert_eq!(goal.tokens_used, 120);
+    }
+
+    #[tokio::test]
+    async fn gate_stops_and_suppresses_on_zero_progress() {
+        let s = store();
+        store::set(&s, "t", "obj", None).await.unwrap();
+        let final_state = run_gate(&s, "t", 100, 0, false, |_n| async {})
+            .await
+            .unwrap();
+        assert_eq!(
+            final_state.iters, 1,
+            "a no-progress iteration stops the loop"
+        );
+        let goal = store::get(&s, "t").await.unwrap().unwrap();
+        assert!(goal.continuation_suppressed, "one-shot suppression set");
+    }
+
+    #[tokio::test]
+    async fn gate_recursion_limit_is_the_backstop() {
+        let s = store();
+        store::set(&s, "t", "obj", None).await.unwrap();
+        // Never completes, never stalls, no budget → the loop only stops at the
+        // recursion limit (work+gate = 2 supersteps per iteration).
+        let err = run_gate(&s, "t", 6, 5, true, |_n| async {})
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TinyAgentsError::RecursionLimit(_)));
+    }
+
+    #[tokio::test]
+    async fn gate_stops_when_thread_has_no_goal() {
+        let s = store();
+        // No goal set for the thread → gate routes straight to END after one work run.
+        let final_state = run_gate(&s, "t", 100, 5, true, |_n| async {})
+            .await
+            .unwrap();
+        assert_eq!(final_state.iters, 1);
+    }
+
+    #[tokio::test]
+    async fn driver_runs_up_to_max_per_tick() {
+        let s = store();
+        store::set(&s, "a", "a", None).await.unwrap();
+        store::set(&s, "b", "b", None).await.unwrap();
+        store::set(&s, "c", "c", None).await.unwrap();
+        let ran = run_continuation_tick(&s, Duration::ZERO, 2, |_g| async {
+            Ok(TurnOutcome {
+                tokens_used: 5,
+                elapsed_secs: 0,
+                made_progress: true,
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(ran, 2, "capped at max_per_tick");
+    }
+
+    #[tokio::test]
+    async fn driver_skips_non_idle_goals() {
+        let s = store();
+        store::set(&s, "fresh", "obj", None).await.unwrap();
+        // A 1-hour idle window over a just-created goal → nothing runs.
+        let ran = run_continuation_tick(&s, Duration::from_secs(3600), 5, |_g| async {
+            Ok(TurnOutcome::default())
+        })
+        .await
+        .unwrap();
+        assert_eq!(ran, 0);
+    }
+
+    #[tokio::test]
+    async fn driver_suppresses_after_a_no_progress_turn() {
+        let s = store();
+        store::set(&s, "t", "obj", None).await.unwrap();
+        let ran = run_continuation_tick(&s, Duration::ZERO, 5, |_g| async {
+            Ok(TurnOutcome {
+                tokens_used: 3,
+                elapsed_secs: 0,
+                made_progress: false,
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(ran, 1);
+        assert!(
+            store::get(&s, "t")
+                .await
+                .unwrap()
+                .unwrap()
+                .continuation_suppressed
+        );
+        // A second tick finds the goal suppressed and runs nothing.
+        let ran2 = run_continuation_tick(&s, Duration::ZERO, 5, |_g| async {
+            Ok(TurnOutcome::default())
+        })
+        .await
+        .unwrap();
+        assert_eq!(ran2, 0);
+    }
+
+    #[tokio::test]
+    async fn note_user_turn_clears_suppression_and_resumes() {
+        let s = store();
+        let g = store::set(&s, "t", "obj", None).await.unwrap();
+        // Suppress, then a user turn clears it.
+        store::set_continuation_suppressed_if(&s, "t", &g.goal_id, true)
+            .await
+            .unwrap();
+        let after = note_user_turn(&s, "t").await.unwrap().unwrap();
+        assert!(!after.continuation_suppressed);
+
+        // A paused goal is reactivated by a user turn.
+        store::pause(&s, "t").await.unwrap();
+        let after = note_user_turn(&s, "t").await.unwrap().unwrap();
+        assert_eq!(after.status, ThreadGoalStatus::Active);
+
+        // No goal → None.
+        assert!(note_user_turn(&s, "missing").await.unwrap().is_none());
+    }
+}
