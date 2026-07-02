@@ -38,6 +38,15 @@ pub struct RetryPolicy {
     /// When `true`, the caller should supply a `[0, 1)` random value to
     /// [`RetryPolicy::backoff_for_attempt_with`] to add jitter.
     pub jitter: bool,
+    /// When `true`, retry loops that honor this policy actually
+    /// [`tokio::time::sleep`] for the computed backoff between attempts.
+    ///
+    /// Defaults to `false` so the harness stays fast and deterministic under
+    /// test: the backoff is *computed* (for observability) but not slept on.
+    /// Production/streaming callers opt in via
+    /// [`RetryPolicy::with_backoff_sleep`] so a transient provider/network
+    /// failure is retried after a real, growing delay instead of back-to-back.
+    pub backoff_sleep: bool,
 }
 
 impl Default for RetryPolicy {
@@ -48,6 +57,7 @@ impl Default for RetryPolicy {
             max_backoff_ms: 30_000,
             multiplier: 2.0,
             jitter: false,
+            backoff_sleep: false,
         }
     }
 }
