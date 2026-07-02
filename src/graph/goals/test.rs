@@ -250,3 +250,142 @@ mod store_tests {
         assert_eq!(ids, vec!["alpha".to_string(), "beta".to_string()]);
     }
 }
+
+mod tool_tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    use super::super::tool::{GoalTool, GoalToolKind, goal_tools};
+    use crate::harness::events::EventSink;
+    use crate::harness::ids::{RunId, ThreadId};
+    use crate::harness::store::{InMemoryStore, Store};
+    use crate::harness::tool::{Tool, ToolCall, ToolExecutionContext};
+
+    fn store() -> Arc<dyn Store> {
+        Arc::new(InMemoryStore::default())
+    }
+
+    fn ctx(thread_id: Option<&str>) -> ToolExecutionContext {
+        ToolExecutionContext {
+            run_id: RunId::new("run-1"),
+            thread_id: thread_id.map(ThreadId::new),
+            depth: 0,
+            max_turn_output_tokens: None,
+            events: EventSink::new(),
+            workspace: None,
+        }
+    }
+
+    fn call(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: args,
+        }
+    }
+
+    #[test]
+    fn goal_tools_builds_the_model_facing_set() {
+        let tools = goal_tools(store());
+        let names: Vec<&str> = tools.iter().map(|t| Tool::<()>::name(t.as_ref())).collect();
+        assert_eq!(names, vec!["goal_get", "goal_set", "goal_complete"]);
+    }
+
+    #[tokio::test]
+    async fn set_get_complete_via_tools_in_thread_scope() {
+        let s = store();
+        let set = GoalTool::new(GoalToolKind::Set, s.clone());
+        let res = Tool::<()>::call_with_context(
+            &set,
+            &(),
+            call(
+                "c1",
+                "goal_set",
+                json!({ "objective": "land the PR", "token_budget": 5000 }),
+            ),
+            ctx(Some("thread-tools")),
+        )
+        .await
+        .unwrap();
+        assert!(res.error.is_none(), "{res:?}");
+        assert!(res.content.contains("land the PR"));
+
+        let get = GoalTool::new(GoalToolKind::Get, s.clone());
+        let res = Tool::<()>::call_with_context(
+            &get,
+            &(),
+            call("c2", "goal_get", json!({})),
+            ctx(Some("thread-tools")),
+        )
+        .await
+        .unwrap();
+        assert!(res.content.contains("status: active"));
+
+        let done = GoalTool::new(GoalToolKind::Complete, s.clone());
+        let res = Tool::<()>::call_with_context(
+            &done,
+            &(),
+            call("c3", "goal_complete", json!({})),
+            ctx(Some("thread-tools")),
+        )
+        .await
+        .unwrap();
+        assert!(res.content.contains("status: complete"));
+    }
+
+    #[tokio::test]
+    async fn tools_error_without_thread_scope() {
+        let s = store();
+        let set = GoalTool::new(GoalToolKind::Set, s);
+        // Bare call (no context) errors.
+        let res = Tool::<()>::call(
+            &set,
+            &(),
+            call("c1", "goal_set", json!({ "objective": "x" })),
+        )
+        .await
+        .unwrap();
+        assert!(res.error.is_some());
+        assert!(res.error.unwrap().contains("active thread"));
+        // Context with no thread id also errors.
+        let set = GoalTool::new(GoalToolKind::Set, store());
+        let res = Tool::<()>::call_with_context(
+            &set,
+            &(),
+            call("c2", "goal_set", json!({ "objective": "x" })),
+            ctx(None),
+        )
+        .await
+        .unwrap();
+        assert!(res.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn get_reports_absent_goal() {
+        let get = GoalTool::new(GoalToolKind::Get, store());
+        let res = Tool::<()>::call_with_context(
+            &get,
+            &(),
+            call("c1", "goal_get", json!({})),
+            ctx(Some("empty-thread")),
+        )
+        .await
+        .unwrap();
+        assert!(res.content.contains("no goal set"));
+    }
+
+    #[tokio::test]
+    async fn set_missing_objective_is_a_soft_error() {
+        let set = GoalTool::new(GoalToolKind::Set, store());
+        let res = Tool::<()>::call_with_context(
+            &set,
+            &(),
+            call("c1", "goal_set", json!({})),
+            ctx(Some("t")),
+        )
+        .await
+        .unwrap();
+        assert!(res.content.contains("missing 'objective'"));
+    }
+}

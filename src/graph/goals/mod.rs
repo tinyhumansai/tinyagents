@@ -13,8 +13,10 @@
 //! primitive is provider-neutral and drives off the graph runtime.
 
 pub mod store;
+mod tool;
 mod types;
 
+pub use tool::{GoalTool, GoalToolKind, goal_tools, register_goal_tools};
 pub use types::{
     GoalProgress, ThreadGoal, ThreadGoalStatus, TurnOutcome, active_goal_context_block,
 };
