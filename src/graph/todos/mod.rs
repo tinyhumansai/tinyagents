@@ -13,8 +13,10 @@
 //! board is always `(Store, thread_id)`.
 
 pub mod store;
+mod tool;
 mod types;
 
+pub use tool::{TodoTool, register_todo_tools, todo_tools};
 pub use types::{
     CardPatch, TaskApprovalMode, TaskBoard, TaskBoardCard, TaskCardStatus, TodosSnapshot,
     normalise_board, parse_status, render_markdown,
