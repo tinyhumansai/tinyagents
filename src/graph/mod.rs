@@ -13,7 +13,9 @@
 //! interrupts ([`command`]), a builder/compile contract ([`builder`]), a
 //! superstep executor ([`compiled`]), checkpointing ([`checkpoint`]),
 //! streaming/events ([`stream`]), run-status snapshots ([`status`]), graph
-//! export/visualization ([`export`]), and subgraph embedding ([`subgraph`]).
+//! export/visualization ([`export`]), subgraph embedding ([`subgraph`]), and
+//! per-thread productivity primitives — a durable goal ([`goals`]) and a kanban
+//! task board ([`todos`]) — exposed as harness tools.
 //!
 //! Each concern lives in its own submodule with `types.rs` (definitions),
 //! `mod.rs` (implementations), and `test.rs` (unit tests).
@@ -96,6 +98,6 @@ pub use testkit::{
     scripted_route_node, scripted_update_node, subagent_fake_node, subgraph_test_node,
 };
 pub use todos::{
-    CardPatch, TaskApprovalMode, TaskBoard, TaskBoardCard, TaskCardStatus, TodosSnapshot,
-    normalise_board, parse_status, render_markdown,
+    CardPatch, TaskApprovalMode, TaskBoard, TaskBoardCard, TaskCardStatus, TodoTool, TodosSnapshot,
+    normalise_board, parse_status, register_todo_tools, render_markdown, todo_tools,
 };

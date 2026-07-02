@@ -26,8 +26,9 @@
 //! 2. **Graph runtime** ([`graph`]) — LangGraph-style durable typed state
 //!    graphs: [`START`]/[`END`], nodes, conditional routing, [`Command`]s,
 //!    fan-out, reducers/channels, [`Checkpoint`]s, [`Interrupt`]s, subgraphs,
-//!    streaming, topology export, and a per-thread durable [`ThreadGoal`] with
-//!    graph-native continuation, exposed as harness tools.
+//!    streaming, topology export, and per-thread productivity primitives — a
+//!    durable [`ThreadGoal`] with graph-native continuation and a
+//!    [`TaskBoard`] kanban — exposed as harness tools.
 //! 3. **Registry** ([`registry`]) — a named capability catalog (models, tools,
 //!    agents, graphs, stores, middleware, policy) that `.rag`/`.ragsh` bind by
 //!    name.
@@ -193,6 +194,15 @@ pub use graph::{
     GoalProgress, GoalTool, GoalToolKind, ThreadGoal, ThreadGoalStatus, TurnOutcome,
     active_goal_context_block, goal_gate_node, goal_tools, note_user_turn, register_goal_tools,
     run_continuation_tick,
+};
+
+// --- Graph: per-thread task board (kanban todos) ---
+// `todo_store` is the programmatic CRUD surface (add/edit/claim_card/...); the
+// tool and data model are re-exported flat for discoverability.
+pub use graph::todos::store as todo_store;
+pub use graph::{
+    CardPatch, TaskApprovalMode, TaskBoard, TaskBoardCard, TaskCardStatus, TodoTool, TodosSnapshot,
+    normalise_board, parse_status, register_todo_tools, render_markdown, todo_tools,
 };
 
 // --- Graph: parallel map/reduce helper ---
