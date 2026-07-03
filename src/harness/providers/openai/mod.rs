@@ -36,6 +36,7 @@ pub use types::*;
 
 use std::collections::VecDeque;
 use std::pin::Pin;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -56,6 +57,13 @@ use super::ProviderSpec;
 const DEFAULT_MODEL: &str = "gpt-4.1-mini";
 /// Default OpenAI API base URL.
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+/// Sane default TCP connect timeout applied to every call. Bounds connection
+/// establishment without capping the (potentially long) response body, so it is
+/// safe for streaming too.
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
+/// Default overall timeout applied to unary calls when the request does not set
+/// [`ModelRequest::timeout_ms`]. Streaming calls get no overall cap by default.
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 600;
 
 /// A [`ChatModel`] backed by the hosted OpenAI Chat Completions API.
 ///
@@ -114,7 +122,10 @@ impl OpenAiModel {
     /// (`gpt-4.1-mini`), and the default base URL (`https://api.openai.com/v1`).
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
+                .build()
+                .expect("default reqwest client builds"),
             api_key: api_key.into(),
             model: DEFAULT_MODEL.to_string(),
             provider: "openai".to_string(),
@@ -504,6 +515,20 @@ impl OpenAiModel {
             .and_then(Value::as_str)
             .map(str::to_string);
         self.provider_error(message, Some(status), code, raw)
+    }
+}
+
+/// Resolves the per-request timeout to apply to an outbound HTTP call.
+///
+/// An explicit [`ModelRequest::timeout_ms`] always wins. Otherwise a unary call
+/// falls back to [`DEFAULT_REQUEST_TIMEOUT_SECS`], while a streaming call gets no
+/// overall cap (a total-request timeout would truncate a legitimately
+/// long-running stream mid-flight).
+fn request_timeout(timeout_ms: Option<u64>, streaming: bool) -> Option<Duration> {
+    match timeout_ms {
+        Some(ms) => Some(Duration::from_millis(ms)),
+        None if streaming => None,
+        None => Some(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)),
     }
 }
 
@@ -1075,18 +1100,19 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         let body = self.translate_request(&request)?;
         let url = format!("{}/chat/completions", self.base_url);
 
-        let response = self
+        let mut builder = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                let error =
-                    self.provider_error(format!("request to {url} failed: {e}"), None, None, None);
-                TinyAgentsError::Model(self.provider_failure_message(&error))
-            })?;
+            .json(&body);
+        if let Some(timeout) = request_timeout(request.timeout_ms, false) {
+            builder = builder.timeout(timeout);
+        }
+        let response = builder.send().await.map_err(|e| {
+            let error =
+                self.provider_error(format!("request to {url} failed: {e}"), None, None, None);
+            TinyAgentsError::Model(self.provider_failure_message(&error))
+        })?;
 
         let status = response.status();
         let text = response.text().await.map_err(|e| {
@@ -1129,22 +1155,23 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         body.stream_options = Some(json!({ "include_usage": true }));
         let url = format!("{}/chat/completions", self.base_url);
 
-        let response = self
+        let mut builder = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                let error = self.provider_error(
-                    format!("stream request to {url} failed: {e}"),
-                    None,
-                    None,
-                    None,
-                );
-                TinyAgentsError::Model(self.provider_failure_message(&error))
-            })?;
+            .json(&body);
+        if let Some(timeout) = request_timeout(request.timeout_ms, true) {
+            builder = builder.timeout(timeout);
+        }
+        let response = builder.send().await.map_err(|e| {
+            let error = self.provider_error(
+                format!("stream request to {url} failed: {e}"),
+                None,
+                None,
+                None,
+            );
+            TinyAgentsError::Model(self.provider_failure_message(&error))
+        })?;
 
         let status = response.status();
         if !status.is_success() {

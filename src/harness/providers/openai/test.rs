@@ -778,6 +778,30 @@ async fn sse_stream_indexless_fallback_ids_match_between_delta_and_final() {
 }
 
 #[test]
+fn request_timeout_prefers_explicit_override() {
+    // An explicit per-request timeout wins for both unary and streaming calls.
+    assert_eq!(
+        request_timeout(Some(1_500), false),
+        Some(Duration::from_millis(1_500))
+    );
+    assert_eq!(
+        request_timeout(Some(1_500), true),
+        Some(Duration::from_millis(1_500))
+    );
+}
+
+#[test]
+fn request_timeout_defaults_by_call_kind() {
+    // Unary calls fall back to a sane overall default; streaming calls get no
+    // overall cap so a long stream is not truncated.
+    assert_eq!(
+        request_timeout(None, false),
+        Some(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS))
+    );
+    assert_eq!(request_timeout(None, true), None);
+}
+
+#[test]
 fn from_env_errors_when_api_key_missing() {
     // Snapshot and clear the key so the missing-key path is exercised
     // deterministically, then restore the prior value.
