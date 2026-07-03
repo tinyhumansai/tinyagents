@@ -284,8 +284,12 @@ where
         let Some(list) = map.get(thread_id) else {
             return Ok(None);
         };
+        // Duplicate-id lookup resolves to the *last* written record, matching
+        // the append-only file/sqlite backends (and `get(None)`, which returns
+        // the latest). Pinning one semantic keeps the three backends
+        // interchangeable — see the checkpointer conformance suite.
         let found = match checkpoint_id {
-            Some(id) => list.iter().find(|c| c.checkpoint_id == id),
+            Some(id) => list.iter().rfind(|c| c.checkpoint_id == id),
             None => list.last(),
         };
         Ok(found.cloned())

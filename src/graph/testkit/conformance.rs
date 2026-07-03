@@ -65,6 +65,25 @@ where
         .expect("some");
     assert_eq!(first.checkpoint_id, "c1", "specific checkpoint id");
 
+    // Duplicate-id lookup: every backend resolves a re-used checkpoint id to
+    // the *last* written record (matching the append-only history and
+    // `get(None)`), so the three backends stay interchangeable.
+    cp.put(contract_checkpoint("dup", "d1", None, 1))
+        .await
+        .expect("put dup first");
+    cp.put(contract_checkpoint("dup", "d1", None, 9))
+        .await
+        .expect("put dup second");
+    let dup = cp
+        .get("dup", Some("d1"))
+        .await
+        .expect("get dup")
+        .expect("some");
+    assert_eq!(
+        dup.state, 9,
+        "duplicate checkpoint id resolves to the last written record"
+    );
+
     // Unknown thread / checkpoint.
     assert!(cp.get("nope", None).await.expect("get miss").is_none());
     assert!(
