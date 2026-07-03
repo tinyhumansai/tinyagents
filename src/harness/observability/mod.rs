@@ -384,16 +384,21 @@ impl RedactingSink {
 
 impl EventListener for RedactingSink {
     fn on_event(&self, record: &EventRecord) {
-        // Serialize the event, mask secrets in every string field, and rebuild
-        // it. On any (de)serialization failure forward the original unchanged
-        // so observability is never silently dropped.
-        let Ok(mut value) = serde_json::to_value(&record.event) else {
+        // Fast path: with no secrets configured there is nothing to redact, so
+        // forward the original record unchanged.
+        if self.secrets.is_empty() {
             self.inner.on_event(record);
+            return;
+        }
+        // Serialize the event, mask secrets in every string field, and rebuild
+        // it. This is a security boundary, so it must fail closed: if we cannot
+        // serialize, redact, and rebuild the event, we drop it rather than
+        // forward a record that may still contain unredacted secrets.
+        let Ok(mut value) = serde_json::to_value(&record.event) else {
             return;
         };
         redact_value(&mut value, &self.secrets, &self.mask);
         let Ok(event) = serde_json::from_value::<AgentEvent>(value) else {
-            self.inner.on_event(record);
             return;
         };
         let redacted = EventRecord {

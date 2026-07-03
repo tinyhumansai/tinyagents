@@ -390,6 +390,34 @@ fn redacting_sink_custom_mask_and_passthrough() {
 }
 
 #[test]
+fn redacting_sink_empty_secrets_forwards_unchanged() {
+    // With no secrets configured the sink takes the fast path and forwards the
+    // original record untouched.
+    let collector = Arc::new(Collector::new());
+    let sink = RedactingSink::new(collector.clone(), Vec::new());
+
+    sink.on_event(&EventRecord {
+        id: EventId::new("evt-0"),
+        offset: 7,
+        event: AgentEvent::RunFailed {
+            run_id: RunId::new("run-r"),
+            error: "nothing to redact here".to_string(),
+        },
+    });
+
+    let events = collector.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, EventId::new("evt-0"));
+    assert_eq!(events[0].offset, 7);
+    match &events[0].event {
+        AgentEvent::RunFailed { error, .. } => {
+            assert_eq!(error, "nothing to redact here");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
 fn fan_out_sink_reaches_all_listeners() {
     let a = Arc::new(Collector::new());
     let b = Arc::new(Collector::new());
