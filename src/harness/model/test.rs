@@ -611,6 +611,42 @@ fn stream_accumulator_collects_reasoning_side_channel() {
     assert_eq!(response.text(), "visible answer");
 }
 
+#[test]
+fn finish_preserves_message_usage_from_completed_response() {
+    // A completed response that carries usage only on the message (not the
+    // top-level field) and no streamed UsageDelta. finish must not clobber the
+    // message usage with None; it should promote it to the response too.
+    let mut response = ModelResponse::assistant("hi");
+    response.usage = None;
+    response.message.usage = Some(Usage::new(10, 20));
+
+    let mut acc = StreamAccumulator::new();
+    acc.push(&ModelStreamItem::Started);
+    acc.push(&ModelStreamItem::Completed(response));
+
+    let finished = acc.finish().unwrap();
+    assert_eq!(finished.message.usage, Some(Usage::new(10, 20)));
+    assert_eq!(finished.usage, Some(Usage::new(10, 20)));
+}
+
+#[test]
+fn finish_backfills_usage_from_stream_delta_when_completed_lacks_it() {
+    // No usage anywhere on the completed response, but a UsageDelta arrived. Both
+    // the response and its message pick up the streamed usage.
+    let mut response = ModelResponse::assistant("hi");
+    response.usage = None;
+    response.message.usage = None;
+
+    let mut acc = StreamAccumulator::new();
+    acc.push(&ModelStreamItem::Started);
+    acc.push(&ModelStreamItem::UsageDelta(Usage::new(4, 6)));
+    acc.push(&ModelStreamItem::Completed(response));
+
+    let finished = acc.finish().unwrap();
+    assert_eq!(finished.usage, Some(Usage::new(4, 6)));
+    assert_eq!(finished.message.usage, Some(Usage::new(4, 6)));
+}
+
 /// Round-trips a [`ModelStreamItem`] through JSON and asserts the re-serialized
 /// form is byte-for-byte stable, proving every variant survives serde.
 fn roundtrip_stream_item(item: ModelStreamItem) {

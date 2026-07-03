@@ -673,10 +673,13 @@ impl StreamAccumulator {
         }
 
         if let Some(mut response) = self.completed {
-            if response.usage.is_none() {
-                response.usage = self.usage;
-                response.message.usage = self.usage;
-            }
+            // Reconcile the response and message usage with any streamed
+            // `UsageDelta`, preferring an already-present value and never
+            // overwriting a known usage with `None` (which previously clobbered a
+            // message-level usage the completed response carried).
+            let merged = response.usage.or(response.message.usage).or(self.usage);
+            response.usage = merged;
+            response.message.usage = merged;
             return Ok(response);
         }
 
