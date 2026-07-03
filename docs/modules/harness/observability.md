@@ -320,6 +320,35 @@ Redaction policies should handle:
 Redacted events should preserve structural fields such as ids, event kinds,
 timings, and counters so traces remain useful.
 
+## Payload Capture
+
+The event stream is **payload-free by default**: `AgentEvent::ModelCompleted`
+and `AgentEvent::ToolCompleted` carry only ids and usage, never the prompt,
+completion, tool arguments, or tool result. This keeps journals and exporters
+safe for privacy-sensitive deployments without any configuration.
+
+`RunPolicy::capture` (a `PayloadCapture { model_io, tool_io }`) opts a run into
+carrying those payloads onto the completion events:
+
+- `model_io` — attaches the request messages (`input`) and the model completion
+  (`output`) to every `ModelCompleted`.
+- `tool_io` — attaches the tool arguments (`input`) and the tool result
+  (`output`) to every `ToolCompleted`.
+
+Capture is snapshotted inside the agent loop before the request/call value is
+moved into the model or tool wrap onion, so it never perturbs execution. Because
+captured payloads ride the ordinary event pipeline, a `RedactingSink` still
+masks them before they reach a journal or exporter, and the durable journal
+replays them verbatim.
+
+Downstream, the Langfuse exporter reads these fields to populate the
+Input/Output panels of a generation (`generation-create`) and a tool
+observation (`tool-create`). With capture disabled the fields are absent and the
+observation renders with ids, timing, and usage only. The harness exporter also
+defaults the trace-level metadata from the run lineage (root/first run ids and
+parent), mirroring the graph exporter, so a trace is correlatable even when the
+caller passes no metadata.
+
 ## Graph Events
 
 State-graph event payloads should be rich enough for a UI to render run

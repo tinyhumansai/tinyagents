@@ -73,6 +73,53 @@ pub enum UnknownToolPolicy {
     },
 }
 
+/// Controls whether the agent loop captures model and tool **payloads**
+/// (prompt/completion text, tool arguments/results) onto the
+/// [`AgentEvent::ModelCompleted`][crate::harness::events::AgentEvent::ModelCompleted]
+/// and [`AgentEvent::ToolCompleted`][crate::harness::events::AgentEvent::ToolCompleted]
+/// events it emits.
+///
+/// The observability layer is **payload-free by default**: events carry only
+/// ids, counters, and usage so privacy-sensitive deployments never journal or
+/// export prompt text or tool I/O. Opt in per-family here to surface the request
+/// messages + completion (`model_io`) and tool arguments + result (`tool_io`) so
+/// downstream exporters — notably the Langfuse exporter — can populate the
+/// Input/Output panels of a generation or tool observation.
+///
+/// Captured payloads flow through the same event pipeline as everything else, so
+/// a [`RedactingSink`][crate::harness::observability::RedactingSink] configured
+/// with secret substrings still masks them before they reach a journal or
+/// exporter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PayloadCapture {
+    /// Capture the request messages and the model completion onto every
+    /// [`AgentEvent::ModelCompleted`][crate::harness::events::AgentEvent::ModelCompleted].
+    pub model_io: bool,
+    /// Capture the tool arguments and the tool result onto every
+    /// [`AgentEvent::ToolCompleted`][crate::harness::events::AgentEvent::ToolCompleted].
+    pub tool_io: bool,
+}
+
+impl PayloadCapture {
+    /// A capture policy with both model and tool I/O enabled.
+    ///
+    /// Prefer this only when the observability pipeline is trusted (or a
+    /// [`RedactingSink`][crate::harness::observability::RedactingSink] is in
+    /// place), since it journals and can export full prompt/completion text and
+    /// tool arguments/results.
+    pub const fn all() -> Self {
+        Self {
+            model_io: true,
+            tool_io: true,
+        }
+    }
+
+    /// `true` when neither model nor tool payloads are captured (the default).
+    pub const fn is_disabled(&self) -> bool {
+        !self.model_io && !self.tool_io
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunPolicy {
     /// Hard run limits enforced fail-closed by the agent loop.
@@ -85,6 +132,11 @@ pub struct RunPolicy {
     pub fallback: Option<FallbackPolicy>,
     /// Response format attached to every model request when set.
     pub default_response_format: Option<ResponseFormat>,
+    /// Whether the loop captures model/tool payloads onto completion events.
+    ///
+    /// Defaults to [`PayloadCapture::default`] (payload-free), preserving the
+    /// privacy-preserving behavior where events carry only ids and usage.
+    pub capture: PayloadCapture,
     /// Default caching policy for the run.
     ///
     /// The loop consults [`CachePolicy::response_cache_enabled`] only when a
@@ -102,6 +154,7 @@ impl Default for RunPolicy {
             retry: RetryPolicy::default(),
             fallback: None,
             default_response_format: None,
+            capture: PayloadCapture::default(),
             // Caching defaults ON, but is gated by an attached `ResponseCache`,
             // so a harness with no cache never caches regardless of this flag.
             cache: CachePolicy {
