@@ -163,8 +163,53 @@ pub struct Checkpoint<State> {
     pub pending_writes: Vec<PendingWrite>,
     /// Interrupts that paused the run at this boundary.
     pub interrupts: Vec<Interrupt>,
+    /// Pending activations to schedule on resume, preserving each pending
+    /// node's per-invocation [`Send`](crate::graph::Send) argument.
+    ///
+    /// A richer superset of [`next_nodes`](Self::next_nodes) (which stays the
+    /// node-id projection used for listing and status). `#[serde(default)]`
+    /// keeps checkpoints written before this field loadable: they deserialize
+    /// to `None`, and resume falls back to `next_nodes` (node-only, no send
+    /// arg) — exactly the pre-field behavior.
+    #[serde(default)]
+    pub pending_activations: Option<Vec<PendingActivation>>,
+    /// Barrier (waiting-edge) arrivals accumulated across supersteps, persisted
+    /// so a join node's precondition survives an interrupt/failure + resume.
+    ///
+    /// `#[serde(default)]` for back-compat: older checkpoints load with an
+    /// empty set (the pre-field behavior, where arrivals were run-local).
+    #[serde(default)]
+    pub barrier_arrivals: Vec<BarrierArrivals>,
     /// Free-form metadata (source, step, etc.).
     pub metadata: serde_json::Value,
+}
+
+/// One pending node activation persisted in a checkpoint: the node to run on
+/// resume plus the optional per-invocation [`Send`](crate::graph::Send)
+/// argument that scheduled it.
+///
+/// The durable counterpart of the executor's in-flight activation. Persisting
+/// the `send_arg` is what lets a map-reduce fanout survive an interrupt/failure
+/// boundary — without it every pending worker re-runs with no argument.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PendingActivation {
+    /// The node scheduled to run on resume.
+    pub node: NodeId,
+    /// The per-invocation `Send` argument, when the activation was a `Send`
+    /// packet (plain edge/goto activations carry `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_arg: Option<serde_json::Value>,
+}
+
+/// The persisted arrivals recorded against one barrier (waiting-edge) join node:
+/// the predecessors that have already routed to it but whose join has not yet
+/// fired.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BarrierArrivals {
+    /// The waiting/join node.
+    pub node: NodeId,
+    /// The predecessor nodes that have arrived so far.
+    pub arrived: Vec<NodeId>,
 }
 
 impl<State> Checkpoint<State> {

@@ -32,6 +32,8 @@ fn contract_checkpoint(
         completed_tasks: vec![],
         pending_writes: vec![],
         interrupts: vec![],
+        pending_activations: None,
+        barrier_arrivals: vec![],
         metadata: serde_json::json!({ "source": "loop", "step": step }),
     }
 }

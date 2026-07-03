@@ -22,8 +22,8 @@ pub use file::FileCheckpointer;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteCheckpointer;
 pub use types::{
-    Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource, CheckpointTuple,
-    DurabilityMode, PendingWrite,
+    BarrierArrivals, Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource,
+    CheckpointTuple, DurabilityMode, PendingActivation, PendingWrite,
 };
 
 use std::collections::{HashMap, HashSet};

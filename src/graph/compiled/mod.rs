@@ -77,7 +77,8 @@ use crate::graph::builder::{
     Branch, BuilderNode, END, ForkId, NodeContext, NodeFuture, NodeHandler, NodeMeta, START,
 };
 use crate::graph::checkpoint::{
-    Checkpoint, CheckpointConfig, CheckpointTuple, Checkpointer, DurabilityMode,
+    BarrierArrivals, Checkpoint, CheckpointConfig, CheckpointTuple, Checkpointer, DurabilityMode,
+    PendingActivation,
 };
 use crate::graph::command::{Command, Interrupt, NodeResult, RouteTarget};
 use crate::graph::recursion::{
@@ -162,14 +163,12 @@ struct StepRun<Update> {
 /// A node-handler failure captured by a runner so the executor can persist a
 /// resumable failure-boundary checkpoint instead of discarding partial progress.
 struct StepFailure {
-    /// The node whose handler ultimately failed (after any retries).
-    failed_node: NodeId,
-    /// Nodes that completed successfully before the failure, in active-set order
-    /// (recorded as the checkpoint's completed tasks).
-    completed: Vec<NodeId>,
-    /// Nodes to re-run on resume: the failed node first, then the not-yet-folded
-    /// members of the step (recorded as the checkpoint's next nodes).
-    pending: Vec<NodeId>,
+    /// Active-set index of the branch whose handler ultimately failed (after any
+    /// retries). The executor derives the failed node, the completed lower-index
+    /// branches (whose successors it schedules) and the pending tail (which it
+    /// re-runs) from this index against the step's active set — preserving each
+    /// pending branch's [`Send`] argument.
+    failed_index: usize,
     /// The escalated error.
     error: TinyAgentsError,
 }
@@ -194,6 +193,42 @@ impl Activation {
             send_arg: None,
         }
     }
+}
+
+impl From<&Activation> for PendingActivation {
+    fn from(a: &Activation) -> Self {
+        PendingActivation {
+            node: a.node.clone(),
+            send_arg: a.send_arg.clone(),
+        }
+    }
+}
+
+impl From<&PendingActivation> for Activation {
+    fn from(p: &PendingActivation) -> Self {
+        Activation {
+            node: p.node.clone(),
+            send_arg: p.send_arg.clone(),
+        }
+    }
+}
+
+/// Projects the live barrier-arrival map onto its serializable checkpoint form.
+fn barriers_to_persisted(map: &HashMap<NodeId, HashSet<NodeId>>) -> Vec<BarrierArrivals> {
+    map.iter()
+        .map(|(node, arrived)| BarrierArrivals {
+            node: node.clone(),
+            arrived: arrived.iter().cloned().collect(),
+        })
+        .collect()
+}
+
+/// Rebuilds the live barrier-arrival map from a checkpoint's persisted form.
+fn barriers_from_persisted(persisted: &[BarrierArrivals]) -> HashMap<NodeId, HashSet<NodeId>> {
+    persisted
+        .iter()
+        .map(|b| (b.node.clone(), b.arrived.iter().cloned().collect()))
+        .collect()
 }
 
 /// Maps an [`Activation`] slice to its node ids (for events, status, and
@@ -401,6 +436,7 @@ where
             vec![Activation::node(self.entry.clone())],
             None,
             HashMap::new(),
+            HashMap::new(),
         )
         .await
     }
@@ -419,7 +455,8 @@ where
         inputs: impl IntoIterator<Item = GraphInput>,
     ) -> Result<GraphExecution<State>> {
         let active = self.initial_inputs(inputs)?;
-        self.execute(state, active, None, HashMap::new()).await
+        self.execute(state, active, None, HashMap::new(), HashMap::new())
+            .await
     }
 
     /// Runs the graph under a thread id, persisting checkpoints at every
@@ -433,6 +470,7 @@ where
             state,
             vec![Activation::node(self.entry.clone())],
             Some(thread_id.into()),
+            HashMap::new(),
             HashMap::new(),
         )
         .await
@@ -448,8 +486,14 @@ where
         inputs: impl IntoIterator<Item = GraphInput>,
     ) -> Result<GraphExecution<State>> {
         let active = self.initial_inputs(inputs)?;
-        self.execute(state, active, Some(thread_id.into()), HashMap::new())
-            .await
+        self.execute(
+            state,
+            active,
+            Some(thread_id.into()),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .await
     }
 
     /// Resumes an interrupted run from its latest checkpoint, re-running the
@@ -529,7 +573,18 @@ where
             checkpoint_id: CheckpointId::new(checkpoint.checkpoint_id.clone()),
         });
 
-        let active = checkpoint.next_nodes.clone();
+        // Prefer the persisted pending activations (which preserve each pending
+        // node's `Send` arg); fall back to the node-id projection for
+        // checkpoints written before that field existed.
+        let active: Vec<Activation> = match &checkpoint.pending_activations {
+            Some(pending) if !pending.is_empty() => pending.iter().map(Activation::from).collect(),
+            _ => checkpoint
+                .next_nodes
+                .iter()
+                .cloned()
+                .map(Activation::node)
+                .collect(),
+        };
         if active.is_empty() {
             return Err(TinyAgentsError::Resume(
                 "checkpoint has no pending nodes to resume".to_string(),
@@ -538,16 +593,21 @@ where
 
         let mut resume_map = HashMap::new();
         if let Some(value) = command.resume {
-            for node in &active {
-                resume_map.insert(node.clone(), value.clone());
+            for activation in &active {
+                resume_map.insert(activation.node.clone(), value.clone());
             }
         }
 
+        // Restore accumulated barrier arrivals so a join's precondition survives
+        // the interrupt/failure boundary this checkpoint recorded.
+        let initial_barriers = barriers_from_persisted(&checkpoint.barrier_arrivals);
+
         self.execute(
             checkpoint.state,
-            active.into_iter().map(Activation::node).collect(),
+            active,
             Some(thread_id),
             resume_map,
+            initial_barriers,
         )
         .await
     }
@@ -699,6 +759,15 @@ where
             None => base.next_nodes.clone(),
         };
         let completed_tasks: Vec<NodeId> = as_node.iter().cloned().collect();
+        // With `as_node`, pending becomes that node's (plain) successors, so no
+        // send args carry over; without it, inherit the base checkpoint's
+        // pending activations verbatim so any pending `Send` args survive.
+        let pending_activations = match &as_node {
+            Some(_) => None,
+            None => base.pending_activations.clone(),
+        };
+        // Manual writes preserve any accumulated barrier arrivals.
+        let barrier_arrivals = base.barrier_arrivals.clone();
 
         let checkpoint_id = next_checkpoint_id();
         let config = self.config_for(thread_id, Some(&checkpoint_id));
@@ -713,6 +782,8 @@ where
             completed_tasks,
             pending_writes: Vec::new(),
             interrupts: Vec::new(),
+            pending_activations,
+            barrier_arrivals,
             metadata: serde_json::json!({ "source": "update", "step": parent_step + 1 }),
         };
         let id = checkpointer.put(checkpoint).await?;
@@ -779,6 +850,8 @@ where
             completed_tasks: source.completed_tasks.clone(),
             pending_writes: source.pending_writes.clone(),
             interrupts: source.interrupts.clone(),
+            pending_activations: source.pending_activations.clone(),
+            barrier_arrivals: source.barrier_arrivals.clone(),
             metadata: serde_json::json!({ "source": "fork", "step": step }),
         };
         let id = checkpointer.put(forked).await?;
@@ -792,6 +865,7 @@ where
         initial_active: Vec<Activation>,
         thread_id: Option<ThreadId>,
         resume_map: HashMap<NodeId, serde_json::Value>,
+        initial_barriers: HashMap<NodeId, HashSet<NodeId>>,
     ) -> Result<GraphExecution<State>> {
         let run_id = crate::harness::ids::new_run_id();
         // When a durable journal is configured, run against a clone whose event
@@ -801,11 +875,25 @@ where
         // their nested path. Default (no journal) leaves `self` untouched.
         if self.journal.is_some() {
             let this = self.clone_with_journal_sink(&run_id, &thread_id);
-            this.execute_run(run_id, state, initial_active, thread_id, resume_map)
-                .await
+            this.execute_run(
+                run_id,
+                state,
+                initial_active,
+                thread_id,
+                resume_map,
+                initial_barriers,
+            )
+            .await
         } else {
-            self.execute_run(run_id, state, initial_active, thread_id, resume_map)
-                .await
+            self.execute_run(
+                run_id,
+                state,
+                initial_active,
+                thread_id,
+                resume_map,
+                initial_barriers,
+            )
+            .await
         }
     }
 
@@ -845,6 +933,7 @@ where
         initial_active: Vec<Activation>,
         thread_id: Option<ThreadId>,
         mut resume_map: HashMap<NodeId, serde_json::Value>,
+        initial_barriers: HashMap<NodeId, HashSet<NodeId>>,
     ) -> Result<GraphExecution<State>> {
         let started_at = SystemTime::now();
         let mut visited: Vec<NodeId> = Vec::new();
@@ -901,7 +990,9 @@ where
         let mut active = initial_active;
         // Barrier/waiting-edge arrivals accumulate across supersteps: a waiting
         // node only activates once every required predecessor has arrived.
-        let mut barrier_arrivals: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
+        // Seeded from the resumed checkpoint so a join's precondition survives
+        // an interrupt/failure boundary.
+        let mut barrier_arrivals: HashMap<NodeId, HashSet<NodeId>> = initial_barriers;
 
         self.emit(GraphEvent::RunStarted {
             run_id: run_id.clone(),
@@ -1008,18 +1099,31 @@ where
             // checkpoint is a no-op and the run aborts exactly as before.
             if let Some(fail) = failure {
                 let StepFailure {
-                    failed_node,
-                    completed,
-                    pending,
+                    failed_index,
                     error,
                 } = fail;
+                let failed_node = active[failed_index].node.clone();
+                // Schedule the successors of the branches that completed before
+                // the failure (they succeeded; their routing must not be lost)
+                // followed by the failed branch and the not-yet-run tail, which
+                // re-run on resume with their `Send` args preserved.
+                let successors = self.route_completed(
+                    &active[..failed_index],
+                    &goto_map,
+                    &state,
+                    &mut barrier_arrivals,
+                )?;
+                let mut pending = successors;
+                pending.extend(active[failed_index..].iter().cloned());
+                let completed_nodes = activation_nodes(&active[..failed_index]);
                 let checkpoint_id = self
                     .persist_failure_checkpoint(
                         &thread_id,
                         &run_id,
                         &state,
                         &pending,
-                        &completed,
+                        &completed_nodes,
+                        &barrier_arrivals,
                         parent_checkpoint.clone(),
                         steps,
                         &failed_node,
@@ -1040,16 +1144,27 @@ where
                 return Err(error);
             }
 
-            // Interrupt: persist a checkpoint whose next nodes are the
-            // not-yet-completed members of this step (interrupted node first),
-            // then return control to the caller.
+            // Interrupt: persist a checkpoint whose pending activations are the
+            // successors of the branches that completed before the interrupt
+            // (their routing must survive) followed by the not-yet-completed
+            // members of this step (interrupted node first). Each pending branch
+            // keeps its `Send` arg; accumulated barrier arrivals are persisted
+            // too. Then return control to the caller.
             if let Some((index, emitted)) = interrupt {
                 if let Err(err) = self.require_interrupt_durability(&thread_id) {
                     self.fail_run(&run_id, &thread_id, started_at, steps, &err, None)
                         .await;
                     return Err(err);
                 }
-                let pending: Vec<NodeId> = activation_nodes(&active[index..]);
+                let successors = self.route_completed(
+                    &active[..index],
+                    &goto_map,
+                    &state,
+                    &mut barrier_arrivals,
+                )?;
+                let mut pending = successors;
+                pending.extend(active[index..].iter().cloned());
+                let pending_nodes = activation_nodes(&pending);
                 let interrupt_id = InterruptId::new(emitted.id.clone());
                 let checkpoint_id = self
                     .persist_checkpoint(
@@ -1059,6 +1174,7 @@ where
                         &pending,
                         &activation_nodes(&active[..index]),
                         vec![emitted.clone()],
+                        &barrier_arrivals,
                         parent_checkpoint.clone(),
                         steps,
                         "loop",
@@ -1070,7 +1186,7 @@ where
                 let mut status = self.base_status(&run_id, &thread_id, started_at);
                 status.status = ExecutionStatus::Interrupted;
                 status.current_step = steps;
-                status.active_nodes = pending;
+                status.active_nodes = pending_nodes;
                 status.pending_interrupts = vec![interrupt_id];
                 status.checkpoint_id = checkpoint_id.clone();
                 self.save_status(status.clone()).await;
@@ -1091,56 +1207,14 @@ where
             }
 
             // Select the next active set from commands or static/conditional
-            // edges, evaluated against the freshly-committed state.
-            let completed = active.clone();
-            let mut next: Vec<Activation> = Vec::new();
-            let mut next_seen: HashSet<NodeId> = HashSet::new();
-            for (index, activation) in completed.iter().enumerate() {
-                let node_id = &activation.node;
-                let targets =
-                    self.route(node_id, goto_map.get(&index).map(Vec::as_slice), &state)?;
-                for target in targets {
-                    let tnode = target.node().clone();
-                    if tnode.as_str() == END {
-                        continue;
-                    }
-                    self.emit(GraphEvent::RouteSelected {
-                        node: node_id.clone(),
-                        target: tnode.clone(),
-                    });
-                    // Barrier gating: hold a waiting node until every required
-                    // predecessor has arrived (possibly across supersteps).
-                    if let Some(required) = self.waiting.get(&tnode) {
-                        let arrived = barrier_arrivals.entry(tnode.clone()).or_default();
-                        arrived.insert(node_id.clone());
-                        if !required.is_subset(arrived) {
-                            continue;
-                        }
-                        barrier_arrivals.remove(&tnode);
-                    }
-                    // `Send` activations may repeat the same node (each carries
-                    // its own arg); plain activations are deduplicated by node.
-                    let send_arg = target.send_arg().cloned();
-                    if send_arg.is_some() {
-                        next.push(Activation {
-                            node: tnode,
-                            send_arg,
-                        });
-                    } else if next_seen.insert(tnode.clone()) {
-                        next.push(Activation {
-                            node: tnode,
-                            send_arg: None,
-                        });
-                    }
-                }
-            }
+            // edges, evaluated against the freshly-committed state. Barrier
+            // arrivals accumulate into `barrier_arrivals` (persisted below).
+            let completed_nodes = activation_nodes(&active);
+            let next = self.route_completed(&active, &goto_map, &state, &mut barrier_arrivals)?;
 
-            // Persist a boundary checkpoint (node-keyed records). Under
-            // `Exit` durability only the terminal boundary (the step that
-            // empties the active set) is written; `Sync`/`Async` persist every
-            // boundary.
-            let completed_nodes = activation_nodes(&completed);
-            let next_nodes = activation_nodes(&next);
+            // Persist a boundary checkpoint. Under `Exit` durability only the
+            // terminal boundary (the step that empties the active set) is
+            // written; `Sync`/`Async` persist every boundary.
             let persist_now = match self.durability {
                 DurabilityMode::Exit => next.is_empty(),
                 DurabilityMode::Sync | DurabilityMode::Async => true,
@@ -1150,9 +1224,10 @@ where
                     &thread_id,
                     &run_id,
                     &state,
-                    &next_nodes,
+                    &next,
                     &completed_nodes,
                     Vec::new(),
+                    &barrier_arrivals,
                     parent_checkpoint.clone(),
                     steps,
                     "loop",
@@ -1244,8 +1319,9 @@ where
         thread_id: &Option<ThreadId>,
         run_id: &RunId,
         state: &State,
-        next_nodes: &[NodeId],
+        pending: &[Activation],
         completed_tasks: &[NodeId],
+        barrier_arrivals: &HashMap<NodeId, HashSet<NodeId>>,
         parent: Option<String>,
         step: usize,
         failed_node: &NodeId,
@@ -1263,10 +1339,12 @@ where
             parent_checkpoint_id: parent,
             namespace: self.namespace.clone(),
             state: state.clone(),
-            next_nodes: next_nodes.to_vec(),
+            next_nodes: activation_nodes(pending),
             completed_tasks: completed_tasks.to_vec(),
             pending_writes: Vec::new(),
             interrupts: Vec::new(),
+            pending_activations: Some(pending.iter().map(PendingActivation::from).collect()),
+            barrier_arrivals: barriers_to_persisted(barrier_arrivals),
             metadata: serde_json::json!({
                 "source": "loop",
                 "step": step,
@@ -1494,12 +1572,11 @@ where
                         error: error.to_string(),
                     });
                     // Preserve the progress of the branches that already ran:
-                    // record them as completed and schedule this node plus the
-                    // not-yet-run tail for a resumable retry.
+                    // the executor records them as completed and schedules their
+                    // successors plus this node and the not-yet-run tail for a
+                    // resumable retry.
                     failure = Some(StepFailure {
-                        failed_node: node_id.clone(),
-                        completed: activation_nodes(&active[..index]),
-                        pending: activation_nodes(&active[index..]),
+                        failed_index: index,
                         error,
                     });
                     break;
@@ -1637,11 +1714,10 @@ where
                     });
                     // The lowest-index failing branch is terminal: fold the
                     // lower-index successes (already applied above) and schedule
-                    // this branch plus the rest for a resumable retry.
+                    // their successors plus this branch and the rest for a
+                    // resumable retry.
                     failure = Some(StepFailure {
-                        failed_node: node_id.clone(),
-                        completed: activation_nodes(&active[..index]),
-                        pending: activation_nodes(&active[index..]),
+                        failed_index: index,
                         error,
                     });
                     break;
@@ -1668,6 +1744,68 @@ where
             interrupt,
             failure,
         })
+    }
+
+    /// Routes a set of completed activations into their successor activations.
+    ///
+    /// Honors per-activation command `goto` (keyed by active-set index), static
+    /// and conditional edges, barrier gating (a waiting node is held until every
+    /// required predecessor has arrived, accumulating into `barrier_arrivals`
+    /// across supersteps), and per-node dedup — while preserving each `Send`
+    /// packet's per-invocation argument. Emits a
+    /// [`GraphEvent::RouteSelected`] per selected edge.
+    ///
+    /// Shared by the normal step boundary (routes the whole active set) and the
+    /// interrupt/failure boundaries (route just the branches that completed
+    /// before the pause, so their successors are still scheduled on resume).
+    fn route_completed(
+        &self,
+        completed: &[Activation],
+        goto_map: &HashMap<usize, Vec<RouteTarget>>,
+        state: &State,
+        barrier_arrivals: &mut HashMap<NodeId, HashSet<NodeId>>,
+    ) -> Result<Vec<Activation>> {
+        let mut next: Vec<Activation> = Vec::new();
+        let mut next_seen: HashSet<NodeId> = HashSet::new();
+        for (index, activation) in completed.iter().enumerate() {
+            let node_id = &activation.node;
+            let targets = self.route(node_id, goto_map.get(&index).map(Vec::as_slice), state)?;
+            for target in targets {
+                let tnode = target.node().clone();
+                if tnode.as_str() == END {
+                    continue;
+                }
+                self.emit(GraphEvent::RouteSelected {
+                    node: node_id.clone(),
+                    target: tnode.clone(),
+                });
+                // Barrier gating: hold a waiting node until every required
+                // predecessor has arrived (possibly across supersteps).
+                if let Some(required) = self.waiting.get(&tnode) {
+                    let arrived = barrier_arrivals.entry(tnode.clone()).or_default();
+                    arrived.insert(node_id.clone());
+                    if !required.is_subset(arrived) {
+                        continue;
+                    }
+                    barrier_arrivals.remove(&tnode);
+                }
+                // `Send` activations may repeat the same node (each carries its
+                // own arg); plain activations are deduplicated by node.
+                let send_arg = target.send_arg().cloned();
+                if send_arg.is_some() {
+                    next.push(Activation {
+                        node: tnode,
+                        send_arg,
+                    });
+                } else if next_seen.insert(tnode.clone()) {
+                    next.push(Activation {
+                        node: tnode,
+                        send_arg: None,
+                    });
+                }
+            }
+        }
+        Ok(next)
     }
 
     /// Resolves the next routing targets for `node_id`.
@@ -1743,9 +1881,10 @@ where
         thread_id: &Option<ThreadId>,
         run_id: &RunId,
         state: &State,
-        next_nodes: &[NodeId],
+        pending: &[Activation],
         completed_tasks: &[NodeId],
         interrupts: Vec<Interrupt>,
+        barrier_arrivals: &HashMap<NodeId, HashSet<NodeId>>,
         parent: Option<String>,
         step: usize,
         source: &str,
@@ -1763,9 +1902,11 @@ where
             parent_checkpoint_id: parent,
             namespace: self.namespace.clone(),
             state: state.clone(),
-            next_nodes: next_nodes.to_vec(),
+            next_nodes: activation_nodes(pending),
             completed_tasks: completed_tasks.to_vec(),
             pending_writes: Vec::new(),
+            pending_activations: Some(pending.iter().map(PendingActivation::from).collect()),
+            barrier_arrivals: barriers_to_persisted(barrier_arrivals),
             interrupts,
             metadata: serde_json::json!({
                 "source": source,

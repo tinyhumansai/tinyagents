@@ -51,8 +51,9 @@ pub use channel::{
 #[cfg(feature = "sqlite")]
 pub use checkpoint::SqliteCheckpointer;
 pub use checkpoint::{
-    Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource, CheckpointTuple,
-    Checkpointer, DurabilityMode, FileCheckpointer, InMemoryCheckpointer, PendingWrite,
+    BarrierArrivals, Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource,
+    CheckpointTuple, Checkpointer, DurabilityMode, FileCheckpointer, InMemoryCheckpointer,
+    PendingActivation, PendingWrite,
 };
 pub use command::{Command, Interrupt, NodeResult, RouteTarget, Send};
 pub use compiled::{CompiledGraph, GraphExecution, GraphInput, ResumeTarget, StateSnapshot};

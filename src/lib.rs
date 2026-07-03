@@ -146,12 +146,13 @@ pub use harness::observability::{LangfuseAuth, LangfuseClient, LangfuseTraceConf
 #[cfg(feature = "sqlite")]
 pub use graph::SqliteCheckpointer;
 pub use graph::{
-    Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource, CheckpointTuple,
-    Checkpointer, ChildRun, ChildRunSink, ClosureReducer, ClosureStateReducer, Command,
-    CompiledGraph, DurabilityMode, END, FileCheckpointer, ForkId, GraphBuilder, GraphDefaults,
-    GraphEvent, GraphExecution, GraphInput, GraphRunStatus, InMemoryCheckpointer, Interrupt,
-    NodeContext, NodeResult, RecursionFrame, RecursionPolicy, RecursionStack, Reducer,
-    ResumeTarget, Route, RouteTarget, RunTree, START, StateReducer, StateSnapshot,
+    BarrierArrivals, Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource,
+    CheckpointTuple, Checkpointer, ChildRun, ChildRunSink, ClosureReducer, ClosureStateReducer,
+    Command, CompiledGraph, DurabilityMode, END, FileCheckpointer, ForkId, GraphBuilder,
+    GraphDefaults, GraphEvent, GraphExecution, GraphInput, GraphRunStatus, InMemoryCheckpointer,
+    Interrupt, NodeContext, NodeResult, PendingActivation, RecursionFrame, RecursionPolicy,
+    RecursionStack, Reducer, ResumeTarget, Route, RouteTarget, RunTree, START, StateReducer,
+    StateSnapshot,
 };
 
 // --- Graph: sub-agent nodes (delegate a graph step to a registered agent) ---

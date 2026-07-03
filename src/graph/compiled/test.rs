@@ -880,6 +880,206 @@ async fn parallel_interrupt_pauses_at_lowest_index_branch() {
 }
 
 #[tokio::test]
+async fn parallel_interrupt_schedules_completed_branch_successors() {
+    // Parallel [a, b]: a routes to successor `x` and completes; b interrupts.
+    // After resume, x (a's successor) must still run — its scheduling used to be
+    // dropped at the interrupt boundary, so x silently never executed.
+    let cp = Arc::new(InMemoryCheckpointer::<Counter>::new());
+    let graph = GraphBuilder::<Counter, i32>::new()
+        .with_parallel(true)
+        .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: i32| {
+            s.value += u;
+            s.log.push(format!("+{u}"));
+            Ok(s)
+        }))
+        .add_node("super", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Command(
+                Command::default().with_goto(["a", "b"]),
+            ))
+        })
+        .add_node("a", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(1))
+        })
+        .add_node("b", |_s: Counter, c: NodeContext| async move {
+            match c.resume {
+                Some(_) => Ok(NodeResult::Update(100)),
+                None => Ok(NodeResult::Interrupt(Interrupt::new("b", json!({})))),
+            }
+        })
+        .add_node("x", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(10))
+        })
+        .set_entry("super")
+        .mark_command_routing("super")
+        .add_edge("a", "x")
+        .set_finish("b")
+        .set_finish("x")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    let paused = graph
+        .run_with_thread(
+            "t",
+            Counter {
+                value: 0,
+                log: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(paused.is_interrupted());
+    assert_eq!(paused.state.value, 1, "branch a committed before the pause");
+
+    let done = graph
+        .resume("t", Command::resume(json!(null)))
+        .await
+        .unwrap();
+    assert!(
+        done.visited.iter().any(|n| n.as_str() == "x"),
+        "a's successor x must run after resume"
+    );
+    // 1 (a) + 100 (b resume) + 10 (x) — every scheduled branch ran once.
+    assert_eq!(done.state.value, 111);
+}
+
+#[tokio::test]
+async fn send_args_survive_interrupt_and_resume() {
+    // A `Send` fanout schedules three workers (args 1, 2, 3); the arg-1 worker
+    // interrupts on its first activation. On resume every pending worker must
+    // still carry its own send arg — before the fix they resumed with `None`.
+    let cp = Arc::new(InMemoryCheckpointer::<Counter>::new());
+    let graph = GraphBuilder::<Counter, i32>::new()
+        .with_parallel(true)
+        .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: i32| {
+            s.value += u;
+            s.log.push(format!("w:{u}"));
+            Ok(s)
+        }))
+        .add_node("dispatch", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Command(Command::send([
+                Send::new("worker", json!(1)),
+                Send::new("worker", json!(2)),
+                Send::new("worker", json!(3)),
+            ])))
+        })
+        .add_node("worker", |_s: Counter, c: NodeContext| async move {
+            let arg = c
+                .send_arg
+                .clone()
+                .expect("worker scheduled via Send must carry its arg")
+                .as_i64()
+                .unwrap() as i32;
+            if arg == 1 && c.resume.is_none() {
+                return Ok(NodeResult::Interrupt(Interrupt::new("worker", json!({}))));
+            }
+            Ok(NodeResult::Update(arg))
+        })
+        .set_entry("dispatch")
+        .mark_command_routing("dispatch")
+        .set_finish("worker")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    let paused = graph
+        .run_with_thread(
+            "fan",
+            Counter {
+                value: 0,
+                log: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(paused.is_interrupted());
+
+    // Resume: the arg-1 worker unblocks and the other two re-run with their
+    // preserved args. With the arg lost, `expect(...)` above would panic.
+    let done = graph
+        .resume("fan", Command::resume(json!(null)))
+        .await
+        .unwrap();
+    assert_eq!(done.state.value, 6, "all three worker args (1+2+3) applied");
+    let mut log = done.state.log.clone();
+    log.sort();
+    assert_eq!(log, vec!["w:1", "w:2", "w:3"]);
+}
+
+#[tokio::test]
+async fn barrier_arrivals_survive_interrupt_and_resume() {
+    // Diamond join: p1 arrives at the barrier before an interrupt; p2 arrives
+    // only after resume. The join must still fire — the p1 arrival has to
+    // survive the checkpoint boundary or the join's precondition is never met.
+    let cp = Arc::new(InMemoryCheckpointer::<Counter>::new());
+    let graph = GraphBuilder::<Counter, i32>::new()
+        .with_parallel(true)
+        .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: i32| {
+            s.value += u;
+            s.log.push(format!("+{u}"));
+            Ok(s)
+        }))
+        .add_node("super", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Command(
+                Command::default().with_goto(["p1", "hold"]),
+            ))
+        })
+        .add_node("p1", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(1))
+        })
+        .add_node("p2", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(2))
+        })
+        // `hold` interrupts first; on resume it routes to p2 (the second
+        // barrier predecessor).
+        .add_node("hold", |_s: Counter, c: NodeContext| async move {
+            match c.resume {
+                Some(_) => Ok(NodeResult::Command(Command::new().with_goto(["p2"]))),
+                None => Ok(NodeResult::Interrupt(Interrupt::new("hold", json!({})))),
+            }
+        })
+        .add_node("join", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(100))
+        })
+        .set_entry("super")
+        .mark_command_routing("super")
+        .mark_command_routing("hold")
+        .add_waiting_edge("p1", "join")
+        .add_waiting_edge("p2", "join")
+        .set_finish("join")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    let paused = graph
+        .run_with_thread(
+            "diamond",
+            Counter {
+                value: 0,
+                log: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(paused.is_interrupted());
+    assert_eq!(
+        paused.state.value, 1,
+        "p1 committed (arrived at the barrier)"
+    );
+
+    let done = graph
+        .resume("diamond", Command::resume(json!(null)))
+        .await
+        .unwrap();
+    assert!(
+        done.visited.iter().any(|n| n.as_str() == "join"),
+        "join must fire once both barrier predecessors have arrived across the resume"
+    );
+    // 1 (p1) + 2 (p2) + 100 (join).
+    assert_eq!(done.state.value, 103);
+}
+
+#[tokio::test]
 async fn status_snapshot_reports_run() {
     let graph = adding_graph();
     let run = graph

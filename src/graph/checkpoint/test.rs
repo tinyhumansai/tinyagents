@@ -18,6 +18,8 @@ fn checkpoint(thread: &str, id: &str, parent: Option<&str>, step: usize) -> Chec
         completed_tasks: vec![],
         pending_writes: vec![],
         interrupts: vec![],
+        pending_activations: None,
+        barrier_arrivals: vec![],
         metadata: json!({ "source": "loop", "step": step }),
     }
 }
@@ -47,6 +49,61 @@ async fn put_get_list_roundtrip() {
     assert_eq!(list[0].checkpoint_id, "c1");
     assert_eq!(list[1].parent_checkpoint_id.as_deref(), Some("c1"));
     assert_eq!(list[1].step, 2);
+}
+
+#[test]
+fn legacy_checkpoint_json_without_new_fields_still_loads() {
+    // Back-compat: a checkpoint serialized before `pending_activations` /
+    // `barrier_arrivals` existed must deserialize, defaulting those fields so
+    // resume falls back to `next_nodes` and an empty barrier set.
+    let legacy = json!({
+        "thread_id": "t",
+        "checkpoint_id": "c1",
+        "run_id": null,
+        "parent_checkpoint_id": null,
+        "namespace": [],
+        "state": 7,
+        "next_nodes": ["a", "b"],
+        "completed_tasks": [],
+        "pending_writes": [],
+        "interrupts": [],
+        "metadata": { "source": "loop", "step": 1 }
+    });
+    let cp: Checkpoint<i32> = serde_json::from_value(legacy).unwrap();
+    assert_eq!(cp.state, 7);
+    assert_eq!(cp.next_nodes.len(), 2);
+    assert!(cp.pending_activations.is_none());
+    assert!(cp.barrier_arrivals.is_empty());
+}
+
+#[test]
+fn pending_activation_send_arg_roundtrips() {
+    let cp = Checkpoint {
+        thread_id: "t".into(),
+        checkpoint_id: "c1".into(),
+        run_id: None,
+        parent_checkpoint_id: None,
+        namespace: vec![],
+        state: 1i32,
+        next_nodes: vec![NodeId::from("w")],
+        completed_tasks: vec![],
+        pending_writes: vec![],
+        interrupts: vec![],
+        pending_activations: Some(vec![super::PendingActivation {
+            node: NodeId::from("w"),
+            send_arg: Some(json!({ "item": 42 })),
+        }]),
+        barrier_arrivals: vec![super::BarrierArrivals {
+            node: NodeId::from("join"),
+            arrived: vec![NodeId::from("p1")],
+        }],
+        metadata: json!({ "source": "loop", "step": 1 }),
+    };
+    let round: Checkpoint<i32> =
+        serde_json::from_str(&serde_json::to_string(&cp).unwrap()).unwrap();
+    let pa = round.pending_activations.unwrap();
+    assert_eq!(pa[0].send_arg, Some(json!({ "item": 42 })));
+    assert_eq!(round.barrier_arrivals[0].arrived, vec![NodeId::from("p1")]);
 }
 
 #[tokio::test]
