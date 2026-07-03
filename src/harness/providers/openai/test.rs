@@ -607,6 +607,45 @@ async fn sse_stream_drains_final_line_without_trailing_newline() {
     assert_eq!(response.text(), "tail");
 }
 
+#[tokio::test]
+async fn sse_stream_surfaces_mid_stream_error_payload() {
+    // The provider streams a text delta, then an `{"error": ...}` payload
+    // instead of a chunk. It must surface as a terminal ProviderFailed rather
+    // than be swallowed as an empty chunk.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n".to_vec(),
+        b"data: {\"error\":{\"message\":\"upstream exploded\",\"code\":\"server_error\"}}\n\n"
+            .to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+
+    let failed = items
+        .iter()
+        .find_map(|item| match item {
+            ModelStreamItem::ProviderFailed(error) => Some(error),
+            _ => None,
+        })
+        .expect("mid-stream error should emit ProviderFailed");
+    assert_eq!(failed.code.as_deref(), Some("server_error"));
+    assert!(failed.message.contains("upstream exploded"));
+    // No terminal Completed is emitted after the failure.
+    assert!(matches!(
+        items.last(),
+        Some(ModelStreamItem::ProviderFailed(_))
+    ));
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let err = merged
+        .finish()
+        .expect_err("stream error must reach accumulator");
+    assert!(err.to_string().contains("upstream exploded"));
+}
+
 #[test]
 fn from_env_errors_when_api_key_missing() {
     // Snapshot and clear the key so the missing-key path is exercised

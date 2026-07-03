@@ -913,10 +913,48 @@ impl SseState {
             return;
         }
         // Ignore keepalives / unparseable lines rather than failing the run.
-        if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(payload) {
+        let Ok(value) = serde_json::from_str::<Value>(payload) else {
+            return;
+        };
+        // Some providers stream a mid-stream `{"error": ...}` payload instead of
+        // a chunk. This also deserializes cleanly as an all-defaults
+        // `ChatCompletionChunk`, so it must be detected first and surfaced as a
+        // terminal failure rather than folded in as an empty chunk and swallowed.
+        if let Some(error) = value.get("error") {
+            self.pending
+                .push_back(ModelStreamItem::ProviderFailed(self.stream_error(error)));
+            self.finished = true;
+            self.terminal_emitted = true;
+            return;
+        }
+        if let Ok(chunk) = serde_json::from_value::<ChatCompletionChunk>(value) {
             let mut pending = std::mem::take(&mut self.pending);
             self.acc.ingest(chunk, &mut pending);
             self.pending = pending;
+        }
+    }
+
+    /// Builds a normalized [`ProviderError`] from a streamed `error` payload.
+    fn stream_error(&self, error: &Value) -> ProviderError {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or("provider reported a stream error")
+            .to_string();
+        let code = error
+            .get("code")
+            .or_else(|| error.get("type"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        ProviderError {
+            provider: self.provider.clone(),
+            model: Some(self.model.clone()),
+            code,
+            message,
+            retryable: false,
+            raw: Some(error.clone()),
+            ..ProviderError::default()
         }
     }
 }
