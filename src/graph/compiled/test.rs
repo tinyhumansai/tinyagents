@@ -330,6 +330,81 @@ async fn interrupt_then_resume_reruns_node() {
 }
 
 #[tokio::test]
+async fn resume_preserves_parent_checkpoint_lineage() {
+    // A run that boundary-checkpoints, interrupts, then resumes to completion
+    // must keep a single connected lineage: the first post-resume checkpoint
+    // chains onto the loaded one instead of orphaning the pre-interrupt
+    // history. Without it, get_state_history stops at the resume point and
+    // prune deletes the ancestors it should protect.
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("start", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s))
+        })
+        .add_node("approve", |s, ctx: NodeContext| async move {
+            match ctx.resume {
+                Some(_) => Ok(NodeResult::Update(s + 1)),
+                None => Ok(NodeResult::Interrupt(Interrupt::new("approve", json!({})))),
+            }
+        })
+        .add_node("done", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s))
+        })
+        .set_entry("start")
+        .add_edge("start", "approve")
+        .add_edge("approve", "done")
+        .set_finish("done")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    let paused = graph.run_with_thread("hitl", 10).await.unwrap();
+    assert!(paused.is_interrupted());
+    let resumed = graph
+        .resume("hitl", Command::resume(json!(null)))
+        .await
+        .unwrap();
+    assert!(!resumed.is_interrupted());
+
+    // Four boundary checkpoints: start, approve(interrupt), approve(resumed),
+    // done — all reachable through the parent lineage from the latest.
+    let history = graph.get_state_history("hitl", None).await.unwrap();
+    assert_eq!(
+        history.len(),
+        4,
+        "full lineage must walk past the resume point; got steps {:?}",
+        history.iter().map(|s| s.metadata.step).collect::<Vec<_>>()
+    );
+    // Connected chain: exactly one root, every parent present.
+    let ids: std::collections::HashSet<&str> = history
+        .iter()
+        .map(|s| s.metadata.checkpoint_id.as_str())
+        .collect();
+    let roots = history
+        .iter()
+        .filter(|s| s.metadata.parent_checkpoint_id.is_none())
+        .count();
+    assert_eq!(roots, 1, "a connected lineage has exactly one root");
+    for s in &history {
+        if let Some(parent) = &s.metadata.parent_checkpoint_id {
+            assert!(
+                ids.contains(parent.as_str()),
+                "parent `{parent}` must be present in the walked history"
+            );
+        }
+    }
+
+    // Prune protects the ancestor chain of the retained window: keeping the
+    // latest still keeps the pre-interrupt checkpoints it depends on.
+    cp.prune("hitl", 1).await.unwrap();
+    assert_eq!(
+        cp.list("hitl").await.unwrap().len(),
+        4,
+        "prune must retain the full ancestor chain across the resume boundary"
+    );
+}
+
+#[tokio::test]
 async fn interrupt_without_checkpointer_errors_instead_of_pausing() {
     let graph = GraphBuilder::<i32, i32>::overwrite()
         .add_node("approve", |_s, _ctx: NodeContext| async move {

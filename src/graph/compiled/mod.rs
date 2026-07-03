@@ -437,6 +437,7 @@ where
             None,
             HashMap::new(),
             HashMap::new(),
+            None,
         )
         .await
     }
@@ -455,7 +456,7 @@ where
         inputs: impl IntoIterator<Item = GraphInput>,
     ) -> Result<GraphExecution<State>> {
         let active = self.initial_inputs(inputs)?;
-        self.execute(state, active, None, HashMap::new(), HashMap::new())
+        self.execute(state, active, None, HashMap::new(), HashMap::new(), None)
             .await
     }
 
@@ -472,6 +473,7 @@ where
             Some(thread_id.into()),
             HashMap::new(),
             HashMap::new(),
+            None,
         )
         .await
     }
@@ -492,6 +494,7 @@ where
             Some(thread_id.into()),
             HashMap::new(),
             HashMap::new(),
+            None,
         )
         .await
     }
@@ -601,6 +604,9 @@ where
         // Restore accumulated barrier arrivals so a join's precondition survives
         // the interrupt/failure boundary this checkpoint recorded.
         let initial_barriers = barriers_from_persisted(&checkpoint.barrier_arrivals);
+        // Chain the first post-resume boundary onto the checkpoint we loaded so
+        // the lineage spine stays connected across the resume.
+        let initial_parent = Some(checkpoint.checkpoint_id.clone());
 
         self.execute(
             checkpoint.state,
@@ -608,6 +614,7 @@ where
             Some(thread_id),
             resume_map,
             initial_barriers,
+            initial_parent,
         )
         .await
     }
@@ -859,6 +866,7 @@ where
         Ok(config)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute(
         &self,
         state: State,
@@ -866,6 +874,7 @@ where
         thread_id: Option<ThreadId>,
         resume_map: HashMap<NodeId, serde_json::Value>,
         initial_barriers: HashMap<NodeId, HashSet<NodeId>>,
+        initial_parent: Option<String>,
     ) -> Result<GraphExecution<State>> {
         let run_id = crate::harness::ids::new_run_id();
         // When a durable journal is configured, run against a clone whose event
@@ -882,6 +891,7 @@ where
                 thread_id,
                 resume_map,
                 initial_barriers,
+                initial_parent,
             )
             .await
         } else {
@@ -892,6 +902,7 @@ where
                 thread_id,
                 resume_map,
                 initial_barriers,
+                initial_parent,
             )
             .await
         }
@@ -926,6 +937,7 @@ where
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_run(
         &self,
         run_id: RunId,
@@ -934,12 +946,17 @@ where
         thread_id: Option<ThreadId>,
         mut resume_map: HashMap<NodeId, serde_json::Value>,
         initial_barriers: HashMap<NodeId, HashSet<NodeId>>,
+        initial_parent: Option<String>,
     ) -> Result<GraphExecution<State>> {
         let started_at = SystemTime::now();
         let mut visited: Vec<NodeId> = Vec::new();
         let mut steps = 0usize;
         let mut last_checkpoint: Option<CheckpointId> = None;
-        let mut parent_checkpoint: Option<String> = None;
+        // On resume this is the loaded checkpoint's id, so the first boundary
+        // checkpoint after a resume chains onto pre-interrupt history rather
+        // than orphaning the lineage (which would stop `get_state_history` at
+        // the resume point and let `prune` delete the ancestors).
+        let mut parent_checkpoint: Option<String> = initial_parent;
 
         // Build this run's recursion stack from the inherited parent frames and
         // push the frame for this graph call. A push that would exceed
