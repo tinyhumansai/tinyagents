@@ -49,7 +49,7 @@ impl From<String> for ComponentId {
 
 impl ComponentKind {
     /// All component kinds, in a stable order, for discovery iteration.
-    pub const ALL: [ComponentKind; 11] = [
+    pub const ALL: [ComponentKind; 12] = [
         ComponentKind::Model,
         ComponentKind::Tool,
         ComponentKind::Graph,
@@ -57,6 +57,7 @@ impl ComponentKind {
         ComponentKind::Reducer,
         ComponentKind::Store,
         ComponentKind::Agent,
+        ComponentKind::Script,
         ComponentKind::Middleware,
         ComponentKind::Checkpointer,
         ComponentKind::TaskStore,
@@ -74,6 +75,7 @@ impl ComponentKind {
             ComponentKind::Reducer => "reducer",
             ComponentKind::Store => "store",
             ComponentKind::Agent => "agent",
+            ComponentKind::Script => "script",
             ComponentKind::Middleware => "middleware",
             ComponentKind::Checkpointer => "checkpointer",
             ComponentKind::TaskStore => "task_store",

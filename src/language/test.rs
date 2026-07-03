@@ -630,6 +630,8 @@ fn extended_kinds_bind_against_a_resolver() {
     let bp = compile(&parse_str(EXTENDED).unwrap()).unwrap().remove(0);
     let resolver = CapabilityResolver::from_lists(["default".to_string()], std::iter::empty())
         .allow_subgraph("summarize")
+        .allow_agent("researcher")
+        .allow_script("triage_script")
         .allow_reducer("messages")
         .allow_reducer("aggregate")
         .allow_reducer("barrier")
@@ -639,6 +641,46 @@ fn extended_kinds_bind_against_a_resolver() {
                 .map(|k| k.to_string()),
         );
     resolver.bind_blueprint(&bp).unwrap();
+}
+
+#[test]
+fn bind_blueprint_rejects_unregistered_subagent_and_script() {
+    // The strict blueprint gate must validate `subagent` agent references and
+    // `repl_agent` script references, not silently pass them through a model
+    // check. Both were previously admitted, so this exercises the fail-closed
+    // path the `Resolver` already covered but `bind_blueprint` did not.
+    let node_kinds = || {
+        crate::language::compiler::DEFAULT_NODE_KINDS
+            .iter()
+            .map(|k| k.to_string())
+    };
+    let bp = compile(&parse_str(EXTENDED).unwrap()).unwrap().remove(0);
+
+    // Missing agent `researcher`: rejected with an unknown-agent capability error.
+    let missing_agent = CapabilityResolver::from_lists(["default".to_string()], std::iter::empty())
+        .allow_subgraph("summarize")
+        .allow_script("triage_script")
+        .allow_reducer("messages")
+        .allow_reducer("aggregate")
+        .allow_reducer("barrier")
+        .with_node_kinds(node_kinds());
+    let err = missing_agent.bind_blueprint(&bp).unwrap_err();
+    assert!(matches!(err, crate::error::TinyAgentsError::Capability(_)));
+    assert!(err.to_string().contains("unknown agent"), "{err}");
+    assert!(err.to_string().contains("researcher"), "{err}");
+
+    // Missing script `triage_script`: rejected with an unknown-script error.
+    let missing_script =
+        CapabilityResolver::from_lists(["default".to_string()], std::iter::empty())
+            .allow_subgraph("summarize")
+            .allow_agent("researcher")
+            .allow_reducer("messages")
+            .allow_reducer("aggregate")
+            .allow_reducer("barrier")
+            .with_node_kinds(node_kinds());
+    let err = missing_script.bind_blueprint(&bp).unwrap_err();
+    assert!(err.to_string().contains("unknown script"), "{err}");
+    assert!(err.to_string().contains("triage_script"), "{err}");
 }
 
 // ---------------------------------------------------------------------------

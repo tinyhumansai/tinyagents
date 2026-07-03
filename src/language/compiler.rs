@@ -437,10 +437,59 @@ pub struct CapabilityResolver {
     subgraphs: HashSet<String>,
     routers: HashSet<String>,
     reducers: HashSet<String>,
+    /// Registered agent names (and aliases) a `subagent` node may reference.
+    agents: HashSet<String>,
+    /// Registered REPL script names (and aliases) a `repl_agent` node may
+    /// reference.
+    scripts: HashSet<String>,
     /// Allowed node kinds. When empty, node-kind validation is skipped (the
     /// legacy, manual behaviour); when non-empty, the strict binding path
     /// rejects any node whose kind is not listed.
     node_kinds: HashSet<String>,
+}
+
+/// The class of the primary, kind-specific reference a node carries.
+///
+/// This is the shared vocabulary of [`CapabilityResolver::classify_reference`],
+/// the one policy that maps a node `kind` to the reference that must resolve and
+/// the allowlist it resolves against. Every binding gate — the compiler's
+/// [`CapabilityResolver::bind_blueprint`] and both
+/// [`crate::language::resolver::Resolver`] paths — routes through it so they
+/// cannot drift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReferenceClass {
+    /// A chat model reference (the `_` default and `router`'s pre-classification).
+    Model,
+    /// A subgraph (graph blueprint) reference.
+    Subgraph,
+    /// A router-function reference.
+    Router,
+    /// A sub-agent reference.
+    Agent,
+    /// A REPL script reference.
+    Script,
+}
+
+impl ReferenceClass {
+    /// The lowercase noun used in "unknown {word}" diagnostics.
+    pub fn word(self) -> &'static str {
+        match self {
+            ReferenceClass::Model => "model",
+            ReferenceClass::Subgraph => "subgraph",
+            ReferenceClass::Router => "router",
+            ReferenceClass::Agent => "agent",
+            ReferenceClass::Script => "script",
+        }
+    }
+}
+
+/// The primary reference a node carries, resolved by the shared policy.
+#[derive(Clone, Copy, Debug)]
+pub struct PrimaryReference<'a> {
+    /// Which allowlist the reference must resolve against.
+    pub class: ReferenceClass,
+    /// The referenced name.
+    pub target: &'a str,
 }
 
 impl CapabilityResolver {
@@ -485,6 +534,8 @@ impl CapabilityResolver {
             subgraphs: collect(ComponentKind::Graph),
             routers: collect(ComponentKind::Router),
             reducers: collect(ComponentKind::Reducer),
+            agents: collect(ComponentKind::Agent),
+            scripts: collect(ComponentKind::Script),
             node_kinds: DEFAULT_NODE_KINDS.iter().map(|k| (*k).to_owned()).collect(),
         }
     }
@@ -516,6 +567,19 @@ impl CapabilityResolver {
     /// Allows an additional reducer name. Returns `self` for chaining.
     pub fn allow_reducer(mut self, name: impl Into<String>) -> Self {
         self.reducers.insert(name.into());
+        self
+    }
+
+    /// Allows an additional agent name (for `subagent` nodes). Returns `self`.
+    pub fn allow_agent(mut self, name: impl Into<String>) -> Self {
+        self.agents.insert(name.into());
+        self
+    }
+
+    /// Allows an additional REPL script name (for `repl_agent` nodes). Returns
+    /// `self`.
+    pub fn allow_script(mut self, name: impl Into<String>) -> Self {
+        self.scripts.insert(name.into());
         self
     }
 
@@ -555,6 +619,59 @@ impl CapabilityResolver {
         self.reducers.contains(name)
     }
 
+    /// Returns true if `name` is an allowed agent (for `subagent` nodes).
+    pub fn agent_allowed(&self, name: &str) -> bool {
+        self.agents.contains(name)
+    }
+
+    /// Returns true if `name` is an allowed REPL script (for `repl_agent`
+    /// nodes).
+    pub fn script_allowed(&self, name: &str) -> bool {
+        self.scripts.contains(name)
+    }
+
+    /// The single kind-to-reference policy every binding gate shares.
+    ///
+    /// Given a node `kind` and the reference fields it carries, returns the
+    /// primary reference that must resolve and the allowlist class it resolves
+    /// against — or `None` when the node declares no primary reference. The
+    /// `subgraph` argument is the caller's already-resolved subgraph target
+    /// (the dedicated graph field falling back to the legacy `model` field).
+    ///
+    /// Centralising this mapping is what keeps
+    /// [`bind_blueprint`](Self::bind_blueprint) and both
+    /// [`crate::language::resolver::Resolver`] paths from drifting: a new node
+    /// kind or a changed reference convention is edited here once.
+    pub fn classify_reference<'a>(
+        kind: &str,
+        model: Option<&'a str>,
+        subgraph: Option<&'a str>,
+        agent: Option<&'a str>,
+        script: Option<&'a str>,
+    ) -> Option<PrimaryReference<'a>> {
+        let (class, target) = match kind {
+            "subgraph" | "graph" => (ReferenceClass::Subgraph, subgraph?),
+            "router" => (ReferenceClass::Router, model?),
+            "subagent" => (ReferenceClass::Agent, agent?),
+            "repl_agent" => (ReferenceClass::Script, script?),
+            // Unknown kinds fall through to a model check, mirroring the
+            // compiler default of an unspecified kind being `model`.
+            _ => (ReferenceClass::Model, model?),
+        };
+        Some(PrimaryReference { class, target })
+    }
+
+    /// Returns true when `target` is allowed for the given reference `class`.
+    pub fn reference_allowed(&self, class: ReferenceClass, target: &str) -> bool {
+        match class {
+            ReferenceClass::Model => self.model_allowed(target),
+            ReferenceClass::Subgraph => self.subgraph_allowed(target),
+            ReferenceClass::Router => self.router_allowed(target),
+            ReferenceClass::Agent => self.agent_allowed(target),
+            ReferenceClass::Script => self.script_allowed(target),
+        }
+    }
+
     /// Returns true if `kind` is an allowed node kind, or if node-kind
     /// validation is disabled (the allowlist is empty).
     pub fn node_kind_allowed(&self, kind: &str) -> bool {
@@ -569,15 +686,17 @@ impl CapabilityResolver {
     /// - each node `kind` is in the resolver's node-kind allowlist (a
     ///   [`TinyAgentsError::Compile`] error otherwise);
     /// - `subgraph`/`graph` node references resolve to a registered subgraph,
-    ///   `router` node references to a registered router, and all other nodes'
-    ///   `model` references to a registered model;
+    ///   `router` node references to a registered router, `subagent` node
+    ///   references to a registered agent, `repl_agent` node references to a
+    ///   registered script, and all other nodes' `model` references to a
+    ///   registered model (via the shared [`classify_reference`](Self::classify_reference) policy);
     /// - every `channel` reducer reference is registered.
     ///
     /// # Errors
     ///
     /// Returns [`TinyAgentsError::Compile`] for an unknown node kind, and
     /// [`TinyAgentsError::Capability`] for the first unregistered model, tool,
-    /// subgraph, router, or reducer reference.
+    /// subgraph, router, agent, script, or reducer reference.
     pub fn bind_blueprint(&self, blueprint: &Blueprint) -> Result<()> {
         for node in &blueprint.nodes {
             if !self.node_kind_allowed(&node.kind) {
@@ -587,39 +706,23 @@ impl CapabilityResolver {
                 )));
             }
 
-            match node.kind.as_str() {
-                "subgraph" | "graph" => {
-                    // Prefer the dedicated `graph "name"` reference, falling
-                    // back to the legacy `model` field for back-compatibility.
-                    if let Some(target) = node.subgraph.as_ref().or(node.model.as_ref())
-                        && !self.subgraph_allowed(target)
-                    {
-                        return Err(TinyAgentsError::Capability(format!(
-                            "node `{}` references unknown subgraph `{target}`",
-                            node.name
-                        )));
-                    }
-                }
-                "router" => {
-                    if let Some(target) = &node.model
-                        && !self.router_allowed(target)
-                    {
-                        return Err(TinyAgentsError::Capability(format!(
-                            "node `{}` references unknown router `{target}`",
-                            node.name
-                        )));
-                    }
-                }
-                _ => {
-                    if let Some(model) = &node.model
-                        && !self.model_allowed(model)
-                    {
-                        return Err(TinyAgentsError::Capability(format!(
-                            "node `{}` references unknown model `{model}`",
-                            node.name
-                        )));
-                    }
-                }
+            // Prefer the dedicated `graph "name"` reference, falling back to the
+            // legacy `model` field for back-compatibility.
+            let subgraph_target = node.subgraph.as_deref().or(node.model.as_deref());
+            if let Some(reference) = Self::classify_reference(
+                &node.kind,
+                node.model.as_deref(),
+                subgraph_target,
+                node.agent.as_deref(),
+                node.script.as_deref(),
+            ) && !self.reference_allowed(reference.class, reference.target)
+            {
+                return Err(TinyAgentsError::Capability(format!(
+                    "node `{}` references unknown {} `{}`",
+                    node.name,
+                    reference.class.word(),
+                    reference.target
+                )));
             }
 
             for tool in &node.tools {

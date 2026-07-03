@@ -112,9 +112,10 @@ live handles.
 
 ### Component kinds
 
-`ComponentKind` partitions the registry namespace and now has **11** variants.
-Alongside `Model`, `Tool`, `Graph`, `Router`, `Reducer`, `Store`, and `Agent`,
-four kinds cover the runtime's durable roles:
+`ComponentKind` partitions the registry namespace and now has **12** variants.
+Alongside `Model`, `Tool`, `Graph`, `Router`, `Reducer`, `Store`, `Agent`, and
+`Script` (a REPL script a `repl_agent` node may reference), four kinds cover the
+runtime's durable roles:
 
 | Kind | `as_str` |
 | --- | --- |
