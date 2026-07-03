@@ -75,6 +75,18 @@ pub enum AgentEvent {
         /// Token usage reported by the provider, when available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<Usage>,
+        /// The request messages sent to the model, captured only when
+        /// [`PayloadCapture::model_io`][crate::harness::runtime::PayloadCapture::model_io]
+        /// is enabled. `None` in the default payload-free mode. Populated so an
+        /// exporter can render the prompt in a generation's Input panel.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<serde_json::Value>,
+        /// The model completion (assistant message), captured only when
+        /// [`PayloadCapture::model_io`][crate::harness::runtime::PayloadCapture::model_io]
+        /// is enabled. `None` in the default payload-free mode. Populated so an
+        /// exporter can render the completion in a generation's Output panel.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<serde_json::Value>,
     },
 
     /// A tool-selection middleware filtered the model-visible tool set before a
@@ -103,6 +115,18 @@ pub enum AgentEvent {
         call_id: CallId,
         /// Name of the tool that was invoked.
         tool_name: String,
+        /// The arguments the tool was invoked with, captured only when
+        /// [`PayloadCapture::tool_io`][crate::harness::runtime::PayloadCapture::tool_io]
+        /// is enabled. `None` in the default payload-free mode. Populated so an
+        /// exporter can render the call in a tool observation's Input panel.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<serde_json::Value>,
+        /// The tool result content, captured only when
+        /// [`PayloadCapture::tool_io`][crate::harness::runtime::PayloadCapture::tool_io]
+        /// is enabled. `None` in the default payload-free mode. Populated so an
+        /// exporter can render the result in a tool observation's Output panel.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<serde_json::Value>,
     },
 
     /// The model called a tool that is not registered, and the run's

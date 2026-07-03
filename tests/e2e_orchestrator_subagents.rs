@@ -171,6 +171,8 @@ async fn orchestrator_resolves_and_runs_only_the_chosen_subagents() -> Result<()
             sink.emit(AgentEvent::ToolCompleted {
                 call_id: CallId::new(call_id),
                 tool_name: name.clone(),
+                input: None,
+                output: None,
             });
             Ok::<(String, String), TinyAgentsError>((name, result.content))
         }

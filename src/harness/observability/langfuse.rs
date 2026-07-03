@@ -156,6 +156,7 @@ impl LangfuseClient {
             .first()
             .map(|obs| iso_ms(obs.ts_ms))
             .unwrap_or_else(|| iso_ms(now_ms()));
+        let metadata = trace_metadata(&trace, observations);
 
         let mut batch = Vec::with_capacity(observations.len() + 1);
         batch.push(json!({
@@ -172,7 +173,7 @@ impl LangfuseClient {
                 "release": trace.release,
                 "version": trace.version,
                 "tags": if trace.tags.is_empty() { Value::Null } else { json!(trace.tags) },
-                "metadata": if trace.metadata.is_null() { Value::Null } else { trace.metadata },
+                "metadata": metadata,
             })),
         }));
 
@@ -277,6 +278,33 @@ fn resolve_trace_id(
         })
 }
 
+/// Builds the trace-level metadata, defaulting useful run-lineage coordinates
+/// (root/first run ids and thread, mirroring what the graph exporter folds in)
+/// so a harness trace is correlatable even when the caller passes no metadata.
+/// Any caller-supplied [`LangfuseTraceConfig::metadata`] keys are merged on top
+/// and win on collision. Returns [`Value::Null`] only when there is nothing to
+/// attach, so [`clean_nulls`] drops the field entirely.
+fn trace_metadata(trace: &LangfuseTraceConfig, observations: &[AgentObservation]) -> Value {
+    let mut metadata = serde_json::Map::new();
+    if let Some(first) = observations.first() {
+        metadata.insert("root_run_id".to_string(), json!(first.root_run_id.as_str()));
+        metadata.insert("run_id".to_string(), json!(first.run_id.as_str()));
+        if let Some(parent) = &first.parent_run_id {
+            metadata.insert("parent_run_id".to_string(), json!(parent.as_str()));
+        }
+    }
+    if let Value::Object(extra) = &trace.metadata {
+        for (k, v) in extra {
+            metadata.insert(k.clone(), v.clone());
+        }
+    }
+    if metadata.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(metadata)
+    }
+}
+
 fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
     let timestamp = iso_ms(obs.ts_ms);
     let metadata = json!({
@@ -287,7 +315,12 @@ fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
         "event": obs.event,
     });
     match &obs.event {
-        AgentEvent::ModelCompleted { call_id, usage } => json!({
+        AgentEvent::ModelCompleted {
+            call_id,
+            usage,
+            input,
+            output,
+        } => json!({
             "id": obs.event_id.as_str(),
             "timestamp": timestamp,
             "type": "generation-create",
@@ -298,10 +331,17 @@ fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
                 "startTime": timestamp,
                 "endTime": timestamp,
                 "usage": usage.map(langfuse_usage),
+                "input": input,
+                "output": output,
                 "metadata": metadata,
             })),
         }),
-        AgentEvent::ToolCompleted { call_id, tool_name } => json!({
+        AgentEvent::ToolCompleted {
+            call_id,
+            tool_name,
+            input,
+            output,
+        } => json!({
             "id": obs.event_id.as_str(),
             "timestamp": timestamp,
             "type": "tool-create",
@@ -311,6 +351,8 @@ fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
                 "name": tool_name,
                 "startTime": timestamp,
                 "endTime": timestamp,
+                "input": input,
+                "output": output,
                 "metadata": metadata,
             })),
         }),
@@ -469,6 +511,8 @@ mod tests {
                                 total_tokens: 7,
                                 ..Default::default()
                             }),
+                            input: None,
+                            output: None,
                         },
                     ),
                 ],
@@ -479,8 +523,82 @@ mod tests {
         assert_eq!(events[0]["type"], "trace-create");
         assert_eq!(events[0]["body"]["id"], "root-1");
         assert_eq!(events[0]["body"]["userId"], "user-1");
+        // Trace metadata is defaulted from run lineage even without a caller value.
+        assert_eq!(events[0]["body"]["metadata"]["root_run_id"], "root-1");
+        assert_eq!(events[0]["body"]["metadata"]["run_id"], "run-1");
         assert_eq!(events[2]["type"], "generation-create");
         assert_eq!(events[2]["body"]["id"], "model-call");
         assert_eq!(events[2]["body"]["usage"]["input"], 3);
+        // Payload-free generation: no input/output body fields.
+        assert!(events[2]["body"].get("input").is_none());
+        assert!(events[2]["body"].get("output").is_none());
+    }
+
+    #[test]
+    fn populates_generation_and_tool_io_when_captured() {
+        let client =
+            LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t")
+                .unwrap();
+        let batch = client
+            .build_ingestion_batch(
+                LangfuseTraceConfig::default(),
+                &[
+                    obs(
+                        0,
+                        AgentEvent::ModelCompleted {
+                            call_id: CallId::new("model-call"),
+                            usage: None,
+                            input: Some(json!([{ "role": "user", "content": "hi" }])),
+                            output: Some(json!({ "content": "hello there" })),
+                        },
+                    ),
+                    obs(
+                        1,
+                        AgentEvent::ToolCompleted {
+                            call_id: CallId::new("tool-call"),
+                            tool_name: "lookup".to_string(),
+                            input: Some(json!({ "query": "weather" })),
+                            output: Some(json!("sunny")),
+                        },
+                    ),
+                ],
+            )
+            .unwrap();
+
+        let events = batch["batch"].as_array().unwrap();
+        assert_eq!(events[1]["type"], "generation-create");
+        assert_eq!(events[1]["body"]["input"][0]["content"], "hi");
+        assert_eq!(events[1]["body"]["output"]["content"], "hello there");
+        assert_eq!(events[2]["type"], "tool-create");
+        assert_eq!(events[2]["body"]["input"]["query"], "weather");
+        assert_eq!(events[2]["body"]["output"], "sunny");
+    }
+
+    #[test]
+    fn merges_caller_trace_metadata_over_defaults() {
+        let client =
+            LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t")
+                .unwrap();
+        let batch = client
+            .build_ingestion_batch(
+                LangfuseTraceConfig {
+                    metadata: json!({ "deployment": "prod", "root_run_id": "override" }),
+                    ..Default::default()
+                },
+                &[obs(
+                    0,
+                    AgentEvent::RunStarted {
+                        run_id: RunId::new("run-1"),
+                        thread_id: None,
+                    },
+                )],
+            )
+            .unwrap();
+
+        let meta = &batch["batch"].as_array().unwrap()[0]["body"]["metadata"];
+        assert_eq!(meta["deployment"], "prod");
+        // Caller keys win on collision with the defaulted lineage.
+        assert_eq!(meta["root_run_id"], "override");
+        assert_eq!(meta["run_id"], "run-1");
     }
 }

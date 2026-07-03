@@ -253,7 +253,12 @@ pub struct EventRecorder {
 /// let events = vec![
 ///     AgentEvent::RunStarted { run_id: RunId::new("r1"), thread_id: None },
 ///     AgentEvent::ModelStarted { call_id: CallId::new("c1"), model: "gpt".into() },
-///     AgentEvent::ModelCompleted { call_id: CallId::new("c1"), usage: None },
+///     AgentEvent::ModelCompleted {
+///         call_id: CallId::new("c1"),
+///         usage: None,
+///         input: None,
+///         output: None,
+///     },
 ///     AgentEvent::RunCompleted { run_id: RunId::new("r1") },
 /// ];
 /// let traj = Trajectory::from_events(events);

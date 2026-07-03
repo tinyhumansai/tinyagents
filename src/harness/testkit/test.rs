@@ -327,6 +327,8 @@ fn make_trajectory() -> Vec<AgentEvent> {
         AgentEvent::ModelCompleted {
             call_id: CallId::new("c1"),
             usage: None,
+            input: None,
+            output: None,
         },
         AgentEvent::ToolStarted {
             call_id: CallId::new("t1"),
@@ -335,6 +337,8 @@ fn make_trajectory() -> Vec<AgentEvent> {
         AgentEvent::ToolCompleted {
             call_id: CallId::new("t1"),
             tool_name: "search".into(),
+            input: None,
+            output: None,
         },
         AgentEvent::ModelStarted {
             call_id: CallId::new("c2"),
@@ -343,6 +347,8 @@ fn make_trajectory() -> Vec<AgentEvent> {
         AgentEvent::ModelCompleted {
             call_id: CallId::new("c2"),
             usage: None,
+            input: None,
+            output: None,
         },
         AgentEvent::RunCompleted {
             run_id: RunId::new("r1"),
