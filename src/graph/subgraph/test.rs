@@ -229,6 +229,53 @@ async fn embedded_child_persists_under_parent_thread_and_child_namespace() {
     assert_eq!(child_state.next_nodes, Vec::<NodeId>::new());
 }
 
+/// A child graph that pauses on an interrupt until resumed.
+fn child_interrupts() -> CompiledGraph<i32, i32> {
+    GraphBuilder::<i32, i32>::overwrite()
+        .add_node("gate", |s: i32, c: NodeContext| async move {
+            match c.resume {
+                Some(_) => Ok(NodeResult::Update(s + 10)),
+                None => Ok(NodeResult::Interrupt(
+                    crate::graph::command::Interrupt::new(
+                        "gate",
+                        serde_json::json!({ "ask": "ok?" }),
+                    ),
+                )),
+            }
+        })
+        .set_entry("gate")
+        .set_finish("gate")
+        .compile()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn subgraph_interrupt_propagates_to_parent() {
+    // A child graph that interrupts must pause the *parent* run — not be
+    // swallowed as a completed output with the child's partial state.
+    let ckpt = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let child = child_interrupts().with_checkpointer(ckpt.clone());
+    let parent = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("child", shared_subgraph_node(child))
+        .set_entry("child")
+        .set_finish("child")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt.clone());
+
+    let run = parent.run_with_thread("t", 0).await.unwrap();
+    assert!(
+        run.is_interrupted(),
+        "a child interrupt must pause the parent instead of being swallowed"
+    );
+    assert_eq!(run.interrupts.len(), 1, "the child's interrupt is surfaced");
+    assert_eq!(
+        run.interrupts[0].node.as_str(),
+        "gate",
+        "the propagated interrupt names the child's paused node"
+    );
+}
+
 #[tokio::test]
 async fn subgraph_child_run_distinct_and_shares_root() {
     // A parent embedding one child: the parent run records exactly one child run

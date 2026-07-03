@@ -24,7 +24,7 @@ use std::pin::Pin;
 
 use crate::Result;
 use crate::graph::builder::NodeContext;
-use crate::graph::command::NodeResult;
+use crate::graph::command::{Command, NodeResult};
 use crate::graph::compiled::{CompiledGraph, GraphExecution};
 use crate::graph::recursion::ChildRun;
 
@@ -47,10 +47,16 @@ where
     Box::new(move |state: State, ctx: NodeContext| {
         let child = child_for(&child, &ctx);
         let thread_id = ctx.thread_id.clone();
+        let resume = ctx.resume.clone();
         let recorder = ChildRunRecorder::new(&ctx);
         Box::pin(async move {
-            let execution = run_child(child, thread_id, state).await?;
+            let execution = drive_child(child, thread_id, state, resume).await?;
             recorder.record(&execution);
+            // A child that paused on an interrupt must surface it to the parent
+            // rather than have its partial state treated as a completed output.
+            if execution.is_interrupted() {
+                return Ok(NodeResult::Interrupt(child_interrupt(execution)));
+            }
             Ok(NodeResult::Update(execution.state))
         })
     })
@@ -77,13 +83,19 @@ where
     Box::new(move |state: P, ctx: NodeContext| {
         let child = child_for(&child, &ctx);
         let thread_id = ctx.thread_id.clone();
+        let resume = ctx.resume.clone();
         let recorder = ChildRunRecorder::new(&ctx);
         let to_child = to_child.clone();
         let from_child = from_child.clone();
         Box::pin(async move {
             let child_input = to_child(&state);
-            let execution = run_child(child, thread_id, child_input).await?;
+            let execution = drive_child(child, thread_id, child_input, resume).await?;
             recorder.record(&execution);
+            // Propagate a child interrupt to the parent instead of folding a
+            // paused child's partial state through `from_child`.
+            if execution.is_interrupted() {
+                return Ok(NodeResult::Interrupt(child_interrupt(execution)));
+            }
             let update = from_child(&state, execution.state);
             Ok(NodeResult::Update(update))
         })
@@ -109,19 +121,39 @@ fn child_for<S, U>(child: &CompiledGraph<S, U>, ctx: &NodeContext) -> CompiledGr
         .with_recursion_node(ctx.node_id.clone())
 }
 
-async fn run_child<S, U>(
+/// Drives an embedded child graph for one parent-node activation.
+///
+/// On a fresh activation (`resume == None`) the child runs from `state`. On a
+/// resumed activation (the parent was resumed and delivered a value to this
+/// node) the child is *resumed* from its own checkpoint with that value, so a
+/// subgraph interrupt is reachable through the parent's resume API rather than
+/// re-running the child (which would just re-interrupt forever). Resuming
+/// requires the child to have run under a thread; without one, a paused child
+/// could not have persisted, so we fall back to a fresh run.
+async fn drive_child<S, U>(
     child: CompiledGraph<S, U>,
     thread_id: Option<crate::harness::ids::ThreadId>,
     state: S,
+    resume: Option<serde_json::Value>,
 ) -> Result<GraphExecution<S>>
 where
     S: Clone + Send + Sync + 'static,
     U: Send + 'static,
 {
-    match thread_id {
-        Some(thread_id) => child.run_with_thread(thread_id, state).await,
-        None => child.run(state).await,
+    match (thread_id, resume) {
+        (Some(thread_id), Some(value)) => child.resume(thread_id, Command::resume(value)).await,
+        (Some(thread_id), None) => child.run_with_thread(thread_id, state).await,
+        (None, _) => child.run(state).await,
     }
+}
+
+/// Extracts the child's paused interrupt so the parent node can re-emit it.
+fn child_interrupt<S>(mut execution: GraphExecution<S>) -> crate::graph::command::Interrupt {
+    execution
+        .interrupts
+        .drain(..)
+        .next()
+        .expect("an interrupted execution carries at least one interrupt")
 }
 
 /// Captures the enclosing run's child-run sink and lineage so a subgraph node can
