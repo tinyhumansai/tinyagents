@@ -953,6 +953,69 @@ async fn send_fanout_delivers_distinct_args_to_parallel_branches() {
 }
 
 #[tokio::test]
+async fn repeated_send_activations_keep_distinct_commands() {
+    // Regression: two `Send` activations of the *same* node each return a
+    // distinct `Command::goto`. A node-keyed goto map let the second clobber
+    // the first, so both branches routed to the survivor's target (and one
+    // sink was dropped). Keyed per activation, each keeps its own routing.
+    let graph = GraphBuilder::<Counter, i32>::new()
+        .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: i32| {
+            s.value += u;
+            s.log.push(format!("n:{u}"));
+            Ok(s)
+        }))
+        .with_parallel(true)
+        .add_node("dispatch", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Command(Command::send([
+                Send::new("worker", json!(1)),
+                Send::new("worker", json!(2)),
+            ])))
+        })
+        // Each worker routes to a different sink based on its own send arg.
+        .add_node("worker", |_s: Counter, c: NodeContext| async move {
+            let arg = c.send_arg.expect("worker carries a send arg");
+            let target = if arg.as_i64() == Some(1) {
+                "sink_a"
+            } else {
+                "sink_b"
+            };
+            Ok(NodeResult::Command(Command::new().with_goto([target])))
+        })
+        .add_node("sink_a", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(10))
+        })
+        .add_node("sink_b", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(20))
+        })
+        .mark_command_routing("dispatch")
+        .mark_command_routing("worker")
+        .set_entry("dispatch")
+        .set_finish("sink_a")
+        .set_finish("sink_b")
+        .compile()
+        .unwrap();
+
+    let run = graph
+        .run(Counter {
+            value: 0,
+            log: vec![],
+        })
+        .await
+        .unwrap();
+
+    // Both sinks must have run — one per activation's own goto.
+    assert!(
+        run.visited.iter().any(|n| n.as_str() == "sink_a"),
+        "sink_a (worker arg 1's target) must run"
+    );
+    assert!(
+        run.visited.iter().any(|n| n.as_str() == "sink_b"),
+        "sink_b (worker arg 2's target) must run"
+    );
+    assert_eq!(run.state.value, 30, "both sinks contributed (10 + 20)");
+}
+
+#[tokio::test]
 async fn run_with_inputs_seeds_start_and_peer_node() {
     let graph = GraphBuilder::<Counter, String>::new()
         .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: String| {

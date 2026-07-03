@@ -143,8 +143,13 @@ struct StepRun<Update> {
     /// Branch updates in deterministic active-set index order.
     updates: Vec<Update>,
     /// Explicit routing (plain `goto` nodes and/or [`Send`] packets) keyed by the
-    /// node that produced it.
-    goto_map: HashMap<NodeId, Vec<RouteTarget>>,
+    /// producing branch's active-set index.
+    ///
+    /// Keyed by index rather than node id so repeated [`Send`] activations of
+    /// the *same* node within a step (map-reduce fanout) each keep their own
+    /// [`Command::goto`] — a node-keyed map would let a later activation's
+    /// command clobber an earlier one's routing.
+    goto_map: HashMap<usize, Vec<RouteTarget>>,
     /// The lowest-index branch interrupt, if any (its active-set index + value).
     interrupt: Option<(usize, Interrupt)>,
     /// A node-handler failure that survived the node-retry policy, if any. When
@@ -686,7 +691,7 @@ where
         // Pending nodes: the attributed node's successors, or the inherited set.
         let next_nodes: Vec<NodeId> = match &as_node {
             Some(node) => self
-                .route(node, &HashMap::new(), &new_state)?
+                .route(node, None, &new_state)?
                 .into_iter()
                 .map(|t| t.node().clone())
                 .filter(|n| n.as_str() != END)
@@ -1090,9 +1095,10 @@ where
             let completed = active.clone();
             let mut next: Vec<Activation> = Vec::new();
             let mut next_seen: HashSet<NodeId> = HashSet::new();
-            for activation in &completed {
+            for (index, activation) in completed.iter().enumerate() {
                 let node_id = &activation.node;
-                let targets = self.route(node_id, &goto_map, &state)?;
+                let targets =
+                    self.route(node_id, goto_map.get(&index).map(Vec::as_slice), &state)?;
                 for target in targets {
                     let tnode = target.node().clone();
                     if tnode.as_str() == END {
@@ -1387,7 +1393,7 @@ where
         step: usize,
         result: NodeResult<Update>,
         updates: &mut Vec<Update>,
-        goto_map: &mut HashMap<NodeId, Vec<RouteTarget>>,
+        goto_map: &mut HashMap<usize, Vec<RouteTarget>>,
         visited: &mut Vec<NodeId>,
     ) -> Option<(usize, Interrupt)> {
         visited.push(node_id.clone());
@@ -1408,7 +1414,7 @@ where
                     });
                 }
                 if !command.goto.is_empty() {
-                    goto_map.insert(node_id.clone(), command.goto);
+                    goto_map.insert(index, command.goto);
                 }
             }
             NodeResult::Interrupt(emitted) => {
@@ -1444,7 +1450,7 @@ where
         child_runs: &ChildRunSink,
     ) -> Result<StepRun<Update>> {
         let mut updates: Vec<Update> = Vec::new();
-        let mut goto_map: HashMap<NodeId, Vec<RouteTarget>> = HashMap::new();
+        let mut goto_map: HashMap<usize, Vec<RouteTarget>> = HashMap::new();
         let mut interrupt: Option<(usize, Interrupt)> = None;
         let mut failure: Option<StepFailure> = None;
 
@@ -1615,7 +1621,7 @@ where
 
         // Fold in deterministic active-set index order.
         let mut updates: Vec<Update> = Vec::new();
-        let mut goto_map: HashMap<NodeId, Vec<RouteTarget>> = HashMap::new();
+        let mut goto_map: HashMap<usize, Vec<RouteTarget>> = HashMap::new();
         let mut interrupt: Option<(usize, Interrupt)> = None;
         let mut failure: Option<StepFailure> = None;
 
@@ -1668,15 +1674,19 @@ where
     ///
     /// Command `goto` (which may include [`Send`] packets) wins over static and
     /// conditional edges; edge/conditional targets are plain node activations.
+    ///
+    /// `goto` carries this specific activation's [`Command::goto`] targets (when
+    /// it returned a command), passed per-activation rather than looked up by
+    /// node id so repeated activations of one node never share routing.
     fn route(
         &self,
         node_id: &NodeId,
-        goto_map: &HashMap<NodeId, Vec<RouteTarget>>,
+        goto: Option<&[RouteTarget]>,
         state: &State,
     ) -> Result<Vec<RouteTarget>> {
-        if let Some(targets) = goto_map.get(node_id) {
+        if let Some(targets) = goto {
             self.validate_route_targets(node_id, targets)?;
-            return Ok(targets.clone());
+            return Ok(targets.to_vec());
         }
         if let Some(target) = self.edges.get(node_id) {
             return Ok(vec![RouteTarget::Node(target.clone())]);
