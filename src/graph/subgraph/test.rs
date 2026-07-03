@@ -277,6 +277,39 @@ async fn subgraph_interrupt_propagates_to_parent() {
 }
 
 #[tokio::test]
+async fn subgraph_interrupt_resumes_child_from_its_own_checkpoint() {
+    // Resuming the parent must resume the *child* from its namespaced
+    // checkpoint (not re-run it and not load the parent's checkpoint), so the
+    // whole nested run completes. Exercises namespace-aware resume end to end.
+    let ckpt = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let child = child_interrupts().with_checkpointer(ckpt.clone());
+    let parent = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("child", shared_subgraph_node(child))
+        .set_entry("child")
+        .set_finish("child")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt.clone());
+
+    let paused = parent.run_with_thread("t", 0).await.unwrap();
+    assert!(paused.is_interrupted());
+
+    let done = parent
+        .resume(
+            "t",
+            crate::graph::command::Command::resume(serde_json::json!("go")),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !done.is_interrupted(),
+        "resuming the parent must drive the child to completion"
+    );
+    // Child added 10 to the initial 0.
+    assert_eq!(done.state, 10);
+}
+
+#[tokio::test]
 async fn subgraph_child_run_distinct_and_shares_root() {
     // A parent embedding one child: the parent run records exactly one child run
     // whose run id differs from the parent's, and whose root run id equals the

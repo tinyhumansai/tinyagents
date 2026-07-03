@@ -51,6 +51,42 @@ where
         checkpoint_id: Option<&str>,
     ) -> Result<Option<Checkpoint<State>>>;
 
+    /// Loads a checkpoint for a thread scoped to `namespace`.
+    ///
+    /// Like [`Checkpointer::get`], but only considers checkpoints whose stored
+    /// namespace equals `namespace`. This is what keeps a parent run and the
+    /// subgraphs it embeds — which share a thread id but differ in namespace —
+    /// from loading each other's checkpoints on resume/inspection. With
+    /// `checkpoint_id == None` the latest checkpoint *in that namespace* is
+    /// returned (last-write-wins, consistent with [`Checkpointer::get`]).
+    ///
+    /// Composed from [`Checkpointer::list`] + [`Checkpointer::get`] so every
+    /// backend inherits it; override only for a cheaper scoped query.
+    async fn get_scoped(
+        &self,
+        thread_id: &str,
+        checkpoint_id: Option<&str>,
+        namespace: &[String],
+    ) -> Result<Option<Checkpoint<State>>> {
+        let metas = self.list(thread_id).await?;
+        let target: Option<String> = match checkpoint_id {
+            Some(id) => metas
+                .iter()
+                .rev()
+                .find(|m| m.checkpoint_id == id && m.namespace.as_slice() == namespace)
+                .map(|m| m.checkpoint_id.clone()),
+            None => metas
+                .iter()
+                .rev()
+                .find(|m| m.namespace.as_slice() == namespace)
+                .map(|m| m.checkpoint_id.clone()),
+        };
+        match target {
+            Some(id) => self.get(thread_id, Some(&id)).await,
+            None => Ok(None),
+        }
+    }
+
     /// Lists checkpoint metadata for a thread in insertion order.
     async fn list(&self, thread_id: &str) -> Result<Vec<CheckpointMetadata>>;
 
@@ -62,7 +98,11 @@ where
     /// `config.checkpoint_id` is `None` the latest checkpoint is returned.
     async fn get_tuple(&self, config: CheckpointConfig) -> Result<Option<CheckpointTuple<State>>> {
         let Some(checkpoint) = self
-            .get(&config.thread_id, config.checkpoint_id.as_deref())
+            .get_scoped(
+                &config.thread_id,
+                config.checkpoint_id.as_deref(),
+                &config.namespace,
+            )
             .await?
         else {
             return Ok(None);

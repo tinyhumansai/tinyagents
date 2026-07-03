@@ -562,7 +562,7 @@ where
             ResumeTarget::Checkpoint(id) => Some(id.as_str()),
         };
         let checkpoint = checkpointer
-            .get(thread_id.as_str(), checkpoint_id)
+            .get_scoped(thread_id.as_str(), checkpoint_id, &self.namespace)
             .await?
             .ok_or_else(|| match &target {
                 ResumeTarget::Latest => {
@@ -746,11 +746,14 @@ where
             return Err(TinyAgentsError::MissingNode(node.to_string()));
         }
 
-        let base = checkpointer.get(thread_id, None).await?.ok_or_else(|| {
-            TinyAgentsError::Checkpoint(format!(
-                "cannot update state: no checkpoint exists for thread `{thread_id}`"
-            ))
-        })?;
+        let base = checkpointer
+            .get_scoped(thread_id, None, &self.namespace)
+            .await?
+            .ok_or_else(|| {
+                TinyAgentsError::Checkpoint(format!(
+                    "cannot update state: no checkpoint exists for thread `{thread_id}`"
+                ))
+            })?;
         let parent_step = base.to_metadata().step;
         let parent_id = base.checkpoint_id.clone();
         let new_state = self.reducer.apply(base.state, update)?;
@@ -836,7 +839,7 @@ where
     ) -> Result<CheckpointConfig> {
         let checkpointer = self.require_checkpointer()?;
         let source = checkpointer
-            .get(source_thread, source_checkpoint_id)
+            .get_scoped(source_thread, source_checkpoint_id, &self.namespace)
             .await?
             .ok_or_else(|| {
                 TinyAgentsError::Checkpoint(format!(
