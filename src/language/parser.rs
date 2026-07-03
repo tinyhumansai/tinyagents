@@ -47,8 +47,18 @@ pub fn parse_str(source: &str) -> Result<Program> {
 /// # Errors
 ///
 /// Returns [`TinyAgentsError::Parse`] when the token stream does not match the
-/// grammar, with the span of the offending token.
+/// grammar, with the span of the offending token. An empty token slice (which
+/// violates the lexer contract that every stream ends with an `Eof` sentinel)
+/// is rejected as a parse error rather than panicking.
 pub fn parse(tokens: &[SpannedToken]) -> Result<Program> {
+    if tokens.is_empty() {
+        return Err(Diagnostic::error(
+            "empty token stream: expected at least an end-of-input token",
+            Span::new(1, 1),
+        )
+        .with_primary_label("here")
+        .into_parse_error(None));
+    }
     Parser {
         tokens,
         pos: 0,

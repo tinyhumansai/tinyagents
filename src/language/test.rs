@@ -231,6 +231,20 @@ fn parse_error_without_source_renders_plain() {
     }
 }
 
+#[test]
+fn parse_empty_token_slice_returns_error_not_panic() {
+    // A well-formed token stream always ends with an `Eof` sentinel; an empty
+    // slice violates that contract and previously underflowed `len() - 1`.
+    // `parse` must return a parse error instead of panicking.
+    let err = parse(&[]).unwrap_err();
+    match err {
+        crate::error::TinyAgentsError::Parse { message, .. } => {
+            assert!(message.contains("empty token stream"), "{message}");
+        }
+        other => panic!("expected parse error, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
