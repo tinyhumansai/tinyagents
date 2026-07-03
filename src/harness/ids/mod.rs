@@ -64,7 +64,9 @@ impl_string_id!(CellId);
 impl_string_id!(CheckpointId);
 impl_string_id!(InterruptId);
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Process-unique monotonic sequence source for deterministic, dependency-free
 /// id generation.
@@ -80,6 +82,44 @@ static ID_SEQ: AtomicU64 = AtomicU64::new(0);
 /// `SystemTime`, or `Date` dependency.
 pub fn next_seq() -> u64 {
     ID_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Returns a per-process nonce, stable for the lifetime of the process and
+/// (in practice) distinct across restarts.
+///
+/// The bare monotonic [`next_seq`] restarts at `0` in every new process, so ids
+/// built from it alone (`ckpt-0`, `ckpt-1`, …) *collide* across a restart — a
+/// resumed thread would re-mint checkpoint ids it already used, corrupting the
+/// parent-lineage map and time-travel resume. Mixing in this nonce makes ids
+/// collision-free across restarts while [`next_seq`] keeps them ordered within
+/// a process. Seeded once from the wall clock (nanoseconds since the epoch);
+/// only ever used as an opaque uniqueness component, never parsed or compared
+/// for time.
+pub fn process_nonce() -> u64 {
+    static NONCE: OnceLock<u64> = OnceLock::new();
+    *NONCE.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+    })
+}
+
+/// Allocates a fresh [`RunId`] of the form `run-<nonce>-<n>`, collision-free
+/// across process restarts (see [`process_nonce`]).
+pub fn new_run_id() -> RunId {
+    RunId(format!("run-{}-{}", process_nonce(), next_seq()))
+}
+
+/// Allocates a fresh [`CheckpointId`] of the form `ckpt-<nonce>-<n>`,
+/// collision-free across process restarts (see [`process_nonce`]).
+///
+/// Restart-safety is essential here: checkpoint ids are the keys of the
+/// parent-lineage spine that `prune`, `get_state_history`, and
+/// `ResumeTarget::Checkpoint` all walk, so a duplicate id across a restart can
+/// delete a live record's ancestor or resume the wrong checkpoint.
+pub fn new_checkpoint_id() -> CheckpointId {
+    CheckpointId(format!("ckpt-{}-{}", process_nonce(), next_seq()))
 }
 
 /// Allocates a fresh, process-unique [`SessionId`] of the form `session-<n>`.

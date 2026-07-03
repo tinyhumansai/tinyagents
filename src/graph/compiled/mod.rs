@@ -99,8 +99,18 @@ pub(crate) fn next_seq() -> u64 {
     SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
-fn next_id(prefix: &str) -> String {
-    format!("{prefix}-{}", next_seq())
+/// Allocates a fresh checkpoint id (string form) that is collision-free across
+/// process restarts.
+///
+/// Delegates to [`crate::harness::ids::new_checkpoint_id`]: a resumed thread
+/// restarted in a new process must never re-mint a checkpoint id it already
+/// used, or the lineage map (`prune`) and time-travel resume corrupt. The bare
+/// process-local counter this used to build ids from restarted at `0` every
+/// process and did exactly that.
+fn next_checkpoint_id() -> String {
+    crate::harness::ids::new_checkpoint_id()
+        .as_str()
+        .to_string()
 }
 
 /// Projects a loaded [`CheckpointTuple`] onto a [`StateSnapshot`] for the
@@ -685,7 +695,7 @@ where
         };
         let completed_tasks: Vec<NodeId> = as_node.iter().cloned().collect();
 
-        let checkpoint_id = next_id("ckpt");
+        let checkpoint_id = next_checkpoint_id();
         let config = self.config_for(thread_id, Some(&checkpoint_id));
         let checkpoint = Checkpoint {
             thread_id: thread_id.to_string(),
@@ -751,7 +761,7 @@ where
                 ))
             })?;
         let step = source.to_metadata().step;
-        let checkpoint_id = next_id("ckpt");
+        let checkpoint_id = next_checkpoint_id();
         let config = self.config_for(target_thread, Some(&checkpoint_id));
         let forked = Checkpoint {
             thread_id: target_thread.to_string(),
@@ -778,7 +788,7 @@ where
         thread_id: Option<ThreadId>,
         resume_map: HashMap<NodeId, serde_json::Value>,
     ) -> Result<GraphExecution<State>> {
-        let run_id = RunId::new(next_id("run"));
+        let run_id = crate::harness::ids::new_run_id();
         // When a durable journal is configured, run against a clone whose event
         // sink wraps every emitted event into a `GraphObservation` and appends
         // it (while still forwarding to any pre-existing live sink). The journal
@@ -1242,7 +1252,7 @@ where
         };
         let checkpoint = Checkpoint {
             thread_id: thread.to_string(),
-            checkpoint_id: next_id("ckpt"),
+            checkpoint_id: next_checkpoint_id(),
             run_id: Some(run_id.to_string()),
             parent_checkpoint_id: parent,
             namespace: self.namespace.clone(),
@@ -1735,7 +1745,7 @@ where
         let (Some(checkpointer), Some(thread)) = (&self.checkpointer, thread_id) else {
             return Ok(None);
         };
-        let checkpoint_id = next_id("ckpt");
+        let checkpoint_id = next_checkpoint_id();
         let checkpoint = Checkpoint {
             thread_id: thread.to_string(),
             checkpoint_id,
