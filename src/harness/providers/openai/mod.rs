@@ -848,8 +848,11 @@ impl OpenAiStreamAcc {
 struct SseState {
     /// Raw response byte chunks (errors already mapped onto the crate error).
     bytes: Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>,
-    /// Bytes received but not yet split into complete lines.
-    buf: String,
+    /// Raw bytes received but not yet split into complete lines. Kept as bytes
+    /// (not a `String`) so a multi-byte UTF-8 character split across two network
+    /// chunks is reassembled before decoding, instead of being corrupted into
+    /// replacement characters by a premature lossy decode.
+    buf: Vec<u8>,
     /// Parsed items waiting to be yielded, in order.
     pending: VecDeque<ModelStreamItem>,
     /// Provider-side response reconstruction.
@@ -868,30 +871,52 @@ struct SseState {
 }
 
 impl SseState {
-    /// Splits buffered bytes into complete lines and folds each SSE `data:`
-    /// payload into the accumulator. The trailing partial line (if any) is kept
-    /// for the next chunk.
+    /// Splits buffered bytes into complete newline-terminated lines and folds
+    /// each SSE `data:` payload into the accumulator. The trailing partial line
+    /// (if any) is kept in `buf` for the next chunk, so a `data:` line split
+    /// across chunk boundaries — including one that splits a multi-byte UTF-8
+    /// character — is only decoded once it is complete.
     fn drain_lines(&mut self) {
-        while let Some(pos) = self.buf.find('\n') {
-            let line: String = self.buf.drain(..=pos).collect();
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let Some(rest) = line.strip_prefix("data:") else {
-                continue;
-            };
-            let payload = rest.trim();
-            if payload == "[DONE]" {
-                self.finished = true;
-                continue;
-            }
-            // Ignore keepalives / unparseable lines rather than failing the run.
-            if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(payload) {
-                let mut pending = std::mem::take(&mut self.pending);
-                self.acc.ingest(chunk, &mut pending);
-                self.pending = pending;
-            }
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = self.buf.drain(..=pos).collect();
+            // A complete line (bounded by the ASCII `\n`) is whole UTF-8, so a
+            // lossy decode here can no longer straddle a chunk boundary.
+            let line = String::from_utf8_lossy(&line_bytes).into_owned();
+            self.process_line(&line);
+        }
+    }
+
+    /// Folds any bytes still buffered after the byte stream ends into a final
+    /// line. Providers that terminate the last SSE event without a trailing
+    /// newline would otherwise leave the final `data:` payload unprocessed.
+    fn drain_remaining(&mut self) {
+        if self.buf.is_empty() {
+            return;
+        }
+        let line = String::from_utf8_lossy(&self.buf).into_owned();
+        self.buf.clear();
+        self.process_line(&line);
+    }
+
+    /// Parses one SSE line and folds any resulting chunk into the accumulator.
+    fn process_line(&mut self, line: &str) {
+        let line = line.trim();
+        if line.is_empty() {
+            return;
+        }
+        let Some(rest) = line.strip_prefix("data:") else {
+            return;
+        };
+        let payload = rest.trim();
+        if payload == "[DONE]" {
+            self.finished = true;
+            return;
+        }
+        // Ignore keepalives / unparseable lines rather than failing the run.
+        if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(payload) {
+            let mut pending = std::mem::take(&mut self.pending);
+            self.acc.ingest(chunk, &mut pending);
+            self.pending = pending;
         }
     }
 }
@@ -928,7 +953,7 @@ async fn sse_next(mut state: SseState) -> Option<(ModelStreamItem, SseState)> {
         }
         match state.bytes.next().await {
             Some(Ok(chunk)) => {
-                state.buf.push_str(&String::from_utf8_lossy(&chunk));
+                state.buf.extend_from_slice(&chunk);
                 state.drain_lines();
             }
             Some(Err(error)) => {
@@ -944,6 +969,9 @@ async fn sse_next(mut state: SseState) -> Option<(ModelStreamItem, SseState)> {
                 return Some((ModelStreamItem::ProviderFailed(provider_error), state));
             }
             None => {
+                // Drain any final `data:` line the provider sent without a
+                // trailing newline before terminating.
+                state.drain_remaining();
                 state.finished = true;
             }
         }
@@ -1059,7 +1087,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
 
         let state = SseState {
             bytes: Box::pin(bytes),
-            buf: String::new(),
+            buf: Vec::new(),
             pending: VecDeque::new(),
             acc: OpenAiStreamAcc::default(),
             provider: self.provider.clone(),

@@ -443,7 +443,7 @@ async fn sse_stream_parses_text_tool_calls_and_usage() {
 
     let state = SseState {
         bytes: Box::pin(bytes),
-        buf: String::new(),
+        buf: Vec::new(),
         pending: std::collections::VecDeque::new(),
         acc: OpenAiStreamAcc::default(),
         provider: "openai".to_string(),
@@ -512,7 +512,7 @@ async fn sse_stream_invalid_tool_argument_json_fails_terminally() {
 
     let state = SseState {
         bytes: Box::pin(bytes),
-        buf: String::new(),
+        buf: Vec::new(),
         pending: std::collections::VecDeque::new(),
         acc: OpenAiStreamAcc::default(),
         provider: "openai".to_string(),
@@ -543,6 +543,68 @@ async fn sse_stream_invalid_tool_argument_json_fails_terminally() {
         .finish()
         .expect_err("provider failure must reach accumulator");
     assert!(err.to_string().contains("invalid_tool_arguments"));
+}
+
+/// Drives an SSE byte stream through the parser and returns every item.
+async fn collect_sse(raw: Vec<Vec<u8>>) -> Vec<ModelStreamItem> {
+    use futures::StreamExt;
+
+    let bytes = futures::stream::iter(raw.into_iter().map(Ok::<Vec<u8>, TinyAgentsError>));
+    let state = SseState {
+        bytes: Box::pin(bytes),
+        buf: Vec::new(),
+        pending: std::collections::VecDeque::new(),
+        acc: OpenAiStreamAcc::default(),
+        provider: "openai".to_string(),
+        model: "gpt-4.1-mini".to_string(),
+        started: false,
+        finished: false,
+        terminal_emitted: false,
+    };
+    futures::stream::unfold(state, sse_next).collect().await
+}
+
+#[tokio::test]
+async fn sse_stream_reassembles_multibyte_char_split_across_chunks() {
+    // A 4-byte emoji in the content payload, split down the middle across two
+    // network chunks. A lossy per-chunk decode would corrupt it into U+FFFD
+    // replacement characters; the byte buffer must reassemble it first.
+    let line = "data: {\"choices\":[{\"delta\":{\"content\":\"hi😀\"}}]}\n\n";
+    let bytes = line.as_bytes();
+    let split = line.find('😀').unwrap() + 2; // inside the 4-byte sequence
+    let raw: Vec<Vec<u8>> = vec![
+        bytes[..split].to_vec(),
+        bytes[split..].to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "hi😀");
+}
+
+#[tokio::test]
+async fn sse_stream_drains_final_line_without_trailing_newline() {
+    // The provider ends the stream with a final `data:` event that has no
+    // trailing newline and no `[DONE]` sentinel. The leftover buffer must be
+    // drained at EOF so the last fragment is not dropped.
+    let raw: Vec<Vec<u8>> =
+        vec![b"data: {\"choices\":[{\"delta\":{\"content\":\"tail\"}}]}".to_vec()];
+
+    let items = collect_sse(raw).await;
+
+    assert!(matches!(items.last(), Some(ModelStreamItem::Completed(_))));
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "tail");
 }
 
 #[test]
