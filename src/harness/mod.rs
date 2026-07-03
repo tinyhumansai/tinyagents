@@ -24,6 +24,7 @@ pub mod memory;
 pub mod message;
 pub mod middleware;
 pub mod model;
+pub mod no_progress;
 pub mod observability;
 pub mod prompt;
 pub mod providers;
@@ -47,6 +48,9 @@ pub use model::{
     CapabilitySet, Modalities, ModelProfile, ModelRequest, ModelResponse, ModelStatus, ModelStream,
     ModelStreamItem, ProviderError, ResponseFormat, StreamAccumulator, ToolChoice,
     collect_model_stream,
+};
+pub use no_progress::{
+    DEFAULT_IDENTICAL_HALT_THRESHOLD, NoProgress, NoProgressTracker, ToolAttempt,
 };
 pub use tool::{
     Tool as HarnessTool, ToolCall as HarnessToolCall, ToolFormat, ToolRegistry,
