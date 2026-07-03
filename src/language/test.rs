@@ -190,6 +190,22 @@ fn diagnostic_renders_caret_under_primary_span() {
 }
 
 #[test]
+fn diagnostic_renders_span_past_end_of_source_without_panic() {
+    // A span whose bytes extend past (or start past) the end of the source must
+    // not panic when rendered — the caret range is clamped into the line.
+    let source = "graph g {}\n";
+    let file = SourceFile::new("plan.rag", source);
+    let past = source.len() + 50;
+    let span = Span::at(past, past + 10, 99, 1);
+    let rendered = Diagnostic::error("dangling span", span)
+        .with_primary_label("here")
+        .render(&file);
+    assert!(rendered.contains("error: dangling span"), "{rendered}");
+    // At least one caret is emitted even for an empty clamped range.
+    assert!(rendered.contains('^'), "{rendered}");
+}
+
+#[test]
 fn severity_labels_are_lowercase() {
     assert_eq!(Severity::Error.label(), "error");
     assert_eq!(Severity::Warning.label(), "warning");

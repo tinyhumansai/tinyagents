@@ -241,8 +241,13 @@ fn render_span_block(
     let _ = writeln!(out, "{line:>gutter$} | {line_text}");
 
     // Caret width: the span's character length on this line, at least one.
-    let (line_start, line_end) = source.line_range(line).unwrap_or((span.start, span.start));
-    let caret_start = span.start.max(line_start);
+    // Clamp the caret range into the line's byte range so a span that points
+    // past the end of the source (or past this line) neither trips `clamp`'s
+    // `min <= max` precondition nor slices out of bounds — the same defensive
+    // clamping `SourceFile::snippet` applies.
+    let text_len = source.text().len();
+    let (line_start, line_end) = source.line_range(line).unwrap_or((text_len, text_len));
+    let caret_start = span.start.clamp(line_start, line_end);
     let caret_end = span.end.clamp(caret_start, line_end);
     let caret_width = source.text()[caret_start..caret_end].chars().count().max(1);
     let indent = column.saturating_sub(1);
