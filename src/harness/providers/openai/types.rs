@@ -137,15 +137,52 @@ pub struct FunctionChunkWire {
     pub arguments: Option<String>,
 }
 
+/// The `content` of a [`ChatMessageWire`].
+///
+/// OpenAI accepts either a plain string (the common case) or an array of typed
+/// content parts (needed to attach images alongside text). Serialized untagged
+/// so a text-only message keeps its historical plain-string wire shape.
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub enum MessageContentWire {
+    /// Plain-string content.
+    Text(String),
+    /// Multi-part content (text and/or image parts).
+    Parts(Vec<ContentPartWire>),
+}
+
+/// One typed content part inside a multi-part [`MessageContentWire::Parts`].
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPartWire {
+    /// A text fragment.
+    Text {
+        /// The text content.
+        text: String,
+    },
+    /// An image reference, by URL or data URI.
+    ImageUrl {
+        /// The `image_url` object.
+        image_url: ImageUrlWire,
+    },
+}
+
+/// The `image_url` payload of a [`ContentPartWire::ImageUrl`].
+#[derive(Clone, Debug, Serialize)]
+pub struct ImageUrlWire {
+    /// URL or data URI of the image.
+    pub url: String,
+}
+
 /// A single message in the request `messages` array.
 #[derive(Clone, Debug, Serialize)]
 pub struct ChatMessageWire {
     /// Role: `system`, `user`, `assistant`, or `tool`.
     pub role: String,
-    /// Textual content. `None` (serialized as absent) for assistant messages
-    /// that only carry tool calls.
+    /// Message content: a plain string or typed content parts. `None`
+    /// (serialized as absent) for assistant messages that only carry tool calls.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<MessageContentWire>,
     /// Tool calls requested by an assistant message. Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallWire>,

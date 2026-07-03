@@ -586,17 +586,22 @@ fn provider_extra_options(options: &Value) -> Result<Map<String, Value>> {
 }
 
 /// Translates one harness [`Message`] into an OpenAI wire message.
+///
+/// User messages are rendered as OpenAI content-parts when they carry non-text
+/// blocks (for example images), so image inputs are actually sent rather than
+/// silently dropped. Blocks that have no faithful OpenAI representation return a
+/// [`TinyAgentsError::Validation`] instead of being discarded.
 fn translate_message(message: &Message) -> Result<ChatMessageWire> {
     let wire = match message {
         Message::System(_) => ChatMessageWire {
             role: "system".to_string(),
-            content: Some(message.text()),
+            content: Some(MessageContentWire::Text(message.text())),
             tool_calls: Vec::new(),
             tool_call_id: None,
         },
-        Message::User(_) => ChatMessageWire {
+        Message::User(user) => ChatMessageWire {
             role: "user".to_string(),
-            content: Some(message.text()),
+            content: Some(translate_user_content(&user.content)?),
             tool_calls: Vec::new(),
             tool_call_id: None,
         },
@@ -606,7 +611,7 @@ fn translate_message(message: &Message) -> Result<ChatMessageWire> {
             let content = if text.is_empty() && !assistant.tool_calls.is_empty() {
                 None
             } else {
-                Some(text)
+                Some(MessageContentWire::Text(text))
             };
             let tool_calls = assistant
                 .tool_calls
@@ -632,12 +637,72 @@ fn translate_message(message: &Message) -> Result<ChatMessageWire> {
         }
         Message::Tool(tool) => ChatMessageWire {
             role: "tool".to_string(),
-            content: Some(message.text()),
+            content: Some(MessageContentWire::Text(message.text())),
             tool_calls: Vec::new(),
             tool_call_id: Some(tool.tool_call_id.clone()),
         },
     };
     Ok(wire)
+}
+
+/// Renders user-message content blocks into OpenAI message content.
+///
+/// Text-only content collapses to a plain string (preserving the historical wire
+/// shape). When an image block is present, content is emitted as OpenAI
+/// content-parts so the image is actually sent. JSON blocks are serialized into
+/// text parts. A [`ContentBlock::ProviderExtension`] has no faithful OpenAI
+/// representation, so it fails closed with a validation error rather than being
+/// silently dropped.
+fn translate_user_content(blocks: &[ContentBlock]) -> Result<MessageContentWire> {
+    let has_image = blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image(_)));
+
+    if !has_image {
+        // No image: render as a single string, but still fail closed on blocks
+        // that cannot be represented.
+        let mut text = String::new();
+        for block in blocks {
+            match block {
+                ContentBlock::Text(t) => text.push_str(t),
+                ContentBlock::Json(value) => text.push_str(&value.to_string()),
+                ContentBlock::Image(_) => unreachable!("guarded by has_image"),
+                ContentBlock::ProviderExtension(_) => {
+                    return Err(unrepresentable_block_error());
+                }
+            }
+        }
+        return Ok(MessageContentWire::Text(text));
+    }
+
+    let mut parts = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        match block {
+            ContentBlock::Text(t) => parts.push(ContentPartWire::Text { text: t.clone() }),
+            ContentBlock::Json(value) => parts.push(ContentPartWire::Text {
+                text: value.to_string(),
+            }),
+            ContentBlock::Image(image) => parts.push(ContentPartWire::ImageUrl {
+                image_url: ImageUrlWire {
+                    url: image.url.clone(),
+                },
+            }),
+            ContentBlock::ProviderExtension(_) => {
+                return Err(unrepresentable_block_error());
+            }
+        }
+    }
+    Ok(MessageContentWire::Parts(parts))
+}
+
+/// Error returned when a content block cannot be represented in an OpenAI
+/// request. Failing closed keeps the block from being silently dropped.
+fn unrepresentable_block_error() -> TinyAgentsError {
+    TinyAgentsError::Validation(
+        "OpenAI request cannot represent a provider-extension content block; \
+         remove it or target the originating provider"
+            .to_string(),
+    )
 }
 
 /// Translates a [`ToolChoice`] into the OpenAI `tool_choice` JSON value.

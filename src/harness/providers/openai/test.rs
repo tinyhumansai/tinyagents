@@ -778,6 +778,55 @@ async fn sse_stream_indexless_fallback_ids_match_between_delta_and_final() {
 }
 
 #[test]
+fn user_image_blocks_render_as_content_parts() {
+    use crate::harness::message::{ContentBlock, ImageRef, UserMessage};
+
+    let request = ModelRequest::new(vec![Message::User(UserMessage {
+        content: vec![
+            ContentBlock::Text("What is in this image?".to_string()),
+            ContentBlock::Image(ImageRef {
+                url: "https://example.test/cat.png".to_string(),
+                mime_type: Some("image/png".to_string()),
+            }),
+        ],
+    })]);
+
+    let value = serde_json::to_value(model().translate_request(&request).unwrap()).unwrap();
+    let content = &value["messages"][0]["content"];
+
+    // Content is an array of parts, not a dropped/plain string.
+    assert!(content.is_array(), "expected content parts, got {content}");
+    assert_eq!(content[0]["type"], json!("text"));
+    assert_eq!(content[0]["text"], json!("What is in this image?"));
+    assert_eq!(content[1]["type"], json!("image_url"));
+    assert_eq!(
+        content[1]["image_url"]["url"],
+        json!("https://example.test/cat.png")
+    );
+}
+
+#[test]
+fn text_only_user_message_stays_a_plain_string() {
+    // The common text-only case keeps its historical plain-string wire shape.
+    let request = ModelRequest::new(vec![Message::user("hi")]);
+    let value = serde_json::to_value(model().translate_request(&request).unwrap()).unwrap();
+    assert_eq!(value["messages"][0]["content"], json!("hi"));
+}
+
+#[test]
+fn provider_extension_block_fails_closed_instead_of_dropping() {
+    use crate::harness::message::{ContentBlock, UserMessage};
+
+    let request = ModelRequest::new(vec![Message::User(UserMessage {
+        content: vec![ContentBlock::ProviderExtension(json!({ "opaque": true }))],
+    })]);
+
+    let error = model().translate_request(&request).unwrap_err();
+    assert!(matches!(error, TinyAgentsError::Validation(_)));
+    assert!(error.to_string().contains("provider-extension"));
+}
+
+#[test]
 fn routes_max_tokens_to_max_completion_tokens_for_o_series() {
     // o-series reasoning models reject `max_tokens` and require
     // `max_completion_tokens`.
