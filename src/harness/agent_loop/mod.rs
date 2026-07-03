@@ -444,6 +444,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 model: binding.model,
                 streaming,
             };
+            // Snapshot the request messages for observability before `request`
+            // is moved into the model-wrap onion, gated by the capture policy so
+            // payload-free runs never serialize prompt text.
+            let captured_input = self
+                .policy
+                .capture
+                .model_io
+                .then(|| serde_json::to_value(&request.messages).unwrap_or(Value::Null));
             let mut response = self
                 .middleware
                 .run_wrapped_model(ctx, state, request, &base)
@@ -466,9 +474,16 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 let record = ctx.emit(AgentEvent::UsageRecorded { usage });
                 status.set_last_event(record.id);
             }
+            let captured_output = self
+                .policy
+                .capture
+                .model_io
+                .then(|| serde_json::to_value(&response.message).unwrap_or(Value::Null));
             let record = ctx.emit(AgentEvent::ModelCompleted {
                 call_id,
                 usage: response.usage,
+                input: captured_input,
+                output: captured_output,
             });
             status.set_last_event(record.id);
 
@@ -628,6 +643,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 });
                 status.set_last_event(record.id);
 
+                // Snapshot the arguments for observability before `call` is
+                // moved into the tool-wrap onion, gated by the capture policy.
+                let captured_input = self.policy.capture.tool_io.then(|| call.arguments.clone());
+
                 // The real tool call is the innermost base of the tool-wrap
                 // onion (same before -> wrap -> after ordering as the model
                 // path): lifecycle `before_tool` ran above, the wrap onion runs
@@ -646,9 +665,16 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 run.tool_calls += 1;
                 status.tool_calls = run.tool_calls;
                 status.active_tool_calls.retain(|c| c != &tool_call_id);
+                let captured_output = self
+                    .policy
+                    .capture
+                    .tool_io
+                    .then(|| Value::String(result.content.clone()));
                 let record = ctx.emit(AgentEvent::ToolCompleted {
                     call_id: tool_call_id,
                     tool_name,
+                    input: captured_input,
+                    output: captured_output,
                 });
                 status.set_last_event(record.id);
 

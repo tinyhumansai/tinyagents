@@ -27,7 +27,7 @@ use tinyagents::harness::ids::{ExecutionStatus, RunId};
 use tinyagents::harness::message::{AssistantMessage, ContentBlock, Message};
 use tinyagents::harness::model::ModelResponse;
 use tinyagents::harness::providers::MockModel;
-use tinyagents::harness::runtime::AgentHarness;
+use tinyagents::harness::runtime::{AgentHarness, PayloadCapture, RunPolicy};
 use tinyagents::harness::testkit::FakeTool;
 use tinyagents::harness::tool::ToolCall;
 use tinyagents::harness::usage::Usage;
@@ -182,6 +182,93 @@ async fn harness_run_journals_redacted_replayable_events() {
         .expect("replay tail");
     assert_eq!(tail.len(), all.len() - 2);
     assert_eq!(tail.first().unwrap().offset, 2);
+}
+
+#[tokio::test]
+async fn harness_run_with_capture_exports_generation_and_tool_io() {
+    // With PayloadCapture enabled, a real harness run journals model/tool
+    // payloads on its completion events; feeding those durable observations
+    // through the Langfuse exporter populates the generation Input/Output and
+    // the tool-create Input/Output panels — the fix for tinyhumansai/tinyagents#6.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness
+        .register_model(
+            "capture-model",
+            Arc::new(MockModel::with_responses(vec![
+                tool_call_response("call-1", "lookup", json!({ "q": "weather" })),
+                text_response("all done"),
+            ])),
+        )
+        .set_default_model("capture-model")
+        .register_tool(Arc::new(FakeTool::returning("lookup", "tool-output")))
+        .with_policy(RunPolicy {
+            capture: PayloadCapture::all(),
+            ..Default::default()
+        });
+
+    let journal: Arc<InMemoryEventJournal> = Arc::new(InMemoryEventJournal::new());
+    let run_id = RunId::new("run-capture");
+    let ctx: RunContext<()> = RunContext::new(RunConfig::new(run_id.as_str()), ());
+    ctx.events
+        .subscribe(Arc::new(JournalSink::new(journal.clone(), run_id.clone())));
+
+    harness
+        .invoke_in_context_with_status(&(), ctx, vec![Message::user("please look up")])
+        .await
+        .expect("run succeeds");
+
+    let observations = journal
+        .read_from(run_id.as_str(), 0)
+        .await
+        .expect("replay journal");
+
+    // The captured payloads survive on the durable observations.
+    let model_completed = observations
+        .iter()
+        .find(|o| matches!(o.event, AgentEvent::ModelCompleted { .. }))
+        .expect("a model completion is journaled");
+    match &model_completed.event {
+        AgentEvent::ModelCompleted { input, output, .. } => {
+            assert!(input.is_some(), "captured model input rides the event");
+            assert!(output.is_some(), "captured model output rides the event");
+        }
+        _ => unreachable!(),
+    }
+
+    // Export through the harness Langfuse client and assert the body carries I/O.
+    let client = LangfuseClient::proxy("https://backend.test", "tok").expect("client");
+    let batch = client
+        .build_ingestion_batch(LangfuseTraceConfig::default(), &observations)
+        .expect("build batch");
+    let events = batch["batch"].as_array().expect("batch array");
+
+    // Trace metadata is defaulted from the run lineage even with no caller value.
+    assert_eq!(events[0]["type"], "trace-create");
+    assert_eq!(events[0]["body"]["metadata"]["root_run_id"], "run-capture");
+
+    let generations: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "generation-create")
+        .collect();
+    assert_eq!(generations.len(), 2, "one generation per model call");
+    assert!(
+        generations
+            .iter()
+            .all(|g| !g["body"]["input"].is_null() && !g["body"]["output"].is_null()),
+        "every generation Input/Output panel is populated"
+    );
+    // The final generation's completion carries the answer text.
+    assert_eq!(
+        generations[1]["body"]["output"]["content"][0]["text"],
+        "all done"
+    );
+
+    let tool = events
+        .iter()
+        .find(|e| e["type"] == "tool-create")
+        .expect("a tool observation");
+    assert_eq!(tool["body"]["input"]["q"], "weather");
+    assert_eq!(tool["body"]["output"], "tool-output");
 }
 
 /// A two-node line graph over `i32` with overwrite semantics: `a -> b`.

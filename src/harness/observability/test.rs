@@ -117,6 +117,8 @@ fn agent_latency_metrics_include_model_tool_and_run_elapsed() {
             AgentEvent::ModelCompleted {
                 call_id: model_id.clone(),
                 usage: None,
+                input: None,
+                output: None,
             },
         ),
         obs(
@@ -133,6 +135,8 @@ fn agent_latency_metrics_include_model_tool_and_run_elapsed() {
             AgentEvent::ToolCompleted {
                 call_id: tool_id.clone(),
                 tool_name: "lookup".to_string(),
+                input: None,
+                output: None,
             },
         ),
         obs(
