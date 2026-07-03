@@ -106,8 +106,12 @@ pub struct ChunkDeltaWire {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ToolCallChunkWire {
     /// Stable slot index used to correlate fragments across chunks.
+    ///
+    /// `None` when the provider omits `index` entirely (some OpenAI-compatible
+    /// backends do); fragments are then correlated by id/name instead of all
+    /// collapsing onto slot 0.
     #[serde(default)]
-    pub index: u32,
+    pub index: Option<u32>,
     /// Provider-assigned call id, sent on the first fragment for the slot.
     #[serde(default)]
     pub id: Option<String>,

@@ -696,6 +696,17 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
     })
 }
 
+/// Returns the effective call id for a streamed tool-call slot: the
+/// provider-assigned id when present, or a stable `tool-{slot}` fallback keyed to
+/// the slot's position so delta ids and the final call id always agree.
+fn tool_call_id(slot: usize, id: &str) -> String {
+    if id.is_empty() {
+        format!("tool-{slot}")
+    } else {
+        id.to_string()
+    }
+}
+
 fn parse_tool_arguments(context: &str, call_id: &str, name: &str, raw: &str) -> Result<Value> {
     serde_json::from_str(raw).map_err(|err| {
         TinyAgentsError::Model(format!(
@@ -774,10 +785,7 @@ impl OpenAiStreamAcc {
                 }));
             }
             for fragment in choice.delta.tool_calls {
-                let idx = fragment.index as usize;
-                while self.tool_calls.len() <= idx {
-                    self.tool_calls.push(ToolCallBuild::default());
-                }
+                let idx = self.resolve_slot(&fragment);
                 let slot = &mut self.tool_calls[idx];
                 if let Some(id) = fragment.id.filter(|id| !id.is_empty()) {
                     slot.id = id;
@@ -788,11 +796,7 @@ impl OpenAiStreamAcc {
                     }
                     if let Some(args) = function.arguments.filter(|a| !a.is_empty()) {
                         slot.args.push_str(&args);
-                        let call_id = if slot.id.is_empty() {
-                            format!("tool-{idx}")
-                        } else {
-                            slot.id.clone()
-                        };
+                        let call_id = tool_call_id(idx, &slot.id);
                         pending.push_back(ModelStreamItem::ToolCallDelta(ToolDelta {
                             call_id,
                             content: args,
@@ -803,23 +807,53 @@ impl OpenAiStreamAcc {
         }
     }
 
+    /// Resolves the accumulator slot a streamed tool-call fragment belongs to.
+    ///
+    /// OpenAI itself always sends a stable `index`; some OpenAI-compatible
+    /// backends omit it. When `index` is present it selects the slot directly
+    /// (growing the vector as needed). When it is absent, fragments are
+    /// correlated by `id`: a fragment carrying a new id opens a new slot, one
+    /// carrying a known id reuses that slot, and an id-less continuation fragment
+    /// (arguments only) appends to the most recent slot — so parallel calls no
+    /// longer all collapse onto slot 0.
+    fn resolve_slot(&mut self, fragment: &ToolCallChunkWire) -> usize {
+        if let Some(index) = fragment.index {
+            let idx = index as usize;
+            while self.tool_calls.len() <= idx {
+                self.tool_calls.push(ToolCallBuild::default());
+            }
+            return idx;
+        }
+        if let Some(id) = fragment.id.as_deref().filter(|id| !id.is_empty()) {
+            if let Some(pos) = self.tool_calls.iter().position(|slot| slot.id == id) {
+                return pos;
+            }
+            self.tool_calls.push(ToolCallBuild::default());
+            return self.tool_calls.len() - 1;
+        }
+        if self.tool_calls.is_empty() {
+            self.tool_calls.push(ToolCallBuild::default());
+        }
+        self.tool_calls.len() - 1
+    }
+
     /// Consumes the accumulator into the final, merged [`ModelResponse`].
     fn into_response(self) -> Result<ModelResponse> {
         let mut content = Vec::new();
         if !self.text.is_empty() {
             content.push(ContentBlock::Text(self.text));
         }
+        // Enumerate over the full slot vector *before* filtering so the synthetic
+        // fallback id (`tool-{idx}`) matches the one streamed in `ToolCallDelta`
+        // items — filtering first would renumber the slots and desynchronize the
+        // delta ids from the final call ids.
         let tool_calls = self
             .tool_calls
             .into_iter()
-            .filter(|b| !b.name.is_empty() || !b.args.is_empty())
             .enumerate()
+            .filter(|(_, b)| !b.name.is_empty() || !b.args.is_empty())
             .map(|(idx, b)| {
-                let id = if b.id.is_empty() {
-                    format!("tool-{idx}")
-                } else {
-                    b.id.clone()
-                };
+                let id = tool_call_id(idx, &b.id);
                 Ok(ToolCall {
                     id: id.clone(),
                     name: b.name.clone(),

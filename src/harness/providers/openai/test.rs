@@ -646,6 +646,86 @@ async fn sse_stream_surfaces_mid_stream_error_payload() {
     assert!(err.to_string().contains("upstream exploded"));
 }
 
+#[tokio::test]
+async fn sse_stream_correlates_indexless_parallel_tool_calls_by_id() {
+    // A compat backend that omits `index` entirely and interleaves two parallel
+    // tool calls, correlating fragments only by `id`. Without id-based slotting
+    // both would collapse onto slot 0; the streamed delta ids must also match the
+    // final reconstructed call ids.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call-a\",\"function\":{\"name\":\"alpha\",\"arguments\":\"{\\\"x\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call-b\",\"function\":{\"name\":\"beta\",\"arguments\":\"{\\\"y\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call-a\",\"function\":{\"arguments\":\"1}\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call-b\",\"function\":{\"arguments\":\"2}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+
+    // Every streamed tool-call delta id must be a real call id, never a slot-0
+    // collapse.
+    let delta_ids: Vec<String> = items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::ToolCallDelta(delta) => Some(delta.call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(delta_ids.contains(&"call-a".to_string()));
+    assert!(delta_ids.contains(&"call-b".to_string()));
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "parallel calls must not collapse: {calls:?}"
+    );
+    assert_eq!(calls[0].id, "call-a");
+    assert_eq!(calls[0].name, "alpha");
+    assert_eq!(calls[0].arguments, json!({ "x": 1 }));
+    assert_eq!(calls[1].id, "call-b");
+    assert_eq!(calls[1].name, "beta");
+    assert_eq!(calls[1].arguments, json!({ "y": 2 }));
+}
+
+#[tokio::test]
+async fn sse_stream_indexless_fallback_ids_match_between_delta_and_final() {
+    // No `index` and no `id` at all (arguments-only continuation on the same
+    // slot). The synthetic fallback id streamed in the delta must equal the id on
+    // the final reconstructed call.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"solo\",\"arguments\":\"{\\\"n\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"7}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+
+    let delta_id = items
+        .iter()
+        .find_map(|item| match item {
+            ModelStreamItem::ToolCallDelta(delta) => Some(delta.call_id.clone()),
+            _ => None,
+        })
+        .expect("a tool-call delta is emitted");
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, delta_id, "delta id must match final call id");
+    assert_eq!(calls[0].name, "solo");
+    assert_eq!(calls[0].arguments, json!({ "n": 7 }));
+}
+
 #[test]
 fn from_env_errors_when_api_key_missing() {
     // Snapshot and clear the key so the missing-key path is exercised
