@@ -572,7 +572,10 @@ where
                     "no checkpoint `{id}` found for thread `{thread_id}`"
                 )),
             })?;
-        self.emit(GraphEvent::CheckpointSaved {
+        // Resume *loads* this checkpoint — it is a read, not a write — so emit a
+        // restore event, not `CheckpointSaved` (which would falsely inflate
+        // persisted-checkpoint counts and mislead durability observers).
+        self.emit(GraphEvent::CheckpointRestored {
             checkpoint_id: CheckpointId::new(checkpoint.checkpoint_id.clone()),
         });
 

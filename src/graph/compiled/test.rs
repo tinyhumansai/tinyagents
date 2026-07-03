@@ -330,6 +330,58 @@ async fn interrupt_then_resume_reruns_node() {
 }
 
 #[tokio::test]
+async fn resume_emits_restore_not_save_for_the_loaded_checkpoint() {
+    // Resuming loads a checkpoint; that read must surface as CheckpointRestored,
+    // never CheckpointSaved (which would inflate persisted-checkpoint counts).
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let sink = Arc::new(CollectingSink::new());
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("approve", |s, ctx: NodeContext| async move {
+            match ctx.resume {
+                Some(_) => Ok(NodeResult::Update(s + 1)),
+                None => Ok(NodeResult::Interrupt(Interrupt::new("approve", json!({})))),
+            }
+        })
+        .set_entry("approve")
+        .set_finish("approve")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone())
+        .with_event_sink(sink.clone());
+
+    let paused = graph.run_with_thread("t", 0).await.unwrap();
+    let loaded = paused
+        .checkpoint_id
+        .clone()
+        .expect("interrupt persisted a checkpoint");
+
+    // Only inspect events emitted during the resume (the initial run genuinely
+    // saved the interrupt checkpoint).
+    let before = sink.events().len();
+    graph
+        .resume("t", Command::resume(json!(null)))
+        .await
+        .unwrap();
+    let resume_events = sink.events();
+    let resume_events = &resume_events[before..];
+
+    assert!(
+        resume_events.iter().any(|e| matches!(
+            e,
+            GraphEvent::CheckpointRestored { checkpoint_id } if *checkpoint_id == loaded
+        )),
+        "resume must emit CheckpointRestored for the loaded checkpoint"
+    );
+    assert!(
+        !resume_events.iter().any(|e| matches!(
+            e,
+            GraphEvent::CheckpointSaved { checkpoint_id } if *checkpoint_id == loaded
+        )),
+        "loading a checkpoint on resume must not re-emit it as saved"
+    );
+}
+
+#[tokio::test]
 async fn resume_preserves_parent_checkpoint_lineage() {
     // A run that boundary-checkpoints, interrupts, then resumes to completion
     // must keep a single connected lineage: the first post-resume checkpoint
