@@ -610,3 +610,45 @@ fn stream_accumulator_collects_reasoning_side_channel() {
     let response = acc.finish().unwrap();
     assert_eq!(response.text(), "visible answer");
 }
+
+/// Round-trips a [`ModelStreamItem`] through JSON and asserts the re-serialized
+/// form is byte-for-byte stable, proving every variant survives serde.
+fn roundtrip_stream_item(item: ModelStreamItem) {
+    let value = serde_json::to_value(&item).expect("serialize ModelStreamItem");
+    let back: ModelStreamItem =
+        serde_json::from_value(value.clone()).expect("deserialize ModelStreamItem");
+    let reserialized = serde_json::to_value(&back).expect("re-serialize ModelStreamItem");
+    assert_eq!(value, reserialized, "round-trip differs for {value}");
+}
+
+#[test]
+fn model_stream_item_roundtrips_every_variant() {
+    roundtrip_stream_item(ModelStreamItem::Started);
+    roundtrip_stream_item(ModelStreamItem::MessageDelta(
+        crate::harness::message::MessageDelta::text("hi"),
+    ));
+    roundtrip_stream_item(ModelStreamItem::ToolCallDelta(
+        crate::harness::tool::ToolDelta {
+            call_id: "call-1".into(),
+            content: "{\"q\":1}".into(),
+        },
+    ));
+    roundtrip_stream_item(ModelStreamItem::UsageDelta(Usage::new(3, 5)));
+    roundtrip_stream_item(ModelStreamItem::Completed(ModelResponse::assistant("done")));
+    // The scalar-carrying variant an internally tagged enum could not encode.
+    roundtrip_stream_item(ModelStreamItem::Failed("boom".to_string()));
+    roundtrip_stream_item(ModelStreamItem::ProviderFailed(ProviderError {
+        provider: "openai".into(),
+        message: "nope".into(),
+        ..ProviderError::default()
+    }));
+}
+
+#[test]
+fn model_stream_item_failed_serializes_without_panicking() {
+    // Under internal tagging this call errored; adjacent tagging encodes the
+    // string payload under `content`.
+    let value = serde_json::to_value(ModelStreamItem::Failed("boom".into())).unwrap();
+    assert_eq!(value["type"], json!("failed"));
+    assert_eq!(value["content"], json!("boom"));
+}

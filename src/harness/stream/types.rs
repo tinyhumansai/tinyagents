@@ -51,8 +51,16 @@ pub enum StreamMode {
 ///
 /// All variants derive `Clone` so chunks can be fanned out to multiple
 /// consumers.
+///
+/// # Serialization
+///
+/// This enum is **adjacently tagged** (`{"type": …, "content": …}`) rather than
+/// internally tagged. Most variants wrap a bare [`serde_json::Value`] or
+/// [`String`]; an internally tagged enum cannot serialize a scalar or array
+/// payload (serde errors, or corrupts `Values(json!(null))` into `{}`), so
+/// adjacent tagging is required for every variant to round-trip.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
+#[serde(rename_all = "snake_case", tag = "type", content = "content")]
 pub enum StreamChunk {
     /// A complete state value snapshot (corresponds to [`StreamMode::Values`]).
     Values(serde_json::Value),
