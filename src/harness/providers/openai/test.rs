@@ -778,6 +778,27 @@ async fn sse_stream_indexless_fallback_ids_match_between_delta_and_final() {
 }
 
 #[test]
+fn routes_max_tokens_to_max_completion_tokens_for_o_series() {
+    // o-series reasoning models reject `max_tokens` and require
+    // `max_completion_tokens`.
+    let request = ModelRequest::new(vec![Message::user("hi")]).with_max_tokens(128);
+    let model = OpenAiModel::new("k").with_model("o3-mini");
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+
+    assert!(value.get("max_tokens").is_none());
+    assert_eq!(value["max_completion_tokens"], json!(128));
+}
+
+#[test]
+fn keeps_max_tokens_for_classic_models() {
+    let request = ModelRequest::new(vec![Message::user("hi")]).with_max_tokens(128);
+    let value = serde_json::to_value(model().translate_request(&request).unwrap()).unwrap();
+
+    assert_eq!(value["max_tokens"], json!(128));
+    assert!(value.get("max_completion_tokens").is_none());
+}
+
+#[test]
 fn request_timeout_prefers_explicit_override() {
     // An explicit per-request timeout wins for both unary and streaming calls.
     assert_eq!(

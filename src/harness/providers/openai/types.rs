@@ -35,9 +35,15 @@ pub struct ChatCompletionRequest {
     /// Nucleus sampling probability mass. Omitted when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
-    /// Maximum number of output tokens. Omitted when unset.
+    /// Maximum number of output tokens. Omitted when unset. Used for classic
+    /// Chat Completions models; the o-series uses `max_completion_tokens`
+    /// instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Maximum number of output tokens for reasoning (o-series) models, which
+    /// reject `max_tokens`. Omitted when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
     /// Stop sequences that terminate generation. Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stop: Vec<String>,

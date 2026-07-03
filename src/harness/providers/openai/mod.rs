@@ -85,6 +85,13 @@ pub struct OpenAiModel {
     profile: ModelProfile,
 }
 
+/// Returns `true` for OpenAI o-series reasoning models (`o1`/`o3`/`o4`), which
+/// reject `max_tokens` and require `max_completion_tokens` instead.
+fn is_reasoning_model(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    lower.starts_with("o1") || lower.starts_with("o3") || lower.starts_with("o4")
+}
+
 /// Derives a static [`ModelProfile`] for an OpenAI(-compatible) model id.
 ///
 /// All targets support tool calling, streaming (including tool-call chunks),
@@ -92,12 +99,8 @@ pub struct OpenAiModel {
 /// advertise native structured output and (for the o-series) reasoning output.
 fn derive_profile(provider: &str, model: &str) -> ModelProfile {
     let lower = model.to_ascii_lowercase();
-    let native_structured = lower.contains("gpt-4o")
-        || lower.contains("gpt-4.1")
-        || lower.starts_with("o1")
-        || lower.starts_with("o3")
-        || lower.starts_with("o4");
-    let reasoning = lower.starts_with("o1") || lower.starts_with("o3") || lower.starts_with("o4");
+    let reasoning = is_reasoning_model(model);
+    let native_structured = lower.contains("gpt-4o") || lower.contains("gpt-4.1") || reasoning;
     ModelProfile {
         provider: Some(provider.to_string()),
         model: Some(model.to_string()),
@@ -443,15 +446,27 @@ impl OpenAiModel {
             .as_ref()
             .and_then(translate_response_format);
 
+        let model = request.model.clone().unwrap_or_else(|| self.model.clone());
+        // The o-series reasoning models reject `max_tokens` and require
+        // `max_completion_tokens`; classic Chat Completions models use
+        // `max_tokens`. Route the request's cap to whichever field the target
+        // model accepts.
+        let (max_tokens, max_completion_tokens) = if is_reasoning_model(&model) {
+            (None, request.max_tokens)
+        } else {
+            (request.max_tokens, None)
+        };
+
         Ok(ChatCompletionRequest {
-            model: request.model.clone().unwrap_or_else(|| self.model.clone()),
+            model,
             messages,
             tools,
             tool_choice,
             response_format,
             temperature: request.temperature,
             top_p: request.top_p,
-            max_tokens: request.max_tokens,
+            max_tokens,
+            max_completion_tokens,
             stop: request.stop_sequences.clone(),
             seed: request.seed,
             stream: false,
@@ -556,6 +571,7 @@ fn provider_extra_options(options: &Value) -> Result<Map<String, Value>> {
         "temperature",
         "top_p",
         "max_tokens",
+        "max_completion_tokens",
         "stop",
         "seed",
         "stream",
