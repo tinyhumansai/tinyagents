@@ -491,6 +491,44 @@ pub struct ContextCompressionMiddleware {
     pub(crate) records: Mutex<Vec<SummaryRecord>>,
 }
 
+// ── MicrocompactMiddleware ────────────────────────────────────────────────────
+
+/// Middleware that clears the bodies of older **tool-result** messages while
+/// keeping the `keep_recent` most recent ones verbatim.
+///
+/// In `before_model` it walks `request.messages`, finds the tool-result
+/// messages, and — once there are more than `keep_recent` of them — replaces the
+/// content of every tool result *except* the newest `keep_recent` with a fixed
+/// [`placeholder`](Self::placeholder) string, preserving each message's
+/// `tool_call_id`. Non-tool messages (system/user/assistant) are never touched
+/// and no chat turn is dropped, so this bounds the cost of a long, tool-heavy
+/// thread without the semantic loss of summarization.
+///
+/// This is the "micro-compaction" companion to
+/// [`ContextCompressionMiddleware`]: the latter summarizes *older chat history*
+/// when the transcript nears the context window, whereas this one only ever
+/// blanks *stale tool payloads* that the model no longer needs verbatim. The two
+/// compose cleanly.
+///
+/// The operation is **idempotent**: a body already equal to the placeholder is
+/// left as-is, so repeated `before_model` passes converge. When there are at
+/// most `keep_recent` tool results the middleware is a complete no-op.
+///
+/// The placeholder text is caller-supplied (via
+/// [`MicrocompactMiddleware::new`]) so host applications can keep their own
+/// model-facing wording stable. Event emission is **opt-in** (default off, see
+/// [`MicrocompactMiddleware::with_events`]): when enabled and at least one body
+/// is cleared, an
+/// [`AgentEvent::Compressed`][crate::harness::events::AgentEvent::Compressed]
+/// event carrying the before/after token estimate is emitted; when disabled the
+/// middleware mutates the request silently.
+pub struct MicrocompactMiddleware {
+    pub(crate) label: &'static str,
+    pub(crate) keep_recent: usize,
+    pub(crate) placeholder: String,
+    pub(crate) emit_events: bool,
+}
+
 // ── PromptCacheGuardMiddleware ────────────────────────────────────────────────
 
 /// Middleware that watches the prompt cache layout for accidental prefix
