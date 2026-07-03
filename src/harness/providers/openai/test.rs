@@ -345,6 +345,57 @@ fn parses_text_only_response_without_usage_details() {
 }
 
 #[test]
+fn parses_empty_tool_arguments_as_empty_object() {
+    // Some compat backends send an empty arguments string for a zero-argument
+    // tool call; it must map to `{}`, not fail as malformed JSON.
+    let body = json!({
+        "id": "chatcmpl-noargs",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-empty",
+                            "type": "function",
+                            "function": { "name": "ping", "arguments": "" }
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }
+        ]
+    });
+
+    let response = parse_response(body).unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "ping");
+    assert_eq!(calls[0].arguments, json!({}));
+}
+
+#[tokio::test]
+async fn sse_stream_empty_tool_arguments_reconstruct_as_empty_object() {
+    // A streamed tool call whose only arguments fragment is empty. The merged
+    // call must carry `{}` rather than fail terminally.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-x\",\"function\":{\"name\":\"ping\",\"arguments\":\"\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "ping");
+    assert_eq!(calls[0].arguments, json!({}));
+}
+
+#[test]
 fn parse_response_errors_on_empty_choices() {
     let body = json!({ "id": "x", "choices": [] });
     let err = parse_response(body).unwrap_err();

@@ -708,6 +708,12 @@ fn tool_call_id(slot: usize, id: &str) -> String {
 }
 
 fn parse_tool_arguments(context: &str, call_id: &str, name: &str, raw: &str) -> Result<Value> {
+    // Some OpenAI-compatible backends emit an empty arguments string for a
+    // zero-argument tool call. That is a well-formed "no arguments" payload, not
+    // malformed JSON, so map it to an empty object instead of failing the call.
+    if raw.trim().is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
     serde_json::from_str(raw).map_err(|err| {
         TinyAgentsError::Model(format!(
             "{context} contained invalid JSON arguments for tool call `{call_id}` (`{name}`): {err}; raw arguments: {raw:?}"
