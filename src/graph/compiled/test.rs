@@ -1155,6 +1155,39 @@ async fn barrier_arrivals_survive_interrupt_and_resume() {
 }
 
 #[tokio::test]
+async fn reducer_error_at_boundary_transitions_run_to_failed() {
+    // A reducer error raised at the step boundary (after the node ran) must
+    // still fail the run — emit RunFailed / a Failed status — rather than
+    // unwinding and leaving observers to see the run stuck in Running.
+    let sink = Arc::new(CollectingSink::new());
+    let graph = GraphBuilder::<i32, i32>::new()
+        .set_reducer(ClosureStateReducer::new(|_s: i32, u: i32| {
+            if u == 999 {
+                Err(TinyAgentsError::Graph("reducer boom".to_string()))
+            } else {
+                Ok(u)
+            }
+        }))
+        .add_node("boom", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(999))
+        })
+        .set_entry("boom")
+        .set_finish("boom")
+        .compile()
+        .unwrap()
+        .with_event_sink(sink.clone());
+
+    let err = graph.run(0).await.unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Graph(_)), "got {err:?}");
+    assert!(
+        sink.events()
+            .iter()
+            .any(|e| matches!(e, GraphEvent::RunFailed { .. })),
+        "a boundary reducer error must transition the run to Failed (RunFailed emitted)"
+    );
+}
+
+#[tokio::test]
 async fn status_snapshot_reports_run() {
     let graph = adding_graph();
     let run = graph

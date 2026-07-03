@@ -1097,9 +1097,18 @@ where
                 }
             };
 
-            // Apply collected updates through the reducer at the boundary.
+            // Apply collected updates through the reducer at the boundary. A
+            // reducer error here must still fail the run (not just unwind
+            // leaving it `Running`).
             for update in updates {
-                state = self.reducer.apply(state, update)?;
+                state = match self.reducer.apply(state, update) {
+                    Ok(state) => state,
+                    Err(err) => {
+                        return self
+                            .fail_and_return(&run_id, &thread_id, started_at, steps, err)
+                            .await;
+                    }
+                };
             }
 
             // Collect any child runs spawned by subgraph nodes this step. They
@@ -1127,15 +1136,25 @@ where
                 // the failure (they succeeded; their routing must not be lost)
                 // followed by the failed branch and the not-yet-run tail, which
                 // re-run on resume with their `Send` args preserved.
-                let successors = self.route_completed(
+                let successors = match self.route_completed(
                     &active[..failed_index],
                     &goto_map,
                     &state,
                     &mut barrier_arrivals,
-                )?;
+                ) {
+                    Ok(successors) => successors,
+                    Err(route_err) => {
+                        return self
+                            .fail_and_return(&run_id, &thread_id, started_at, steps, route_err)
+                            .await;
+                    }
+                };
                 let mut pending = successors;
                 pending.extend(active[failed_index..].iter().cloned());
                 let completed_nodes = activation_nodes(&active[..failed_index]);
+                // A failure-boundary persist error must not replace the original
+                // node error: keep reporting the node error and just drop the
+                // resumable checkpoint reference.
                 let checkpoint_id = self
                     .persist_failure_checkpoint(
                         &thread_id,
@@ -1151,7 +1170,8 @@ where
                         &recursion_meta,
                         &child_runs_meta,
                     )
-                    .await?;
+                    .await
+                    .unwrap_or(None);
                 self.fail_run(
                     &run_id,
                     &thread_id,
@@ -1176,17 +1196,24 @@ where
                         .await;
                     return Err(err);
                 }
-                let successors = self.route_completed(
+                let successors = match self.route_completed(
                     &active[..index],
                     &goto_map,
                     &state,
                     &mut barrier_arrivals,
-                )?;
+                ) {
+                    Ok(successors) => successors,
+                    Err(route_err) => {
+                        return self
+                            .fail_and_return(&run_id, &thread_id, started_at, steps, route_err)
+                            .await;
+                    }
+                };
                 let mut pending = successors;
                 pending.extend(active[index..].iter().cloned());
                 let pending_nodes = activation_nodes(&pending);
                 let interrupt_id = InterruptId::new(emitted.id.clone());
-                let checkpoint_id = self
+                let checkpoint_id = match self
                     .persist_checkpoint(
                         &thread_id,
                         &run_id,
@@ -1201,7 +1228,15 @@ where
                         &recursion_meta,
                         &child_runs_meta,
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(persist_err) => {
+                        return self
+                            .fail_and_return(&run_id, &thread_id, started_at, steps, persist_err)
+                            .await;
+                    }
+                };
 
                 let mut status = self.base_status(&run_id, &thread_id, started_at);
                 status.status = ExecutionStatus::Interrupted;
@@ -1230,7 +1265,15 @@ where
             // edges, evaluated against the freshly-committed state. Barrier
             // arrivals accumulate into `barrier_arrivals` (persisted below).
             let completed_nodes = activation_nodes(&active);
-            let next = self.route_completed(&active, &goto_map, &state, &mut barrier_arrivals)?;
+            let next = match self.route_completed(&active, &goto_map, &state, &mut barrier_arrivals)
+            {
+                Ok(next) => next,
+                Err(route_err) => {
+                    return self
+                        .fail_and_return(&run_id, &thread_id, started_at, steps, route_err)
+                        .await;
+                }
+            };
 
             // Persist a boundary checkpoint. Under `Exit` durability only the
             // terminal boundary (the step that empties the active set) is
@@ -1240,21 +1283,30 @@ where
                 DurabilityMode::Sync | DurabilityMode::Async => true,
             };
             let checkpoint_id = if persist_now {
-                self.persist_checkpoint(
-                    &thread_id,
-                    &run_id,
-                    &state,
-                    &next,
-                    &completed_nodes,
-                    Vec::new(),
-                    &barrier_arrivals,
-                    parent_checkpoint.clone(),
-                    steps,
-                    "loop",
-                    &recursion_meta,
-                    &child_runs_meta,
-                )
-                .await?
+                match self
+                    .persist_checkpoint(
+                        &thread_id,
+                        &run_id,
+                        &state,
+                        &next,
+                        &completed_nodes,
+                        Vec::new(),
+                        &barrier_arrivals,
+                        parent_checkpoint.clone(),
+                        steps,
+                        "loop",
+                        &recursion_meta,
+                        &child_runs_meta,
+                    )
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(persist_err) => {
+                        return self
+                            .fail_and_return(&run_id, &thread_id, started_at, steps, persist_err)
+                            .await;
+                    }
+                }
             } else {
                 None
             };
@@ -1320,6 +1372,26 @@ where
         status.error = Some(err.to_string());
         status.checkpoint_id = checkpoint_id;
         self.save_status(status).await;
+    }
+
+    /// Records a terminal `Failed` status for `err` (via [`Self::fail_run`]) and
+    /// returns it as `Err`.
+    ///
+    /// Used at the step boundary so an error raised *after* the node runners —
+    /// a reducer merge, a routing resolution, or a checkpoint persist — still
+    /// transitions the run to `Failed` (rather than leaving observers to see it
+    /// stuck in `Running` forever) before the error unwinds out of the run.
+    async fn fail_and_return<T>(
+        &self,
+        run_id: &RunId,
+        thread_id: &Option<ThreadId>,
+        started_at: SystemTime,
+        steps: usize,
+        err: TinyAgentsError,
+    ) -> Result<T> {
+        self.fail_run(run_id, thread_id, started_at, steps, &err, None)
+            .await;
+        Err(err)
     }
 
     /// Persists a resumable failure-boundary checkpoint for a node-handler
