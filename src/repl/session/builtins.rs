@@ -282,12 +282,12 @@ fn bump_graph<State: Send + Sync>(ctx: &HostContext<State>) -> Result<(), Box<Ev
 /// Increments and bounds the agent-call counter.
 fn bump_agent<State: Send + Sync>(ctx: &HostContext<State>) -> Result<(), Box<EvalAltResult>> {
     let mut counters = ctx.counters.lock().expect("counters poisoned");
-    if counters.agent >= ctx.policy.max_model_calls {
+    if counters.agent >= ctx.policy.max_agent_calls {
         return Err(raise(
             ctx,
             TinyAgentsError::LimitExceeded(format!(
                 "agent call limit ({}) exceeded",
-                ctx.policy.max_model_calls
+                ctx.policy.max_agent_calls
             )),
         ));
     }

@@ -84,6 +84,14 @@ pub struct ReplPolicy {
     pub max_output_bytes: usize,
     /// Maximum `model_query` calls per session.
     pub max_model_calls: usize,
+    /// Maximum `agent_run`/sub-agent calls per session.
+    ///
+    /// Enforced independently of [`max_model_calls`][Self::max_model_calls]:
+    /// each sub-agent call itself drives one or more model calls, so
+    /// capping agent calls at the model-call budget (as an earlier
+    /// implementation did) let a session's *combined* model spend reach
+    /// roughly twice the configured `max_model_calls`.
+    pub max_agent_calls: usize,
     /// Maximum `tool_call` calls per session.
     pub max_tool_calls: usize,
     /// Maximum `graph_run` calls per session.
@@ -109,6 +117,7 @@ impl Default for ReplPolicy {
             max_script_bytes: 64 * 1024,
             max_output_bytes: 256 * 1024,
             max_model_calls: 64,
+            max_agent_calls: 32,
             max_tool_calls: 128,
             max_graph_calls: 32,
             max_graph_definitions: 8,

@@ -203,6 +203,73 @@ fn output_byte_limit_fails_closed() {
     assert!(matches!(err, TinyAgentsError::LimitExceeded(_)));
 }
 
+/// A trivial [`HarnessAgent`] that returns a fixed response, for exercising
+/// `agent_query` without a real model/harness run.
+struct StubAgent;
+
+#[async_trait::async_trait]
+impl crate::graph::subagent_node::HarnessAgent for StubAgent {
+    fn name(&self) -> &str {
+        "stub"
+    }
+
+    async fn run(
+        &self,
+        input: crate::graph::subagent_node::SubAgentInput,
+        _events: crate::harness::events::EventSink,
+    ) -> crate::Result<crate::graph::subagent_node::SubAgentOutput> {
+        Ok(crate::graph::subagent_node::SubAgentOutput {
+            text: format!("stub replied to: {}", input.prompt),
+            ..Default::default()
+        })
+    }
+}
+
+fn session_with_stub_agent(policy: ReplPolicy) -> ReplSession {
+    let mut registry = crate::registry::CapabilityRegistry::<()>::new();
+    registry
+        .register_agent(std::sync::Arc::new(StubAgent))
+        .expect("register stub agent");
+    let capabilities = ReplCapabilities::new(std::sync::Arc::new(registry));
+    ReplSession::<()>::new()
+        .with_policy(policy)
+        .with_capabilities(capabilities)
+}
+
+#[test]
+fn agent_call_limit_is_independent_of_the_model_call_limit() {
+    // Regression test: `bump_agent` used to compare the agent-call counter
+    // against `max_model_calls` (with an "agent call limit" message quoting
+    // that same number), so a session's *combined* model spend — direct
+    // `model_query` calls plus every model call a delegated `agent_query`
+    // itself drives — could reach roughly twice the configured
+    // `max_model_calls` before anything failed closed. `max_agent_calls` is
+    // now tracked and enforced independently.
+    let policy = ReplPolicy {
+        max_model_calls: 64,
+        max_agent_calls: 2,
+        ..ReplPolicy::default()
+    };
+    let mut s = session_with_stub_agent(policy);
+
+    let script = r#"agent_query(#{ agent: "stub", prompt: "hi" })"#;
+    s.eval_cell(script).expect("call 1 within the limit");
+    s.eval_cell(script).expect("call 2 within the limit");
+
+    let err = s
+        .eval_cell(script)
+        .expect_err("call 3 exceeds max_agent_calls");
+    match err {
+        TinyAgentsError::LimitExceeded(msg) => {
+            assert!(
+                msg.contains("agent call limit (2)"),
+                "expected the message to cite max_agent_calls (2), got: {msg}"
+            );
+        }
+        other => panic!("expected LimitExceeded, got {other:?}"),
+    }
+}
+
 #[test]
 fn map_and_array_values_round_trip_to_json() {
     let mut s = session();
