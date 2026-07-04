@@ -274,6 +274,7 @@ mod tool_tests {
             depth: 0,
             max_turn_output_tokens: None,
             events: EventSink::new(),
+            streaming: false,
             workspace: None,
         }
     }

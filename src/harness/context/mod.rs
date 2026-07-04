@@ -193,6 +193,7 @@ impl<Ctx> RunContext<Ctx> {
             cancellation: CancellationToken::new(),
             control: std::sync::Arc::new(std::sync::Mutex::new(None)),
             workspace: None,
+            streaming: false,
         }
     }
 

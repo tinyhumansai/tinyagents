@@ -177,6 +177,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     ) -> Result<AgentLoopResult> {
         let run_id = ctx.config.run_id.clone();
         let thread_id = ctx.config.thread_id.clone();
+        // Record the drive mode so tool execution contexts (and the sub-agents
+        // they spawn) can match it — child deltas then propagate to the parent
+        // stream via the shared sink.
+        ctx.streaming = streaming;
 
         let mut status = HarnessRunStatus::new(run_id.clone(), ComponentId::new("agent_loop"));
         if let Some(thread) = thread_id {
