@@ -143,6 +143,22 @@ pub enum AgentEvent {
         /// exporter can render the result in a tool observation's Output panel.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<serde_json::Value>,
+        /// Wall-clock duration of the call in milliseconds (completion minus
+        /// [`started_at_ms`]). Present regardless of payload capture, so an
+        /// exporter renders a real duration without a side-channel. `None` for
+        /// events serialized before this field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        /// Size, in bytes, of the tool's textual result content. Present even in
+        /// payload-free mode (unlike [`output`]), so an exporter can show result
+        /// size without capturing the body. `None` for older events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_bytes: Option<u64>,
+        /// Failure message when the tool call failed; `None` on success. Lets an
+        /// exporter render success/failure and a reason from the journalled
+        /// event itself rather than a live outcome side-channel.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 
     /// The model called a tool that is not registered, and the run's

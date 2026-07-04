@@ -316,26 +316,43 @@ fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
             started_at_ms,
             input,
             output,
-        } => json!({
-            "id": obs.event_id.as_str(),
-            "timestamp": timestamp,
-            // A tool call is modelled as a span. `tool-create` is not a valid
-            // Langfuse ingestion observation type — older/self-hosted Langfuse
-            // rejects it, silently dropping every tool observation.
-            "type": "span-create",
-            "body": clean_nulls(json!({
-                "id": call_id.as_str(),
-                "traceId": trace_id,
-                "name": tool_name,
-                // Loop-captured start time when available (see the
-                // generation branch above).
-                "startTime": started_at_ms.map(iso_ms).unwrap_or_else(|| timestamp.clone()),
-                "endTime": timestamp,
-                "input": input,
-                "output": output,
-                "metadata": metadata,
-            })),
-        }),
+            duration_ms,
+            output_bytes,
+            error,
+        } => {
+            // Prefer the loop-captured start + real duration for the end time;
+            // fall back to the journal timestamp. A failed call is marked ERROR
+            // with the failure reason, and result size rides metadata so the
+            // span is informative even in payload-free mode.
+            let end_time = match (started_at_ms, duration_ms) {
+                (Some(start), Some(dur)) => iso_ms(start.saturating_add(*dur)),
+                _ => timestamp.clone(),
+            };
+            let mut tool_metadata = metadata.clone();
+            if let (Some(map), Some(bytes)) = (tool_metadata.as_object_mut(), output_bytes) {
+                map.insert("output_bytes".into(), json!(bytes));
+            }
+            json!({
+                "id": obs.event_id.as_str(),
+                "timestamp": timestamp,
+                // A tool call is modelled as a span. `tool-create` is not a
+                // valid Langfuse ingestion observation type — older/self-hosted
+                // Langfuse rejects it, silently dropping every tool observation.
+                "type": "span-create",
+                "body": clean_nulls(json!({
+                    "id": call_id.as_str(),
+                    "traceId": trace_id,
+                    "name": tool_name,
+                    "startTime": started_at_ms.map(iso_ms).unwrap_or_else(|| timestamp.clone()),
+                    "endTime": end_time,
+                    "input": input,
+                    "output": output,
+                    "level": error.as_ref().map(|_| "ERROR"),
+                    "statusMessage": error,
+                    "metadata": tool_metadata,
+                })),
+            })
+        }
         AgentEvent::RunFailed { error, .. } => json!({
             "id": obs.event_id.as_str(),
             "timestamp": timestamp,

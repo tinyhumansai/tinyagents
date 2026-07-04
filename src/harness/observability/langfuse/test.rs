@@ -116,6 +116,9 @@ fn populates_generation_and_tool_io_when_captured() {
                         started_at_ms: Some(1_704_067_199_500),
                         input: Some(json!({ "query": "weather" })),
                         output: Some(json!("sunny")),
+                        duration_ms: Some(250),
+                        output_bytes: Some(5),
+                        error: None,
                     },
                 ),
             ],
@@ -135,7 +138,12 @@ fn populates_generation_and_tool_io_when_captured() {
     assert_eq!(events[1]["body"]["startTime"], iso_ms(1_704_067_199_000));
     assert_eq!(events[1]["body"]["endTime"], iso_ms(1_704_067_200_000));
     assert_eq!(events[2]["body"]["startTime"], iso_ms(1_704_067_199_500));
-    assert_eq!(events[2]["body"]["endTime"], iso_ms(1_704_067_200_001));
+    // The tool span's end time is now start + the event's own duration_ms
+    // (1_704_067_199_500 + 250), a real execution window rather than the
+    // journal-append timestamp.
+    assert_eq!(events[2]["body"]["endTime"], iso_ms(1_704_067_199_750));
+    // Result size rides metadata even though this fixture also captured output.
+    assert_eq!(events[2]["body"]["metadata"]["output_bytes"], 5);
 
     // Observation metadata carries only lineage + event kind, not the whole
     // event payload (which would duplicate input/output already in `body`).

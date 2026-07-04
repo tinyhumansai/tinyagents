@@ -260,12 +260,22 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             .capture
             .tool_io
             .then(|| Value::String(result.content.clone()));
+        // Outcome fields carried on the event itself (not a side-channel) so
+        // journal-backed exporters render duration/size/success without the
+        // live run's state. Duration is wall-clock (completion minus start);
+        // `error` mirrors `ToolResult::error` (`None` == success).
+        let duration_ms = crate::harness::ids::now_ms().saturating_sub(prepared.started_at_ms);
+        let output_bytes = result.content.len() as u64;
+        let error = result.error.clone();
         let record = ctx.emit(AgentEvent::ToolCompleted {
             call_id: prepared.call_id,
             tool_name: prepared.tool_name,
             started_at_ms: Some(prepared.started_at_ms),
             input: prepared.captured_input,
             output: captured_output,
+            duration_ms: Some(duration_ms),
+            output_bytes: Some(output_bytes),
+            error,
         });
         status.set_last_event(record.id);
 

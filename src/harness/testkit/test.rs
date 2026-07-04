@@ -341,6 +341,9 @@ fn make_trajectory() -> Vec<AgentEvent> {
             started_at_ms: None,
             input: None,
             output: None,
+            duration_ms: None,
+            output_bytes: None,
+            error: None,
         },
         AgentEvent::ModelStarted {
             call_id: CallId::new("c2"),

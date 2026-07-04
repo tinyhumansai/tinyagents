@@ -147,6 +147,9 @@ fn completed_events_deserialize_without_started_at_ms() {
         started_at_ms: Some(1_704_067_199_000),
         input: None,
         output: None,
+        duration_ms: Some(12),
+        output_bytes: Some(5),
+        error: None,
     };
     let json = serde_json::to_value(&event).unwrap();
     assert_eq!(json["started_at_ms"], 1_704_067_199_000u64);
