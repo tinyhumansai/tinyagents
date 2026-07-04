@@ -354,3 +354,36 @@ async fn steer_tool_redirect_without_payload_is_rejected() {
         .expect_err("redirect without payload is rejected");
     assert!(matches!(err, crate::TinyAgentsError::Validation(_)));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn jsonl_store_persists_inside_multi_thread_runtime() {
+    // Exercises the `block_in_place` path: persist runs on a tokio worker.
+    let path = unique_log_path("multi-thread-runtime");
+    let _ = std::fs::remove_file(&path);
+    let task_id = TaskId::new("task-mt");
+
+    let store = JsonlTaskStore::open(&path).unwrap();
+    store.insert(graph_spec(task_id.as_str())).unwrap();
+    store.mark_running(&task_id).unwrap();
+    store
+        .complete(&task_id, OrchestrationTaskResult::text("done"))
+        .unwrap();
+
+    assert_eq!(store.history(&task_id).len(), 3);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn jsonl_store_persists_inside_current_thread_runtime() {
+    // A current-thread runtime must not panic (block_in_place is skipped).
+    let path = unique_log_path("current-thread-runtime");
+    let _ = std::fs::remove_file(&path);
+    let task_id = TaskId::new("task-ct");
+
+    let store = JsonlTaskStore::open(&path).unwrap();
+    store.insert(graph_spec(task_id.as_str())).unwrap();
+    store.mark_running(&task_id).unwrap();
+
+    assert_eq!(store.history(&task_id).len(), 2);
+    let _ = std::fs::remove_file(&path);
+}

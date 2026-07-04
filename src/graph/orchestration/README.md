@@ -85,7 +85,11 @@ call `orchestration_tools` to build the full set, or call
   not the in-flight task itself.
 - `JsonlTaskStore` is append-only: task-record updates are appended, not
   rewritten in place, so a long-lived store grows monotonically. Compact or
-  rotate externally if that matters for your deployment.
+  rotate externally if that matters for your deployment. Each transition
+  appends one line; inside a multi-thread tokio runtime the write runs under
+  `block_in_place` so the blocking file I/O does not stall other tasks on
+  that worker (`TaskStore` is a synchronous trait, so it cannot await a
+  `spawn_blocking` handle).
 - `OrchestrationTaskFilter::matches` is evaluated in-process against loaded
   records; a `TaskStore` backend is not required to push the filter down, so
   `list` cost scales with total record count unless a given implementation
