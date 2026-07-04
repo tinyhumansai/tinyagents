@@ -18,6 +18,7 @@ system, recursion policy, or run limits.
 ## Detailed Module Docs
 
 - [Design](design.md)
+  - [RLM feature map, embedding, safety, events, testkit](operations.md)
 
 ## Responsibilities
 
