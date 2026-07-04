@@ -69,7 +69,7 @@ silently excluded from the rollup rather than reported with a bogus duration.
 | --- | --- |
 | `types.rs` | Every public type: `AgentObservation`, journal/status-store traits and in-memory impls, sink structs, latency types. |
 | `mod.rs` | Behavioral code: latency rollups, journal/store/sink impls. |
-| `langfuse.rs` | `LangfuseClient` and payload helpers (`clean_nulls`, `iso_ms`) shared with `graph::observability::langfuse`. |
+| `langfuse/` | `LangfuseClient` and payload helpers (`clean_nulls`, `iso_ms`) shared with `graph::observability::langfuse`, split into `mod.rs` (impl + helpers), `types.rs` (`LangfuseAuth`/`LangfuseClient`/`LangfuseTraceConfig`), and `test.rs`. |
 | `test.rs` | Unit tests (journal round-trips, redaction, latency rollups, sink fan-out). |
 
 ## Operational constraints
