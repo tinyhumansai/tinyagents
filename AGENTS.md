@@ -3,10 +3,12 @@
 ## Project Structure & Module Organization
 
 TinyAgents is a Rust 2024 library crate rooted at `Cargo.toml`. Public API
-exports live in `src/lib.rs`, with core modules split across `src/chat.rs`,
-`src/model.rs`, `src/tool.rs`, `src/graph.rs`, and `src/error.rs`. Additional
-architecture work is staged under module directories such as `src/harness/`,
-`src/language/`, and `src/registry/`.
+exports live in `src/lib.rs`, with the crate-wide error type in `src/error.rs`.
+The five surfaces each live in their own module directory: `src/graph/`
+(durable typed state graphs), `src/harness/` (provider-neutral model calls,
+tools, middleware, streaming), `src/language/` (the declarative `.rag`
+blueprint format), `src/registry/` (the named capability catalog), and
+`src/repl/` (the imperative `.ragsh` session runtime).
 
 Prefer small, focused modules that do one thing extremely well. New feature
 areas should live in module directories instead of accumulating broad,
@@ -15,10 +17,22 @@ dedicated `types.rs` file and keep module-local unit tests in a dedicated
 `test.rs` file. The module root should wire the pieces together and expose the
 smallest useful API.
 
-Integration tests are in `tests/`, currently focused on serialization behavior.
-Runnable usage examples are in `examples/`, especially
-`examples/basic_graph.rs`. Design notes and module-level specifications live in
-`docs/`, with `docs/spec/README.md` as the top-level architecture reference.
+Two Cargo features gate optional dependencies: `sqlite` (embedded SQLite
+checkpointer, `graph::checkpoint::SqliteCheckpointer`) and `repl` (embedded
+Rhai engine backing `repl::session`); every other provider and surface is
+compiled in by default.
+
+Integration tests are in `tests/`, covering serialization, graph routing,
+registry binding, the expressive and REPL languages, streaming, subagents,
+and provider contracts (including live, network-gated tests such as
+`tests/live_*.rs`). Runnable usage examples are in `examples/`, especially
+`examples/basic_graph.rs`. Design notes and module-level specifications live
+in `docs/`, with `docs/spec/README.md` as the top-level architecture
+reference and `docs/modules/` holding per-surface design docs (`graph/`,
+`harness/`, `registry/`, `expressive-language/`, `repl-language/`). A `wiki/`
+git submodule holds the published GitHub wiki pages; do not edit it as part
+of unrelated work, and commit its pointer update separately when it does
+change.
 
 ## Build, Test, and Development Commands
 
