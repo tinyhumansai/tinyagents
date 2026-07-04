@@ -1,5 +1,10 @@
 # TinyAgents SDK Gaps
 
+> **Internal migration backlog.** This is a working document tracking an
+> internal OpenHuman-to-TinyAgents migration effort, not a general public
+> roadmap or API reference. See [`ROADMAP.md`](../ROADMAP.md) for the
+> project's public-facing roadmap.
+
 This document lists TinyAgents SDK features that are missing or only partially
 available from the perspective of migrating OpenHuman's Rust agent core onto
 TinyAgents.
