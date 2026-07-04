@@ -118,11 +118,15 @@ impl SteeringHandle {
     ///
     /// The command becomes visible to the loop at its next steering checkpoint;
     /// this method never blocks and does not itself check the policy.
+    ///
+    /// Queue accessors recover from a poisoned mutex (a panic in another
+    /// holder) instead of panicking: the queue is a plain `VecDeque` with no
+    /// invariants that a panicking holder could break mid-update.
     pub fn send(&self, command: SteeringCommand) {
         self.inner
             .queue
             .lock()
-            .expect("steering queue mutex poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push_back(command);
     }
 
@@ -133,7 +137,7 @@ impl SteeringHandle {
             .inner
             .queue
             .lock()
-            .expect("steering queue mutex poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         queue.drain(..).collect()
     }
 
@@ -142,7 +146,7 @@ impl SteeringHandle {
         self.inner
             .queue
             .lock()
-            .expect("steering queue mutex poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty()
     }
 
@@ -151,7 +155,7 @@ impl SteeringHandle {
         self.inner
             .queue
             .lock()
-            .expect("steering queue mutex poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
     }
 

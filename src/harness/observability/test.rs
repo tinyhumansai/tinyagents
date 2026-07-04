@@ -603,3 +603,42 @@ async fn status_store_evicts_oldest_terminal_run_but_never_active_ones() {
     );
     assert!(store.get_status("run-c").await.unwrap().is_some());
 }
+
+/// The read-only accessors must recover from a poisoned lock (a panic in
+/// another holder) instead of panicking, matching the `poisoned()` error
+/// mapping used by the fallible trait methods.
+#[tokio::test]
+async fn in_memory_backends_recover_len_from_poisoned_lock() {
+    let journal = Arc::new(InMemoryEventJournal::new());
+    journal
+        .append(obs("run-poison", 0, AgentEvent::StateUpdate))
+        .await
+        .expect("append succeeds");
+
+    let poisoner = journal.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = poisoner.state.lock().unwrap();
+        panic!("poison the journal lock");
+    })
+    .join();
+    assert_eq!(journal.len("run-poison"), 1);
+    assert_eq!(journal.run_count(), 1);
+
+    let store = Arc::new(InMemoryStatusStore::new());
+    store
+        .put_status(HarnessRunStatus::new(
+            RunId::new("run-poison"),
+            ComponentId::new("agent"),
+        ))
+        .await
+        .expect("put succeeds");
+
+    let poisoner = store.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = poisoner.state.lock().unwrap();
+        panic!("poison the status store lock");
+    })
+    .join();
+    assert_eq!(store.len(), 1);
+    assert!(!store.is_empty());
+}
