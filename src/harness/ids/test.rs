@@ -66,3 +66,15 @@ fn status_and_phase_use_snake_case() {
         "\"building_request\""
     );
 }
+
+#[test]
+fn now_ms_returns_a_recent_unix_millis_timestamp() {
+    // The shared clock helper must return a plausible wall-clock timestamp: at
+    // or after a fixed 2020-01-01 epoch anchor and monotonic non-decreasing
+    // across two reads. (2020-01-01T00:00:00Z in ms.)
+    const JAN_2020_MS: u64 = 1_577_836_800_000;
+    let first = now_ms();
+    assert!(first >= JAN_2020_MS, "timestamp {first} predates 2020");
+    let second = now_ms();
+    assert!(second >= first, "now_ms went backwards: {second} < {first}");
+}

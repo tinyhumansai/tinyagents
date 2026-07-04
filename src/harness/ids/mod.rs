@@ -105,6 +105,20 @@ pub fn process_nonce() -> u64 {
     })
 }
 
+/// Returns the current wall-clock time in milliseconds since the Unix epoch,
+/// or `0` if the clock is set before the epoch.
+///
+/// The single `now_ms` used across the crate for timestamping records,
+/// checkpoints, goals, and observability events, so the epoch/`unwrap_or(0)`
+/// convention lives in exactly one place instead of being re-hand-rolled in
+/// every module that needs a millisecond timestamp.
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Allocates a fresh [`RunId`] of the form `run-<nonce>-<n>`, collision-free
 /// across process restarts (see [`process_nonce`]).
 pub fn new_run_id() -> RunId {

@@ -36,6 +36,7 @@ use serde_json::Value;
 pub use types::*;
 
 use crate::error::{Result, TinyAgentsError};
+use crate::harness::ids::now_ms;
 
 /// Process-wide counter making [`FileStore`] temp-file names unique so
 /// concurrent atomic writes to the same key never collide on their scratch file.
@@ -380,15 +381,6 @@ impl AppendStore for JsonlAppendStore {
         let path = self.stream_path(stream)?;
         Ok(Self::read_records(&path)?.len() as u64)
     }
-}
-
-/// Returns the current time in Unix-epoch milliseconds, saturating at `0` for
-/// clocks set before the epoch.
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 // ── StoreRegistry ─────────────────────────────────────────────────────────────

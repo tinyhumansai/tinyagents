@@ -132,7 +132,7 @@ where
     F: Fn(ThreadGoal) -> Fut,
     Fut: Future<Output = Result<TurnOutcome>>,
 {
-    let now = store::now_ms();
+    let now = crate::harness::ids::now_ms();
     let idle_ms = idle.as_millis() as u64;
     let mut candidates: Vec<ThreadGoal> = store::list_all(store)
         .await?

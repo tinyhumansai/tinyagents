@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::harness::events::{AgentEvent, EventListener, HarnessRunStatus};
-use crate::harness::ids::{CallId, EventId, RunId};
+use crate::harness::ids::{CallId, EventId, RunId, now_ms};
 use crate::harness::store::AppendStore;
 
 use super::worker::AppendWorker;
@@ -413,12 +413,4 @@ pub struct JournalSink {
 pub struct JsonlSink {
     /// Background drain that appends records without blocking the run.
     pub(crate) worker: Arc<AppendWorker<serde_json::Value>>,
-}
-
-/// Returns the current time in Unix-epoch milliseconds, saturating at `0`.
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }

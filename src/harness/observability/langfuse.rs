@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::events::AgentEvent;
+use crate::harness::ids::now_ms;
 use crate::harness::observability::AgentObservation;
 use crate::harness::usage::Usage;
 
@@ -431,14 +432,6 @@ pub(crate) fn iso_ms(ms: u64) -> String {
     let secs = duration.as_secs();
     let millis = duration.subsec_millis();
     format_unix_iso(secs, millis)
-}
-
-fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 fn format_unix_iso(secs: u64, millis: u32) -> String {

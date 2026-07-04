@@ -57,7 +57,7 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::graph::status::GraphRunStatus;
 use crate::graph::stream::{GraphEvent, GraphEventSink};
-use crate::harness::ids::{CheckpointId, EventId, GraphId, NodeId, RunId, ThreadId};
+use crate::harness::ids::{CheckpointId, EventId, GraphId, NodeId, RunId, ThreadId, now_ms};
 use crate::harness::observability::{AppendWorker, DEFAULT_DRAIN_CAPACITY};
 use crate::harness::store::AppendStore;
 
@@ -517,14 +517,6 @@ fn duration_ms(start: SystemTime, end: SystemTime) -> Option<u64> {
     end.duration_since(start)
         .ok()
         .map(|duration| duration.as_millis() as u64)
-}
-
-/// Returns the current time in Unix-epoch milliseconds, saturating at `0`.
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// Builds a uniform poisoned-lock validation error for the in-memory backends.
