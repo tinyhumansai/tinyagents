@@ -8,6 +8,7 @@
 //! All public types declared here are re-exported through [`super`] so callers
 //! import them from `crate::harness::embeddings` directly.
 
+use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
@@ -178,6 +179,19 @@ pub(crate) struct VectorEntry {
     pub(crate) metadata: Value,
 }
 
+/// Shared interior state of an [`InMemoryVectorStore`]: the entries in
+/// insertion order plus an id → index map for O(1) upsert-by-id.
+///
+/// Entries are never removed, only appended or replaced in place, so the
+/// indices in `index` stay valid for the lifetime of the store.
+#[derive(Debug, Default)]
+pub(crate) struct VectorStoreInner {
+    /// All stored entries, in insertion order.
+    pub(crate) entries: Vec<VectorEntry>,
+    /// Maps each entry id to its position in `entries`.
+    pub(crate) index: HashMap<String, usize>,
+}
+
 /// Thread-safe in-process [`VectorStore`] backed by a plain [`Vec`].
 ///
 /// Search is a linear scan computing cosine similarity against every stored
@@ -185,8 +199,8 @@ pub(crate) struct VectorEntry {
 /// store is cheaply clonable through the inner [`Arc`]; clones share the same
 /// underlying data.
 ///
-/// Adding a vector whose `id` already exists **replaces** the previous entry,
-/// so re-indexing a document updates it in place.
+/// Adding a vector whose `id` already exists **replaces** the previous entry
+/// (an O(1) id-indexed upsert), so re-indexing a document updates it in place.
 ///
 /// # Example
 /// ```
@@ -203,8 +217,8 @@ pub(crate) struct VectorEntry {
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct InMemoryVectorStore {
-    /// All stored entries, protected by a standard mutex.
-    pub(crate) entries: Arc<Mutex<Vec<VectorEntry>>>,
+    /// Entries plus their id index, protected by a standard mutex.
+    pub(crate) inner: Arc<Mutex<VectorStoreInner>>,
 }
 
 // ── Retriever ─────────────────────────────────────────────────────────────────

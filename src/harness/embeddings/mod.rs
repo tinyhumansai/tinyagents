@@ -108,7 +108,10 @@ impl InMemoryVectorStore {
 
     /// Returns the number of vectors currently stored.
     pub fn len(&self) -> usize {
-        self.entries.lock().map(|e| e.len()).unwrap_or(0)
+        self.inner
+            .lock()
+            .map(|inner| inner.entries.len())
+            .unwrap_or(0)
     }
 
     /// Returns `true` when the store holds no vectors.
@@ -117,22 +120,31 @@ impl InMemoryVectorStore {
     }
 }
 
+fn store_lock_err(e: impl std::fmt::Display) -> crate::error::TinyAgentsError {
+    crate::error::TinyAgentsError::Embedding(format!("vector store lock poisoned: {e}"))
+}
+
 #[async_trait]
 impl VectorStore for InMemoryVectorStore {
     async fn add(&self, id: String, vector: Vec<f32>, metadata: Value) -> Result<()> {
-        let mut entries = self.entries.lock().map_err(|e| {
-            crate::error::TinyAgentsError::Embedding(format!("vector store lock poisoned: {e}"))
-        })?;
+        let mut inner = self.inner.lock().map_err(store_lock_err)?;
         // Replace an existing entry with the same id so re-indexing updates it.
-        if let Some(existing) = entries.iter_mut().find(|e| e.id == id) {
-            existing.vector = vector;
-            existing.metadata = metadata;
-        } else {
-            entries.push(VectorEntry {
-                id,
-                vector,
-                metadata,
-            });
+        // The id → index map makes the upsert O(1) instead of a linear scan.
+        match inner.index.get(&id) {
+            Some(&at) => {
+                let existing = &mut inner.entries[at];
+                existing.vector = vector;
+                existing.metadata = metadata;
+            }
+            None => {
+                let at = inner.entries.len();
+                inner.index.insert(id.clone(), at);
+                inner.entries.push(VectorEntry {
+                    id,
+                    vector,
+                    metadata,
+                });
+            }
         }
         Ok(())
     }
@@ -141,22 +153,32 @@ impl VectorStore for InMemoryVectorStore {
         if top_k == 0 {
             return Ok(Vec::new());
         }
-        let entries = self.entries.lock().map_err(|e| {
-            crate::error::TinyAgentsError::Embedding(format!("vector store lock poisoned: {e}"))
-        })?;
-        let mut scored: Vec<ScoredDoc> = entries
+        let inner = self.inner.lock().map_err(store_lock_err)?;
+        // Score first (index + score only), pick the top-k, and clone ids and
+        // metadata only for the winners — entries outside the top-k are never
+        // cloned.
+        let mut scored: Vec<(usize, f32)> = inner
+            .entries
             .iter()
-            .map(|e| ScoredDoc {
-                id: e.id.clone(),
-                score: cosine_similarity(vector, &e.vector),
-                metadata: e.metadata.clone(),
-            })
+            .enumerate()
+            .map(|(at, e)| (at, cosine_similarity(vector, &e.vector)))
             .collect();
         // Sort by descending score; `total_cmp` keeps ordering total even with
-        // NaN-free f32 scores (cosine_similarity never returns NaN).
-        scored.sort_by(|a, b| b.score.total_cmp(&a.score));
+        // NaN-free f32 scores (cosine_similarity never returns NaN). The sort
+        // is stable, so equal scores keep insertion order, exactly as before.
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
         scored.truncate(top_k);
-        Ok(scored)
+        Ok(scored
+            .into_iter()
+            .map(|(at, score)| {
+                let entry = &inner.entries[at];
+                ScoredDoc {
+                    id: entry.id.clone(),
+                    score,
+                    metadata: entry.metadata.clone(),
+                }
+            })
+            .collect())
     }
 }
 
