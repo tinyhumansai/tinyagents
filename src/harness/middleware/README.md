@@ -40,7 +40,11 @@ outermost and the base call innermost.
 Every per-middleware hook invocation is bracketed by
 `AgentEvent::MiddlewareStarted` / `MiddlewareCompleted` events emitted through
 the `RunContext`, so hook activity is independently observable via the event
-sink regardless of what a middleware itself records.
+sink regardless of what a middleware itself records. The pair is always
+balanced: a hook that returns `Err` still emits its `MiddlewareCompleted`
+before the error short-circuits the stack, so an observer never sees a dangling
+`Started`. (The per-delta streaming hook `on_model_delta` is the one deliberate
+exception — it emits no bracketing events, to stay cheap on the token hot path.)
 
 ## Error handling
 

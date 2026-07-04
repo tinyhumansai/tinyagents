@@ -195,6 +195,47 @@ async fn emits_started_and_completed_events() {
 }
 
 #[tokio::test]
+async fn failing_hook_still_emits_balanced_completed_event() {
+    // A hook that returns `Err` must still close its `MiddlewareStarted` with a
+    // matching `MiddlewareCompleted`, so downstream observers never see a
+    // dangling, unbalanced `Started`.
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(FailingMiddleware));
+
+    let recorder = Arc::new(RecordingListener::new());
+    let mut c = ctx();
+    c.events.subscribe(recorder.clone());
+
+    let mut request = ModelRequest::default();
+    let result = stack.run_before_model(&mut c, &(), &mut request).await;
+    assert!(matches!(result, Err(TinyAgentsError::Middleware(_))));
+
+    let brackets: Vec<AgentEvent> = recorder
+        .events()
+        .into_iter()
+        .map(|r| r.event)
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::MiddlewareStarted { .. } | AgentEvent::MiddlewareCompleted { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        brackets,
+        vec![
+            AgentEvent::MiddlewareStarted {
+                name: "failing".to_string()
+            },
+            AgentEvent::MiddlewareCompleted {
+                name: "failing".to_string()
+            },
+        ],
+        "a failing hook must emit a balanced Started/Completed pair"
+    );
+}
+
+#[tokio::test]
 async fn on_model_delta_hook_emits_no_bracketing_events() {
     // The per-delta hook runs on the streaming hot path, so it must NOT emit
     // `MiddlewareStarted`/`MiddlewareCompleted` events the way the other stack

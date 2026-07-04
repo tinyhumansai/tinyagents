@@ -50,6 +50,36 @@ use crate::harness::usage::UsageTotals;
 
 use async_trait::async_trait;
 
+/// Runs one per-middleware lifecycle hook across the whole stack, bracketing
+/// each call with `MiddlewareStarted`/`MiddlewareCompleted` events and fanning
+/// `on_error` out to every middleware on the first failure (so the originating
+/// error is never masked).
+///
+/// This is factored as a macro rather than an async helper because each hook
+/// takes different arguments and borrows `ctx` mutably across its `await`, which
+/// a closure-based helper cannot express without heap-boxing every call.
+///
+/// Crucially, `MiddlewareCompleted` is emitted on *both* the success and error
+/// paths: a hook that returns `Err` can no longer leave a dangling
+/// `MiddlewareStarted` with no matching `Completed` in the event stream. `$iter`
+/// selects registration order (`.iter()`) or reverse order (`.iter().rev()`);
+/// `$call` is the (un-awaited) hook invocation on `$mw`.
+macro_rules! run_stack_hook {
+    ($self:ident, $ctx:ident, $iter:expr, |$mw:ident| $call:expr) => {{
+        for $mw in $iter {
+            let name = $mw.name().to_string();
+            $ctx.emit(AgentEvent::MiddlewareStarted { name: name.clone() });
+            let result = $call.await;
+            $ctx.emit(AgentEvent::MiddlewareCompleted { name });
+            if let Err(e) = result {
+                $self.fan_out_on_error($ctx, &e).await;
+                return Err(e);
+            }
+        }
+        Ok(())
+    }};
+}
+
 // ── AgentRun ────────────────────────────────────────────────────────────────
 
 impl AgentRun {
@@ -134,23 +164,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> MiddlewareStack<State, Ctx> {
     /// Runs every middleware's [`Middleware::before_agent`] in registration
     /// order.
     pub async fn run_before_agent(&self, ctx: &mut RunContext<Ctx>, state: &State) -> Result<()> {
-        for mw in self.middlewares.iter() {
-            ctx.emit(AgentEvent::MiddlewareStarted {
-                name: mw.name().to_string(),
-            });
-            match mw.before_agent(ctx, state).await {
-                Ok(()) => {
-                    ctx.emit(AgentEvent::MiddlewareCompleted {
-                        name: mw.name().to_string(),
-                    });
-                }
-                Err(e) => {
-                    self.fan_out_on_error(ctx, &e).await;
-                    return Err(e);
-                }
-            }
-        }
-        Ok(())
+        run_stack_hook!(self, ctx, self.middlewares.iter(), |mw| mw
+            .before_agent(ctx, state))
     }
 
     /// Runs every middleware's [`Middleware::after_agent`] in reverse
@@ -161,23 +176,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> MiddlewareStack<State, Ctx> {
         state: &State,
         run: &mut AgentRun,
     ) -> Result<()> {
-        for mw in self.middlewares.iter().rev() {
-            ctx.emit(AgentEvent::MiddlewareStarted {
-                name: mw.name().to_string(),
-            });
-            match mw.after_agent(ctx, state, run).await {
-                Ok(()) => {
-                    ctx.emit(AgentEvent::MiddlewareCompleted {
-                        name: mw.name().to_string(),
-                    });
-                }
-                Err(e) => {
-                    self.fan_out_on_error(ctx, &e).await;
-                    return Err(e);
-                }
-            }
-        }
-        Ok(())
+        run_stack_hook!(self, ctx, self.middlewares.iter().rev(), |mw| mw
+            .after_agent(ctx, state, run))
     }
 
     /// Runs every middleware's [`Middleware::before_model`] in registration
@@ -188,23 +188,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> MiddlewareStack<State, Ctx> {
         state: &State,
         request: &mut ModelRequest,
     ) -> Result<()> {
-        for mw in self.middlewares.iter() {
-            ctx.emit(AgentEvent::MiddlewareStarted {
-                name: mw.name().to_string(),
-            });
-            match mw.before_model(ctx, state, request).await {
-                Ok(()) => {
-                    ctx.emit(AgentEvent::MiddlewareCompleted {
-                        name: mw.name().to_string(),
-                    });
-                }
-                Err(e) => {
-                    self.fan_out_on_error(ctx, &e).await;
-                    return Err(e);
-                }
-            }
-        }
-        Ok(())
+        run_stack_hook!(self, ctx, self.middlewares.iter(), |mw| mw
+            .before_model(ctx, state, request))
     }
 
     /// Runs every middleware's [`Middleware::on_model_delta`] in registration
@@ -241,23 +226,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> MiddlewareStack<State, Ctx> {
         state: &State,
         response: &mut ModelResponse,
     ) -> Result<()> {
-        for mw in self.middlewares.iter().rev() {
-            ctx.emit(AgentEvent::MiddlewareStarted {
-                name: mw.name().to_string(),
-            });
-            match mw.after_model(ctx, state, response).await {
-                Ok(()) => {
-                    ctx.emit(AgentEvent::MiddlewareCompleted {
-                        name: mw.name().to_string(),
-                    });
-                }
-                Err(e) => {
-                    self.fan_out_on_error(ctx, &e).await;
-                    return Err(e);
-                }
-            }
-        }
-        Ok(())
+        run_stack_hook!(self, ctx, self.middlewares.iter().rev(), |mw| mw
+            .after_model(ctx, state, response))
     }
 
     /// Runs every middleware's [`Middleware::before_tool`] in registration
@@ -268,23 +238,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> MiddlewareStack<State, Ctx> {
         state: &State,
         call: &mut ToolCall,
     ) -> Result<()> {
-        for mw in self.middlewares.iter() {
-            ctx.emit(AgentEvent::MiddlewareStarted {
-                name: mw.name().to_string(),
-            });
-            match mw.before_tool(ctx, state, call).await {
-                Ok(()) => {
-                    ctx.emit(AgentEvent::MiddlewareCompleted {
-                        name: mw.name().to_string(),
-                    });
-                }
-                Err(e) => {
-                    self.fan_out_on_error(ctx, &e).await;
-                    return Err(e);
-                }
-            }
-        }
-        Ok(())
+        run_stack_hook!(self, ctx, self.middlewares.iter(), |mw| mw
+            .before_tool(ctx, state, call))
     }
 
     /// Runs every middleware's [`Middleware::on_tool_delta`] in registration
@@ -295,23 +250,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> MiddlewareStack<State, Ctx> {
         state: &State,
         delta: &mut ToolDelta,
     ) -> Result<()> {
-        for mw in self.middlewares.iter() {
-            ctx.emit(AgentEvent::MiddlewareStarted {
-                name: mw.name().to_string(),
-            });
-            match mw.on_tool_delta(ctx, state, delta).await {
-                Ok(()) => {
-                    ctx.emit(AgentEvent::MiddlewareCompleted {
-                        name: mw.name().to_string(),
-                    });
-                }
-                Err(e) => {
-                    self.fan_out_on_error(ctx, &e).await;
-                    return Err(e);
-                }
-            }
-        }
-        Ok(())
+        run_stack_hook!(self, ctx, self.middlewares.iter(), |mw| mw
+            .on_tool_delta(ctx, state, delta))
     }
 
     /// Runs every middleware's [`Middleware::after_tool`] in reverse
@@ -322,23 +262,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> MiddlewareStack<State, Ctx> {
         state: &State,
         result: &mut ToolResult,
     ) -> Result<()> {
-        for mw in self.middlewares.iter().rev() {
-            ctx.emit(AgentEvent::MiddlewareStarted {
-                name: mw.name().to_string(),
-            });
-            match mw.after_tool(ctx, state, result).await {
-                Ok(()) => {
-                    ctx.emit(AgentEvent::MiddlewareCompleted {
-                        name: mw.name().to_string(),
-                    });
-                }
-                Err(e) => {
-                    self.fan_out_on_error(ctx, &e).await;
-                    return Err(e);
-                }
-            }
-        }
-        Ok(())
+        run_stack_hook!(self, ctx, self.middlewares.iter().rev(), |mw| mw
+            .after_tool(ctx, state, result))
     }
 
     /// Runs every middleware's [`Middleware::on_error`] in registration order,
@@ -424,14 +349,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> ModelHandler<'_, State, Ctx> {
                     remaining: tail,
                     base: self.base,
                 };
-                ctx.emit(AgentEvent::MiddlewareStarted {
-                    name: head.name().to_string(),
-                });
-                let outcome = head.wrap_model(ctx, state, request, next).await?;
-                ctx.emit(AgentEvent::MiddlewareCompleted {
-                    name: head.name().to_string(),
-                });
-                Ok(outcome)
+                let name = head.name().to_string();
+                ctx.emit(AgentEvent::MiddlewareStarted { name: name.clone() });
+                // Emit `Completed` whether the wrap layer succeeds or errors, so
+                // a failing layer never leaves a dangling `Started` in the event
+                // stream (the onion's balance invariant).
+                let outcome = head.wrap_model(ctx, state, request, next).await;
+                ctx.emit(AgentEvent::MiddlewareCompleted { name });
+                outcome
             }
             None => Ok(MiddlewareModelOutcome::Response(
                 self.base.call(ctx, state, request).await?,
@@ -455,14 +380,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> ToolHandler<'_, State, Ctx> {
                     remaining: tail,
                     base: self.base,
                 };
-                ctx.emit(AgentEvent::MiddlewareStarted {
-                    name: head.name().to_string(),
-                });
-                let outcome = head.wrap_tool(ctx, state, call, next).await?;
-                ctx.emit(AgentEvent::MiddlewareCompleted {
-                    name: head.name().to_string(),
-                });
-                Ok(outcome)
+                let name = head.name().to_string();
+                ctx.emit(AgentEvent::MiddlewareStarted { name: name.clone() });
+                // Balance `Started` with `Completed` even when the wrap layer
+                // errors (see `ModelHandler::run`).
+                let outcome = head.wrap_tool(ctx, state, call, next).await;
+                ctx.emit(AgentEvent::MiddlewareCompleted { name });
+                outcome
             }
             None => Ok(MiddlewareToolOutcome::Result(
                 self.base.call(ctx, state, call).await?,
