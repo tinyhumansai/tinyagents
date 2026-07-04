@@ -12,6 +12,8 @@ server.
 ## Detailed Module Docs
 
 - [Design](design.md)
+  - [Events and persistence](events.md)
+  - [Operations and lifecycle](operations.md)
 - [Model catalog and local snapshots](model-catalog.md)
 
 ## Responsibilities
@@ -73,6 +75,8 @@ Documentation layout:
 docs/modules/registry/
   README.md
   design.md
+  events.md
+  operations.md
   model-catalog.md
   model-catalog.snapshot.json
 ```
