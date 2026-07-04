@@ -106,6 +106,21 @@ fn invalid_escape_is_a_parse_error() {
     assert!(matches!(err, crate::error::TinyAgentsError::Parse { .. }));
 }
 
+#[test]
+fn literal_as_display_does_not_saturate_huge_floats() {
+    // A huge finite float must not be truncated to i64::MAX; it should render
+    // using the float's own formatting instead.
+    let huge = Literal::Num(1e30);
+    assert_eq!(huge.as_display(), format!("{}", 1e30_f64));
+    assert_ne!(huge.as_display(), format!("{}", i64::MAX));
+
+    let nan = Literal::Num(f64::NAN);
+    assert_eq!(nan.as_display(), "NaN");
+
+    let inf = Literal::Num(f64::INFINITY);
+    assert_eq!(inf.as_display(), "inf");
+}
+
 // ---------------------------------------------------------------------------
 // Spans, source map, and diagnostics
 // ---------------------------------------------------------------------------
