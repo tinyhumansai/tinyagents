@@ -101,7 +101,7 @@ cause or replace it with a different error.
 | --- | --- |
 | `types.rs` | Every public type: traits, `MiddlewareStack`, built-in middleware structs. |
 | `mod.rs` | Behavioral code: `AgentRun` helpers, the stack runner, built-in `Middleware` impls. |
-| `library/` | Constructors and additional impls for the built-in middleware. |
+| `library/` | Constructors and additional impls for the built-in middleware, split by concern: `resilience.rs` (retry/timeout/fallback/rate-limit), `budget.rs` (token/cost tracking and enforcement), `tool_policy.rs` (allowlisting, policy, dynamic/contextual selection, human approval), `observe.rs` (structured-output validation, dynamic prompt, redaction, tracing). |
 | `test.rs` | Unit tests (ordering, short-circuiting, each built-in middleware). |
 
 ## Operational constraints
