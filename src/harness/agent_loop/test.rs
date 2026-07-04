@@ -9,10 +9,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde_json::json;
 
+use super::AgentStreamItem;
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::context::{RunConfig, RunContext};
+use crate::harness::events::AgentEvent;
 use crate::harness::limits::RunLimits;
 use crate::harness::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
 use crate::harness::middleware::{
@@ -1951,4 +1954,155 @@ async fn unknown_tool_recovery_keeps_its_slot_in_a_parallel_turn() {
     assert!(run.messages[2].text().contains("unknown tool `missing`"));
     assert_eq!(second.tool_call_id, "call-b");
     assert_eq!(run.messages[3].text(), "beta-out");
+}
+
+// ── invoke_stream (caller-consumable streaming) ──────────────────────────────
+
+/// Collects an `invoke_stream` run into a vec and returns (events, terminal).
+async fn collect_stream(items: Vec<AgentStreamItem>) -> (Vec<AgentEvent>, AgentStreamItem) {
+    let terminal = items
+        .last()
+        .cloned()
+        .expect("stream must yield at least a terminal item");
+    // Exactly one terminal, and it is the final item.
+    let terminals = items
+        .iter()
+        .filter(|i| !matches!(i, AgentStreamItem::Event(_)))
+        .count();
+    assert_eq!(terminals, 1, "exactly one terminal item");
+    assert!(
+        !matches!(
+            items[..items.len() - 1].last(),
+            Some(AgentStreamItem::Completed(_))
+        ) && !matches!(
+            items[..items.len() - 1].last(),
+            Some(AgentStreamItem::Failed(_))
+        ),
+        "terminal must be last"
+    );
+    let events = items
+        .into_iter()
+        .filter_map(|i| match i {
+            AgentStreamItem::Event(r) => Some(r.event),
+            _ => None,
+        })
+        .collect();
+    (events, terminal)
+}
+
+#[tokio::test]
+async fn invoke_stream_yields_events_then_completed() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("hello there")));
+
+    let items: Vec<AgentStreamItem> = harness
+        .invoke_stream(
+            &(),
+            (),
+            RunConfig::new("run-stream"),
+            vec![Message::user("hi")],
+        )
+        .collect()
+        .await;
+    let (events, terminal) = collect_stream(items).await;
+
+    match terminal {
+        AgentStreamItem::Completed(run) => {
+            assert_eq!(run.text().as_deref(), Some("hello there"));
+        }
+        other => panic!("expected Completed terminal, got {other:?}"),
+    }
+    // Live events flowed before the terminal: run lifecycle + a model delta.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::RunStarted { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ModelDelta { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::RunCompleted { .. }))
+    );
+}
+
+#[tokio::test]
+async fn invoke_stream_surfaces_tool_lifecycle() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("c1", "spin", json!({})),
+            text_response("done", 5, 2),
+        ])),
+    );
+    harness.register_tool(Arc::new(FakeTool::new("spin", "again")));
+
+    let items: Vec<AgentStreamItem> = harness
+        .invoke_stream(
+            &(),
+            (),
+            RunConfig::new("run-tools"),
+            vec![Message::user("go")],
+        )
+        .collect()
+        .await;
+    let (events, terminal) = collect_stream(items).await;
+
+    let started = events.iter().position(
+        |e| matches!(e, AgentEvent::ToolStarted { tool_name, .. } if tool_name == "spin"),
+    );
+    let completed = events.iter().position(
+        |e| matches!(e, AgentEvent::ToolCompleted { tool_name, .. } if tool_name == "spin"),
+    );
+    assert!(started.is_some(), "ToolStarted for spin must be streamed");
+    assert!(
+        completed.is_some(),
+        "ToolCompleted for spin must be streamed"
+    );
+    assert!(
+        started < completed,
+        "ToolStarted must precede ToolCompleted in the stream"
+    );
+    match terminal {
+        AgentStreamItem::Completed(run) => assert_eq!(run.text().as_deref(), Some("done")),
+        other => panic!("expected Completed terminal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn invoke_stream_yields_failed_terminal_on_error() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    // A model that always asks for the tool, capped so the loop trips the limit.
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_tool_call("spin", json!({}))),
+    );
+    harness.register_tool(Arc::new(FakeTool::new("spin", "again")));
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default().with_max_model_calls(1),
+        ..RunPolicy::default()
+    });
+
+    let items: Vec<AgentStreamItem> = harness
+        .invoke_stream(
+            &(),
+            (),
+            RunConfig::new("run-fail"),
+            vec![Message::user("go")],
+        )
+        .collect()
+        .await;
+    let (_events, terminal) = collect_stream(items).await;
+
+    match terminal {
+        AgentStreamItem::Failed(message) => {
+            assert!(message.contains("max model calls"), "got: {message}");
+        }
+        other => panic!("expected Failed terminal, got {other:?}"),
+    }
 }
