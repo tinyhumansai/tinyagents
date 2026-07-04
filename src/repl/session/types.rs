@@ -23,9 +23,11 @@ use crate::registry::CapabilityRegistry;
 ///
 /// These are restored to their session baseline after each cell so a script
 /// can read or temporarily shadow them but cannot permanently replace the
-/// session's context, state, or final-answer slots.
-pub const RESERVED_VARIABLES: &[&str] =
-    &["context", "state", "messages", "history", "run", "answer"];
+/// session's context, state, or run slots. `answer` is *not* included here:
+/// it is a capability function only (see [`RESERVED_FUNCTIONS`]), never a
+/// readable session variable, so listing it in both would seed the scope
+/// with a duplicate entry for the same name.
+pub const RESERVED_VARIABLES: &[&str] = &["context", "state", "messages", "history", "run"];
 
 /// Reserved built-in *capability function* names.
 ///
@@ -55,12 +57,17 @@ pub const RESERVED_FUNCTIONS: &[&str] = &[
 ];
 
 /// Returns every reserved name (variables and capability functions) the
-/// runtime must protect across cells.
+/// runtime must protect across cells, each name yielded at most once even if
+/// it were (accidentally) listed in both [`RESERVED_VARIABLES`] and
+/// [`RESERVED_FUNCTIONS`] — callers seed one scope entry per yielded name, so
+/// a duplicate here would silently double-push the same variable.
 pub fn reserved_names() -> impl Iterator<Item = &'static str> {
+    let mut seen = std::collections::HashSet::new();
     RESERVED_VARIABLES
         .iter()
         .copied()
         .chain(RESERVED_FUNCTIONS.iter().copied())
+        .filter(move |name| seen.insert(*name))
 }
 
 // ── Policy ──────────────────────────────────────────────────────────────────

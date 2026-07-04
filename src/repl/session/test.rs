@@ -149,6 +149,32 @@ fn reserved_names_are_restored_after_each_cell() {
 }
 
 #[test]
+fn reserved_names_contains_no_duplicates() {
+    // `answer` is a capability function (see RESERVED_FUNCTIONS), not a
+    // readable session variable; it must not also appear in
+    // RESERVED_VARIABLES, or `ReplVariables::seeded` double-pushes the same
+    // scope entry.
+    let names: Vec<&str> = reserved_names().collect();
+    let mut seen = std::collections::HashSet::new();
+    for name in &names {
+        assert!(seen.insert(*name), "duplicate reserved name: {name}");
+    }
+    assert!(names.contains(&"answer"));
+}
+
+#[test]
+fn answer_variable_is_seeded_exactly_once_in_scope() {
+    let s = session();
+    let count = s
+        .variables
+        .scope
+        .iter()
+        .filter(|(name, _, _)| *name == "answer")
+        .count();
+    assert_eq!(count, 1, "`answer` must be seeded into scope exactly once");
+}
+
+#[test]
 fn reserved_capability_name_cannot_be_set_as_a_variable() {
     let mut s = session();
     let err = s
