@@ -515,6 +515,157 @@ async fn context_compression_none_window_falls_back_to_trigger_tokens() {
     assert_eq!(mw.records().len(), 1);
 }
 
+// ── MicrocompactMiddleware ────────────────────────────────────────────────────
+//
+// These cases are the byte-for-byte parity contract ported from the OpenHuman
+// in-house `MicrocompactMiddleware` this type replaces: older tool-result bodies
+// are blanked to the caller's placeholder, the newest `keep_recent` are kept
+// verbatim, non-tool messages are never touched, and the pass is idempotent.
+
+const CLEARED: &str = "[Old tool result content cleared]";
+
+#[tokio::test]
+async fn microcompact_clears_older_tool_bodies_and_keeps_recent() {
+    let mw = MicrocompactMiddleware::new(1, CLEARED);
+    let mut request = ModelRequest {
+        messages: vec![
+            Message::system("sys"),
+            Message::user("hello"),
+            Message::tool("t1", "FIRST_BODY"),
+            Message::assistant("thinking"),
+            Message::tool("t2", "SECOND_BODY"),
+            Message::tool("t3", "THIRD_BODY"),
+        ],
+        ..Default::default()
+    };
+
+    mw.before_model(&mut ctx(), &(), &mut request)
+        .await
+        .unwrap();
+
+    // 3 tool messages, keep_recent=1 → the two oldest cleared, newest kept.
+    assert_eq!(request.messages[2].text(), CLEARED);
+    assert_eq!(request.messages[4].text(), CLEARED);
+    assert_eq!(request.messages[5].text(), "THIRD_BODY");
+    // Non-tool messages are never touched.
+    assert_eq!(request.messages[0].text(), "sys");
+    assert_eq!(request.messages[1].text(), "hello");
+    assert_eq!(request.messages[3].text(), "thinking");
+    // Cleared tool messages keep their tool_call_id.
+    match &request.messages[2] {
+        Message::Tool(t) => assert_eq!(t.tool_call_id, "t1"),
+        other => panic!("expected tool message, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn microcompact_is_a_noop_when_within_keep_recent() {
+    let mw = MicrocompactMiddleware::new(5, CLEARED);
+    let mut request = ModelRequest {
+        messages: vec![Message::tool("t1", "A"), Message::tool("t2", "B")],
+        ..Default::default()
+    };
+    mw.before_model(&mut ctx(), &(), &mut request)
+        .await
+        .unwrap();
+    assert_eq!(request.messages[0].text(), "A");
+    assert_eq!(request.messages[1].text(), "B");
+}
+
+#[tokio::test]
+async fn microcompact_is_idempotent() {
+    let mw = MicrocompactMiddleware::new(1, CLEARED);
+    let mut request = ModelRequest {
+        messages: vec![Message::tool("t1", "FIRST"), Message::tool("t2", "SECOND")],
+        ..Default::default()
+    };
+    mw.before_model(&mut ctx(), &(), &mut request)
+        .await
+        .unwrap();
+    assert_eq!(request.messages[0].text(), CLEARED);
+    // Second pass leaves the already-cleared body as the placeholder.
+    mw.before_model(&mut ctx(), &(), &mut request)
+        .await
+        .unwrap();
+    assert_eq!(request.messages[0].text(), CLEARED);
+    assert_eq!(request.messages[1].text(), "SECOND");
+}
+
+#[tokio::test]
+async fn microcompact_emits_no_event_by_default() {
+    // Default construction is silent: bodies are still cleared, but no
+    // Compressed event is emitted (parity with the OpenHuman in-house version).
+    let mw = Arc::new(MicrocompactMiddleware::new(1, CLEARED));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw.clone());
+
+    let recorder = Arc::new(RecordingListener::new());
+    let mut c = ctx();
+    c.events.subscribe(recorder.clone());
+
+    let mut request = ModelRequest {
+        messages: vec![Message::tool("t1", "FIRST"), Message::tool("t2", "SECOND")],
+        ..Default::default()
+    };
+    stack
+        .run_before_model(&mut c, &(), &mut request)
+        .await
+        .unwrap();
+
+    assert_eq!(request.messages[0].text(), CLEARED);
+    let events: Vec<AgentEvent> = recorder.events().into_iter().map(|r| r.event).collect();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Compressed { .. })),
+        "no Compressed event should be emitted when events are off"
+    );
+}
+
+#[tokio::test]
+async fn microcompact_emits_compressed_event_when_enabled() {
+    let mw = Arc::new(MicrocompactMiddleware::new(1, CLEARED).with_events(true));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw.clone());
+
+    let recorder = Arc::new(RecordingListener::new());
+    let mut c = ctx();
+    c.events.subscribe(recorder.clone());
+
+    let mut request = ModelRequest {
+        messages: vec![
+            Message::tool("t1", "x".repeat(400)),
+            Message::tool("t2", "y".repeat(400)),
+        ],
+        ..Default::default()
+    };
+    stack
+        .run_before_model(&mut c, &(), &mut request)
+        .await
+        .unwrap();
+
+    let compressed: Vec<(u64, u64)> = recorder
+        .events()
+        .into_iter()
+        .filter_map(|r| match r.event {
+            AgentEvent::Compressed {
+                from_tokens,
+                to_tokens,
+            } => Some((from_tokens, to_tokens)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        compressed.len(),
+        1,
+        "one Compressed event when a body cleared"
+    );
+    assert!(
+        compressed[0].0 > compressed[0].1,
+        "tokens dropped after clear"
+    );
+}
+
 #[tokio::test]
 async fn usage_accounting_accumulates_across_calls() {
     let mw = Arc::new(UsageAccountingMiddleware::new());

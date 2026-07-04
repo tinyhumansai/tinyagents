@@ -179,7 +179,8 @@ pub use graph::{
 pub use graph::{
     GraphEventJournal, GraphHealthSummary, GraphLangfuseExporter, GraphLatencyMetrics,
     GraphNodeHealth, GraphNodeLatency, GraphObservation, GraphStatusStore, GraphStepLatency,
-    InMemoryGraphEventJournal, InMemoryGraphStatusStore, JournalGraphSink, StoreGraphEventJournal,
+    InMemoryGraphEventJournal, InMemoryGraphStatusStore, JournalGraphSink, SpanMetadataFn,
+    StoreGraphEventJournal,
 };
 
 // --- Graph: orchestration tools (ordinary harness Tool implementations) ---
