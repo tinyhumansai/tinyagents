@@ -646,6 +646,27 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for BudgetMidd
         }
         Ok(())
     }
+
+    async fn on_error(&self, _ctx: &mut RunContext<Ctx>, _error: &TinyAgentsError) -> Result<()> {
+        // A model call that fails (retries/fallback exhausted, hard provider
+        // error, middleware timeout, ...) short-circuits with `?` before
+        // `after_model` ever runs, so the reservation `before_model` added to
+        // the shared tracker would otherwise never be released. Release it
+        // here so a run of failures cannot permanently inflate
+        // `reserved_input_total` and starve every future call on a
+        // process-lifetime-shared `BudgetTracker`.
+        let reserved = std::mem::take(
+            &mut *self
+                .pending_reservation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        if reserved > 0 {
+            let mut guard = self.tracker.lock_recovering();
+            guard.reserved_input_total = guard.reserved_input_total.saturating_sub(reserved);
+        }
+        Ok(())
+    }
 }
 
 // ── ToolPolicyMiddleware ──────────────────────────────────────────────────────

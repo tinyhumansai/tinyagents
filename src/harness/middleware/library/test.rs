@@ -673,6 +673,47 @@ async fn reservation_is_released_even_when_response_carries_no_usage() {
     assert_eq!(tracker.snapshot().reserved_input_total, 0);
 }
 
+#[tokio::test]
+async fn reservation_is_released_when_model_call_errors() {
+    // A model call that ultimately errors (retries/fallback exhausted, hard
+    // provider error, timeout, ...) never reaches `after_model` — the wrap
+    // onion returns `Err` and the harness propagates it with `?` before the
+    // lifecycle `after_model` hook runs. The reservation `before_model` added
+    // must still be released (via `on_error`), or it leaks forever and
+    // permanently starves every later call on a shared tracker.
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let mw = BudgetMiddleware::new(BudgetLimits {
+        max_input_tokens: Some(5),
+        ..BudgetLimits::default()
+    });
+    let tracker = mw.tracker();
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    let mut req = ModelRequest::new(vec![Message::user("hi")]);
+    stack
+        .run_before_model(&mut ctx, &(), &mut req)
+        .await
+        .expect("small call fits the reservation");
+    assert!(tracker.snapshot().reserved_input_total > 0);
+
+    // Simulate the model call failing before `after_model` ever runs: the
+    // harness surfaces the failure to every middleware via `on_error`
+    // instead.
+    let error = TinyAgentsError::Model("provider down".to_string());
+    stack.run_on_error(&mut ctx, &error).await.unwrap();
+
+    assert_eq!(tracker.snapshot().reserved_input_total, 0);
+
+    // The tracker must have recovered: a fresh call reserving the same
+    // amount should not be rejected as if capacity were still consumed.
+    let mut req2 = ModelRequest::new(vec![Message::user("hi")]);
+    stack
+        .run_before_model(&mut ctx, &(), &mut req2)
+        .await
+        .expect("reservation was released so a new call fits the budget again");
+}
+
 #[test]
 fn poisoned_tracker_stays_fail_closed() {
     // A poisoned mutex still holds a valid last-written spend value; a
