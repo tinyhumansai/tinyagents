@@ -36,6 +36,30 @@ use crate::harness::model::{ModelRequest, ModelResponse};
 
 // ── Deterministic hash ────────────────────────────────────────────────────────
 
+/// Renders a finalized SHA-256 digest as a 64-character lowercase hex string.
+fn hex_digest(digest: impl AsRef<[u8]>) -> String {
+    digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Folds one JSON `value` into `hasher` as a self-delimiting frame: an ASCII
+/// domain `tag`, then the canonical byte length (little-endian `u64`), then the
+/// canonical bytes.
+///
+/// Canonicalizing per component keeps peak memory bounded by the single largest
+/// value rather than the whole request tree, and the length prefix makes the
+/// concatenation of frames unambiguous — no two distinct component sequences
+/// can hash to the same byte stream.
+fn fold_canonical(hasher: &mut Sha256, tag: u8, value: Value) {
+    let bytes = serde_json::to_vec(&canonical_value(value)).unwrap_or_default();
+    hasher.update([tag]);
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(&bytes);
+}
+
 /// Computes a deterministic FNV-1a 64-bit hash over `data` and returns it as
 /// a 16-character lowercase hex string.
 ///
@@ -77,33 +101,60 @@ fn canonical_value(v: Value) -> Value {
 
 /// Produces a stable, deterministic cache key for `request`.
 ///
-/// The key is a 16-character lowercase hex string derived from:
-/// 1. Serializing `request` to a [`serde_json::Value`].
-/// 2. Sorting all JSON object keys recursively (canonical form).
-/// 3. Re-serializing to a compact JSON string.
-/// 4. Applying SHA-256 to the canonical bytes.
+/// The key is a 64-character lowercase SHA-256 hex string built by folding the
+/// request into the hasher **incrementally**, one component at a time:
+/// 1. Serialize `request` once to a [`serde_json::Value`].
+/// 2. Fold each conversation message as its own length-prefixed, canonicalized
+///    frame (tag `M`), preceded by the message count.
+/// 3. Fold each tool schema likewise (tag `T`), preceded by the tool count.
+/// 4. Fold the remaining scalar/parameter fields — everything left in the
+///    request object once `messages` and `tools` are removed — as one envelope
+///    frame (tag `E`).
 ///
-/// Because every behavior-affecting field of [`ModelRequest`] participates in
-/// the serialization, two requests that differ in any field produce different
-/// canonical bytes and should produce different keys modulo SHA-256 collision
-/// resistance.
+/// This avoids the previous approach's three simultaneous whole-transcript
+/// allocations (a full `Value` tree, a full canonical rebuild, and a full byte
+/// buffer). Transcripts routinely carry large tool results; canonicalizing and
+/// serializing per component bounds peak memory by the single largest component
+/// instead of the entire request. The envelope is taken as "whatever remains"
+/// so that any future [`ModelRequest`] field automatically participates in the
+/// key — no field can silently drop out and cause a false cache hit.
+///
+/// Distinct requests still map to distinct keys (modulo SHA-256 collision
+/// resistance): per-component length prefixes make the frame stream
+/// unambiguous, and every behavior-affecting field is folded exactly once.
 ///
 /// # Panics
-/// Does not panic. If serialization unexpectedly fails, returns an empty-data
-/// hash.
+/// Does not panic. If serialization unexpectedly fails, the affected frame
+/// folds empty bytes; the key stays well-defined.
 pub fn cache_key(request: &ModelRequest) -> String {
-    let value = serde_json::to_value(request).unwrap_or(Value::Null);
-    let canonical = canonical_value(value);
-    // Stream the canonical JSON directly into the digest instead of allocating
-    // an intermediate `Vec<u8>`: `Sha256` implements `std::io::Write`.
     let mut hasher = Sha256::new();
-    if serde_json::to_writer(&mut hasher, &canonical).is_err() {
-        // Serialization of an already-materialized `Value` does not fail in
-        // practice; fall back to hashing empty data for a stable result.
-        hasher = Sha256::new();
+    let mut root = serde_json::to_value(request).unwrap_or(Value::Null);
+
+    if let Value::Object(map) = &mut root {
+        // Messages: fold one at a time so a long transcript never materializes
+        // a second full tree. The count frame keeps `[a, b]` distinct from a
+        // single message that happens to serialize to the same concatenation.
+        if let Some(Value::Array(messages)) = map.remove("messages") {
+            hasher.update(b"M");
+            hasher.update((messages.len() as u64).to_le_bytes());
+            for message in messages {
+                fold_canonical(&mut hasher, b'm', message);
+            }
+        }
+        // Tool schemas: already name-sorted by `ToolRegistry::schemas`, so the
+        // order is deterministic across calls.
+        if let Some(Value::Array(tools)) = map.remove("tools") {
+            hasher.update(b"T");
+            hasher.update((tools.len() as u64).to_le_bytes());
+            for tool in tools {
+                fold_canonical(&mut hasher, b't', tool);
+            }
+        }
     }
-    let digest = hasher.finalize();
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+
+    // Envelope: every remaining scalar/parameter field in one frame.
+    fold_canonical(&mut hasher, b'E', root);
+    hex_digest(hasher.finalize())
 }
 
 // ── InMemoryResponseCache ─────────────────────────────────────────────────────

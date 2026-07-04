@@ -1614,3 +1614,61 @@ async fn middleware_control_can_interrupt_run() {
         other => panic!("expected Interrupted, got {other:?}"),
     }
 }
+
+/// A model that records the tool schemas presented on each `invoke` and replays
+/// scripted responses in order. Used to prove the loop exposes the registered
+/// tool set on *every* turn, not just the first.
+struct ToolCapturingModel {
+    responses: Mutex<std::collections::VecDeque<ModelResponse>>,
+    seen_tools: Arc<Mutex<Vec<Vec<ToolSchema>>>>,
+}
+
+#[async_trait]
+impl ChatModel<()> for ToolCapturingModel {
+    async fn invoke(&self, _state: &(), request: ModelRequest) -> Result<ModelResponse> {
+        self.seen_tools.lock().unwrap().push(request.tools.clone());
+        let next = self.responses.lock().unwrap().pop_front();
+        next.ok_or_else(|| TinyAgentsError::Validation("no scripted response left".into()))
+    }
+}
+
+/// Regression test for the per-run tool-schema cache: hoisting
+/// `self.tools.schemas()` out of the loop must not change the tools the model
+/// sees on any turn. A two-turn run (tool call, then final text) must present
+/// the identical, non-empty schema set on both turns.
+#[tokio::test]
+async fn tool_schemas_are_stable_across_turns() {
+    let seen_tools = Arc::new(Mutex::new(Vec::new()));
+    let model = ToolCapturingModel {
+        responses: Mutex::new(
+            vec![
+                tool_call_response("c1", "spin", json!({})),
+                text_response("done", 5, 2),
+            ]
+            .into(),
+        ),
+        seen_tools: Arc::clone(&seen_tools),
+    };
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(model));
+    harness.register_tool(Arc::new(FakeTool::new("spin", "again")));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("run succeeds");
+    assert_eq!(run.text(), Some("done".to_string()));
+
+    let seen = seen_tools.lock().unwrap();
+    assert_eq!(seen.len(), 2, "model should be invoked twice");
+    assert!(
+        !seen[0].is_empty(),
+        "first turn must expose the registered tool schema"
+    );
+    assert_eq!(
+        seen[0], seen[1],
+        "cached schemas must reach the model identically on every turn"
+    );
+    assert_eq!(seen[0][0].name, "spin");
+}
