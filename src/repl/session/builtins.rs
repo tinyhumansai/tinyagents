@@ -517,18 +517,18 @@ fn graph_define_impl<State: Send + Sync + 'static>(
     let source =
         map_str(params, "source").ok_or_else(|| invalid(ctx, "graph_define: missing `source`"))?;
 
+    // Check the limit up front (without consuming a slot) so a session that
+    // has already hit the cap fails fast instead of paying for a parse and
+    // compile it can't keep the result of anyway.
+    if ctx.counters.lock().expect("counters poisoned").graph_def >= ctx.policy.max_graph_definitions
     {
-        let mut counters = ctx.counters.lock().expect("counters poisoned");
-        if counters.graph_def >= ctx.policy.max_graph_definitions {
-            return Err(raise(
-                ctx,
-                TinyAgentsError::LimitExceeded(format!(
-                    "graph definition limit ({}) exceeded",
-                    ctx.policy.max_graph_definitions
-                )),
-            ));
-        }
-        counters.graph_def += 1;
+        return Err(raise(
+            ctx,
+            TinyAgentsError::LimitExceeded(format!(
+                "graph definition limit ({}) exceeded",
+                ctx.policy.max_graph_definitions
+            )),
+        ));
     }
     if source.len() > ctx.policy.max_script_bytes {
         return Err(raise(
@@ -559,6 +559,23 @@ fn graph_define_impl<State: Send + Sync + 'static>(
                 format!("graph_define: source has no graph named `{name}`"),
             )
         })?;
+
+    // The draft is about to be recorded successfully; consume a slot now
+    // (re-checking the limit under the same lock to guard against a
+    // concurrent `graph_define` racing between the check above and here).
+    {
+        let mut counters = ctx.counters.lock().expect("counters poisoned");
+        if counters.graph_def >= ctx.policy.max_graph_definitions {
+            return Err(raise(
+                ctx,
+                TinyAgentsError::LimitExceeded(format!(
+                    "graph definition limit ({}) exceeded",
+                    ctx.policy.max_graph_definitions
+                )),
+            ));
+        }
+        counters.graph_def += 1;
+    }
 
     let handle = GraphBlueprintHandle {
         name: blueprint.graph_id.clone(),

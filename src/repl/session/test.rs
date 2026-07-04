@@ -225,6 +225,48 @@ fn output_byte_limit_bounds_intra_cell_buffering_in_a_print_loop() {
     assert!(matches!(err, TinyAgentsError::LimitExceeded(_)), "{err:?}");
 }
 
+#[test]
+fn graph_define_does_not_consume_the_limit_on_a_failed_draft() {
+    // A `graph_define` call whose source parses but names a graph that isn't
+    // in the source must not consume a definition slot: only a successfully
+    // recorded draft should count against `max_graph_definitions`.
+    let policy = ReplPolicy {
+        max_graph_definitions: 1,
+        ..ReplPolicy::default()
+    };
+    let mut s = ReplSession::<()>::new().with_policy(policy);
+
+    let source = r#"graph g { start a node a { kind model next END } }"#;
+
+    // First call: wrong graph name, so the draft is never recorded — this
+    // must fail without spending the one available slot.
+    let bad = s.eval_cell(&format!(
+        r#"graph_define(#{{ name: "missing", source: `{source}` }})"#
+    ));
+    assert!(
+        bad.is_err(),
+        "expected a failure for the unknown graph name"
+    );
+
+    // Second call: the correct graph name must still succeed, proving the
+    // failed attempt above did not consume the definition budget.
+    let good = s
+        .eval_cell(&format!(
+            r#"graph_define(#{{ name: "g", source: `{source}` }})"#
+        ))
+        .expect("a valid graph_define should still have a slot available");
+    assert!(good.value.is_some());
+
+    // A third attempt now must fail: the one slot has genuinely been spent.
+    let over_limit = s.eval_cell(&format!(
+        r#"graph_define(#{{ name: "g", source: `{source}` }})"#
+    ));
+    assert!(
+        over_limit.is_err(),
+        "the definition limit must be enforced once a slot is actually consumed"
+    );
+}
+
 /// A trivial [`HarnessAgent`] that returns a fixed response, for exercising
 /// `agent_query` without a real model/harness run.
 struct StubAgent;
