@@ -1082,12 +1082,23 @@ impl SseState {
     /// across chunk boundaries — including one that splits a multi-byte UTF-8
     /// character — is only decoded once it is complete.
     fn drain_lines(&mut self) {
-        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
-            let line_bytes: Vec<u8> = self.buf.drain(..=pos).collect();
+        // Scan with a moving start offset and drain the whole consumed prefix
+        // once at the end, rather than `drain(..=pos)` per line: the old form
+        // allocated a `Vec<u8>` per line and shifted the remaining buffer down
+        // on every line (O(n^2) over a chunk carrying many lines).
+        let mut start = 0;
+        while let Some(rel) = self.buf[start..].iter().position(|&b| b == b'\n') {
+            let end = start + rel;
             // A complete line (bounded by the ASCII `\n`) is whole UTF-8, so a
-            // lossy decode here can no longer straddle a chunk boundary.
-            let line = String::from_utf8_lossy(&line_bytes).into_owned();
+            // lossy decode here can no longer straddle a chunk boundary. The
+            // `into_owned` detaches the line from `buf` so `process_line` can
+            // borrow `self` mutably.
+            let line = String::from_utf8_lossy(&self.buf[start..end]).into_owned();
+            start = end + 1;
             self.process_line(&line);
+        }
+        if start > 0 {
+            self.buf.drain(..start);
         }
     }
 

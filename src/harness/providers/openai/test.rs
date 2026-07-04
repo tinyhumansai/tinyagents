@@ -735,6 +735,38 @@ async fn sse_stream_reassembles_multibyte_char_split_across_chunks() {
 }
 
 #[tokio::test]
+async fn sse_stream_processes_many_lines_in_one_chunk() {
+    // A single network chunk carrying several complete `data:` lines exercises
+    // the batched multi-line drain: every line is parsed in order and the buffer
+    // is consumed exactly once. Each line contributes one content fragment.
+    let mut chunk = Vec::new();
+    for frag in ["a", "b", "c", "d", "e"] {
+        chunk.extend_from_slice(
+            format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{frag}\"}}}}]}}\n\n")
+                .as_bytes(),
+        );
+    }
+    let raw: Vec<Vec<u8>> = vec![chunk, b"data: [DONE]\n\n".to_vec()];
+
+    let items = collect_sse(raw).await;
+
+    let text: String = items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "abcde", "all five lines in one chunk parsed in order");
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    assert_eq!(merged.finish().unwrap().text(), "abcde");
+}
+
+#[tokio::test]
 async fn sse_stream_drains_final_line_without_trailing_newline() {
     // The provider ends the stream with a final `data:` event that has no
     // trailing newline and no `[DONE]` sentinel. The leftover buffer must be
