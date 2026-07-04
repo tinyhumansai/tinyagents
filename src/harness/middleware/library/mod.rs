@@ -29,7 +29,7 @@ mod types;
 
 pub use types::*;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1291,14 +1291,35 @@ impl TracingMiddleware {
     pub fn with_label(label: &'static str) -> Self {
         Self {
             label,
-            records: Mutex::new(Vec::new()),
+            records: Mutex::new(VecDeque::new()),
             counts: Mutex::new(TraceCounts::default()),
+            max_records: DEFAULT_TRACE_RECORD_CAP,
         }
     }
 
+    /// Sets the maximum number of [`PhaseTrace`] entries retained before the
+    /// oldest is evicted. `0` disables recording entirely (counts are still
+    /// tracked).
+    pub fn with_max_records(mut self, max_records: usize) -> Self {
+        self.max_records = max_records;
+        let mut records = self.records.lock().expect("records mutex poisoned");
+        while records.len() > max_records {
+            records.pop_front();
+        }
+        drop(records);
+        self
+    }
+
     /// Returns the structured begin/end traces recorded so far, in order.
+    /// Bounded to at most [`TracingMiddleware::with_max_records`] entries
+    /// (default [`DEFAULT_TRACE_RECORD_CAP`]); older traces are evicted first.
     pub fn records(&self) -> Vec<PhaseTrace> {
-        self.records.lock().expect("records mutex poisoned").clone()
+        self.records
+            .lock()
+            .expect("records mutex poisoned")
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Returns a snapshot of the per-phase begin counts.
@@ -1307,10 +1328,14 @@ impl TracingMiddleware {
     }
 
     fn push(&self, phase: &'static str, boundary: TraceBoundary) {
-        self.records
-            .lock()
-            .expect("records mutex poisoned")
-            .push(PhaseTrace { phase, boundary });
+        let mut records = self.records.lock().expect("records mutex poisoned");
+        if self.max_records == 0 {
+            return;
+        }
+        if records.len() >= self.max_records {
+            records.pop_front();
+        }
+        records.push_back(PhaseTrace { phase, boundary });
     }
 }
 

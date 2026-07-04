@@ -19,6 +19,7 @@
 //! `mod.rs`; tests live in `test.rs`. Every public item is re-exported through
 //! `crate::harness::middleware` so callers import from one place.
 
+use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -464,6 +465,11 @@ pub enum TraceBoundary {
     End,
 }
 
+/// Default cap on the number of [`PhaseTrace`] entries a [`TracingMiddleware`]
+/// retains before evicting the oldest. Long-running agent loops otherwise grow
+/// this recorder without bound.
+pub const DEFAULT_TRACE_RECORD_CAP: usize = 1024;
+
 /// Lifecycle middleware that records structured begin/end traces and per-phase
 /// counts for an entire run.
 ///
@@ -474,10 +480,17 @@ pub enum TraceBoundary {
 /// giving tests and dashboards a structured timeline without parsing the event
 /// stream. (The surrounding [`MiddlewareStack`][crate::harness::middleware::MiddlewareStack]
 /// also emits `MiddlewareStarted`/`MiddlewareCompleted` events around each hook.)
+///
+/// The recorder is a bounded ring buffer (default cap
+/// [`DEFAULT_TRACE_RECORD_CAP`], configurable via
+/// [`TracingMiddleware::with_max_records`]): once full, the oldest trace is
+/// dropped to make room for the newest, so an unbounded run cannot grow this
+/// middleware's memory footprint forever.
 pub struct TracingMiddleware {
     pub(crate) label: &'static str,
-    pub(crate) records: Mutex<Vec<PhaseTrace>>,
+    pub(crate) records: Mutex<VecDeque<PhaseTrace>>,
     pub(crate) counts: Mutex<TraceCounts>,
+    pub(crate) max_records: usize,
 }
 
 /// Per-phase begin counts captured by [`TracingMiddleware`].

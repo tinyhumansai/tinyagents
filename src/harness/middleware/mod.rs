@@ -657,8 +657,21 @@ impl ContextCompressionMiddleware {
             label: "context_compression",
             policy,
             summarizer,
-            records: std::sync::Mutex::new(Vec::new()),
+            records: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            max_records: DEFAULT_COMPRESSION_RECORD_CAP,
         }
+    }
+
+    /// Sets the maximum number of [`SummaryRecord`]s retained before the
+    /// oldest is evicted. `0` disables recording entirely.
+    pub fn with_max_records(mut self, max_records: usize) -> Self {
+        self.max_records = max_records;
+        let mut records = self.records.lock().expect("records mutex poisoned");
+        while records.len() > max_records {
+            records.pop_front();
+        }
+        drop(records);
+        self
     }
 
     /// Returns the configured [`SummarizationPolicy`].
@@ -666,10 +679,17 @@ impl ContextCompressionMiddleware {
         &self.policy
     }
 
-    /// Returns the [`SummaryRecord`]s produced so far, in order. Each record
-    /// carries the compression provenance for one compaction.
+    /// Returns the [`SummaryRecord`]s produced so far, in order. Bounded to
+    /// at most [`ContextCompressionMiddleware::with_max_records`] entries
+    /// (default [`DEFAULT_COMPRESSION_RECORD_CAP`]); older records are
+    /// evicted first.
     pub fn records(&self) -> Vec<SummaryRecord> {
-        self.records.lock().expect("records mutex poisoned").clone()
+        self.records
+            .lock()
+            .expect("records mutex poisoned")
+            .iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -717,10 +737,15 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for ContextCom
         new_messages.extend(recent);
         let to_tokens = total_message_tokens(&new_messages);
 
-        self.records
-            .lock()
-            .expect("records mutex poisoned")
-            .push(record);
+        {
+            let mut records = self.records.lock().expect("records mutex poisoned");
+            if self.max_records > 0 {
+                if records.len() >= self.max_records {
+                    records.pop_front();
+                }
+                records.push_back(record);
+            }
+        }
         request.messages = new_messages;
 
         ctx.emit(AgentEvent::Compressed {
@@ -740,13 +765,34 @@ impl PromptCacheGuardMiddleware {
         Self {
             label: "prompt_cache_guard",
             previous: std::sync::Mutex::new(None),
-            events: std::sync::Mutex::new(Vec::new()),
+            events: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            max_events: DEFAULT_CACHE_GUARD_EVENT_CAP,
         }
     }
 
+    /// Sets the maximum number of [`CacheLayoutEvent`]s retained before the
+    /// oldest is evicted. `0` disables recording entirely.
+    pub fn with_max_events(mut self, max_events: usize) -> Self {
+        self.max_events = max_events;
+        let mut events = self.events.lock().expect("events mutex poisoned");
+        while events.len() > max_events {
+            events.pop_front();
+        }
+        drop(events);
+        self
+    }
+
     /// Returns the cache-layout change events recorded so far, in order.
+    /// Bounded to at most [`PromptCacheGuardMiddleware::with_max_events`]
+    /// entries (default [`DEFAULT_CACHE_GUARD_EVENT_CAP`]); older events are
+    /// evicted first.
     pub fn layout_events(&self) -> Vec<CacheLayoutEvent> {
-        self.events.lock().expect("events mutex poisoned").clone()
+        self.events
+            .lock()
+            .expect("events mutex poisoned")
+            .iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -774,10 +820,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for PromptCach
             && !prev.is_prefix_stable_against(&layout)
         {
             let event = CacheLayoutEvent::new(prev, &layout);
-            self.events
-                .lock()
-                .expect("events mutex poisoned")
-                .push(event);
+            let mut events = self.events.lock().expect("events mutex poisoned");
+            if self.max_events > 0 {
+                if events.len() >= self.max_events {
+                    events.pop_front();
+                }
+                events.push_back(event);
+            }
         }
         *previous = Some(layout);
         Ok(())

@@ -1219,3 +1219,35 @@ async fn tracing_records_phase_boundaries_and_counts() {
     assert_eq!(records.last().unwrap().phase, "agent");
     assert_eq!(records.last().unwrap().boundary, TraceBoundary::End);
 }
+
+#[tokio::test]
+async fn tracing_records_are_bounded_by_max_records() {
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let tracing = Arc::new(TracingMiddleware::new().with_max_records(3));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(tracing.clone());
+
+    // Each `before_agent`/`after_agent` pair pushes 2 records; run enough
+    // iterations to far exceed the cap of 3 and confirm memory stays bounded
+    // rather than growing without limit.
+    for _ in 0..50 {
+        stack.run_before_agent(&mut ctx, &()).await.unwrap();
+        let mut run = crate::harness::middleware::AgentRun::new();
+        stack
+            .run_after_agent(&mut ctx, &(), &mut run)
+            .await
+            .unwrap();
+    }
+
+    let records = tracing.records();
+    assert_eq!(records.len(), 3);
+    // The oldest entries were evicted; only the most recent boundary pair
+    // (plus one) survives.
+    assert_eq!(records.last().unwrap().phase, "agent");
+    assert_eq!(records.last().unwrap().boundary, TraceBoundary::End);
+
+    // Counts are unaffected by the record cap — they track unboundedly by
+    // design (a single `usize` per phase, not a growing collection).
+    let counts = tracing.counts();
+    assert_eq!(counts.agent, 50);
+}

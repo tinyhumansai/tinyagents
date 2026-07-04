@@ -357,6 +357,40 @@ async fn context_compression_compresses_at_or_above_threshold() {
 }
 
 #[tokio::test]
+async fn context_compression_records_are_bounded_by_max_records() {
+    // A long-running loop that compresses repeatedly must not grow the
+    // recorder without bound; cap it and confirm eviction happens.
+    let policy = SummarizationPolicy {
+        keep_last: 1,
+        ..SummarizationPolicy::default()
+    }
+    .with_context_window(100)
+    .with_threshold_fraction(0.5);
+    let mw = Arc::new(ContextCompressionMiddleware::new(policy).with_max_records(2));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw.clone());
+
+    let big = "a".repeat(200);
+    let mut c = ctx();
+    for _ in 0..10 {
+        let mut request = ModelRequest {
+            messages: vec![
+                user(&format!("{big}-1")),
+                user(&format!("{big}-2")),
+                user(&format!("{big}-3")),
+            ],
+            ..Default::default()
+        };
+        stack
+            .run_before_model(&mut c, &(), &mut request)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(mw.records().len(), 2);
+}
+
+#[tokio::test]
 async fn context_compression_keeps_system_prompt_before_summary() {
     // A leading system prompt carries persistent instructions and anchors the
     // cacheable prefix; the summary of elided older turns must be inserted
@@ -493,6 +527,26 @@ async fn prompt_cache_guard_detects_prefix_change() {
     assert!(events[0].changed_prefix);
     assert_eq!(events[0].segment_ids_before, vec!["sys".to_string()]);
     assert_eq!(events[0].segment_ids_after, vec!["sys2".to_string()]);
+}
+
+#[tokio::test]
+async fn prompt_cache_guard_events_are_bounded_by_max_events() {
+    let mw = Arc::new(PromptCacheGuardMiddleware::new().with_max_events(2));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw.clone());
+
+    let mut c = ctx();
+    // Each call after the first changes the stable prefix, producing an
+    // event; run far more iterations than the cap and confirm eviction.
+    for i in 0..10 {
+        let mut req = ModelRequest {
+            cache_segments: vec![segment(&format!("sys{i}"), SegmentRole::System, true)],
+            ..Default::default()
+        };
+        stack.run_before_model(&mut c, &(), &mut req).await.unwrap();
+    }
+
+    assert_eq!(mw.layout_events().len(), 2);
 }
 
 // ── wrap middleware: model ────────────────────────────────────────────────────
