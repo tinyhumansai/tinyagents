@@ -690,7 +690,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for ContextCom
             return Ok(());
         }
 
-        let (to_summarize, to_keep) = self.policy.plan(&request.messages);
+        let (to_summarize, mut to_keep) = self.policy.plan(&request.messages);
         // Nothing old enough to compress (e.g. keep_last covers everything):
         // leave the transcript untouched rather than summarizing an empty set.
         if to_summarize.is_empty() {
@@ -700,9 +700,21 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for ContextCom
         let from_tokens = total_message_tokens(&request.messages);
         let record = self.summarizer.summarize(&to_summarize).await?;
 
-        let mut new_messages = Vec::with_capacity(to_keep.len() + 1);
+        // `plan` returns `to_keep` as `[system prompts..., recent turns...]`.
+        // Insert the summary *after* the leading system prompts, not at index 0:
+        // a system prompt must stay first so its persistent instructions keep
+        // priority and the cacheable prefix is not churned. The summary of the
+        // elided older turns then sits between the system prompt and the kept
+        // recent turns, in chronological position.
+        let system_prefix = to_keep
+            .iter()
+            .take_while(|m| matches!(m, crate::harness::message::Message::System(_)))
+            .count();
+        let recent = to_keep.split_off(system_prefix);
+        let mut new_messages = Vec::with_capacity(to_keep.len() + recent.len() + 1);
+        new_messages.append(&mut to_keep);
         new_messages.push(record.summary.clone());
-        new_messages.extend(to_keep);
+        new_messages.extend(recent);
         let to_tokens = total_message_tokens(&new_messages);
 
         self.records

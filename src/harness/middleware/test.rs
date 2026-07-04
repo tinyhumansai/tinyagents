@@ -357,6 +357,58 @@ async fn context_compression_compresses_at_or_above_threshold() {
 }
 
 #[tokio::test]
+async fn context_compression_keeps_system_prompt_before_summary() {
+    // A leading system prompt carries persistent instructions and anchors the
+    // cacheable prefix; the summary of elided older turns must be inserted
+    // *after* it, never at position 0.
+    let policy = SummarizationPolicy {
+        keep_last: 1,
+        ..SummarizationPolicy::default()
+    }
+    .with_context_window(100)
+    .with_threshold_fraction(0.5);
+    let mw = Arc::new(ContextCompressionMiddleware::new(policy));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw.clone());
+
+    let mut c = ctx();
+    let big = "a".repeat(200);
+    let system_prompt = "You are a helpful assistant. Always follow these rules.";
+    let mut request = ModelRequest {
+        messages: vec![
+            Message::system(system_prompt),
+            user(&format!("{big}-1")),
+            user(&format!("{big}-2")),
+            user(&format!("{big}-3")),
+        ],
+        ..Default::default()
+    };
+    stack
+        .run_before_model(&mut c, &(), &mut request)
+        .await
+        .unwrap();
+
+    // Result is [real system prompt, summary, kept recent turn].
+    assert_eq!(request.messages.len(), 3);
+    assert!(matches!(request.messages[0], Message::System(_)));
+    assert_eq!(
+        request.messages[0].text(),
+        system_prompt,
+        "the real system prompt must stay at position 0"
+    );
+    assert!(
+        matches!(request.messages[1], Message::System(_)),
+        "the summary follows the system prompt"
+    );
+    assert_ne!(
+        request.messages[1].text(),
+        system_prompt,
+        "position 1 is the summary, not a duplicated system prompt"
+    );
+    assert_eq!(request.messages[2].text(), format!("{big}-3"));
+}
+
+#[tokio::test]
 async fn context_compression_none_window_falls_back_to_trigger_tokens() {
     // No context window → raw trigger_tokens gate (strict `>`). Trigger at 2
     // tokens, keep_last=1.
