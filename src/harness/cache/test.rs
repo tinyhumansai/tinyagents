@@ -18,6 +18,35 @@ async fn response_cache_put_get() {
     assert_eq!(fetched.text(), "hello");
 }
 
+#[tokio::test]
+async fn response_cache_evicts_least_recently_used() {
+    let cache = InMemoryResponseCache::with_capacity(2);
+    cache.put("a", ModelResponse::assistant("a")).await.unwrap();
+    cache.put("b", ModelResponse::assistant("b")).await.unwrap();
+
+    // Touch "a" so "b" becomes the least-recently-used entry.
+    assert!(cache.get("a").await.unwrap().is_some());
+
+    // Inserting a third key evicts "b", not the recently-read "a".
+    cache.put("c", ModelResponse::assistant("c")).await.unwrap();
+    assert!(
+        cache.get("a").await.unwrap().is_some(),
+        "a was recently used"
+    );
+    assert!(cache.get("c").await.unwrap().is_some(), "c is newest");
+    assert!(cache.get("b").await.unwrap().is_none(), "b evicted as LRU");
+}
+
+#[tokio::test]
+async fn response_cache_capacity_zero_retains_last() {
+    // A zero capacity is clamped to 1: the cache still retains the last write.
+    let cache = InMemoryResponseCache::with_capacity(0);
+    cache.put("x", ModelResponse::assistant("x")).await.unwrap();
+    cache.put("y", ModelResponse::assistant("y")).await.unwrap();
+    assert!(cache.get("x").await.unwrap().is_none());
+    assert!(cache.get("y").await.unwrap().is_some());
+}
+
 #[test]
 fn cache_key_is_deterministic() {
     let req = ModelRequest::new(vec![]).with_model("gpt-4");

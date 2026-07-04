@@ -1422,6 +1422,44 @@ async fn response_cache_serves_repeated_request_without_calling_model() {
 }
 
 #[tokio::test]
+async fn multi_turn_request_with_prior_assistant_turn_is_not_cached() {
+    use crate::harness::cache::InMemoryResponseCache;
+
+    // A request whose transcript already contains an assistant turn can never be
+    // re-served identically, so it must bypass the cache entirely: the model is
+    // invoked on every run even for identical multi-turn input.
+    let model = Arc::new(MockModel::with_responses(vec![
+        text_response("a1", 4, 2),
+        text_response("a2", 4, 2),
+    ]));
+    let cache = Arc::new(InMemoryResponseCache::new());
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", model.clone());
+    harness.with_response_cache(cache.clone());
+
+    let convo = vec![
+        Message::user("q1"),
+        Message::assistant("prior answer"),
+        Message::user("q2"),
+    ];
+
+    harness
+        .invoke_default(&(), convo.clone())
+        .await
+        .expect("first run succeeds");
+    harness
+        .invoke_default(&(), convo)
+        .await
+        .expect("second run succeeds");
+
+    assert_eq!(
+        model.call_count(),
+        2,
+        "multi-turn requests bypass the cache, so the model runs each time"
+    );
+}
+
+#[tokio::test]
 async fn no_cache_attached_invokes_model_each_run() {
     // Control: without a cache the model is invoked on every run.
     let model = Arc::new(MockModel::echo());

@@ -727,6 +727,18 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         if !enabled {
             return None;
         }
+        // Skip caching multi-turn requests. Once the transcript contains a prior
+        // assistant turn (or tool result), every subsequent call carries a
+        // unique history and can never be re-served, so caching it only pays the
+        // hashing/serialization cost and grows the cache with dead entries. The
+        // first, history-free call is the only reusable one.
+        if request
+            .messages
+            .iter()
+            .any(|m| matches!(m, Message::Assistant(_) | Message::Tool(_)))
+        {
+            return None;
+        }
         Some((Arc::clone(cache), cache_key(request)))
     }
 
