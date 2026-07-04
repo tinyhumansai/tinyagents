@@ -209,6 +209,15 @@ impl<State: Send + Sync, Ctx: Send + Sync> MiddlewareStack<State, Ctx> {
 
     /// Runs every middleware's [`Middleware::on_model_delta`] in registration
     /// order for one streamed delta.
+    ///
+    /// Unlike the other stack runners, the per-delta hook is deliberately *not*
+    /// bracketed by `MiddlewareStarted`/`MiddlewareCompleted` events. This runs
+    /// on the streaming hot path — potentially hundreds of times per second per
+    /// middleware — and emitting two events (each cloning `mw.name()` and
+    /// acquiring the recorder mutex) per middleware per token dominated the
+    /// stream loop's cost for zero observability value. Callers that need to
+    /// observe delta-level middleware activity should instrument the hook
+    /// itself.
     pub async fn run_on_model_delta(
         &self,
         ctx: &mut RunContext<Ctx>,
@@ -216,19 +225,9 @@ impl<State: Send + Sync, Ctx: Send + Sync> MiddlewareStack<State, Ctx> {
         delta: &mut ModelDelta,
     ) -> Result<()> {
         for mw in self.middlewares.iter() {
-            ctx.emit(AgentEvent::MiddlewareStarted {
-                name: mw.name().to_string(),
-            });
-            match mw.on_model_delta(ctx, state, delta).await {
-                Ok(()) => {
-                    ctx.emit(AgentEvent::MiddlewareCompleted {
-                        name: mw.name().to_string(),
-                    });
-                }
-                Err(e) => {
-                    self.fan_out_on_error(ctx, &e).await;
-                    return Err(e);
-                }
+            if let Err(e) = mw.on_model_delta(ctx, state, delta).await {
+                self.fan_out_on_error(ctx, &e).await;
+                return Err(e);
             }
         }
         Ok(())

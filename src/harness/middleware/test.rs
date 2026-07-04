@@ -195,6 +195,46 @@ async fn emits_started_and_completed_events() {
 }
 
 #[tokio::test]
+async fn on_model_delta_hook_emits_no_bracketing_events() {
+    // The per-delta hook runs on the streaming hot path, so it must NOT emit
+    // `MiddlewareStarted`/`MiddlewareCompleted` events the way the other stack
+    // runners do — those two events per middleware per token dominated the
+    // stream loop for no observability value.
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(LoggingMiddleware::new()));
+
+    let recorder = Arc::new(RecordingListener::new());
+    let mut c = ctx();
+    c.events.subscribe(recorder.clone());
+
+    let mut delta = ModelDelta {
+        call_id: "call-1".to_string(),
+        content: "tok".to_string(),
+        reasoning: String::new(),
+        tool_call: None,
+    };
+    stack
+        .run_on_model_delta(&mut c, &(), &mut delta)
+        .await
+        .unwrap();
+
+    let bracketing = recorder
+        .events()
+        .into_iter()
+        .filter(|r| {
+            matches!(
+                r.event,
+                AgentEvent::MiddlewareStarted { .. } | AgentEvent::MiddlewareCompleted { .. }
+            )
+        })
+        .count();
+    assert_eq!(
+        bracketing, 0,
+        "the delta hook must not bracket middleware with events"
+    );
+}
+
+#[tokio::test]
 async fn message_trim_middleware_shrinks_request() {
     let mw = MessageTrimMiddleware::new(TrimStrategy::KeepLast(1));
     let mut stack: MiddlewareStack<()> = MiddlewareStack::new();

@@ -1037,19 +1037,21 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             };
 
             if let Some(message_delta) = message_delta {
-                let record = ctx.emit(AgentEvent::ModelDelta {
-                    run_id: ctx.config.run_id.clone(),
-                    call_id: call_id.clone(),
-                    delta: message_delta.clone(),
-                });
-                let _ = record;
-
+                // Build the middleware-facing delta first (it needs owned
+                // copies of the fields), then move `message_delta` into the
+                // event so the hot path clones the payload once instead of
+                // twice per streamed token.
                 let mut model_delta = ModelDelta {
                     call_id: call_id.as_str().to_string(),
                     content: message_delta.text.clone(),
                     reasoning: message_delta.reasoning.clone(),
                     tool_call: message_delta.tool_call.clone(),
                 };
+                ctx.emit(AgentEvent::ModelDelta {
+                    run_id: ctx.config.run_id.clone(),
+                    call_id: call_id.clone(),
+                    delta: message_delta,
+                });
                 self.middleware
                     .run_on_model_delta(ctx, state, &mut model_delta)
                     .await?;
