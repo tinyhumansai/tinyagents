@@ -467,8 +467,8 @@ async fn microcompact_emits_compressed_event_when_enabled() {
 
     let mut request = ModelRequest {
         messages: vec![
-            Message::tool("t1", &"x".repeat(400)),
-            Message::tool("t2", &"y".repeat(400)),
+            Message::tool("t1", "x".repeat(400)),
+            Message::tool("t2", "y".repeat(400)),
         ],
         ..Default::default()
     };
