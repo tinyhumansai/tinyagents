@@ -227,6 +227,19 @@ impl LangfuseClient {
                 "Langfuse ingestion returned {status}: {parsed}"
             )));
         }
+        // A `207 Multi-Status` reports per-item outcomes: some events may have
+        // been rejected while the request itself "succeeded". Surface those
+        // partial failures instead of swallowing them and reporting success.
+        if status.as_u16() == 207
+            && let Some(errors) = parsed.get("errors").and_then(Value::as_array)
+            && !errors.is_empty()
+        {
+            return Err(TinyAgentsError::Model(format!(
+                "Langfuse ingestion partially failed ({} rejected): {}",
+                errors.len(),
+                json!(errors)
+            )));
+        }
         Ok(parsed)
     }
 }
@@ -307,12 +320,17 @@ fn trace_metadata(trace: &LangfuseTraceConfig, observations: &[AgentObservation]
 
 fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
     let timestamp = iso_ms(obs.ts_ms);
+    // Attach only run lineage, offset, and the event *kind* — not the full event
+    // payload. The event's meaningful fields (input/output/usage/name) are
+    // already lifted into the observation `body`; embedding the whole event here
+    // duplicated every payload, roughly doubling batch bytes and growing
+    // O(turns^2) as a run accumulates, which can trip the ~3.5MB batch cap.
     let metadata = json!({
         "run_id": obs.run_id.as_str(),
         "root_run_id": obs.root_run_id.as_str(),
         "parent_run_id": obs.parent_run_id.as_ref().map(|id| id.as_str()),
         "offset": obs.offset,
-        "event": obs.event,
+        "event_kind": obs.event.kind(),
     });
     match &obs.event {
         AgentEvent::ModelCompleted {
@@ -344,7 +362,10 @@ fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
         } => json!({
             "id": obs.event_id.as_str(),
             "timestamp": timestamp,
-            "type": "tool-create",
+            // A tool call is modelled as a span. `tool-create` is not a valid
+            // Langfuse ingestion observation type — older/self-hosted Langfuse
+            // rejects it, silently dropping every tool observation.
+            "type": "span-create",
             "body": clean_nulls(json!({
                 "id": call_id.as_str(),
                 "traceId": trace_id,
@@ -569,9 +590,19 @@ mod tests {
         assert_eq!(events[1]["type"], "generation-create");
         assert_eq!(events[1]["body"]["input"][0]["content"], "hi");
         assert_eq!(events[1]["body"]["output"]["content"], "hello there");
-        assert_eq!(events[2]["type"], "tool-create");
+        assert_eq!(events[2]["type"], "span-create");
         assert_eq!(events[2]["body"]["input"]["query"], "weather");
         assert_eq!(events[2]["body"]["output"], "sunny");
+
+        // Observation metadata carries only lineage + event kind, not the whole
+        // event payload (which would duplicate input/output already in `body`).
+        let gen_meta = &events[1]["body"]["metadata"];
+        assert_eq!(gen_meta["event_kind"], "model.completed");
+        assert!(
+            gen_meta.get("event").is_none(),
+            "full event payload must not be duplicated into metadata"
+        );
+        assert_eq!(gen_meta["run_id"], "run-1");
     }
 
     #[test]
