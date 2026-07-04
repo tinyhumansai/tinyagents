@@ -4,6 +4,8 @@
 //! Split out of `library/mod.rs`; see that module's doc comment for the
 //! full built-in middleware library overview.
 
+use serde_json::Value;
+
 use super::*;
 use crate::harness::middleware::{
     AgentRun, HookCounts, LoggingMiddleware, UsageAccountingMiddleware,
@@ -136,17 +138,56 @@ impl RedactionMiddleware {
 
     /// Replaces every configured pattern in `text`, returning the redacted
     /// string and the number of occurrences replaced.
+    ///
+    /// The scan is a single left-to-right pass over the *original* text, so a
+    /// pattern can never match inside mask text introduced by an earlier
+    /// replacement. Existing occurrences of the full mask string in the input
+    /// are skipped as opaque, which makes redaction idempotent: re-running the
+    /// middleware over already-redacted text is a no-op even when a pattern
+    /// happens to be a substring of the mask. When several patterns match at
+    /// the same position, the first-configured pattern wins.
     fn redact(&self, text: &str) -> (String, usize) {
-        let mut out = text.to_string();
+        let mut out = String::with_capacity(text.len());
         let mut hits = 0usize;
-        for pattern in &self.patterns {
-            let occurrences = out.matches(pattern.as_str()).count();
-            if occurrences > 0 {
-                hits += occurrences;
-                out = out.replace(pattern.as_str(), &self.mask);
+        let mut rest = text;
+        'scan: while !rest.is_empty() {
+            // Treat prior mask output as opaque so redaction is idempotent.
+            if !self.mask.is_empty() && rest.starts_with(self.mask.as_str()) {
+                out.push_str(&self.mask);
+                rest = &rest[self.mask.len()..];
+                continue;
             }
+            for pattern in &self.patterns {
+                if rest.starts_with(pattern.as_str()) {
+                    out.push_str(&self.mask);
+                    hits += 1;
+                    rest = &rest[pattern.len()..];
+                    continue 'scan;
+                }
+            }
+            let ch = rest.chars().next().expect("non-empty remainder");
+            out.push(ch);
+            rest = &rest[ch.len_utf8()..];
         }
         (out, hits)
+    }
+
+    /// Recursively redacts every string value inside a JSON `value` (array
+    /// elements and object values; object keys are left untouched), returning
+    /// the number of occurrences replaced.
+    fn redact_value(&self, value: &mut Value) -> usize {
+        match value {
+            Value::String(s) => {
+                let (redacted, hits) = self.redact(s);
+                if hits > 0 {
+                    *s = redacted;
+                }
+                hits
+            }
+            Value::Array(items) => items.iter_mut().map(|v| self.redact_value(v)).sum(),
+            Value::Object(map) => map.values_mut().map(|v| self.redact_value(v)).sum(),
+            _ => 0,
+        }
     }
 
     /// Records `hits` redactions against the running total.
@@ -171,14 +212,38 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for RedactionM
     ) -> Result<()> {
         let mut hits = 0usize;
         for block in &mut response.message.content {
-            if let ContentBlock::Text(text) = block {
-                let (redacted, n) = self.redact(text);
-                if n > 0 {
-                    *text = redacted;
-                    hits += n;
+            match block {
+                ContentBlock::Text(text) => {
+                    let (redacted, n) = self.redact(text);
+                    if n > 0 {
+                        *text = redacted;
+                        hits += n;
+                    }
                 }
+                ContentBlock::Json(value) => hits += self.redact_value(value),
+                _ => {}
             }
         }
+        // Model-authored tool-call arguments leave the harness (they are
+        // echoed into transcripts and journals), so scrub them too.
+        for call in &mut response.message.tool_calls {
+            hits += self.redact_value(&mut call.arguments);
+        }
+        // The raw provider payload carries the same text verbatim.
+        if let Some(raw) = &mut response.raw {
+            hits += self.redact_value(raw);
+        }
+        self.record(hits);
+        Ok(())
+    }
+
+    async fn before_tool(
+        &self,
+        _ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        call: &mut ToolCall,
+    ) -> Result<()> {
+        let hits = self.redact_value(&mut call.arguments);
         self.record(hits);
         Ok(())
     }
@@ -189,9 +254,21 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for RedactionM
         _state: &State,
         result: &mut ToolResult,
     ) -> Result<()> {
-        let (redacted, hits) = self.redact(&result.content);
+        let (redacted, mut hits) = self.redact(&result.content);
         if hits > 0 {
             result.content = redacted;
+        }
+        // The structured `raw` payload duplicates (or extends) the content, so
+        // it must be scrubbed as well.
+        if let Some(raw) = &mut result.raw {
+            hits += self.redact_value(raw);
+        }
+        if let Some(error) = &mut result.error {
+            let (redacted, n) = self.redact(error);
+            if n > 0 {
+                *error = redacted;
+                hits += n;
+            }
         }
         self.record(hits);
         Ok(())

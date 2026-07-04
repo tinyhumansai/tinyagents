@@ -432,12 +432,21 @@ pub struct DynamicPromptMiddleware<State, Ctx = ()> {
 /// before it leaves the harness.
 ///
 /// Implements [`Middleware`][crate::harness::middleware::Middleware]'s
-/// `after_model` and `after_tool` hooks: every configured pattern found in the
-/// model response text or tool result content is replaced with the mask string.
+/// `after_model`, `before_tool`, and `after_tool` hooks: every configured
+/// pattern found in model response text/JSON blocks, model-authored tool-call
+/// arguments, raw provider/tool payloads, tool result content, or tool error
+/// messages is replaced with the mask string.
 ///
 /// Patterns are literal substrings (no regex dependency); supply pre-built
 /// patterns for the secrets you need to scrub. The number of redactions is
 /// tracked and available via [`RedactionMiddleware::redactions`].
+///
+/// Redaction is idempotent and never self-matching: text is scanned in a
+/// single pass over the original input (so a pattern cannot match inside mask
+/// text produced by an earlier replacement), and existing occurrences of the
+/// full mask string are treated as opaque (so re-running over already-redacted
+/// text is a no-op, even when a pattern is a substring of the mask). A pattern
+/// exactly equal to the mask is therefore never matched.
 pub struct RedactionMiddleware {
     pub(crate) label: &'static str,
     pub(crate) patterns: Vec<String>,
