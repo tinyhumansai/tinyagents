@@ -448,6 +448,46 @@ pub enum AgentEvent {
         /// Human-readable error description.
         error: String,
     },
+
+    /// A `.ragsh` REPL cell dispatched (or completed) a host capability call
+    /// (`model_query`, `tool_call`, `agent_query`, or an `emit`).
+    ///
+    /// [`ReplResult::calls`](crate::repl::session::ReplResult) is only readable
+    /// *after* a cell returns, so a long fan-out would otherwise look frozen to
+    /// a live observer. This event streams each capability call as it starts and
+    /// again as it completes, letting a host (which subscribes an
+    /// [`EventListener`] on the session [`EventSink`]) forward REPL progress to
+    /// its own UI/progress sink mid-cell. Gated behind the `repl` feature so the
+    /// default build neither pulls in the Rhai engine nor references
+    /// [`ReplCallRecord`](crate::repl::session::ReplCallRecord).
+    #[cfg(feature = "repl")]
+    ReplCall {
+        /// The session label (its [`SessionId`](crate::harness::ids::SessionId)
+        /// string) the call was issued from, correlating the event back to the
+        /// REPL session that produced it.
+        session_id: String,
+        /// The call record. On the [`ReplCallPhase::Started`] phase the record's
+        /// `elapsed` is zero and `detail` is minimal (the completed phase
+        /// carries the full detail and measured `elapsed`); `call_id` is stable
+        /// across the two phases so a listener can pair them.
+        record: crate::repl::session::ReplCallRecord,
+        /// Whether the call is starting or has completed.
+        phase: ReplCallPhase,
+    },
+}
+
+/// The lifecycle phase of an [`AgentEvent::ReplCall`] — whether a REPL host
+/// capability call is just starting or has completed.
+///
+/// Gated behind the `repl` feature alongside the event it annotates.
+#[cfg(feature = "repl")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplCallPhase {
+    /// The capability call has been dispatched but has not yet returned.
+    Started,
+    /// The capability call returned (successfully or with a recorded error).
+    Completed,
 }
 
 /// Names the kind of run limit that tripped in an [`AgentEvent::LimitReached`].
@@ -521,6 +561,8 @@ impl AgentEvent {
             AgentEvent::StreamClosed => "stream.closed",
             AgentEvent::RunCompleted { .. } => "run.completed",
             AgentEvent::RunFailed { .. } => "run.failed",
+            #[cfg(feature = "repl")]
+            AgentEvent::ReplCall { .. } => "repl.call",
         }
     }
 }

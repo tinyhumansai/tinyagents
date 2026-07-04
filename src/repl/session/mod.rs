@@ -230,6 +230,11 @@ where
     /// against [`ReplPolicy::max_iterations`]. Each `eval_cell` call is one
     /// CodeAct-style iteration of a model-driven session.
     iterations: usize,
+    /// External cancellation flag. A host holding a clone can abort an in-flight
+    /// cell (see [`ReplCancelFlag`]); enforced fail-closed in both the engine
+    /// `on_progress` hook and the blocking capability bridge. Cloned into the
+    /// engine's [`HostContext`] on every [`rebuild_engine`](Self::rebuild_engine).
+    cancel: ReplCancelFlag,
 }
 
 impl<State: Send + Sync + Default + 'static> ReplSession<State, ()> {
@@ -284,6 +289,7 @@ impl<State: Send + Sync + Default + 'static, Ctx> ReplSession<State, Ctx> {
             engine: Engine::new(),
             buffers,
             iterations: 0,
+            cancel: ReplCancelFlag::new(),
         };
         session.rebuild_engine();
         session
@@ -307,8 +313,29 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
             buffers: self.buffers.clone(),
             counters: self.counters.clone(),
             drafts: self.drafts.clone(),
+            cancel: self.cancel.clone(),
         });
         self.engine = builtins::build_engine(ctx);
+    }
+
+    /// Installs an external [`ReplCancelFlag`] and rebuilds the engine so the
+    /// `on_progress` hook and the blocking capability bridge observe it.
+    ///
+    /// The host keeps a clone of `flag` and calls [`ReplCancelFlag::cancel`] to
+    /// abort an in-flight cell; the cell then fails with
+    /// [`TinyAgentsError::Cancelled`]. Because a cancelled flag is sticky, pass a
+    /// **fresh** flag when reusing a session whose previous run was cancelled.
+    pub fn with_cancel_flag(mut self, flag: ReplCancelFlag) -> Self {
+        self.cancel = flag;
+        self.rebuild_engine();
+        self
+    }
+
+    /// Returns a clone of this session's cancellation flag, so a host that did
+    /// not supply one via [`with_cancel_flag`](Self::with_cancel_flag) can still
+    /// obtain the handle needed to abort an in-flight cell.
+    pub fn cancel_flag(&self) -> ReplCancelFlag {
+        self.cancel.clone()
     }
 
     /// Replaces the session policy and rebuilds the engine to honor the new
@@ -364,6 +391,33 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
     /// names are restored afterward so the next cell starts from a clean
     /// capability baseline.
     ///
+    /// # Blocking — driving this from an async host
+    ///
+    /// **This method blocks the calling thread.** The Rhai engine is
+    /// synchronous, so each `model_query`/`tool_call`/`agent_query` a cell
+    /// performs is driven to completion by an internal
+    /// [`futures::executor::block_on`] (the "blocking bridge"; see
+    /// [`builtins`](self::builtins)). Calling `eval_cell` directly on an async
+    /// worker therefore blocks that worker for the whole cell, and on a
+    /// **current-thread** Tokio runtime it deadlocks — `block_on` parks the only
+    /// worker the in-flight capability future needs to make progress.
+    ///
+    /// An async host **must** run `eval_cell` off the async workers, on a
+    /// blocking-safe thread:
+    ///
+    /// ```ignore
+    /// let result = tokio::task::spawn_blocking(move || session.eval_cell(&script)).await?;
+    /// ```
+    ///
+    /// A multi-threaded runtime with a spare worker also works, but
+    /// `spawn_blocking` (or a dedicated thread) is the contract. Because
+    /// `eval_cell` takes `&mut self`, only one cell runs per session at a time;
+    /// the host serializes concurrent calls to the same session. To bound a
+    /// cell's wall clock from the async side as well, wrap the join handle in a
+    /// [`tokio::time::timeout`] and install a [`ReplCancelFlag`] via
+    /// [`with_cancel_flag`](Self::with_cancel_flag) so the blocked worker is
+    /// released rather than leaked.
+    ///
     /// # Errors
     ///
     /// * [`TinyAgentsError::LimitExceeded`] — the script exceeds
@@ -376,8 +430,21 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
     ///   model/tool/agent/graph call.
     /// * [`TinyAgentsError::Validation`] — the script failed to compile or
     ///   raised a runtime error.
+    /// * [`TinyAgentsError::Cancelled`] — an external [`ReplCancelFlag`] was
+    ///   tripped before or during the cell (mid-script via the `on_progress`
+    ///   hook, or during an in-flight capability call via the blocking bridge).
     pub fn eval_cell(&mut self, script: &str) -> Result<ReplResult> {
         let start = Instant::now();
+
+        // Fail closed if cancellation was requested before this cell even
+        // starts: a host that cancels between cells must not have its next cell
+        // begin any script or capability work. (Mid-cell cancellation is
+        // enforced separately by the `on_progress` hook and the capability
+        // bridge.) The iteration counter is left untouched so a cancelled,
+        // never-run cell does not consume the session's `max_iterations` budget.
+        if self.cancel.is_cancelled() {
+            return Err(TinyAgentsError::Cancelled);
+        }
 
         // Each call is one CodeAct-style iteration of a model-driven session;
         // enforce the cap fail-closed before doing any other work.
@@ -617,6 +684,15 @@ fn map_rhai_error(err: EvalAltResult) -> TinyAgentsError {
         EvalAltResult::ErrorTooManyOperations(pos) => TinyAgentsError::LimitExceeded(format!(
             "ragsh cell exceeded the operation limit (max_operations) at {pos}"
         )),
+        // The engine's `on_progress` hook (see `builtins::build_engine`)
+        // terminates the script with this exact sentinel value once an external
+        // [`ReplCancelFlag`] is tripped mid-script; map it to `Cancelled` so the
+        // host sees a cancellation rather than a generic validation error.
+        EvalAltResult::ErrorTerminated(token, _pos)
+            if token.clone().into_string().ok().as_deref() == Some(builtins::CANCELLED_TOKEN) =>
+        {
+            TinyAgentsError::Cancelled
+        }
         // The engine's `on_progress` hook (see `builtins::build_engine`)
         // terminates the script with this exact sentinel value once the
         // per-cell `ReplPolicy::timeout` deadline elapses.

@@ -20,14 +20,21 @@ pub(super) fn model_query_impl<State: Send + Sync + 'static>(
         .model(&model_name)
         .ok_or_else(|| raise(ctx, TinyAgentsError::ModelNotFound(model_name.clone())))?;
     let request = build_model_request(&model_name, params);
+    let call_id = new_call_id();
+    emit_call_started(ctx, &call_id, ReplCallKind::Model, &model_name);
     let start = Instant::now();
-    let response = bridge_block_on(ctx.buffers.deadline(), model.invoke(&ctx.state, request))
-        .map_err(|err| raise(ctx, err))?;
+    let response = bridge_block_on(
+        ctx.buffers.deadline(),
+        &ctx.cancel,
+        model.invoke(&ctx.state, request),
+    )
+    .map_err(|err| raise(ctx, err))?;
     let elapsed = start.elapsed();
     let finish_reason = response.finish_reason.clone();
     let text = Message::Assistant(response.message).text();
     record(
         ctx,
+        call_id,
         ReplCallKind::Model,
         &model_name,
         json!({ "chars": text.len() }),
@@ -52,17 +59,24 @@ pub(super) fn tool_call_impl<State: Send + Sync + 'static>(
         .tool(&tool_name)
         .ok_or_else(|| raise(ctx, TinyAgentsError::ToolNotFound(tool_name.clone())))?;
     let arguments = map_json(params, "arguments").unwrap_or(Value::Null);
+    let call_id = new_call_id();
     let call = ToolCall {
-        id: new_call_id().as_str().to_string(),
+        id: call_id.as_str().to_string(),
         name: tool_name.clone(),
         arguments: arguments.clone(),
     };
+    emit_call_started(ctx, &call_id, ReplCallKind::Tool, &tool_name);
     let start = Instant::now();
-    let result = bridge_block_on(ctx.buffers.deadline(), tool.call(&ctx.state, call))
-        .map_err(|err| raise(ctx, err))?;
+    let result = bridge_block_on(
+        ctx.buffers.deadline(),
+        &ctx.cancel,
+        tool.call(&ctx.state, call),
+    )
+    .map_err(|err| raise(ctx, err))?;
     let elapsed = start.elapsed();
     record(
         ctx,
+        call_id,
         ReplCallKind::Tool,
         &tool_name,
         json!({ "arguments": arguments }),
@@ -107,11 +121,18 @@ pub(super) fn agent_query_impl<State: Send + Sync + 'static>(
     if let Some(data) = map_json(params, "input") {
         input = input.with_data(data);
     }
+    let call_id = new_call_id();
+    emit_call_started(ctx, &call_id, ReplCallKind::Agent, &agent_name);
     let start = Instant::now();
-    let output = bridge_block_on(ctx.buffers.deadline(), agent.run(input, ctx.events.clone()))
-        .map_err(|err| raise(ctx, err))?;
+    let output = bridge_block_on(
+        ctx.buffers.deadline(),
+        &ctx.cancel,
+        agent.run(input, ctx.events.clone()),
+    )
+    .map_err(|err| raise(ctx, err))?;
     record(
         ctx,
+        call_id,
         ReplCallKind::Agent,
         &agent_name,
         json!({ "model_calls": output.model_calls, "tool_calls": output.tool_calls }),
@@ -149,6 +170,7 @@ pub(super) fn graph_run_impl<State: Send + Sync + 'static>(
         .clone();
     record(
         ctx,
+        new_call_id(),
         ReplCallKind::Graph,
         &graph_name,
         json!({ "nodes": blueprint.nodes.len() }),

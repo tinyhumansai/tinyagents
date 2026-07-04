@@ -92,6 +92,7 @@ pub(super) fn graph_define_impl<State: Send + Sync + 'static>(
         .insert(handle.name.clone(), handle.clone());
     record(
         ctx,
+        new_call_id(),
         ReplCallKind::Graph,
         "graph_define",
         json!({ "name": handle.name }),
@@ -166,6 +167,7 @@ pub(super) fn graph_compile_impl<State: Send + Sync + 'static>(
         .insert(handle.name.clone(), handle.clone());
     record(
         ctx,
+        new_call_id(),
         ReplCallKind::Graph,
         "graph_compile",
         json!({ "name": handle.name, "requires_review": handle.requires_review }),
@@ -222,6 +224,7 @@ pub(super) fn graph_register_impl<State: Send + Sync + 'static>(
     // the REPL never installs generated topology directly.
     record(
         ctx,
+        new_call_id(),
         ReplCallKind::Graph,
         "graph_register",
         json!({ "name": handle.name, "review_id": review_id }),

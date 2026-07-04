@@ -49,13 +49,13 @@ use std::time::{Duration, Instant};
 use rhai::{Array, Dynamic, Engine, EvalAltResult, Map, Position};
 use serde_json::{Value, json};
 
-use super::types::{GraphBlueprintHandle, LanguageCompiler, ReplPolicy};
+use super::types::{GraphBlueprintHandle, LanguageCompiler, ReplCancelFlag, ReplPolicy};
 use super::{
     ReplCallKind, ReplCallRecord, dynamic_to_repl_value, json_to_repl_value, repl_value_to_dynamic,
 };
 use crate::error::TinyAgentsError;
-use crate::harness::events::EventSink;
-use crate::harness::ids::new_call_id;
+use crate::harness::events::{AgentEvent, EventSink, ReplCallPhase};
+use crate::harness::ids::{CallId, new_call_id};
 use crate::harness::message::Message;
 use crate::harness::model::ModelRequest;
 use crate::harness::tool::ToolCall;
@@ -102,6 +102,9 @@ pub(super) struct HostContext<State: Send + Sync> {
     pub run_depth: usize,
     /// The event sink shared with the run context.
     pub events: EventSink,
+    /// External cancellation flag, observed fail-closed by the `on_progress`
+    /// hook (mid-script) and the blocking capability bridge (mid-call).
+    pub cancel: ReplCancelFlag,
     /// Per-cell shared buffers (stdout, calls, answer, host error, vars).
     pub buffers: super::CellBuffers,
     /// Session-cumulative call counters.
@@ -110,58 +113,117 @@ pub(super) struct HostContext<State: Send + Sync> {
     pub drafts: Arc<Mutex<BTreeMap<String, GraphBlueprintHandle>>>,
 }
 
-/// Drives an async capability future to completion synchronously, bounded by
-/// an optional wall-clock `deadline` — the v1 "blocking bridge" adapter (see
-/// the [module docs](self)), now with fail-closed enforcement of
-/// [`ReplPolicy::timeout`].
+/// How often the watcher thread in [`bridge_block_on_raw`] wakes to observe an
+/// armed [`ReplCancelFlag`] while a capability call is in flight.
+///
+/// Small enough that a user cancel releases a hung call promptly, large enough
+/// that watching a fast (scripted-test) call costs nothing measurable.
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Why the watcher tripped a bounded [`bridge_block_on_raw`] call.
+enum BridgeStop {
+    /// The per-cell wall-clock deadline elapsed.
+    Deadline,
+    /// The external [`ReplCancelFlag`] was tripped.
+    Cancelled,
+}
+
+/// Drives an async capability future to completion synchronously, bounded by an
+/// optional wall-clock `deadline` **and** an external `cancel` flag — the v1
+/// "blocking bridge" adapter (see the [module docs](self)), with fail-closed
+/// enforcement of both [`ReplPolicy::timeout`] and host cancellation.
 ///
 /// `on_progress` (see [`build_engine`]) only fires between Rhai
-/// statements/operations, so it can never interrupt a blocked native call:
-/// this is the enforcement point for that case. When `deadline` elapses
-/// first, the future is dropped — canceling the underlying request, since
-/// providers are built on cancel-safe `reqwest`/`futures` — and a `Timeout`
-/// error is returned instead of blocking the session forever.
+/// statements/operations, so it can never interrupt a blocked native call: this
+/// is the enforcement point for that case. A detached watcher thread races the
+/// capability future; when the deadline elapses or `cancel` trips first, the
+/// future is dropped — canceling the underlying request, since providers are
+/// built on cancel-safe `reqwest`/`futures` — and a `Timeout` or `Cancelled`
+/// error is returned instead of blocking the session forever. If the future
+/// finishes first, the watcher observes the dropped receiver and exits.
 fn bridge_block_on_raw<F: Future>(
     deadline: Option<Instant>,
+    cancel: &ReplCancelFlag,
     future: F,
 ) -> std::result::Result<F::Output, TinyAgentsError> {
-    let Some(deadline) = deadline else {
-        return Ok(futures::executor::block_on(future));
-    };
-    let now = Instant::now();
-    if now >= deadline {
+    // Fail closed before the call even starts if either bound has already
+    // tripped, so a cancel/timeout that landed between statements is honored
+    // without dispatching the call at all.
+    if cancel.is_cancelled() {
+        return Err(TinyAgentsError::Cancelled);
+    }
+    if let Some(deadline) = deadline
+        && Instant::now() >= deadline
+    {
         return Err(TinyAgentsError::Timeout(format!(
             "{DEADLINE_EXCEEDED_TOKEN} before a host capability call could start"
         )));
     }
-    let remaining = deadline - now;
-    let (tx, rx) = futures::channel::oneshot::channel::<()>();
-    // A detached timer thread wakes the race below at the deadline. If the
-    // capability future finishes first this thread simply sleeps out its
-    // remainder and exits; nothing observes it after that.
+
+    let (tx, rx) = futures::channel::oneshot::channel::<BridgeStop>();
+    let watcher_cancel = cancel.clone();
+    // A detached watcher wakes the race below when the deadline elapses or the
+    // cancel flag trips. If the capability future finishes first, `rx` is
+    // dropped and `tx.is_canceled()` lets the watcher exit promptly instead of
+    // polling out a full deadline.
     std::thread::spawn(move || {
-        std::thread::sleep(remaining);
-        let _ = tx.send(());
+        loop {
+            if tx.is_canceled() {
+                return;
+            }
+            if watcher_cancel.is_cancelled() {
+                let _ = tx.send(BridgeStop::Cancelled);
+                return;
+            }
+            match deadline {
+                Some(deadline) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        let _ = tx.send(BridgeStop::Deadline);
+                        return;
+                    }
+                    std::thread::sleep((deadline - now).min(CANCEL_POLL_INTERVAL));
+                }
+                None => std::thread::sleep(CANCEL_POLL_INTERVAL),
+            }
+        }
     });
+
     match futures::executor::block_on(futures::future::select(Box::pin(future), rx)) {
-        futures::future::Either::Left((output, _timer)) => Ok(output),
-        futures::future::Either::Right(_) => Err(TinyAgentsError::Timeout(format!(
-            "{DEADLINE_EXCEEDED_TOKEN} during a host capability call"
-        ))),
+        futures::future::Either::Left((output, _watcher)) => Ok(output),
+        futures::future::Either::Right((stop, _fut)) => match stop {
+            Ok(BridgeStop::Cancelled) => Err(TinyAgentsError::Cancelled),
+            Ok(BridgeStop::Deadline) => Err(TinyAgentsError::Timeout(format!(
+                "{DEADLINE_EXCEEDED_TOKEN} during a host capability call"
+            ))),
+            // The watcher dropped its sender without sending — only reachable in
+            // a race the future has effectively already won; re-check the bounds
+            // and prefer cancellation, never silently succeeding.
+            Err(_canceled) => {
+                if cancel.is_cancelled() {
+                    Err(TinyAgentsError::Cancelled)
+                } else {
+                    Err(TinyAgentsError::Timeout(format!(
+                        "{DEADLINE_EXCEEDED_TOKEN} during a host capability call"
+                    )))
+                }
+            }
+        },
     }
 }
 
 /// Convenience wrapper over [`bridge_block_on_raw`] for the common case where
-/// the capability future itself resolves to a `Result`, flattening the
-/// deadline error into the same error channel as the call's own failures.
+/// the capability future itself resolves to a `Result`, flattening the deadline
+/// / cancellation error into the same error channel as the call's own failures.
 fn bridge_block_on<T, F>(
     deadline: Option<Instant>,
+    cancel: &ReplCancelFlag,
     future: F,
 ) -> std::result::Result<T, TinyAgentsError>
 where
     F: Future<Output = std::result::Result<T, TinyAgentsError>>,
 {
-    bridge_block_on_raw(deadline, future)?
+    bridge_block_on_raw(deadline, cancel, future)?
 }
 
 /// One completed `model_query_batched` item: `(model, text, finish_reason,
@@ -192,21 +254,65 @@ fn invalid<State: Send + Sync>(
     raise(ctx, TinyAgentsError::Validation(message.into()))
 }
 
-/// Records a capability call (or emitted event) into the per-cell buffer.
+/// Records a completed capability call (or emitted event) into the per-cell
+/// buffer **and** streams it live on the session [`EventSink`] as an
+/// [`AgentEvent::ReplCall`] with phase [`ReplCallPhase::Completed`].
+///
+/// `call_id` is generated by the caller up front so a preceding
+/// [`emit_call_started`] event can carry the same id, letting a host pair the
+/// start and completion of one call.
 fn record<State: Send + Sync>(
     ctx: &HostContext<State>,
+    call_id: CallId,
     kind: ReplCallKind,
     name: &str,
     detail: Value,
     elapsed: Duration,
 ) {
-    ctx.buffers.push_call(ReplCallRecord {
-        call_id: new_call_id(),
+    let record = ReplCallRecord {
+        call_id,
         kind,
         name: name.to_string(),
         detail,
         elapsed,
+    };
+    emit_repl_call(ctx, &record, ReplCallPhase::Completed);
+    ctx.buffers.push_call(record);
+}
+
+/// Emits an [`AgentEvent::ReplCall`] on the session event sink so a live
+/// observer sees a capability call as it happens, rather than only in
+/// [`ReplResult::calls`](super::ReplResult) after the cell returns.
+fn emit_repl_call<State: Send + Sync>(
+    ctx: &HostContext<State>,
+    record: &ReplCallRecord,
+    phase: ReplCallPhase,
+) {
+    ctx.events.emit(AgentEvent::ReplCall {
+        session_id: ctx.session_label.clone(),
+        record: record.clone(),
+        phase,
     });
+}
+
+/// Streams a `ReplCall` "started" event for a capability call about to be
+/// dispatched, carrying `call_id` (matched by the later [`record`] completion),
+/// its kind, and name — but no `detail` (arguments are only in the completed
+/// record) and a zero `elapsed`.
+fn emit_call_started<State: Send + Sync>(
+    ctx: &HostContext<State>,
+    call_id: &CallId,
+    kind: ReplCallKind,
+    name: &str,
+) {
+    let record = ReplCallRecord {
+        call_id: call_id.clone(),
+        kind,
+        name: name.to_string(),
+        detail: Value::Null,
+        elapsed: Duration::default(),
+    };
+    emit_repl_call(ctx, &record, ReplCallPhase::Started);
 }
 
 // ── Map argument helpers ────────────────────────────────────────────────────
@@ -358,6 +464,12 @@ use capabilities::*;
 /// generic runtime-error path.
 pub(super) const DEADLINE_EXCEEDED_TOKEN: &str = "ragsh cell exceeded its wall-clock timeout";
 
+/// Sentinel exception value `on_progress` terminates a script with when an
+/// external [`ReplCancelFlag`] is tripped mid-script. `eval_cell`'s
+/// `map_rhai_error` recognizes this exact string and maps it to
+/// [`TinyAgentsError::Cancelled`] instead of the generic runtime-error path.
+pub(super) const CANCELLED_TOKEN: &str = "ragsh cell cancelled by host";
+
 /// Builds a sandboxed Rhai engine for a session, registering every host-backed
 /// built-in against the session's live registries and policy.
 ///
@@ -378,6 +490,13 @@ pub(super) fn build_engine<State: Send + Sync + 'static>(ctx: Arc<HostContext<St
     // `on_progress`.
     let deadline_ctx = ctx.clone();
     engine.on_progress(move |_ops| {
+        // External cancellation takes precedence: a host that tripped the
+        // cancel flag mid-script terminates the cell at the next
+        // statement/operation with the cancellation sentinel, which
+        // `map_rhai_error` maps to `TinyAgentsError::Cancelled`.
+        if deadline_ctx.cancel.is_cancelled() {
+            return Some(Dynamic::from(CANCELLED_TOKEN.to_string()));
+        }
         // A fail-closed host check (currently: push_stdout_line's
         // max_output_bytes enforcement) may have stashed an error without
         // Rhai itself failing; abort promptly instead of letting the script
@@ -405,6 +524,7 @@ pub(super) fn build_engine<State: Send + Sync + 'static>(ctx: Arc<HostContext<St
     engine.register_fn("emit", move |name: &str| {
         record(
             &emit_ctx,
+            new_call_id(),
             ReplCallKind::Emit,
             name,
             Value::Null,
@@ -416,6 +536,7 @@ pub(super) fn build_engine<State: Send + Sync + 'static>(ctx: Arc<HostContext<St
         let detail = dynamic_to_repl_value(&Dynamic::from_map(data)).to_json();
         record(
             &emit_payload_ctx,
+            new_call_id(),
             ReplCallKind::Emit,
             name,
             detail,
@@ -534,7 +655,8 @@ mod bridge_deadline_test {
 
     #[test]
     fn no_deadline_awaits_to_completion() {
-        let out = bridge_block_on::<u32, _>(None, async { Ok(7) }).expect("no deadline");
+        let out = bridge_block_on::<u32, _>(None, &ReplCancelFlag::new(), async { Ok(7) })
+            .expect("no deadline");
         assert_eq!(out, 7);
     }
 
@@ -542,7 +664,8 @@ mod bridge_deadline_test {
     fn future_finishing_before_the_deadline_succeeds() {
         let deadline = Instant::now() + Duration::from_secs(5);
         let out =
-            bridge_block_on::<u32, _>(Some(deadline), async { Ok(9) }).expect("within deadline");
+            bridge_block_on::<u32, _>(Some(deadline), &ReplCancelFlag::new(), async { Ok(9) })
+                .expect("within deadline");
         assert_eq!(out, 9);
     }
 
@@ -551,8 +674,9 @@ mod bridge_deadline_test {
         // Regression test: `ReplPolicy::timeout` used to be parsed but never
         // enforced anywhere a host capability call could hang forever.
         let deadline = Instant::now() - Duration::from_millis(1);
-        let err = bridge_block_on::<u32, _>(Some(deadline), async { Ok(1) })
-            .expect_err("deadline already passed");
+        let err =
+            bridge_block_on::<u32, _>(Some(deadline), &ReplCancelFlag::new(), async { Ok(1) })
+                .expect_err("deadline already passed");
         assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
     }
 
@@ -565,6 +689,7 @@ mod bridge_deadline_test {
         let deadline = start + Duration::from_millis(30);
         let err = bridge_block_on::<u32, _>(
             Some(deadline),
+            &ReplCancelFlag::new(),
             futures::future::pending::<std::result::Result<u32, TinyAgentsError>>(),
         )
         .expect_err("hanging call must be cut off at the deadline");
@@ -572,6 +697,47 @@ mod bridge_deadline_test {
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "took {:?}, should return promptly at the 30ms deadline",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn cancel_already_set_fails_closed_without_starting_the_call() {
+        // A flag tripped before the bridge runs must short-circuit to
+        // `Cancelled` without ever polling the (here, never-resolving) future.
+        let cancel = ReplCancelFlag::new();
+        cancel.cancel();
+        let err = bridge_block_on::<u32, _>(
+            None,
+            &cancel,
+            futures::future::pending::<std::result::Result<u32, TinyAgentsError>>(),
+        )
+        .expect_err("pre-cancelled call must not start");
+        assert!(matches!(err, TinyAgentsError::Cancelled), "got {err:?}");
+    }
+
+    #[test]
+    fn a_hanging_call_is_cut_off_promptly_when_the_cancel_flag_trips() {
+        // With no deadline, a hung capability future must still be released
+        // once a host trips the cancel flag from another thread — the watcher
+        // polls the flag and drops the future.
+        let start = Instant::now();
+        let cancel = ReplCancelFlag::new();
+        let trigger = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            trigger.cancel();
+        });
+        let err = bridge_block_on::<u32, _>(
+            None,
+            &cancel,
+            futures::future::pending::<std::result::Result<u32, TinyAgentsError>>(),
+        )
+        .expect_err("hanging call must be cut off on cancel");
+        assert!(matches!(err, TinyAgentsError::Cancelled), "got {err:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "took {:?}, should return promptly after the ~40ms cancel",
             start.elapsed()
         );
     }

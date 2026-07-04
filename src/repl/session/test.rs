@@ -482,6 +482,176 @@ fn agent_call_limit_is_independent_of_the_model_call_limit() {
     }
 }
 
+// ── External cancellation (Phase 2) ──────────────────────────────────────────
+
+/// A tool whose call never resolves, modelling a hung provider/tool so a test
+/// can prove external cancellation drops the in-flight future via the blocking
+/// bridge rather than blocking the session forever.
+struct HangingTool;
+
+#[async_trait::async_trait]
+impl crate::harness::tool::Tool<()> for HangingTool {
+    fn name(&self) -> &str {
+        "hangs"
+    }
+
+    fn description(&self) -> &str {
+        "Never returns; used to test the cancellation bridge."
+    }
+
+    fn schema(&self) -> crate::harness::tool::ToolSchema {
+        crate::harness::tool::ToolSchema {
+            name: self.name().to_string(),
+            description: self.description().to_string(),
+            parameters: serde_json::json!({ "type": "object" }),
+            format: Default::default(),
+        }
+    }
+
+    async fn call(
+        &self,
+        _state: &(),
+        _call: crate::harness::tool::ToolCall,
+    ) -> crate::Result<crate::harness::tool::ToolResult> {
+        futures::future::pending().await
+    }
+}
+
+fn session_with_hanging_tool(policy: ReplPolicy) -> ReplSession {
+    let mut registry = crate::registry::CapabilityRegistry::<()>::new();
+    registry
+        .register_tool(std::sync::Arc::new(HangingTool))
+        .expect("register hanging tool");
+    let capabilities = ReplCapabilities::new(std::sync::Arc::new(registry));
+    ReplSession::<()>::new()
+        .with_policy(policy)
+        .with_capabilities(capabilities)
+}
+
+#[test]
+fn cancel_set_before_eval_fails_closed_without_running_the_cell() {
+    // A flag tripped before the cell starts short-circuits to `Cancelled`, and
+    // must not consume the session's iteration budget: a later cell with a
+    // fresh flag still runs.
+    let flag = ReplCancelFlag::new();
+    let mut s = session().with_cancel_flag(flag.clone());
+    flag.cancel();
+
+    let err = s.eval_cell("let x = 1; x").expect_err("pre-cancelled");
+    assert!(matches!(err, TinyAgentsError::Cancelled), "got {err:?}");
+
+    // A fresh flag re-enables the session — the cancelled cell did not burn an
+    // iteration or otherwise poison the namespace.
+    let mut s = s.with_cancel_flag(ReplCancelFlag::new());
+    let ok = s.eval_cell("1 + 1").expect("session usable after cancel");
+    assert_eq!(ok.value, Some(ReplValue::Int(2)));
+}
+
+#[test]
+fn cancel_mid_script_loop_terminates_promptly() {
+    // A pure `loop {}` with no timeout and an unbounded operation budget can
+    // only be stopped by the cancel flag, enforced via the `on_progress` hook.
+    let policy = ReplPolicy {
+        timeout: None,
+        max_operations: 0,
+        ..ReplPolicy::default()
+    };
+    let flag = ReplCancelFlag::new();
+    let mut s = session().with_policy(policy).with_cancel_flag(flag.clone());
+
+    let trigger = flag.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(40));
+        trigger.cancel();
+    });
+
+    let start = Instant::now();
+    let err = s
+        .eval_cell("let total = 0; loop { total += 1; }")
+        .expect_err("cancel must terminate the loop");
+    assert!(matches!(err, TinyAgentsError::Cancelled), "got {err:?}");
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "eval_cell took {:?}, should return near the ~40ms cancel",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn cancel_during_a_hanging_capability_call_terminates_promptly() {
+    // A tool call that never resolves can only be released by the cancel flag,
+    // enforced via the blocking bridge (`on_progress` never fires inside a
+    // blocked native call). No timeout is configured so only cancel can stop it.
+    let policy = ReplPolicy {
+        timeout: None,
+        ..ReplPolicy::default()
+    };
+    let flag = ReplCancelFlag::new();
+    let mut s = session_with_hanging_tool(policy).with_cancel_flag(flag.clone());
+
+    let trigger = flag.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(40));
+        trigger.cancel();
+    });
+
+    let start = Instant::now();
+    let err = s
+        .eval_cell(r#"tool_call(#{ tool: "hangs" })"#)
+        .expect_err("cancel must drop the hung tool future");
+    assert!(matches!(err, TinyAgentsError::Cancelled), "got {err:?}");
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "eval_cell took {:?}, should return near the ~40ms cancel",
+        start.elapsed()
+    );
+}
+
+// ── Live capability-call events (Phase 2) ────────────────────────────────────
+
+#[test]
+fn capability_calls_stream_started_and_completed_events() {
+    use crate::harness::events::{AgentEvent, ReplCallPhase};
+
+    // `fail_id` "none" never matches, so the "1" call succeeds.
+    let mut s = session_with_sometimes_failing_tool("none");
+    let recorder = std::sync::Arc::new(crate::harness::events::RecordingListener::new());
+    s.events.subscribe(recorder.clone());
+
+    let session_label = s.session_id.as_str().to_string();
+    s.eval_cell(r#"tool_call(#{ tool: "sometimes_fails", arguments: #{ id: "1" } })"#)
+        .expect("tool call");
+
+    // Exactly one Started and one Completed ReplCall event, paired by call_id,
+    // both naming the tool and correlated back to this session.
+    let repl_calls: Vec<(ReplCallPhase, String, String)> = recorder
+        .events()
+        .into_iter()
+        .filter_map(|rec| match rec.event {
+            AgentEvent::ReplCall {
+                session_id,
+                record,
+                phase,
+            } => Some((phase, session_id, record.call_id.as_str().to_string())),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        repl_calls.len(),
+        2,
+        "expected start + completion: {repl_calls:?}"
+    );
+    assert_eq!(repl_calls[0].0, ReplCallPhase::Started);
+    assert_eq!(repl_calls[1].0, ReplCallPhase::Completed);
+    assert_eq!(repl_calls[0].1, session_label, "session_id correlates");
+    assert_eq!(repl_calls[1].1, session_label);
+    assert_eq!(
+        repl_calls[0].2, repl_calls[1].2,
+        "start and completion share one call_id"
+    );
+}
+
 #[test]
 fn map_and_array_values_round_trip_to_json() {
     let mut s = session();
