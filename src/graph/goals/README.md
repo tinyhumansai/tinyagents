@@ -45,7 +45,9 @@ Semantics preserved from OpenHuman:
 
 **Concurrency / single-process caveat.** The `Store` trait offers no CAS and no
 cross-key transaction, so each mutation runs `load → mutate → put` under a
-per-thread async mutex — atomic **within one process**. Across processes sharing
+per-thread async mutex (a weak-value `graph::thread_locks::ThreadLockMap`, so
+idle threads' mutexes are reclaimed instead of leaking) — atomic **within one
+process**. Across processes sharing
 a `FileStore`, two concurrent read-modify-writes can lose an update; the
 `goal_id` guard still prevents logical corruption from stale accounting but not
 lost updates. Funnel goal mutations through one process, or wait for a future

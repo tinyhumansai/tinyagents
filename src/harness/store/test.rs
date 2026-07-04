@@ -245,6 +245,60 @@ async fn in_memory_append_streams_are_isolated() {
     assert_eq!(store.len("missing").await.unwrap(), 0);
 }
 
+#[tokio::test]
+async fn in_memory_append_bounded_evicts_oldest_and_keeps_offsets_monotonic() {
+    let store = InMemoryAppendStore::new().with_max_entries_per_stream(3);
+    for i in 0..5u64 {
+        // Offsets keep advancing past the cap.
+        assert_eq!(store.append("s", json!(i)).await.unwrap(), i);
+    }
+
+    // Logical length is unaffected by eviction: the next append gets offset 5.
+    assert_eq!(store.len("s").await.unwrap(), 5);
+
+    // Only the newest 3 entries remain, at their original offsets.
+    let all = store.read_from("s", 0).await.unwrap();
+    assert_eq!(
+        all,
+        vec![(2, json!(2)), (3, json!(3)), (4, json!(4))],
+        "evicted offsets are no longer readable"
+    );
+
+    // Reading from a retained offset returns exactly the tail.
+    assert_eq!(
+        store.read_from("s", 3).await.unwrap(),
+        vec![(3, json!(3)), (4, json!(4))]
+    );
+    // Reading past the end is empty, not an error.
+    assert!(store.read_from("s", 5).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn in_memory_append_bound_applies_per_stream() {
+    let store = InMemoryAppendStore::new().with_max_entries_per_stream(2);
+    for i in 0..3u64 {
+        store.append("a", json!(i)).await.unwrap();
+    }
+    store.append("b", json!("b0")).await.unwrap();
+
+    // Stream `a` was trimmed; stream `b` is untouched.
+    assert_eq!(store.read_from("a", 0).await.unwrap().len(), 2);
+    assert_eq!(
+        store.read_from("b", 0).await.unwrap(),
+        vec![(0, json!("b0"))]
+    );
+}
+
+#[tokio::test]
+async fn in_memory_append_unbounded_by_default() {
+    let store = InMemoryAppendStore::new();
+    for i in 0..100u64 {
+        store.append("s", json!(i)).await.unwrap();
+    }
+    assert_eq!(store.read_from("s", 0).await.unwrap().len(), 100);
+    assert_eq!(store.len("s").await.unwrap(), 100);
+}
+
 // ── JsonlAppendStore ───────────────────────────────────────────────────────────
 
 #[tokio::test]

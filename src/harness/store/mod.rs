@@ -227,9 +227,25 @@ impl Store for FileStore {
 // ── InMemoryAppendStore ─────────────────────────────────────────────────────────
 
 impl InMemoryAppendStore {
-    /// Creates a new, empty in-memory append store.
+    /// Creates a new, empty, **unbounded** in-memory append store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Caps every stream at `max` retained entries, evicting the **oldest**
+    /// entries once a stream grows past the cap.
+    ///
+    /// Offsets stay monotonically increasing across eviction: an evicted
+    /// offset is no longer readable (`read_from` silently starts at the oldest
+    /// retained entry when asked for an earlier offset), and `len` keeps
+    /// returning the logical stream length. A `max` of `0` retains nothing —
+    /// every append is immediately evicted (offsets still advance).
+    ///
+    /// The default (via [`Self::new`] / [`Default`]) is unbounded, preserving
+    /// full journal semantics for tests and replay.
+    pub fn with_max_entries_per_stream(mut self, max: usize) -> Self {
+        self.max_entries_per_stream = Some(max);
+        self
     }
 }
 
@@ -240,9 +256,15 @@ impl AppendStore for InMemoryAppendStore {
             .streams
             .lock()
             .map_err(|e| TinyAgentsError::Validation(format!("append store lock poisoned: {e}")))?;
-        let entries = streams.entry(stream.to_string()).or_default();
-        let offset = entries.len() as u64;
-        entries.push((now_ms(), value));
+        let buf = streams.entry(stream.to_string()).or_default();
+        let offset = buf.base_offset + buf.entries.len() as u64;
+        buf.entries.push_back((now_ms(), value));
+        if let Some(max) = self.max_entries_per_stream {
+            while buf.entries.len() > max {
+                buf.entries.pop_front();
+                buf.base_offset += 1;
+            }
+        }
         Ok(offset)
     }
 
@@ -251,14 +273,18 @@ impl AppendStore for InMemoryAppendStore {
             .streams
             .lock()
             .map_err(|e| TinyAgentsError::Validation(format!("append store lock poisoned: {e}")))?;
-        let Some(entries) = streams.get(stream) else {
+        let Some(buf) = streams.get(stream) else {
             return Ok(Vec::new());
         };
-        Ok(entries
+        // Entries before `base_offset` have been evicted; reading from an
+        // evicted offset resumes at the oldest retained entry.
+        let skip = offset.saturating_sub(buf.base_offset) as usize;
+        Ok(buf
+            .entries
             .iter()
             .enumerate()
-            .skip(offset as usize)
-            .map(|(i, (_ts, value))| (i as u64, value.clone()))
+            .skip(skip)
+            .map(|(i, (_ts, value))| (buf.base_offset + i as u64, value.clone()))
             .collect())
     }
 
@@ -267,7 +293,10 @@ impl AppendStore for InMemoryAppendStore {
             .streams
             .lock()
             .map_err(|e| TinyAgentsError::Validation(format!("append store lock poisoned: {e}")))?;
-        Ok(streams.get(stream).map(|e| e.len() as u64).unwrap_or(0))
+        Ok(streams
+            .get(stream)
+            .map(|buf| buf.base_offset + buf.entries.len() as u64)
+            .unwrap_or(0))
     }
 }
 

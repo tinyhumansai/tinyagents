@@ -485,3 +485,116 @@ fn graph_event_kind_and_step_are_stable() {
     assert_eq!(forked.step(), Some(3));
     assert_eq!(GraphEvent::RecursionDepthChanged { depth: 2 }.step(), None);
 }
+
+// ── InMemoryGraphStatusStore indexing and retention ───────────────────────────
+
+/// Builds a status for `run_id` on `thread_id` in the given lifecycle state.
+fn status_on_thread(run_id: &str, thread_id: &str, status: ExecutionStatus) -> GraphRunStatus {
+    let mut s = GraphRunStatus::new(RunId::new(run_id), GraphId::new("g"), status);
+    s.thread_id = Some(crate::harness::ids::ThreadId::new(thread_id));
+    s
+}
+
+#[tokio::test]
+async fn status_store_thread_index_tracks_overwrites() {
+    let store = InMemoryGraphStatusStore::new();
+    store
+        .put_status(status_on_thread("r-1", "t-a", ExecutionStatus::Running))
+        .await
+        .unwrap();
+    store
+        .put_status(status_on_thread("r-2", "t-a", ExecutionStatus::Running))
+        .await
+        .unwrap();
+    store
+        .put_status(status_on_thread("r-3", "t-b", ExecutionStatus::Running))
+        .await
+        .unwrap();
+
+    assert_eq!(store.list_by_thread("t-a").await.unwrap().len(), 2);
+    assert_eq!(store.list_by_thread("t-b").await.unwrap().len(), 1);
+    assert!(store.list_by_thread("t-missing").await.unwrap().is_empty());
+
+    // Overwriting a run on the same thread does not duplicate the index entry.
+    store
+        .put_status(status_on_thread("r-1", "t-a", ExecutionStatus::Completed))
+        .await
+        .unwrap();
+    assert_eq!(store.list_by_thread("t-a").await.unwrap().len(), 2);
+
+    // Re-homing a run to a different thread moves it in the index.
+    store
+        .put_status(status_on_thread("r-2", "t-b", ExecutionStatus::Running))
+        .await
+        .unwrap();
+    assert_eq!(store.list_by_thread("t-a").await.unwrap().len(), 1);
+    assert_eq!(store.list_by_thread("t-b").await.unwrap().len(), 2);
+    assert_eq!(store.len(), 3);
+}
+
+#[tokio::test]
+async fn status_store_cap_evicts_oldest_terminal_first() {
+    let store = InMemoryGraphStatusStore::new().with_max_runs(2);
+    store
+        .put_status(status_on_thread("r-live", "t", ExecutionStatus::Running))
+        .await
+        .unwrap();
+    store
+        .put_status(status_on_thread("r-done", "t", ExecutionStatus::Completed))
+        .await
+        .unwrap();
+    // Third run exceeds the cap: the terminal `r-done` goes first even though
+    // `r-live` is older.
+    store
+        .put_status(status_on_thread("r-new", "t", ExecutionStatus::Running))
+        .await
+        .unwrap();
+
+    assert_eq!(store.len(), 2);
+    assert!(store.get_status("r-done").await.unwrap().is_none());
+    assert!(store.get_status("r-live").await.unwrap().is_some());
+    assert!(store.get_status("r-new").await.unwrap().is_some());
+
+    // The thread index no longer serves the evicted run.
+    let by_thread = store.list_by_thread("t").await.unwrap();
+    assert_eq!(by_thread.len(), 2);
+    assert!(by_thread.iter().all(|s| s.run_id.as_str() != "r-done"));
+}
+
+#[tokio::test]
+async fn status_store_cap_falls_back_to_oldest_live_run() {
+    let store = InMemoryGraphStatusStore::new().with_max_runs(2);
+    for id in ["r-1", "r-2", "r-3"] {
+        store
+            .put_status(status_on_thread(id, "t", ExecutionStatus::Running))
+            .await
+            .unwrap();
+    }
+    // No terminal run to prefer, so the oldest live run is evicted.
+    assert_eq!(store.len(), 2);
+    assert!(store.get_status("r-1").await.unwrap().is_none());
+    assert!(store.get_status("r-2").await.unwrap().is_some());
+    assert!(store.get_status("r-3").await.unwrap().is_some());
+    assert_eq!(store.list_by_thread("t").await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn status_store_overwrite_never_evicts() {
+    let store = InMemoryGraphStatusStore::new().with_max_runs(2);
+    store
+        .put_status(status_on_thread("r-1", "t", ExecutionStatus::Running))
+        .await
+        .unwrap();
+    store
+        .put_status(status_on_thread("r-2", "t", ExecutionStatus::Running))
+        .await
+        .unwrap();
+    // Updating an existing run at capacity is not an insertion.
+    store
+        .put_status(status_on_thread("r-1", "t", ExecutionStatus::Completed))
+        .await
+        .unwrap();
+    assert_eq!(store.len(), 2);
+    assert!(store.get_status("r-1").await.unwrap().is_some());
+    assert!(store.get_status("r-2").await.unwrap().is_some());
+}
