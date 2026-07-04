@@ -157,21 +157,23 @@ Add TinyAgents to your project:
 
 ```toml
 [dependencies]
-tinyagents = "0.1"
+tinyagents = "1.5"
 ```
 
-The OpenAI (and OpenAI-compatible) provider is compiled in by default and pulls
-no extra dependencies; the build stays offline unless you actually make a call.
+The OpenAI (and OpenAI-compatible) provider is compiled in by default; the
+build stays offline unless you actually make a call. Two optional Cargo
+features gate heavier dependencies: `sqlite` (embedded SQLite checkpointer)
+and `repl` (embedded Rhai engine for the `.ragsh` session runtime).
 
 To explore locally:
 
 ```sh
-git clone git@github.com:tinyhumansai/rustagents.git
-cd rustagents
+git clone git@github.com:tinyhumansai/tinyagents.git
+cd tinyagents
 cargo run --example basic_graph
 ```
 
-OpenAI-backed examples need the feature flag and an API key:
+OpenAI-backed examples need an API key:
 
 ```sh
 export OPENAI_API_KEY=...
@@ -236,6 +238,10 @@ All live in [`examples/`](examples/):
 - **`openai_self_blueprint`** — **the deepest recursion:** a model authors a
   `.rag` blueprint that is compiled and run on the same runtime.
 - **`rag_blueprint`** — load and run a declarative `.rag` workflow.
+- **`goals_and_todos`** — a durable `ThreadGoal` driving a `TaskBoard` kanban
+  on one thread.
+- **`subconscious_loop`** — an offline, testable autonomous closed-loop
+  harness (see [`examples/subconscious_loop/README.md`](examples/subconscious_loop/README.md)).
 - **`openai_chat`** — a single provider-backed chat turn.
 - **`openai_tools`** — tool calling against a hosted model.
 - **`openai_structured`** — typed structured output.

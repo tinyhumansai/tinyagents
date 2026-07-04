@@ -53,10 +53,13 @@
 //!
 //! ## Provider features
 //!
-//! The default build is offline and deterministic ([`harness::providers::MockModel`]).
 //! Hosted and local providers (OpenAI plus the OpenAI-compatible endpoints for
 //! Anthropic, Ollama, DeepSeek, Groq, xAI, OpenRouter, Together, and Mistral)
-//! live behind the `openai` Cargo feature.
+//! are compiled in unconditionally alongside the offline, deterministic
+//! [`harness::providers::MockModel`]. Two Cargo features gate optional,
+//! heavier dependencies instead: `sqlite` (embedded SQLite checkpointer,
+//! [`graph::checkpoint::SqliteCheckpointer`]) and `repl` (embedded Rhai engine
+//! powering the `.ragsh` session runtime, [`repl::session`]).
 //!
 //! ## Crate-root re-exports
 //!
