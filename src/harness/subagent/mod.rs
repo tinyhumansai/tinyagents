@@ -149,10 +149,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
         max_turn_output_tokens: Option<u32>,
     ) -> Result<RunConfig> {
         let max_depth = self.harness.policy().limits.max_depth;
-        let child_depth = parent_depth + 1;
-        if child_depth > max_depth {
-            return Err(TinyAgentsError::SubAgentDepth(max_depth));
-        }
+        let child_depth = RunConfig::checked_child_depth(parent_depth, max_depth)?;
         let child_run_id = format!("{}-d{child_depth}", self.name);
         let mut config = RunConfig::new(child_run_id.clone())
             .with_depth(child_depth)
@@ -333,10 +330,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgentSession<State, Ctx> {
     /// cap exactly as [`SubAgent::invoke`] does.
     fn child_config(&self) -> Result<RunConfig> {
         let max_depth = self.subagent.harness.policy().limits.max_depth;
-        let child_depth = self.parent_depth + 1;
-        if child_depth > max_depth {
-            return Err(TinyAgentsError::SubAgentDepth(max_depth));
-        }
+        let child_depth = RunConfig::checked_child_depth(self.parent_depth, max_depth)?;
         Ok(RunConfig::new(format!(
             "{}-t{}-d{child_depth}",
             self.subagent.name, self.turn

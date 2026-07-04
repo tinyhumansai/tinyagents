@@ -302,14 +302,11 @@ fn bump_agent<State: Send + Sync>(ctx: &HostContext<State>) -> Result<(), Box<Ev
 /// [`ReplPolicy::max_depth`] fails closed with
 /// [`TinyAgentsError::SubAgentDepth`].
 fn check_depth<State: Send + Sync>(ctx: &HostContext<State>) -> Result<(), Box<EvalAltResult>> {
-    let child_depth = ctx.run_depth + 1;
-    if child_depth > ctx.policy.max_depth {
-        return Err(raise(
-            ctx,
-            TinyAgentsError::SubAgentDepth(ctx.policy.max_depth),
-        ));
-    }
-    Ok(())
+    // Funnel the depth-cap check through the shared harness guard so the REPL
+    // sub-run bound stays in lock-step with SubAgent/SubAgentTool.
+    crate::harness::context::RunConfig::checked_child_depth(ctx.run_depth, ctx.policy.max_depth)
+        .map(|_| ())
+        .map_err(|err| raise(ctx, err))
 }
 
 // ── Request builders ────────────────────────────────────────────────────────

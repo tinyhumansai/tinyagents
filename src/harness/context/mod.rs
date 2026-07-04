@@ -124,6 +124,22 @@ impl RunConfig {
         self
     }
 
+    /// Derives a child run's depth from its parent, enforcing the recursion cap.
+    ///
+    /// The single source of truth for the sub-agent depth guard: returns
+    /// `parent_depth + 1`, or [`crate::error::TinyAgentsError::SubAgentDepth`]
+    /// carrying `max_depth` when the child would exceed the cap. Every recursion
+    /// surface — [`crate::harness::subagent::SubAgent`], its reuse-session tool,
+    /// and the REPL sub-run builtin — funnels its `depth + 1` check through here
+    /// so the fail-closed guard cannot drift out of sync between them.
+    pub fn checked_child_depth(parent_depth: usize, max_depth: usize) -> Result<usize> {
+        let child_depth = parent_depth + 1;
+        if child_depth > max_depth {
+            return Err(crate::error::TinyAgentsError::SubAgentDepth(max_depth));
+        }
+        Ok(child_depth)
+    }
+
     /// Builds the [`RunConfig`] for a child run one level deeper than this one.
     ///
     /// The returned config keeps this config's `max_depth` and thread, sets

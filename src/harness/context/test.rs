@@ -141,3 +141,18 @@ fn request_control_keeps_highest_precedence() {
         Some(MiddlewareControl::Interrupt { .. })
     ));
 }
+
+#[test]
+fn checked_child_depth_is_the_shared_depth_guard() {
+    use crate::error::TinyAgentsError;
+
+    // Below the cap: returns parent_depth + 1.
+    assert_eq!(RunConfig::checked_child_depth(0, 8).unwrap(), 1);
+    assert_eq!(RunConfig::checked_child_depth(7, 8).unwrap(), 8);
+
+    // At the boundary (child would be max_depth + 1): fail closed with the cap.
+    match RunConfig::checked_child_depth(8, 8) {
+        Err(TinyAgentsError::SubAgentDepth(cap)) => assert_eq!(cap, 8),
+        other => panic!("expected SubAgentDepth(8), got {other:?}"),
+    }
+}
