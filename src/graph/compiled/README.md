@@ -122,7 +122,10 @@ Accessors: `graph_id()`, `name()`, `namespace()`.
 | File | Role |
 | --- | --- |
 | `types.rs` | `CompiledGraph`, `GraphExecution`, `GraphInput`, `StateSnapshot`, `ResumeTarget`. |
-| `mod.rs` | The superstep loop, retry/resumable-failure machinery, run/resume/state APIs. |
+| `mod.rs` | Module wiring: shared helpers (`Activation`, checkpoint-id/snapshot projection, barrier persistence) and the builder/configuration `impl` (`with_*`, `emit`). |
+| `executor.rs` | The superstep loop and run/resume entry points (`run`, `resume`, `retry`, `execute`, `execute_run`, node retry, resumable-failure persistence). |
+| `state_api.rs` | State inspection / time travel (`get_state`, `get_state_history`, `update_state`, `bulk_update_state`, `fork_state`). |
+| `routing.rs` | Resolving a completed step's active set into the next superstep's activations (`route`, `route_completed`, interrupt-durability preconditions). |
 | `test.rs` | Unit tests (sequential/parallel steps, retry, resumable failure, resume/fork, state history). |
 
 ## Operational constraints
