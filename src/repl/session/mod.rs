@@ -72,6 +72,13 @@ pub(super) struct CellBuffers {
     answer: Arc<Mutex<Option<String>>>,
     host_error: Arc<Mutex<Option<TinyAgentsError>>>,
     vars_snapshot: Arc<Mutex<BTreeMap<String, String>>>,
+    /// The wall-clock instant the current cell's [`ReplPolicy::timeout`]
+    /// expires at, if the policy configures one. Set at the start of
+    /// [`ReplSession::eval_cell`] and read by every host capability call (via
+    /// [`builtins::bridge_block_on`]) and the engine's `on_progress` hook, so
+    /// the deadline is enforced fail-closed both for pure script loops and for
+    /// in-flight model/tool/agent/graph calls.
+    deadline: Arc<Mutex<Option<Instant>>>,
 }
 
 /// The persistent variable namespace of a session.
@@ -213,6 +220,10 @@ where
     engine: Engine,
     /// Shared buffers the engine's built-ins write into.
     buffers: CellBuffers,
+    /// Number of cells evaluated so far this session, enforced fail-closed
+    /// against [`ReplPolicy::max_iterations`]. Each `eval_cell` call is one
+    /// CodeAct-style iteration of a model-driven session.
+    iterations: usize,
 }
 
 impl<State: Send + Sync + Default + 'static> ReplSession<State, ()> {
@@ -266,6 +277,7 @@ impl<State: Send + Sync + Default + 'static, Ctx> ReplSession<State, Ctx> {
             drafts: Arc::new(Mutex::new(BTreeMap::new())),
             engine: Engine::new(),
             buffers,
+            iterations: 0,
         };
         session.rebuild_engine();
         session
@@ -350,12 +362,26 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
     ///
     /// * [`TinyAgentsError::LimitExceeded`] — the script exceeds
     ///   [`ReplPolicy::max_script_bytes`], the output exceeds
-    ///   [`ReplPolicy::max_output_bytes`], or the script exceeds the engine
-    ///   operation limit (fail-closed runaway protection).
+    ///   [`ReplPolicy::max_output_bytes`], the engine operation limit
+    ///   (fail-closed runaway protection), or the session has already
+    ///   evaluated [`ReplPolicy::max_iterations`] cells.
+    /// * [`TinyAgentsError::Timeout`] — the cell's wall-clock deadline
+    ///   ([`ReplPolicy::timeout`]) elapsed, either mid-script or during a
+    ///   model/tool/agent/graph call.
     /// * [`TinyAgentsError::Validation`] — the script failed to compile or
     ///   raised a runtime error.
     pub fn eval_cell(&mut self, script: &str) -> Result<ReplResult> {
         let start = Instant::now();
+
+        // Each call is one CodeAct-style iteration of a model-driven session;
+        // enforce the cap fail-closed before doing any other work.
+        if self.iterations >= self.policy.max_iterations {
+            return Err(TinyAgentsError::LimitExceeded(format!(
+                "ragsh session has evaluated {} cells, reaching the max_iterations limit of {}",
+                self.iterations, self.policy.max_iterations
+            )));
+        }
+        self.iterations += 1;
 
         if script.len() > self.policy.max_script_bytes {
             return Err(TinyAgentsError::LimitExceeded(format!(
@@ -365,8 +391,15 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
             )));
         }
 
-        // Reset per-cell shared buffers.
+        // Reset per-cell shared buffers and arm the wall-clock deadline (if
+        // the policy configures one) before any script or host-capability
+        // work begins. `on_progress` (see `builtins::build_engine`) enforces
+        // it for pure script execution; `bridge_block_on` enforces it around
+        // every model/tool/agent/graph call so a hanging host call cannot
+        // block the session forever either.
         self.buffers.reset();
+        self.buffers
+            .arm_deadline(self.policy.timeout.map(|d| start + d));
 
         let before = self.variables.snapshot();
         // Expose the pre-cell namespace to `show_vars()`.
@@ -439,6 +472,19 @@ impl CellBuffers {
         self.calls.lock().expect("calls poisoned").clear();
         *self.answer.lock().expect("answer poisoned") = None;
         *self.host_error.lock().expect("host_error poisoned") = None;
+        *self.deadline.lock().expect("deadline poisoned") = None;
+    }
+
+    /// Arms the per-cell wall-clock deadline, replacing any previous one.
+    fn arm_deadline(&self, deadline: Option<Instant>) {
+        *self.deadline.lock().expect("deadline poisoned") = deadline;
+    }
+
+    /// Returns the current cell's wall-clock deadline, if the policy
+    /// configured a timeout. Read by every host capability call and the
+    /// engine's `on_progress` hook (see [`builtins::bridge_block_on`]).
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        *self.deadline.lock().expect("deadline poisoned")
     }
 
     fn stdout(&self) -> String {
@@ -498,6 +544,15 @@ fn map_rhai_error(err: EvalAltResult) -> TinyAgentsError {
         EvalAltResult::ErrorTooManyOperations(pos) => TinyAgentsError::LimitExceeded(format!(
             "ragsh cell exceeded the operation limit (max_operations) at {pos}"
         )),
+        // The engine's `on_progress` hook (see `builtins::build_engine`)
+        // terminates the script with this exact sentinel value once the
+        // per-cell `ReplPolicy::timeout` deadline elapses.
+        EvalAltResult::ErrorTerminated(token, pos)
+            if token.clone().into_string().ok().as_deref()
+                == Some(builtins::DEADLINE_EXCEEDED_TOKEN) =>
+        {
+            TinyAgentsError::Timeout(format!("{} at {pos}", builtins::DEADLINE_EXCEEDED_TOKEN))
+        }
         other => TinyAgentsError::Validation(format!("ragsh evaluation error: {other}")),
     }
 }

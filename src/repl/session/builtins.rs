@@ -110,10 +110,58 @@ pub(super) struct HostContext<State: Send + Sync> {
     pub drafts: Arc<Mutex<BTreeMap<String, GraphBlueprintHandle>>>,
 }
 
-/// Drives an async capability future to completion synchronously — the v1
-/// "blocking bridge" adapter (see the [module docs](self)).
-fn bridge_block_on<F: Future>(future: F) -> F::Output {
-    futures::executor::block_on(future)
+/// Drives an async capability future to completion synchronously, bounded by
+/// an optional wall-clock `deadline` — the v1 "blocking bridge" adapter (see
+/// the [module docs](self)), now with fail-closed enforcement of
+/// [`ReplPolicy::timeout`].
+///
+/// `on_progress` (see [`build_engine`]) only fires between Rhai
+/// statements/operations, so it can never interrupt a blocked native call:
+/// this is the enforcement point for that case. When `deadline` elapses
+/// first, the future is dropped — canceling the underlying request, since
+/// providers are built on cancel-safe `reqwest`/`futures` — and a `Timeout`
+/// error is returned instead of blocking the session forever.
+fn bridge_block_on_raw<F: Future>(
+    deadline: Option<Instant>,
+    future: F,
+) -> std::result::Result<F::Output, TinyAgentsError> {
+    let Some(deadline) = deadline else {
+        return Ok(futures::executor::block_on(future));
+    };
+    let now = Instant::now();
+    if now >= deadline {
+        return Err(TinyAgentsError::Timeout(format!(
+            "{DEADLINE_EXCEEDED_TOKEN} before a host capability call could start"
+        )));
+    }
+    let remaining = deadline - now;
+    let (tx, rx) = futures::channel::oneshot::channel::<()>();
+    // A detached timer thread wakes the race below at the deadline. If the
+    // capability future finishes first this thread simply sleeps out its
+    // remainder and exits; nothing observes it after that.
+    std::thread::spawn(move || {
+        std::thread::sleep(remaining);
+        let _ = tx.send(());
+    });
+    match futures::executor::block_on(futures::future::select(Box::pin(future), rx)) {
+        futures::future::Either::Left((output, _timer)) => Ok(output),
+        futures::future::Either::Right(_) => Err(TinyAgentsError::Timeout(format!(
+            "{DEADLINE_EXCEEDED_TOKEN} during a host capability call"
+        ))),
+    }
+}
+
+/// Convenience wrapper over [`bridge_block_on_raw`] for the common case where
+/// the capability future itself resolves to a `Result`, flattening the
+/// deadline error into the same error channel as the call's own failures.
+fn bridge_block_on<T, F>(
+    deadline: Option<Instant>,
+    future: F,
+) -> std::result::Result<T, TinyAgentsError>
+where
+    F: Future<Output = std::result::Result<T, TinyAgentsError>>,
+{
+    bridge_block_on_raw(deadline, future)?
 }
 
 /// One completed `model_query_batched` item: `(model, text, finish_reason,
@@ -312,8 +360,8 @@ fn model_query_impl<State: Send + Sync + 'static>(
         .ok_or_else(|| raise(ctx, TinyAgentsError::ModelNotFound(model_name.clone())))?;
     let request = build_model_request(&model_name, params);
     let start = Instant::now();
-    let response =
-        bridge_block_on(model.invoke(&ctx.state, request)).map_err(|err| raise(ctx, err))?;
+    let response = bridge_block_on(ctx.buffers.deadline(), model.invoke(&ctx.state, request))
+        .map_err(|err| raise(ctx, err))?;
     let elapsed = start.elapsed();
     let finish_reason = response.finish_reason.clone();
     let text = Message::Assistant(response.message).text();
@@ -349,7 +397,8 @@ fn tool_call_impl<State: Send + Sync + 'static>(
         arguments: arguments.clone(),
     };
     let start = Instant::now();
-    let result = bridge_block_on(tool.call(&ctx.state, call)).map_err(|err| raise(ctx, err))?;
+    let result = bridge_block_on(ctx.buffers.deadline(), tool.call(&ctx.state, call))
+        .map_err(|err| raise(ctx, err))?;
     let elapsed = start.elapsed();
     record(
         ctx,
@@ -398,8 +447,8 @@ fn agent_query_impl<State: Send + Sync + 'static>(
         input = input.with_data(data);
     }
     let start = Instant::now();
-    let output =
-        bridge_block_on(agent.run(input, ctx.events.clone())).map_err(|err| raise(ctx, err))?;
+    let output = bridge_block_on(ctx.buffers.deadline(), agent.run(input, ctx.events.clone()))
+        .map_err(|err| raise(ctx, err))?;
     record(
         ctx,
         ReplCallKind::Agent,
@@ -703,22 +752,24 @@ fn model_query_batched_impl<State: Send + Sync + 'static>(
     }
 
     let concurrency = ctx.policy.max_concurrency.max(1);
-    let results: Vec<Result<ModelBatchItem, TinyAgentsError>> = bridge_block_on(async {
-        stream::iter(prepared.iter().map(|(name, model, request, structured)| {
-            let name = name.clone();
-            let structured = *structured;
-            async move {
-                let start = Instant::now();
-                let response = model.invoke(&ctx.state, request.clone()).await?;
-                let finish_reason = response.finish_reason.clone();
-                let text = Message::Assistant(response.message).text();
-                Ok((name, text, finish_reason, structured, start.elapsed()))
-            }
-        }))
-        .buffered(concurrency)
-        .collect()
-        .await
-    });
+    let results: Vec<Result<ModelBatchItem, TinyAgentsError>> =
+        bridge_block_on_raw(ctx.buffers.deadline(), async {
+            stream::iter(prepared.iter().map(|(name, model, request, structured)| {
+                let name = name.clone();
+                let structured = *structured;
+                async move {
+                    let start = Instant::now();
+                    let response = model.invoke(&ctx.state, request.clone()).await?;
+                    let finish_reason = response.finish_reason.clone();
+                    let text = Message::Assistant(response.message).text();
+                    Ok((name, text, finish_reason, structured, start.elapsed()))
+                }
+            }))
+            .buffered(concurrency)
+            .collect()
+            .await
+        })
+        .map_err(|err| raise(ctx, err))?;
 
     let mut out = Array::with_capacity(results.len());
     for result in results {
@@ -759,7 +810,7 @@ fn tool_call_batched_impl<State: Send + Sync + 'static>(
     let concurrency = ctx.policy.max_concurrency.max(1);
     let results: Vec<
         Result<(String, crate::harness::tool::ToolResult, Duration), TinyAgentsError>,
-    > = bridge_block_on(async {
+    > = bridge_block_on_raw(ctx.buffers.deadline(), async {
         stream::iter(prepared.iter().map(|(name, tool, arguments)| {
             let name = name.clone();
             let call = ToolCall {
@@ -776,7 +827,8 @@ fn tool_call_batched_impl<State: Send + Sync + 'static>(
         .buffered(concurrency)
         .collect()
         .await
-    });
+    })
+    .map_err(|err| raise(ctx, err))?;
 
     let mut out = Array::with_capacity(results.len());
     for result in results {
@@ -827,19 +879,21 @@ fn agent_query_batched_impl<State: Send + Sync + 'static>(
     }
 
     let concurrency = ctx.policy.max_concurrency.max(1);
-    let results: Vec<Result<AgentBatchItem, TinyAgentsError>> = bridge_block_on(async {
-        stream::iter(prepared.iter().map(|(name, agent, input)| {
-            let name = name.clone();
-            async move {
-                let start = Instant::now();
-                let output = agent.run(input.clone(), ctx.events.clone()).await?;
-                Ok((name, output.text, start.elapsed()))
-            }
-        }))
-        .buffered(concurrency)
-        .collect()
-        .await
-    });
+    let results: Vec<Result<AgentBatchItem, TinyAgentsError>> =
+        bridge_block_on_raw(ctx.buffers.deadline(), async {
+            stream::iter(prepared.iter().map(|(name, agent, input)| {
+                let name = name.clone();
+                async move {
+                    let start = Instant::now();
+                    let output = agent.run(input.clone(), ctx.events.clone()).await?;
+                    Ok((name, output.text, start.elapsed()))
+                }
+            }))
+            .buffered(concurrency)
+            .collect()
+            .await
+        })
+        .map_err(|err| raise(ctx, err))?;
 
     let mut out = Array::with_capacity(results.len());
     for result in results {
@@ -864,6 +918,12 @@ fn graph_run_batched_impl<State: Send + Sync + 'static>(
 
 // ── Engine construction ─────────────────────────────────────────────────────
 
+/// Sentinel exception value `on_progress` terminates a script with when the
+/// per-cell [`ReplPolicy::timeout`] deadline elapses. `eval_cell` recognizes
+/// this exact string and maps it to `TinyAgentsError::Timeout` instead of the
+/// generic runtime-error path.
+pub(super) const DEADLINE_EXCEEDED_TOKEN: &str = "ragsh cell exceeded its wall-clock timeout";
+
 /// Builds a sandboxed Rhai engine for a session, registering every host-backed
 /// built-in against the session's live registries and policy.
 ///
@@ -873,6 +933,22 @@ fn graph_run_batched_impl<State: Send + Sync + 'static>(
 pub(super) fn build_engine<State: Send + Sync + 'static>(ctx: Arc<HostContext<State>>) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_operations(ctx.policy.max_operations);
+
+    // Fail-closed wall-clock deadline: `eval_cell` arms `ctx.buffers`'s
+    // per-cell deadline before running the script. `on_progress` is polled
+    // between Rhai statements/operations, so this catches runaway *script*
+    // loops (a busy `while true {}` with no host calls) that `max_operations`
+    // alone might not bound tightly enough in wall-clock terms. Host
+    // capability calls (`model_query`, `tool_call`, …) are bounded separately
+    // by `bridge_block_on`, since a blocked native call never yields back to
+    // `on_progress`.
+    let deadline_ctx = ctx.clone();
+    engine.on_progress(move |_ops| match deadline_ctx.buffers.deadline() {
+        Some(deadline) if Instant::now() >= deadline => {
+            Some(Dynamic::from(DEADLINE_EXCEEDED_TOKEN.to_string()))
+        }
+        _ => None,
+    });
 
     // ── stdout capture ──
     let stdout_ctx = ctx.clone();
@@ -1006,4 +1082,53 @@ pub(super) fn build_engine<State: Send + Sync + 'static>(ctx: Arc<HostContext<St
     });
 
     engine
+}
+
+#[cfg(test)]
+mod bridge_deadline_test {
+    use super::*;
+
+    #[test]
+    fn no_deadline_awaits_to_completion() {
+        let out = bridge_block_on::<u32, _>(None, async { Ok(7) }).expect("no deadline");
+        assert_eq!(out, 7);
+    }
+
+    #[test]
+    fn future_finishing_before_the_deadline_succeeds() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let out =
+            bridge_block_on::<u32, _>(Some(deadline), async { Ok(9) }).expect("within deadline");
+        assert_eq!(out, 9);
+    }
+
+    #[test]
+    fn deadline_already_elapsed_fails_closed_without_starting_the_call() {
+        // Regression test: `ReplPolicy::timeout` used to be parsed but never
+        // enforced anywhere a host capability call could hang forever.
+        let deadline = Instant::now() - Duration::from_millis(1);
+        let err = bridge_block_on::<u32, _>(Some(deadline), async { Ok(1) })
+            .expect_err("deadline already passed");
+        assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn a_hanging_call_is_cut_off_at_the_deadline_instead_of_blocking_forever() {
+        // A future that never resolves models a hung provider/tool call. The
+        // deadline must still return control promptly rather than hanging the
+        // whole `eval_cell` (and therefore the session) forever.
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(30);
+        let err = bridge_block_on::<u32, _>(
+            Some(deadline),
+            futures::future::pending::<std::result::Result<u32, TinyAgentsError>>(),
+        )
+        .expect_err("hanging call must be cut off at the deadline");
+        assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "took {:?}, should return promptly at the 30ms deadline",
+            start.elapsed()
+        );
+    }
 }

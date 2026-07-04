@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::harness::store::StoreRegistry;
 use crate::language::types::{Blueprint, Origin};
 use crate::registry::CapabilityRegistry;
 
@@ -293,19 +292,24 @@ impl Default for LanguageCompiler {
 /// `GraphRegistry`, and `AgentRegistry` fields. In this crate those four kinds
 /// are already unified under the single name-addressable
 /// [`CapabilityRegistry`], so `ReplCapabilities` wraps that registry (shared via
-/// `Arc` so a session can be cheaply cloned into a graph node) plus the
-/// long-term [`StoreRegistry`] and an optional [`LanguageCompiler`]. The
-/// per-kind accessors ([`models`](Self::models), [`tools`](Self::tools),
-/// [`graphs`](Self::graphs), [`agents`](Self::agents)) preserve the documented
-/// surface.
+/// `Arc` so a session can be cheaply cloned into a graph node) plus an optional
+/// [`LanguageCompiler`]. The per-kind accessors ([`models`](Self::models),
+/// [`tools`](Self::tools), [`graphs`](Self::graphs), [`agents`](Self::agents))
+/// preserve the documented surface.
+///
+/// A prior revision also carried a [`crate::harness::store::StoreRegistry`]
+/// field, but no built-in
+/// (`model_query`, `tool_call`, …) ever read or wrote through it — it was dead
+/// weight advertising a capability the engine did not actually expose. It was
+/// removed rather than left half-wired; long-term store access can be added
+/// back as real `store_get`/`store_set` built-ins (see [`super::builtins`])
+/// once that surface is designed.
 pub struct ReplCapabilities<State = ()>
 where
     State: Send + Sync,
 {
     /// The unified capability catalog (models, tools, graphs, agents).
     pub registry: Arc<CapabilityRegistry<State>>,
-    /// Named long-term stores available to the session.
-    pub stores: StoreRegistry,
     /// Optional expressive-language compiler handle for graph drafting.
     pub language: Option<LanguageCompiler>,
 }
@@ -315,7 +319,6 @@ impl<State: Send + Sync> ReplCapabilities<State> {
     pub fn new(registry: Arc<CapabilityRegistry<State>>) -> Self {
         Self {
             registry,
-            stores: StoreRegistry::new(),
             language: None,
         }
     }
@@ -323,12 +326,6 @@ impl<State: Send + Sync> ReplCapabilities<State> {
     /// Enables the expressive-language compiler handle for this session.
     pub fn with_language(mut self, language: LanguageCompiler) -> Self {
         self.language = Some(language);
-        self
-    }
-
-    /// Replaces the store registry with a (possibly shared) one.
-    pub fn with_stores(mut self, stores: StoreRegistry) -> Self {
-        self.stores = stores;
         self
     }
 

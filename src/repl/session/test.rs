@@ -1,5 +1,7 @@
 //! Unit tests for the Rhai-backed `.ragsh` session runtime.
 
+use std::time::{Duration, Instant};
+
 use super::*;
 use crate::error::TinyAgentsError;
 
@@ -60,6 +62,54 @@ fn over_limit_script_fails_closed() {
         }
         other => panic!("expected LimitExceeded, got {other:?}"),
     }
+}
+
+#[test]
+fn timeout_fails_closed_on_a_runaway_script() {
+    // Regression test: `ReplPolicy::timeout` used to be parsed but never
+    // enforced — a runaway or hanging cell could block the session forever.
+    // `max_operations` is left effectively unbounded here so only the
+    // wall-clock deadline (enforced via the engine's `on_progress` hook) can
+    // stop the loop.
+    let policy = ReplPolicy {
+        timeout: Some(Duration::from_millis(30)),
+        max_operations: 0,
+        ..ReplPolicy::default()
+    };
+    let mut s = ReplSession::<()>::new().with_policy(policy);
+
+    let start = Instant::now();
+    let err = s
+        .eval_cell("let total = 0; loop { total += 1; }")
+        .expect_err("should exceed the wall-clock deadline");
+    assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
+    // The property under test: `eval_cell` returns promptly once the
+    // deadline elapses rather than running the loop forever.
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "eval_cell took {:?}, should have returned near the 30ms deadline",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn max_iterations_limit_fails_closed() {
+    // Regression test: `ReplPolicy::max_iterations` was parsed and defaulted
+    // but no code path ever checked it.
+    let policy = ReplPolicy {
+        max_iterations: 2,
+        ..ReplPolicy::default()
+    };
+    let mut s = ReplSession::<()>::new().with_policy(policy);
+
+    s.eval_cell("1").expect("cell 1 within the limit");
+    s.eval_cell("2").expect("cell 2 within the limit");
+
+    let err = s.eval_cell("3").expect_err("cell 3 exceeds max_iterations");
+    assert!(
+        matches!(err, TinyAgentsError::LimitExceeded(_)),
+        "got {err:?}"
+    );
 }
 
 #[test]
