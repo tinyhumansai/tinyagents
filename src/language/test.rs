@@ -1330,6 +1330,74 @@ fn blueprint_diff_of_identical_blueprints_is_empty() {
     assert_eq!(diff.to_string(), "no changes");
 }
 
+const DIFF_COMMAND_BASE: &str = r#"
+graph flow2 {
+  start plan
+
+  node plan {
+    kind agent
+    model "default"
+    command {
+      goto work
+      update {
+        status "planned"
+      }
+    }
+  }
+
+  node work {
+    kind tool_executor
+    next END
+  }
+}
+"#;
+
+/// Only `plan`'s command `update` value changes (`"planned"` -> `"revised"`);
+/// topology, routing target, and everything else stays identical.
+const DIFF_COMMAND_NEW: &str = r#"
+graph flow2 {
+  start plan
+
+  node plan {
+    kind agent
+    model "default"
+    command {
+      goto work
+      update {
+        status "revised"
+      }
+    }
+  }
+
+  node work {
+    kind tool_executor
+    next END
+  }
+}
+"#;
+
+#[test]
+fn blueprint_diff_reports_command_only_change() {
+    let old = lang_testkit::blueprint(DIFF_COMMAND_BASE);
+    let new = lang_testkit::blueprint(DIFF_COMMAND_NEW);
+
+    let diff = blueprint_diff(&old, &new);
+    assert!(!diff.is_empty(), "command-only change must not be silent");
+    assert!(diff.nodes_added.is_empty());
+    assert!(diff.nodes_removed.is_empty());
+
+    assert_eq!(diff.nodes_changed.len(), 1, "{diff:?}");
+    let plan_change = &diff.nodes_changed[0];
+    assert_eq!(plan_change.name, "plan");
+    assert!(
+        plan_change.fields.iter().any(|f| f.field == "command"),
+        "{plan_change:?}"
+    );
+
+    let rendered = diff.to_string();
+    assert!(rendered.contains("command:"), "{rendered}");
+}
+
 #[test]
 fn blueprint_diff_serializes_round_trip() {
     let old = lang_testkit::blueprint(DIFF_BASE);
