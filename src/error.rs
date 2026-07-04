@@ -72,8 +72,29 @@ pub enum TinyAgentsError {
     /// A model provider call failed (transport error, non-2xx status, or a
     /// malformed response). The payload is a human-readable, provider-normalized
     /// description.
+    ///
+    /// Prefer [`TinyAgentsError::Provider`] when the structured failure detail
+    /// (HTTP status, provider error code, retryability) is available — this
+    /// variant remains for transport-level and parsing failures that have no
+    /// such structure to preserve.
     #[error("model error: {0}")]
     Model(String),
+
+    /// A model provider call failed with the full structured detail preserved
+    /// — HTTP status, provider error code, and whether retrying the same
+    /// request may succeed — instead of flattened into a display string.
+    ///
+    /// Real provider adapters (for example the OpenAI unary and streaming
+    /// paths) raise this instead of [`TinyAgentsError::Model`] whenever they
+    /// have a [`crate::harness::model::ProviderError`] in hand, so
+    /// [`crate::harness::retry::is_retryable`] can classify retryability from
+    /// [`crate::harness::model::ProviderError::retryable`] (a 429 is
+    /// retryable; a 401 is not) rather than retrying every provider failure
+    /// indiscriminately. Boxed so this one variant's larger payload does not
+    /// inflate every `Result<T, TinyAgentsError>` in the crate
+    /// (`clippy::result_large_err`).
+    #[error("model error: {0}")]
+    Provider(Box<crate::harness::model::ProviderError>),
 
     /// A tool invocation returned an error. The payload describes the failure.
     #[error("tool error: {0}")]

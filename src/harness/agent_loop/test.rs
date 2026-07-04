@@ -241,6 +241,51 @@ impl ChatModel<()> for FailingModel {
     }
 }
 
+/// A model that always fails with a retryable error and records the
+/// (virtual) `tokio::time::Instant` of each `invoke` call, so a test can
+/// assert on the actual elapsed time between retries rather than just the
+/// attempt count.
+struct TimestampingFailingModel {
+    timestamps: Mutex<Vec<tokio::time::Instant>>,
+}
+
+#[async_trait]
+impl ChatModel<()> for TimestampingFailingModel {
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+        self.timestamps
+            .lock()
+            .unwrap()
+            .push(tokio::time::Instant::now());
+        Err(TinyAgentsError::Model("transient boom".to_string()))
+    }
+}
+
+/// A model that always fails with a structured `TinyAgentsError::Provider`
+/// error whose `retryable` flag is fixed at construction, and counts
+/// attempts. Used to prove the agent loop's retry decision consults the
+/// structured flag rather than retrying every provider failure.
+struct ProviderFailingModel {
+    retryable: bool,
+    status: u16,
+    attempts: Mutex<usize>,
+}
+
+#[async_trait]
+impl ChatModel<()> for ProviderFailingModel {
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+        *self.attempts.lock().unwrap() += 1;
+        Err(TinyAgentsError::Provider(Box::new(
+            crate::harness::model::ProviderError {
+                provider: "test-provider".to_string(),
+                status: Some(self.status),
+                retryable: self.retryable,
+                message: "boom".to_string(),
+                ..crate::harness::model::ProviderError::default()
+            },
+        )))
+    }
+}
+
 /// Around-model wrap middleware that calls the inner pipeline then stamps the
 /// finish reason on the resulting response.
 struct StampModelWrap;
@@ -716,6 +761,56 @@ async fn no_model_registered_errors() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn retry_backoff_sleeps_the_documented_schedule() {
+    // Regression test: the loop used to compute the backoff from the
+    // *post-increment* attempt number, so the first retry's sleep skipped
+    // `initial_backoff_ms` entirely and the whole exponential schedule was
+    // shifted one step higher than `RetryPolicy::backoff_for_attempt`
+    // documents. With `initial_backoff_ms = 100`, `multiplier = 2.0`, no
+    // jitter: attempt 0 -> 100ms, attempt 1 -> 200ms, attempt 2 -> 400ms.
+    use std::time::Duration;
+
+    let policy = RetryPolicy::default()
+        .with_max_attempts(4)
+        .with_initial_backoff_ms(100)
+        .with_multiplier(2.0)
+        .with_jitter(false)
+        .with_backoff_sleep(true);
+
+    let model = Arc::new(TimestampingFailingModel {
+        timestamps: Mutex::new(Vec::new()),
+    });
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("flaky", model.clone());
+    harness.with_policy(RunPolicy {
+        retry: policy,
+        ..RunPolicy::default()
+    });
+
+    harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("all 4 attempts fail");
+
+    let timestamps = model.timestamps.lock().unwrap().clone();
+    assert_eq!(timestamps.len(), 4, "expected exactly max_attempts calls");
+
+    let gaps: Vec<Duration> = timestamps
+        .windows(2)
+        .map(|w| w[1].duration_since(w[0]))
+        .collect();
+    assert_eq!(
+        gaps,
+        vec![
+            Duration::from_millis(100), // before retry 1 (attempt 0's backoff)
+            Duration::from_millis(200), // before retry 2 (attempt 1's backoff)
+            Duration::from_millis(400), // before retry 3 (attempt 2's backoff)
+        ],
+        "backoff schedule does not match RetryPolicy::backoff_for_attempt"
+    );
+}
+
 #[tokio::test]
 async fn retry_then_fallback_succeeds() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
@@ -764,6 +859,55 @@ async fn run_limits_max_retries_per_call_caps_a_looser_retry_policy() {
         .expect_err("no fallback, retries capped by RunLimits");
     assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
     assert_eq!(*failing.attempts.lock().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn provider_error_401_is_not_retried() {
+    // Regression test: before `ProviderError` was preserved structurally, a
+    // 401 flattened into `Model(String)` was retried like any other model
+    // error. A non-retryable `Provider` error must fail on the first attempt.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    let model = Arc::new(ProviderFailingModel {
+        retryable: false,
+        status: 401,
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("primary", model.clone());
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(5),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("401 is not retryable");
+    assert!(matches!(err, TinyAgentsError::Provider(_)), "got {err:?}");
+    assert_eq!(*model.attempts.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn provider_error_429_is_retried_up_to_max_attempts() {
+    // Contrast with the 401 case: a retryable `Provider` error (e.g. a 429)
+    // must still be retried up to `max_attempts`.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    let model = Arc::new(ProviderFailingModel {
+        retryable: true,
+        status: 429,
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("primary", model.clone());
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(3),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("retries exhausted");
+    assert!(matches!(err, TinyAgentsError::Provider(_)), "got {err:?}");
+    assert_eq!(*model.attempts.lock().unwrap(), 3);
 }
 
 #[tokio::test]

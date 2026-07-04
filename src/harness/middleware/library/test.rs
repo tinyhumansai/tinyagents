@@ -114,6 +114,50 @@ async fn retry_middleware_retries_then_succeeds() {
     assert_eq!(scheduled, 2);
 }
 
+#[tokio::test(start_paused = true)]
+async fn retry_middleware_sleeps_the_documented_backoff_schedule() {
+    // Regression test: the middleware used to compute the backoff from the
+    // *post-increment* attempt number, so the first retry's sleep skipped
+    // `initial_backoff_ms` entirely and the whole exponential schedule was
+    // shifted one step higher than `RetryPolicy::backoff_for_attempt`
+    // documents. With `initial_backoff_ms = 100`, `multiplier = 2.0`, no
+    // jitter: attempt 0 -> 100ms, attempt 1 -> 200ms.
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_model_middleware(Arc::new(RetryMiddleware::new(
+        RetryPolicy::default()
+            .with_max_attempts(3)
+            .with_initial_backoff_ms(100)
+            .with_multiplier(2.0)
+            .with_jitter(false)
+            .with_backoff_sleep(true),
+    )));
+
+    let timestamps = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = timestamps.clone();
+    let base = FakeModelBase::new(move |_n, _req| {
+        recorded.lock().unwrap().push(tokio::time::Instant::now());
+        Err(TinyAgentsError::Model("transient".to_string()))
+    });
+
+    stack
+        .run_wrapped_model(&mut ctx, &(), ModelRequest::default(), &base)
+        .await
+        .expect_err("all 3 attempts fail");
+
+    let timestamps = timestamps.lock().unwrap().clone();
+    assert_eq!(timestamps.len(), 3, "expected exactly max_attempts calls");
+    let gaps: Vec<Duration> = timestamps
+        .windows(2)
+        .map(|w| w[1].duration_since(w[0]))
+        .collect();
+    assert_eq!(
+        gaps,
+        vec![Duration::from_millis(100), Duration::from_millis(200)],
+        "backoff schedule does not match RetryPolicy::backoff_for_attempt"
+    );
+}
+
 #[tokio::test]
 async fn retry_middleware_does_not_retry_non_retryable() {
     let (mut ctx, _recorder) = ctx_with_recorder();

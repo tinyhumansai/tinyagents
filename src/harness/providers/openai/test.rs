@@ -405,6 +405,32 @@ fn parse_response_errors_on_empty_choices() {
 }
 
 #[test]
+fn parse_error_body_classifies_retryability_by_http_status() {
+    // Regression test: retry used to see every provider failure flattened
+    // into `TinyAgentsError::Model(String)`, so it could not distinguish a
+    // retryable 429 from a non-retryable 401 and retried both. The status
+    // code alone must fully determine `ProviderError::retryable`.
+    let m = model();
+
+    let unauthorized = m.parse_error_body(
+        401,
+        r#"{"error":{"message":"Incorrect API key provided","type":"invalid_request_error","code":"invalid_api_key"}}"#,
+    );
+    assert_eq!(unauthorized.status, Some(401));
+    assert!(!unauthorized.retryable, "401 must not be retryable");
+
+    let rate_limited = m.parse_error_body(
+        429,
+        r#"{"error":{"message":"Rate limit reached","type":"requests","code":"rate_limit_exceeded"}}"#,
+    );
+    assert_eq!(rate_limited.status, Some(429));
+    assert!(rate_limited.retryable, "429 must be retryable");
+
+    let server_error = m.parse_error_body(500, r#"{"error":{"message":"internal error"}}"#);
+    assert!(server_error.retryable, "5xx must be retryable");
+}
+
+#[test]
 fn compatible_presets_set_base_url_and_default_model() {
     let deepseek = OpenAiModel::deepseek("k");
     assert_eq!(deepseek.provider(), "deepseek");

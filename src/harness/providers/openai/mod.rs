@@ -273,9 +273,7 @@ impl OpenAiModel {
 
         if !status.is_success() {
             let error = self.parse_error_body(status.as_u16(), &text);
-            return Err(TinyAgentsError::Model(
-                self.provider_failure_message(&error),
-            ));
+            return Err(TinyAgentsError::Provider(Box::new(error)));
         }
 
         let listing: ModelListWire = serde_json::from_str(&text)?;
@@ -1254,9 +1252,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
 
         if !status.is_success() {
             let error = self.parse_error_body(status.as_u16(), &text);
-            return Err(TinyAgentsError::Model(
-                self.provider_failure_message(&error),
-            ));
+            return Err(TinyAgentsError::Provider(Box::new(error)));
         }
 
         let value: Value = serde_json::from_str(&text)?;
@@ -1310,9 +1306,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
             let error = self.parse_error_body(status.as_u16(), &text);
-            return Err(TinyAgentsError::Model(
-                self.provider_failure_message(&error),
-            ));
+            return Err(TinyAgentsError::Provider(Box::new(error)));
         }
 
         // Map each raw byte chunk onto an owned `Vec<u8>` so the boxed stream's

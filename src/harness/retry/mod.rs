@@ -157,7 +157,8 @@ impl RetryPolicy {
 ///
 /// | Variant | Retryable | Rationale |
 /// |---|---|---|
-/// | `Model` | yes | Transient provider 5xx / rate-limit / network glitch. |
+/// | `Provider` | depends | Classified from [`crate::harness::model::ProviderError::retryable`] — a 429/408/409/5xx is retryable, a 4xx like 401/400 is not. |
+/// | `Model` | yes | No structured detail to classify from (transport/parse failure); transient provider 5xx / rate-limit / network glitch is the common case. |
 /// | `Tool` | yes | Tool execution may have hit a transient dependency. |
 /// | `Validation` | **no** | Caller-side schema or policy error; retrying will not help. |
 /// | `Serialization` | **no** | Malformed data; retrying will not help. |
@@ -166,7 +167,11 @@ impl RetryPolicy {
 /// | `ToolNotFound` / `ModelNotFound` | **no** | Registry errors; not transient. |
 /// | `StructuredOutput` | **no** | Schema mismatch; retrying the same call will likely fail again. |
 pub fn is_retryable(err: &TinyAgentsError) -> bool {
-    matches!(err, TinyAgentsError::Model(_) | TinyAgentsError::Tool(_))
+    match err {
+        TinyAgentsError::Provider(provider_error) => provider_error.retryable,
+        TinyAgentsError::Model(_) | TinyAgentsError::Tool(_) => true,
+        _ => false,
+    }
 }
 
 // ── FallbackPolicy ───────────────────────────────────────────────────────────

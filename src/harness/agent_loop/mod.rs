@@ -849,6 +849,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                             .retry
                             .max_attempts_capped_at(self.policy.limits.max_retries_per_call);
                         if is_retryable(&error) && attempt + 1 < max_attempts {
+                            // Compute the backoff from the *pre-increment*
+                            // attempt number: `attempt == 0` is the first
+                            // retry and must sleep `initial_backoff_ms`
+                            // (`RetryPolicy::backoff_for_attempt(0)`). Sleeping
+                            // on the post-increment value skipped
+                            // `initial_backoff_ms` entirely and shifted the
+                            // whole exponential schedule one step too high.
+                            let backoff_attempt = attempt;
                             attempt += 1;
                             ctx.emit(AgentEvent::RetryScheduled {
                                 call_id: call_id.clone(),
@@ -857,7 +865,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                             // Sleep for the backoff only when the policy opts in
                             // (`with_backoff_sleep`); otherwise this is a no-op so
                             // the loop stays fast and deterministic in tests.
-                            self.policy.retry.sleep_backoff(attempt).await;
+                            self.policy.retry.sleep_backoff(backoff_attempt).await;
                             continue;
                         }
                         break Err(error);

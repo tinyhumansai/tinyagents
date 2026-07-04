@@ -94,12 +94,20 @@ impl<State: Send + Sync, Ctx: Send + Sync> ModelMiddleware<State, Ctx> for Retry
                 Ok(outcome) => return Ok(outcome),
                 Err(error) => {
                     if is_retryable(&error) && self.policy.should_retry(attempt) {
+                        // Compute the backoff from the *pre-increment* attempt
+                        // number: `attempt == 0` is the first retry and must
+                        // sleep `initial_backoff_ms`
+                        // (`RetryPolicy::backoff_for_attempt(0)`). Sleeping on
+                        // the post-increment value skipped `initial_backoff_ms`
+                        // entirely and shifted the whole exponential schedule
+                        // one step too high.
+                        let backoff_attempt = attempt;
                         attempt += 1;
                         let call_id = CallId::new(format!("{}-model", ctx.run_id()));
                         ctx.emit(AgentEvent::RetryScheduled { call_id, attempt });
                         // Sleep for the backoff only when the policy opts in
                         // (`with_backoff_sleep`); a no-op otherwise.
-                        self.policy.sleep_backoff(attempt).await;
+                        self.policy.sleep_backoff(backoff_attempt).await;
                         continue;
                     }
                     return Err(error);

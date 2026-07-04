@@ -131,6 +131,41 @@ fn is_retryable_classification() {
     assert!(!is_retryable(&TinyAgentsError::Serialization(serde_err)));
 }
 
+// ── TinyAgentsError::Provider classification ──────────────────────────────────
+
+#[test]
+fn provider_error_retryability_is_read_from_the_structured_flag_not_assumed() {
+    use crate::harness::model::ProviderError;
+
+    // Regression test: the unary/streaming provider path used to flatten a
+    // structured `ProviderError` into a plain `Model(String)`, so retry could
+    // not distinguish a retryable 429 from a non-retryable 401 and retried
+    // both. `TinyAgentsError::Provider` preserves the `retryable` flag a real
+    // provider adapter computes from the HTTP status, and `is_retryable` must
+    // consult it instead of assuming every provider failure is transient.
+    let rate_limited = ProviderError {
+        provider: "openai".to_string(),
+        status: Some(429),
+        retryable: true,
+        message: "rate limited".to_string(),
+        ..ProviderError::default()
+    };
+    assert!(is_retryable(&TinyAgentsError::Provider(Box::new(
+        rate_limited
+    ))));
+
+    let unauthorized = ProviderError {
+        provider: "openai".to_string(),
+        status: Some(401),
+        retryable: false,
+        message: "invalid api key".to_string(),
+        ..ProviderError::default()
+    };
+    assert!(!is_retryable(&TinyAgentsError::Provider(Box::new(
+        unauthorized
+    ))));
+}
+
 // ── FallbackPolicy::next_after ────────────────────────────────────────────────
 
 #[test]

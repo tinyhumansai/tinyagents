@@ -71,9 +71,15 @@ Streaming responses are decoded by a small state machine (`SseState` /
 
 ## Error handling
 
-Non-2xx responses and transport failures are normalized through
-`parse_error_body` / `provider_error` / `provider_failure_message` into
-`TinyAgentsError::Model`; malformed JSON bodies surface as
+Non-2xx responses are normalized through `parse_error_body` / `provider_error`
+into a structured `ProviderError` (HTTP status, provider error code, and a
+`retryable` flag derived from the status: 408/409/429/5xx are retryable,
+everything else — including 401/400 — is not) and surfaced as
+`TinyAgentsError::Provider`, so `harness::retry::is_retryable` can classify
+retryability instead of retrying every provider failure indiscriminately.
+Transport-level failures (connection errors, body-read failures) have no such
+structure to preserve and surface as a plain `TinyAgentsError::Model` string
+via `provider_failure_message`. Malformed JSON bodies surface as
 `TinyAgentsError::Serialization`.
 
 ## Operational constraints
