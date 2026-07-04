@@ -429,9 +429,14 @@ pub struct ModelResponse {
 pub struct ModelDelta {
     /// Id of the model call this delta belongs to.
     pub call_id: String,
-    /// Incremental text content.
+    /// Incremental visible text content.
     #[serde(default)]
     pub content: String,
+    /// Incremental reasoning/thinking content, when the provider streams
+    /// reasoning separately from visible text. Kept distinct from `content` so
+    /// middleware can observe thinking without it leaking into visible output.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning: String,
     /// Incremental tool-call fragment, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call: Option<ToolDelta>,

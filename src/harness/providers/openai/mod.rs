@@ -746,6 +746,7 @@ struct ToolCallBuild {
 struct OpenAiStreamAcc {
     id: Option<String>,
     text: String,
+    reasoning: String,
     tool_calls: Vec<ToolCallBuild>,
     usage: Option<Usage>,
     finish_reason: Option<String>,
@@ -769,7 +770,20 @@ impl OpenAiStreamAcc {
             if let Some(reason) = choice.finish_reason {
                 self.finish_reason = Some(reason);
             }
-            if let Some(content) = choice.delta.content.filter(|c| !c.is_empty()) {
+            let mut delta = choice.delta;
+            // Reasoning fragment, when the provider streams thinking separately
+            // from visible content (DeepSeek `reasoning_content`, OpenRouter
+            // `reasoning`). Emitted on the neutral delta's reasoning channel and
+            // accumulated for the final `Thinking` block; kept out of `text`.
+            if let Some(reasoning) = delta.reasoning_fragment() {
+                self.reasoning.push_str(&reasoning);
+                pending.push_back(ModelStreamItem::MessageDelta(MessageDelta {
+                    text: String::new(),
+                    reasoning,
+                    tool_call: None,
+                }));
+            }
+            if let Some(content) = delta.content.filter(|c| !c.is_empty()) {
                 self.text.push_str(&content);
                 pending.push_back(ModelStreamItem::MessageDelta(MessageDelta {
                     text: content,
@@ -777,7 +791,7 @@ impl OpenAiStreamAcc {
                     tool_call: None,
                 }));
             }
-            for fragment in choice.delta.tool_calls {
+            for fragment in delta.tool_calls {
                 let idx = fragment.index as usize;
                 while self.tool_calls.len() <= idx {
                     self.tool_calls.push(ToolCallBuild::default());
@@ -810,6 +824,15 @@ impl OpenAiStreamAcc {
     /// Consumes the accumulator into the final, merged [`ModelResponse`].
     fn into_response(self) -> Result<ModelResponse> {
         let mut content = Vec::new();
+        // Preserve streamed reasoning as a leading `Thinking` block so the
+        // persisted message carries the model's thinking. The OpenAI-compatible
+        // path does not sign thinking, so the signature is `None`.
+        if !self.reasoning.is_empty() {
+            content.push(ContentBlock::Thinking {
+                text: self.reasoning,
+                signature: None,
+            });
+        }
         if !self.text.is_empty() {
             content.push(ContentBlock::Text(self.text));
         }

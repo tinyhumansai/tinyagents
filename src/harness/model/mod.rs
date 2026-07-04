@@ -681,7 +681,19 @@ impl StreamAccumulator {
         }
 
         // No authoritative response: reconstruct from accumulated deltas.
+        //
+        // Reasoning streamed on the side channel is preserved as a leading
+        // `Thinking` block rather than dropped, so the reconstructed message
+        // carries the model's thinking for persistence and provider replay.
+        // (Signatures are provider-signed only on the Anthropic Messages path,
+        // wired separately; the OpenAI-compatible path leaves them `None`.)
         let mut content = Vec::new();
+        if !self.reasoning.is_empty() {
+            content.push(ContentBlock::Thinking {
+                text: self.reasoning,
+                signature: None,
+            });
+        }
         if !self.text.is_empty() {
             content.push(ContentBlock::Text(self.text));
         }

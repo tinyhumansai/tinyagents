@@ -303,10 +303,7 @@ fn parses_reasoning_tokens_from_completion_details() {
         }
     });
 
-    let usage = parse_response(body)
-        .unwrap()
-        .usage
-        .expect("usage present");
+    let usage = parse_response(body).unwrap().usage.expect("usage present");
     assert_eq!(usage.output_tokens, 100);
     assert_eq!(
         usage.reasoning_tokens, 64,
@@ -325,10 +322,7 @@ fn usage_reasoning_tokens_default_to_zero_when_absent() {
         "usage": { "prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4 }
     });
 
-    let usage = parse_response(body)
-        .unwrap()
-        .usage
-        .expect("usage present");
+    let usage = parse_response(body).unwrap().usage.expect("usage present");
     assert_eq!(usage.reasoning_tokens, 0);
 }
 
@@ -543,6 +537,70 @@ async fn sse_stream_parses_text_tool_calls_and_usage() {
     assert_eq!(calls[0].arguments, json!({ "q": 42 }));
     assert_eq!(response.finish_reason.as_deref(), Some("tool_calls"));
     assert_eq!(response.usage.unwrap().total_tokens, 8);
+}
+
+#[tokio::test]
+async fn sse_stream_parses_reasoning_deltas_into_thinking_block() {
+    use crate::harness::message::ContentBlock;
+    use futures::StreamExt;
+
+    // A DeepSeek/compat stream: reasoning arrives on `reasoning_content` before
+    // the visible answer. A later chunk uses the OpenRouter-style `reasoning`
+    // key to prove the fallback path.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"id\":\"chatcmpl-r\",\"choices\":[{\"delta\":{\"reasoning_content\":\"first \"}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"reasoning\":\"second\"}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let bytes = futures::stream::iter(raw.into_iter().map(Ok::<Vec<u8>, TinyAgentsError>));
+
+    let state = SseState {
+        bytes: Box::pin(bytes),
+        buf: String::new(),
+        pending: std::collections::VecDeque::new(),
+        acc: OpenAiStreamAcc::default(),
+        provider: "openai".to_string(),
+        model: "deepseek-reasoner".to_string(),
+        started: false,
+        finished: false,
+        terminal_emitted: false,
+    };
+    let items: Vec<ModelStreamItem> = futures::stream::unfold(state, sse_next).collect().await;
+
+    // Reasoning fragments are streamed on the neutral delta's reasoning channel,
+    // never mixed into visible text.
+    let reasoning: String = items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta.reasoning.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning, "first second");
+    let visible: String = items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(visible, "answer");
+
+    // The merged response leads with the preserved (unsigned) thinking block.
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "answer");
+    assert_eq!(
+        response.message.content.first(),
+        Some(&ContentBlock::Thinking {
+            text: "first second".into(),
+            signature: None,
+        })
+    );
 }
 
 #[tokio::test]

@@ -97,9 +97,29 @@ pub struct ChunkDeltaWire {
     /// Incremental text fragment, when present.
     #[serde(default)]
     pub content: Option<String>,
+    /// Incremental reasoning fragment under the DeepSeek/compat
+    /// `reasoning_content` key.
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
+    /// Incremental reasoning fragment under the OpenRouter/compat `reasoning`
+    /// key. Used as a fallback when `reasoning_content` is absent.
+    #[serde(default)]
+    pub reasoning: Option<String>,
     /// Incremental tool-call fragments, correlated by `index`.
     #[serde(default)]
     pub tool_calls: Vec<ToolCallChunkWire>,
+}
+
+impl ChunkDeltaWire {
+    /// Returns the non-empty reasoning fragment for this delta, preferring the
+    /// DeepSeek/compat `reasoning_content` key over the OpenRouter/compat
+    /// `reasoning` key.
+    pub fn reasoning_fragment(&mut self) -> Option<String> {
+        self.reasoning_content
+            .take()
+            .or_else(|| self.reasoning.take())
+            .filter(|r| !r.is_empty())
+    }
 }
 
 /// One incremental tool-call fragment in a streamed delta.
