@@ -130,6 +130,48 @@ where
         }))
     }
 
+    /// Returns a thread's checkpoint lineage newest-first, following each
+    /// checkpoint's `parent_checkpoint_id` from the latest checkpoint in
+    /// `namespace`. `limit` caps the number of tuples returned (the most recent
+    /// ones).
+    ///
+    /// The default walks [`Checkpointer::get_tuple`] once per hop, so a backend
+    /// that re-reads the whole thread per lookup (the file/JSONL backend) is
+    /// O(H²) over the lineage. Such backends override this to read the thread
+    /// once and walk the lineage in memory (O(H)). The observable result is
+    /// identical to iterating `get_tuple` by parent pointer.
+    async fn state_history(
+        &self,
+        thread_id: &str,
+        namespace: &[String],
+        limit: Option<usize>,
+    ) -> Result<Vec<CheckpointTuple<State>>> {
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            if let Some(limit) = limit
+                && out.len() >= limit
+            {
+                break;
+            }
+            let config = CheckpointConfig {
+                thread_id: thread_id.to_string(),
+                checkpoint_id: cursor.clone(),
+                namespace: namespace.to_vec(),
+            };
+            let Some(tuple) = self.get_tuple(config).await? else {
+                break;
+            };
+            let parent = tuple.checkpoint.parent_checkpoint_id.clone();
+            out.push(tuple);
+            match parent {
+                Some(parent) => cursor = Some(parent),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
     // ---- Thread operations -------------------------------------------------
     //
     // Three storage-specific primitives (`list_threads`, `delete_thread`,

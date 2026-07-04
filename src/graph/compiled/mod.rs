@@ -712,26 +712,13 @@ where
         limit: Option<usize>,
     ) -> Result<Vec<StateSnapshot<State>>> {
         let checkpointer = self.require_checkpointer()?;
-        let mut out: Vec<StateSnapshot<State>> = Vec::new();
-        let mut cursor: Option<String> = None;
-        loop {
-            if let Some(limit) = limit
-                && out.len() >= limit
-            {
-                break;
-            }
-            let config = self.config_for(thread_id, cursor.as_deref());
-            let Some(tuple) = checkpointer.get_tuple(config).await? else {
-                break;
-            };
-            let parent = tuple.checkpoint.parent_checkpoint_id.clone();
-            out.push(snapshot_from_tuple(tuple));
-            match parent {
-                Some(parent) => cursor = Some(parent),
-                None => break,
-            }
-        }
-        Ok(out)
+        // Delegate the parent-lineage walk to the checkpointer so backends that
+        // would otherwise re-read the whole thread per hop (the file backend) can
+        // read it once and walk in memory (O(H) instead of O(H²)).
+        let tuples = checkpointer
+            .state_history(thread_id, &self.namespace, limit)
+            .await?;
+        Ok(tuples.into_iter().map(snapshot_from_tuple).collect())
     }
 
     /// Applies a manual state write to a thread, producing a new checkpoint with

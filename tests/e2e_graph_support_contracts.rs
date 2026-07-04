@@ -117,6 +117,61 @@ async fn file_checkpointer_persists_lists_copies_prunes_and_deletes_threads() {
 }
 
 #[tokio::test]
+async fn file_checkpointer_state_history_walks_lineage_newest_first() {
+    // Exercises FileCheckpointer's single-pass `state_history` override: the
+    // whole thread file is read once and the parent lineage walked in memory,
+    // returning snapshots newest-first with the lineage spine intact.
+    let dir = temp_path("file-checkpointer-history");
+    let checkpointer = std::sync::Arc::new(FileCheckpointer::<i32>::new(&dir));
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("a", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .add_node("b", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .set_entry("a")
+        .add_edge("a", "b")
+        .set_finish("b")
+        .compile()
+        .expect("graph compiles")
+        .with_checkpointer(checkpointer.clone());
+
+    graph
+        .run_with_thread("hist-thread", 0)
+        .await
+        .expect("threaded run succeeds");
+
+    // Full history is newest-first, and each snapshot's parent addresses the
+    // next (older) snapshot — the lineage spine walked in memory.
+    let history = graph
+        .get_state_history("hist-thread", None)
+        .await
+        .expect("state history");
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].values, 2);
+    assert_eq!(history[1].values, 1);
+    assert_eq!(
+        history[0]
+            .parent_config
+            .as_ref()
+            .and_then(|c| c.checkpoint_id.as_deref()),
+        history[1].config.checkpoint_id.as_deref(),
+        "newest checkpoint's parent is the older checkpoint"
+    );
+
+    // `limit` caps to the most recent snapshots.
+    let recent = graph
+        .get_state_history("hist-thread", Some(1))
+        .await
+        .expect("limited history");
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].values, 2);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn graph_testkit_helpers_drive_recorded_graphs_and_assertions() {
     let checkpointer = std::sync::Arc::new(InMemoryCheckpointer::<i32>::new());
     let graph = GraphBuilder::<i32, i32>::overwrite()

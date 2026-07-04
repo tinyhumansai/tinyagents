@@ -22,7 +22,14 @@ use async_trait::async_trait;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::{Checkpoint, CheckpointMetadata, Checkpointer};
+/// Minimal projection used to read a checkpoint's id without deserializing its
+/// `State` payload, so `get` can pick the target line and decode only that one.
+#[derive(serde::Deserialize)]
+struct CheckpointIdHeader {
+    checkpoint_id: String,
+}
+
+use super::{Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointTuple, Checkpointer};
 use crate::harness::ids::CheckpointId;
 use crate::{Result, TinyAgentsError};
 
@@ -91,6 +98,32 @@ fn escape_thread_id(thread_id: &str) -> String {
 
 fn io_err(context: &str, err: impl std::fmt::Display) -> TinyAgentsError {
     TinyAgentsError::Checkpoint(format!("file checkpointer: {context}: {err}"))
+}
+
+/// Builds a [`CheckpointTuple`] from an owned checkpoint, mirroring the
+/// addressing/parent/pending-writes wiring of the default
+/// [`Checkpointer::get_tuple`].
+fn tuple_from_checkpoint<State>(checkpoint: Checkpoint<State>) -> CheckpointTuple<State> {
+    let config = CheckpointConfig {
+        thread_id: checkpoint.thread_id.clone(),
+        checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
+        namespace: checkpoint.namespace.clone(),
+    };
+    let parent_config = checkpoint
+        .parent_checkpoint_id
+        .as_ref()
+        .map(|parent| CheckpointConfig {
+            thread_id: checkpoint.thread_id.clone(),
+            checkpoint_id: Some(parent.clone()),
+            namespace: checkpoint.namespace.clone(),
+        });
+    let pending_writes = checkpoint.pending_writes.clone();
+    CheckpointTuple {
+        config,
+        checkpoint,
+        parent_config,
+        pending_writes,
+    }
 }
 
 impl<State> FileCheckpointer<State>
@@ -178,12 +211,41 @@ where
         thread_id: &str,
         checkpoint_id: Option<&str>,
     ) -> Result<Option<Checkpoint<State>>> {
-        let records = self.read_records(thread_id)?;
-        let found = match checkpoint_id {
-            Some(id) => records.into_iter().rev().find(|c| c.checkpoint_id == id),
-            None => records.into_iter().next_back(),
+        // Stream lines and fully decode only the single target line, instead of
+        // deserializing every record's `State` just to pick one. Selection
+        // matches the previous `rev().find` / `next_back` semantics: the last
+        // matching line (or the last line, for `None`) wins.
+        let path = self.thread_path(thread_id);
+        let file = match File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_err("open thread file", e)),
         };
-        Ok(found)
+        let reader = BufReader::new(file);
+        let mut target: Option<String> = None;
+        for line in reader.lines() {
+            let line = line.map_err(|e| io_err("read line", e))?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            match checkpoint_id {
+                Some(id) => {
+                    // Decode only the id header to test the match, not `State`.
+                    let header: CheckpointIdHeader =
+                        serde_json::from_str(&line).map_err(|e| io_err("decode header", e))?;
+                    if header.checkpoint_id == id {
+                        target = Some(line);
+                    }
+                }
+                None => target = Some(line),
+            }
+        }
+        match target {
+            Some(line) => Ok(Some(
+                serde_json::from_str(&line).map_err(|e| io_err("decode record", e))?,
+            )),
+            None => Ok(None),
+        }
     }
 
     async fn list(&self, thread_id: &str) -> Result<Vec<CheckpointMetadata>> {
@@ -192,6 +254,55 @@ where
             .iter()
             .map(Checkpoint::to_metadata)
             .collect())
+    }
+
+    async fn state_history(
+        &self,
+        thread_id: &str,
+        namespace: &[String],
+        limit: Option<usize>,
+    ) -> Result<Vec<CheckpointTuple<State>>> {
+        // Read the whole thread once, then walk the parent lineage in memory
+        // (O(H)), instead of re-reading and re-parsing the file per hop (O(H²)).
+        let records = self.read_records(thread_id)?;
+        if records.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // id -> checkpoint, last write wins for duplicate ids (matching `get`,
+        // which takes the last matching record). Track the latest checkpoint in
+        // the target namespace as the walk's starting point.
+        let mut by_id: std::collections::HashMap<String, Checkpoint<State>> =
+            std::collections::HashMap::with_capacity(records.len());
+        let mut cursor: Option<String> = None;
+        for record in records {
+            if record.namespace.as_slice() == namespace {
+                cursor = Some(record.checkpoint_id.clone());
+            }
+            by_id.insert(record.checkpoint_id.clone(), record);
+        }
+
+        let mut out = Vec::new();
+        while let Some(id) = cursor {
+            if let Some(limit) = limit
+                && out.len() >= limit
+            {
+                break;
+            }
+            // `remove` doubles as a cycle guard: each id is visited at most once.
+            let Some(checkpoint) = by_id.remove(&id) else {
+                break;
+            };
+            // A checkpoint outside the target namespace is not visible under
+            // namespace-scoped lookup, so the lineage walk stops (matching the
+            // `get_scoped`-based default).
+            if checkpoint.namespace.as_slice() != namespace {
+                break;
+            }
+            cursor = checkpoint.parent_checkpoint_id.clone();
+            out.push(tuple_from_checkpoint(checkpoint));
+        }
+        Ok(out)
     }
 
     async fn list_threads(&self) -> Result<Vec<String>> {
