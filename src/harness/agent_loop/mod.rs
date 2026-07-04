@@ -40,12 +40,16 @@
 //!
 //! # Limits
 //!
-//! Model and tool caps come from [`RunPolicy::limits`][crate::harness::runtime::RunPolicy]
-//! and are enforced *before* each call, returning
-//! [`TinyAgentsError::LimitExceeded`]. The wall-clock deadline (from the run
-//! config) is checked each iteration and surfaces as
-//! [`TinyAgentsError::Timeout`]. The run context's own [`crate::harness::limits::LimitTracker`]
-//! is also advanced so its counters stay consistent.
+//! Model and tool caps are enforced by the run context's own
+//! [`crate::harness::limits::LimitTracker`], which is synced with
+//! [`RunPolicy::limits`][crate::harness::runtime::RunPolicy] once at the start
+//! of each run (see [`crate::harness::limits::LimitTracker::sync_call_limits`])
+//! so the harness policy and the per-run [`RunConfig`] agree on a single
+//! enforced cap instead of silently disagreeing. Each call is checked
+//! *before* it is made, returning [`TinyAgentsError::LimitExceeded`] whose
+//! message always names the limit that actually tripped. The wall-clock
+//! deadline (from the run config) is checked each iteration and surfaces as
+//! [`TinyAgentsError::Timeout`].
 //!
 //! # Backoff
 //!
@@ -306,6 +310,15 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         status.set_last_event(record.id);
         status.mark_running(HarnessPhase::Idle);
 
+        // Reconcile the `RunConfig`-derived limit tracker with the harness's
+        // `RunPolicy::limits` so model/tool call caps have one enforced
+        // source of truth instead of the two silently disagreeing (see
+        // `LimitTracker::sync_call_limits`).
+        ctx.limits.sync_call_limits(
+            self.policy.limits.max_model_calls,
+            self.policy.limits.max_tool_calls,
+        );
+
         let mut messages = input;
 
         status.mark_running(HarnessPhase::Middleware);
@@ -340,14 +353,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     ctx.run_id()
                 )));
             }
-            if run.model_calls >= self.policy.limits.max_model_calls {
+            // The context's `LimitTracker` (synced with `RunPolicy::limits`
+            // above) is the single enforced source of truth for the model-call
+            // cap, so the reported limit always matches the one that trips.
+            if let Err(err) = ctx.record_model_call() {
                 ctx.emit(AgentEvent::LimitReached {
                     kind: LimitKind::ModelCalls,
                 });
-                return Err(TinyAgentsError::LimitExceeded(format!(
-                    "max model calls ({}) reached",
-                    self.policy.limits.max_model_calls
-                )));
+                return Err(TinyAgentsError::LimitExceeded(err.to_string()));
             }
 
             // Build the request from the working transcript, tool schemas, and
@@ -366,15 +379,6 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             self.middleware
                 .run_before_model(ctx, state, &mut request)
                 .await?;
-
-            // Record against the context tracker too (keeps its counters
-            // consistent); map its error onto the deterministic limit error.
-            ctx.record_model_call().map_err(|_| {
-                TinyAgentsError::LimitExceeded(format!(
-                    "max model calls ({}) reached",
-                    self.policy.limits.max_model_calls
-                ))
-            })?;
 
             // Resolve the model for the event/log name before invoking.
             let binding = self
@@ -555,21 +559,16 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                         ctx.run_id()
                     )));
                 }
-                if run.tool_calls >= self.policy.limits.max_tool_calls {
+                // The context's `LimitTracker` (synced with `RunPolicy::limits`
+                // above) is the single enforced source of truth for the
+                // tool-call cap, so the reported limit always matches the one
+                // that trips.
+                if let Err(err) = ctx.record_tool_call() {
                     ctx.emit(AgentEvent::LimitReached {
                         kind: LimitKind::ToolCalls,
                     });
-                    return Err(TinyAgentsError::LimitExceeded(format!(
-                        "max tool calls ({}) reached",
-                        self.policy.limits.max_tool_calls
-                    )));
+                    return Err(TinyAgentsError::LimitExceeded(err.to_string()));
                 }
-                ctx.record_tool_call().map_err(|_| {
-                    TinyAgentsError::LimitExceeded(format!(
-                        "max tool calls ({}) reached",
-                        self.policy.limits.max_tool_calls
-                    ))
-                })?;
 
                 self.middleware
                     .run_before_tool(ctx, state, &mut call)
@@ -802,6 +801,12 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         let mut model = binding.model;
         let mut resolved = binding.resolved;
         let run_id = ctx.run_id().clone();
+        // Tracks every model name already attempted in this fallback chain so
+        // a chain containing a repeated name (e.g. `[primary, backup,
+        // primary]`) cannot alternate between the same two models forever;
+        // once a name has been tried it is never tried again.
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        visited.insert(current_name.clone());
 
         loop {
             // Retry loop for the current model.
@@ -858,16 +863,27 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     return Ok(response);
                 }
                 Err(error) => {
+                    // A non-retryable, deadline-driven timeout must not feed
+                    // back into the fallback chain: the run itself is out of
+                    // wall-clock budget, so trying another model would just
+                    // spin until the *next* deadline check fails identically.
+                    if matches!(error, TinyAgentsError::Timeout(_)) {
+                        return Err(error);
+                    }
                     // Retries exhausted (or non-retryable): try the next model
-                    // in the fallback chain, if any.
+                    // in the fallback chain, if any, skipping any name already
+                    // visited in this chain so a chain with a repeated name
+                    // cannot alternate between the same models forever.
                     let next = self
                         .policy
                         .fallback
                         .as_ref()
                         .and_then(|fallback| fallback.next_after(&current_name))
-                        .map(str::to_owned);
+                        .map(str::to_owned)
+                        .filter(|name| !visited.contains(name));
                     match next.and_then(|name| self.models.get(&name).map(|m| (name, m))) {
                         Some((name, next_model)) => {
+                            visited.insert(name.clone());
                             resolved = ResolvedModel {
                                 name: name.clone(),
                                 requested: Some(name.clone()),

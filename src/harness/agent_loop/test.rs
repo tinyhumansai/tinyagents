@@ -400,6 +400,42 @@ async fn max_model_calls_limit_triggers_limit_exceeded() {
 }
 
 #[tokio::test]
+async fn policy_model_call_limit_above_run_config_default_is_honored() {
+    // Regression test: `RunConfig::new` defaults `max_model_calls` to 25, but
+    // a harness-wide `RunPolicy` can configure a higher cap. Before the two
+    // limit sources were unified, the context's tracker (seeded from the
+    // `RunConfig` default) tripped at call 26 while the error message
+    // incorrectly reported the policy's higher limit. This asserts the run
+    // survives past 25 calls and, once it does trip, reports the limit that
+    // actually applies.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_tool_call("spin", json!({}))),
+    );
+    harness.register_tool(Arc::new(FakeTool::new("spin", "again")));
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default()
+            .with_max_model_calls(30)
+            .with_max_tool_calls(1000),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect_err("limit should be exceeded");
+    assert!(
+        matches!(err, TinyAgentsError::LimitExceeded(_)),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("30"),
+        "expected error to report the policy's limit (30), got: {err}"
+    );
+}
+
+#[tokio::test]
 async fn max_tool_calls_limit_triggers_limit_exceeded() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model(
@@ -699,6 +735,43 @@ async fn non_retryable_or_exhausted_without_fallback_errors() {
         .await
         .expect_err("no fallback, error propagates");
     assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn fallback_chain_with_repeated_model_name_terminates() {
+    // Regression test: a fallback chain that repeats a model name
+    // (`[primary, backup, primary]`) used to alternate primary <-> backup
+    // forever because `FallbackPolicy::next_after` always resolves from the
+    // *first* occurrence of the current name. Both models fail every call, so
+    // without a visited-set/hop-cap this run would never terminate.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    let primary = Arc::new(FailingModel {
+        attempts: Mutex::new(0),
+    });
+    let backup = Arc::new(FailingModel {
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("primary", primary.clone());
+    harness.register_model("backup", backup.clone());
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(1),
+        fallback: Some(FallbackPolicy::new(["primary", "backup", "primary"])),
+        ..RunPolicy::default()
+    });
+
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        harness.invoke_default(&(), vec![Message::user("hi")]),
+    )
+    .await
+    .expect("fallback chain must terminate, not hang")
+    .expect_err("both models fail, so the run must error out");
+
+    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
+    // Each model is visited at most once: primary, then backup, then the
+    // chain's repeated `primary` entry is skipped as already-visited.
+    assert_eq!(*primary.attempts.lock().unwrap(), 1);
+    assert_eq!(*backup.attempts.lock().unwrap(), 1);
 }
 
 #[tokio::test]
