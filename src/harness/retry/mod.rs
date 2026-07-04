@@ -102,6 +102,20 @@ impl RetryPolicy {
         attempt + 1 < self.max_attempts
     }
 
+    /// Reconciles this policy's own `max_attempts` with a harness-level
+    /// ceiling expressed as a *retry* count (not counting the first attempt)
+    /// — [`crate::harness::limits::RunLimits::max_retries_per_call`] — and
+    /// returns whichever total-attempt cap is stricter.
+    ///
+    /// Without this, a `RunPolicy` could configure a looser `RetryPolicy`
+    /// than its own `RunLimits`, silently making the "hard" limit
+    /// unenforceable; the harness's agent loop always calls this instead of
+    /// consulting `max_attempts` directly.
+    pub fn max_attempts_capped_at(&self, max_retries_per_call: usize) -> usize {
+        self.max_attempts
+            .min(max_retries_per_call.saturating_add(1))
+    }
+
     /// Computes the deterministic (no-jitter) backoff for the given retry
     /// `attempt`.
     ///

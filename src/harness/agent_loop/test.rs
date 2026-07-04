@@ -64,6 +64,30 @@ impl Tool<()> for FakeTool {
     }
 }
 
+/// A tool that sleeps `delay` before returning a fixed reply, used to prove a
+/// hanging tool call is bounded by the run's remaining wall-clock budget the
+/// same way a hanging model call is.
+struct SlowTool {
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl Tool<()> for SlowTool {
+    fn name(&self) -> &str {
+        "slow"
+    }
+    fn description(&self) -> &str {
+        "slow tool"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new("slow", "slow tool", json!({"type": "object"}))
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        tokio::time::sleep(self.delay).await;
+        Ok(ToolResult::text(call.id, "slow", "too late"))
+    }
+}
+
 /// A strict tool used to prove harness-level schema validation runs before the
 /// tool implementation is invoked.
 struct StrictLookupTool {
@@ -717,6 +741,31 @@ async fn retry_then_fallback_succeeds() {
 }
 
 #[tokio::test]
+async fn run_limits_max_retries_per_call_caps_a_looser_retry_policy() {
+    // Regression test: `RunLimits::max_retries_per_call` was parsed but never
+    // enforced, so a `RetryPolicy` with a higher `max_attempts` silently
+    // ignored the harness's "hard" limit. `max_retries_per_call: 1` (one
+    // retry, so 2 attempts total) must win over `max_attempts: 5`.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    let failing = Arc::new(FailingModel {
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("primary", failing.clone());
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(5),
+        limits: RunLimits::default().with_max_retries_per_call(1),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("no fallback, retries capped by RunLimits");
+    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
+    assert_eq!(*failing.attempts.lock().unwrap(), 2);
+}
+
+#[tokio::test]
 async fn non_retryable_or_exhausted_without_fallback_errors() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model(
@@ -1066,6 +1115,33 @@ async fn slow_streaming_model_call_is_timed_out() {
         .invoke_streaming(&(), (), config, vec![Message::user("hi")])
         .await
         .expect_err("a slow streaming model call must time out");
+
+    assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn slow_tool_call_is_timed_out_by_remaining_budget() {
+    use std::time::Duration;
+
+    // Regression test: the remaining wall-clock budget was previously only
+    // enforced around model calls, so a hanging tool call could block the run
+    // past its deadline. The tool sleeps far longer (200ms) than the run's
+    // budget (20ms), so the same per-call timeout used for model calls must
+    // interrupt it too.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_tool_call("slow", json!({}))),
+    );
+    harness.register_tool(Arc::new(SlowTool {
+        delay: Duration::from_millis(200),
+    }));
+
+    let config = RunConfig::new("tool-timeout-run").with_timeout_ms(20);
+    let err = harness
+        .invoke(&(), (), config, vec![Message::user("go")])
+        .await
+        .expect_err("a tool call slower than the budget must time out");
 
     assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
 }

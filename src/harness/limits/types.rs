@@ -27,10 +27,13 @@ pub struct RunLimits {
     pub max_tool_calls: usize,
     /// Maximum elapsed wall-clock time in milliseconds. `None` means no limit.
     pub max_wall_clock_ms: Option<u64>,
-    /// Maximum number of retry attempts per individual call.
+    /// Maximum number of retry *attempts* (not counting the first try)
+    /// permitted for an individual model call. Reconciled with
+    /// [`crate::harness::retry::RetryPolicy::max_attempts`] by the agent loop
+    /// (see [`crate::harness::retry::RetryPolicy::max_attempts_capped_at`]):
+    /// whichever of the two is stricter wins, so this is a hard ceiling a
+    /// looser `RetryPolicy` cannot exceed.
     pub max_retries_per_call: usize,
-    /// Maximum number of concurrent in-flight calls. `None` means no limit.
-    pub max_concurrency: Option<usize>,
     /// Maximum sub-agent / recursion depth allowed for the run tree rooted at
     /// this run. A top-level run is depth `0`; each nested child run increments
     /// the depth. A sub-agent invocation whose child depth would exceed this cap
@@ -51,7 +54,6 @@ impl Default for RunLimits {
             max_tool_calls: 50,
             max_wall_clock_ms: None,
             max_retries_per_call: 3,
-            max_concurrency: None,
             max_depth: Self::DEFAULT_MAX_DEPTH,
         }
     }

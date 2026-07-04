@@ -99,6 +99,24 @@ fn should_retry_boundary_at_max_attempts() {
     assert!(!no_retry.should_retry(0));
 }
 
+// ── RetryPolicy::max_attempts_capped_at ───────────────────────────────────────
+
+#[test]
+fn max_attempts_capped_at_takes_the_stricter_of_the_two_caps() {
+    // A looser `RunLimits::max_retries_per_call` never widens the policy's
+    // own cap.
+    let policy = RetryPolicy::default().with_max_attempts(3);
+    assert_eq!(policy.max_attempts_capped_at(10), 3);
+
+    // A stricter `max_retries_per_call` (a *retry* count, so +1 for the first
+    // attempt) overrides a looser policy.
+    assert_eq!(policy.max_attempts_capped_at(1), 2);
+
+    // Zero retries permitted means exactly one attempt, same as
+    // `max_attempts == 1`.
+    assert_eq!(policy.max_attempts_capped_at(0), 1);
+}
+
 // ── is_retryable per error class ──────────────────────────────────────────────
 
 #[test]

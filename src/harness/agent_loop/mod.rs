@@ -649,11 +649,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 // The real tool call is the innermost base of the tool-wrap
                 // onion (same before -> wrap -> after ordering as the model
                 // path): lifecycle `before_tool` ran above, the wrap onion runs
-                // here, and lifecycle `after_tool` runs below.
+                // here, and lifecycle `after_tool` runs below. Bounded by the
+                // same remaining wall-clock budget as a model call, so a
+                // hanging tool cannot block the run past its deadline either.
                 let base = ToolCallBase { tool };
-                let mut result = self
-                    .middleware
-                    .run_wrapped_tool(ctx, state, call, &base)
+                let remaining = self.call_budget(ctx);
+                let run_id = ctx.run_id().as_str().to_string();
+                let fut = self.middleware.run_wrapped_tool(ctx, state, call, &base);
+                let mut result = Self::with_call_budget(remaining, &run_id, "tool call", fut)
                     .await?
                     .into_result();
 
@@ -830,15 +833,22 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 let attempt_result = if streaming {
                     let fut =
                         self.invoke_model_streaming_once(state, ctx, &model, request, call_id);
-                    Self::with_call_budget(remaining, run_id.as_str(), fut).await
+                    Self::with_call_budget(remaining, run_id.as_str(), "model call", fut).await
                 } else {
                     let fut = model.invoke(state, request.clone());
-                    Self::with_call_budget(remaining, run_id.as_str(), fut).await
+                    Self::with_call_budget(remaining, run_id.as_str(), "model call", fut).await
                 };
                 match attempt_result {
                     Ok(response) => break Ok(response),
                     Err(error) => {
-                        if is_retryable(&error) && self.policy.retry.should_retry(attempt) {
+                        // `RunLimits::max_retries_per_call` is a hard ceiling
+                        // that a looser `RetryPolicy::max_attempts` cannot
+                        // exceed; whichever is stricter wins.
+                        let max_attempts = self
+                            .policy
+                            .retry
+                            .max_attempts_capped_at(self.policy.limits.max_retries_per_call);
+                        if is_retryable(&error) && attempt + 1 < max_attempts {
                             attempt += 1;
                             ctx.emit(AgentEvent::RetryScheduled {
                                 call_id: call_id.clone(),
@@ -930,26 +940,33 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         }
     }
 
-    /// Awaits a single model-call future, optionally bounded by `budget`.
+    /// Awaits a single call future (model or tool), optionally bounded by
+    /// `budget`.
     ///
     /// When `budget` is `Some`, the future is wrapped in
     /// [`tokio::time::timeout`]; if it elapses the future is dropped (cancelling
-    /// the in-flight provider request) and a
+    /// the in-flight provider/tool request) and a
     /// [`TinyAgentsError::Timeout`] is returned. When `budget` is `None` (no
     /// run timeout configured) the future is awaited without a bound.
     ///
     /// `budget` is the run's *remaining* wall-clock budget at the time the call
     /// is issued, so each successive call gets a tighter bound as the deadline
-    /// approaches.
-    async fn with_call_budget<F>(budget: Option<Duration>, run_id: &str, fut: F) -> F::Output
+    /// approaches. `what` names the kind of call in the timeout message (e.g.
+    /// `"model call"`, `"tool call"`).
+    async fn with_call_budget<T, F>(
+        budget: Option<Duration>,
+        run_id: &str,
+        what: &str,
+        fut: F,
+    ) -> Result<T>
     where
-        F: Future<Output = Result<ModelResponse>>,
+        F: Future<Output = Result<T>>,
     {
         match budget {
             Some(budget) => match tokio::time::timeout(budget, fut).await {
                 Ok(result) => result,
                 Err(_) => Err(TinyAgentsError::Timeout(format!(
-                    "model call for run `{run_id}` exceeded its remaining wall-clock budget \
+                    "{what} for run `{run_id}` exceeded its remaining wall-clock budget \
                      ({} ms)",
                     budget.as_millis()
                 ))),

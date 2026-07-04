@@ -49,15 +49,10 @@ impl RunLimits {
         self
     }
 
-    /// Sets the per-call retry cap.
+    /// Sets the per-call retry cap (a retry *count*, not counting the first
+    /// attempt). See [`RunLimits::max_retries_per_call`].
     pub fn with_max_retries_per_call(mut self, n: usize) -> Self {
         self.max_retries_per_call = n;
-        self
-    }
-
-    /// Sets the concurrency cap. `None` removes the limit.
-    pub fn with_max_concurrency(mut self, n: Option<usize>) -> Self {
-        self.max_concurrency = n;
         self
     }
 

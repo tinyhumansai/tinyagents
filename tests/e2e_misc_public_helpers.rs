@@ -328,10 +328,8 @@ fn tool_schema_limits_ids_and_repl_contracts_cover_public_helpers() {
         .with_max_tool_calls(1)
         .with_max_wall_clock_ms(Some(1))
         .with_max_retries_per_call(3)
-        .with_max_concurrency(Some(2))
         .with_max_depth(9);
     assert_eq!(limits.max_retries_per_call, 3);
-    assert_eq!(limits.max_concurrency, Some(2));
     assert_eq!(limits.max_depth, 9);
     let mut tracker = LimitTracker::new(limits);
     assert_eq!(tracker.model_calls(), 0);
