@@ -338,6 +338,21 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
         self.cancel.clone()
     }
 
+    /// Installs a fresh cancellation flag in place (`&mut self`), rebuilding the
+    /// engine so the `on_progress` hook and the blocking bridge observe it.
+    ///
+    /// Unlike the consuming [`with_cancel_flag`](Self::with_cancel_flag), this
+    /// swaps the flag on a session already owned behind a lock — the shape a
+    /// long-lived session manager needs. Because a cancelled flag is sticky,
+    /// installing a **fresh** flag before each cell lets a persistent session
+    /// stay resumable after a prior cell was cancelled. The persistent variable
+    /// namespace is untouched (only the engine is rebuilt), so `let` bindings
+    /// survive the swap.
+    pub fn set_cancel_flag(&mut self, flag: ReplCancelFlag) {
+        self.cancel = flag;
+        self.rebuild_engine();
+    }
+
     /// Replaces the session policy and rebuilds the engine to honor the new
     /// operation and call limits.
     pub fn with_policy(mut self, policy: ReplPolicy) -> Self {

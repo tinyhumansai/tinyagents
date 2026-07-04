@@ -548,6 +548,28 @@ fn cancel_set_before_eval_fails_closed_without_running_the_cell() {
 }
 
 #[test]
+fn set_cancel_flag_swaps_in_place_and_preserves_the_namespace() {
+    // A long-lived session behind a lock swaps its flag with `set_cancel_flag`
+    // (not the consuming builder). A fresh flag re-enables a session whose
+    // prior cell was cancelled, and the persistent namespace survives the swap.
+    let mut s = session();
+    s.eval_cell("let kept = 42;").expect("seed binding");
+
+    let tripped = ReplCancelFlag::new();
+    tripped.cancel();
+    s.set_cancel_flag(tripped);
+    let err = s
+        .eval_cell("kept")
+        .expect_err("cancelled flag blocks the cell");
+    assert!(matches!(err, TinyAgentsError::Cancelled), "got {err:?}");
+
+    // A fresh flag re-enables the session, and `kept` is still in scope.
+    s.set_cancel_flag(ReplCancelFlag::new());
+    let ok = s.eval_cell("kept").expect("session usable again");
+    assert_eq!(ok.value, Some(ReplValue::Int(42)));
+}
+
+#[test]
 fn cancel_mid_script_loop_terminates_promptly() {
     // A pure `loop {}` with no timeout and an unbounded operation budget can
     // only be stopped by the cancel flag, enforced via the `on_progress` hook.
