@@ -153,6 +153,9 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             let call_id = CallId::new(format!("{}-model-{}", ctx.run_id(), run.model_calls + 1));
             status.mark_running(HarnessPhase::Model);
             status.active_model_call = Some(call_id.clone());
+            // Captured here (where the call actually starts) so the completed
+            // event carries a real start time for duration-aware exporters.
+            let model_started_at_ms = crate::harness::ids::now_ms();
             let record = ctx.emit(AgentEvent::ModelStarted {
                 call_id: call_id.clone(),
                 model: model_name,
@@ -208,6 +211,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 .then(|| serde_json::to_value(&response.message).unwrap_or(Value::Null));
             let record = ctx.emit(AgentEvent::ModelCompleted {
                 call_id,
+                started_at_ms: Some(model_started_at_ms),
                 usage: response.usage,
                 input: captured_input,
                 output: captured_output,
@@ -359,6 +363,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 let tool_call_id = CallId::new(call.id.clone());
                 let tool_name = call.name.clone();
                 status.active_tool_calls.push(tool_call_id.clone());
+                // Captured here (where the call actually starts) so the
+                // completed event carries a real start time for
+                // duration-aware exporters.
+                let tool_started_at_ms = crate::harness::ids::now_ms();
                 let record = ctx.emit(AgentEvent::ToolStarted {
                     call_id: tool_call_id.clone(),
                     tool_name: tool_name.clone(),
@@ -398,6 +406,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 let record = ctx.emit(AgentEvent::ToolCompleted {
                     call_id: tool_call_id,
                     tool_name,
+                    started_at_ms: Some(tool_started_at_ms),
                     input: captured_input,
                     output: captured_output,
                 });

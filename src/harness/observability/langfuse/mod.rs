@@ -286,6 +286,7 @@ fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
     match &obs.event {
         AgentEvent::ModelCompleted {
             call_id,
+            started_at_ms,
             usage,
             input,
             output,
@@ -297,7 +298,11 @@ fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
                 "id": call_id.as_str(),
                 "traceId": trace_id,
                 "name": "model",
-                "startTime": timestamp,
+                // Use the loop-captured start time so the generation has a
+                // real duration; fall back to the completion timestamp (a
+                // zero-width point) for events journaled before the field
+                // existed.
+                "startTime": started_at_ms.map(iso_ms).unwrap_or_else(|| timestamp.clone()),
                 "endTime": timestamp,
                 "usage": usage.map(langfuse_usage),
                 "input": input,
@@ -308,6 +313,7 @@ fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
         AgentEvent::ToolCompleted {
             call_id,
             tool_name,
+            started_at_ms,
             input,
             output,
         } => json!({
@@ -321,7 +327,9 @@ fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
                 "id": call_id.as_str(),
                 "traceId": trace_id,
                 "name": tool_name,
-                "startTime": timestamp,
+                // Loop-captured start time when available (see the
+                // generation branch above).
+                "startTime": started_at_ms.map(iso_ms).unwrap_or_else(|| timestamp.clone()),
                 "endTime": timestamp,
                 "input": input,
                 "output": output,
