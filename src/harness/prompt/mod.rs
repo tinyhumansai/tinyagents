@@ -35,10 +35,8 @@ mod types;
 
 pub use types::*;
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::message::Message;
@@ -276,28 +274,50 @@ impl PromptBuilder {
         req
     }
 
-    /// Returns a hex fingerprint of the stable (cacheable) prefix.
+    /// Returns a 64-character lowercase hex SHA-256 fingerprint of the stable
+    /// (cacheable) prefix.
     ///
-    /// The fingerprint is derived from the concatenated text of all cacheable
-    /// segment messages and tool names, so a change to the stable prefix
-    /// produces a different fingerprint.  It is suitable for cache-key
-    /// derivation within a single process but is not guaranteed stable across
-    /// different Rust versions or platforms.
+    /// The fingerprint is derived from the canonical JSON serialization of
+    /// every cacheable segment — its id, its [`SegmentRole`], and its full
+    /// messages (roles, text, JSON blocks, image URLs/data, and provider
+    /// extensions) — plus the complete [`ToolSchema`] list (names,
+    /// descriptions, and parameter schemas). Any change to the stable prefix,
+    /// including a tool-schema edit, an image swap, or a role change with
+    /// identical text, produces a different fingerprint.
+    ///
+    /// Because the hash is SHA-256 over serde's deterministic (sorted-key)
+    /// JSON, the value is stable across processes, Rust versions, and
+    /// platforms — safe to persist and compare across restarts. It only
+    /// changes when the serialized shape of [`Message`]/[`ToolSchema`]
+    /// changes, which is a versioned public-API change.
     pub fn fingerprint(&self) -> String {
-        let mut hasher = DefaultHasher::new();
+        let segments: Vec<Value> = self
+            .segments
+            .iter()
+            .filter(|s| s.meta.cacheable)
+            .map(|seg| {
+                json!({
+                    "id": seg.meta.id,
+                    "role": seg.meta.role,
+                    "messages": seg.messages,
+                })
+            })
+            .collect();
+        let payload = json!({
+            "segments": segments,
+            "tools": self.tools,
+        });
 
-        for seg in self.segments.iter().filter(|s| s.meta.cacheable) {
-            seg.meta.id.hash(&mut hasher);
-            for msg in &seg.messages {
-                msg.text().hash(&mut hasher);
-            }
+        // Stream the canonical JSON straight into the digest; `Sha256`
+        // implements `std::io::Write`.
+        let mut hasher = Sha256::new();
+        if serde_json::to_writer(&mut hasher, &payload).is_err() {
+            // Serializing an already-materialized `Value` does not fail in
+            // practice; fall back to hashing empty data for a stable result.
+            hasher = Sha256::new();
         }
-
-        for tool in &self.tools {
-            tool.name.hash(&mut hasher);
-        }
-
-        format!("{:016x}", hasher.finish())
+        let digest = hasher.finalize();
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }
 
