@@ -308,6 +308,17 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
 
         let mut messages = input;
 
+        // Cache the tool schemas once for the whole run. The registered tool set
+        // is fixed for a run, so rebuilding every `ToolSchema` (cloning
+        // name/description/`parameters`) and re-sorting on each loop iteration is
+        // pure overhead. Dynamic tool-selection middleware operates on
+        // `request.tools` after this point (copy-on-filter), so it never needs
+        // the registry rebuilt per turn. We clone this cached vector into each
+        // `ModelRequest`; that clone is unavoidable while `ModelRequest.tools`
+        // owns a `Vec<ToolSchema>` (the no-clone `Arc` form is the coordinated
+        // trait-break tracked separately), but the build + sort now happen once.
+        let tool_schemas = self.tools.schemas();
+
         status.mark_running(HarnessPhase::Middleware);
         self.middleware.run_before_agent(ctx, state).await?;
 
@@ -353,7 +364,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // Build the request from the working transcript, tool schemas, and
             // policy response format.
             status.mark_running(HarnessPhase::BuildingRequest);
-            let mut request = ModelRequest::new(messages.clone()).with_tools(self.tools.schemas());
+            let mut request = ModelRequest::new(messages.clone()).with_tools(tool_schemas.clone());
             if let Some(format) = &self.policy.default_response_format {
                 request = request.with_response_format(format.clone());
             }
