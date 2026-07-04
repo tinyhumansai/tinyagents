@@ -943,11 +943,21 @@ pub(super) fn build_engine<State: Send + Sync + 'static>(ctx: Arc<HostContext<St
     // by `bridge_block_on`, since a blocked native call never yields back to
     // `on_progress`.
     let deadline_ctx = ctx.clone();
-    engine.on_progress(move |_ops| match deadline_ctx.buffers.deadline() {
-        Some(deadline) if Instant::now() >= deadline => {
-            Some(Dynamic::from(DEADLINE_EXCEEDED_TOKEN.to_string()))
+    engine.on_progress(move |_ops| {
+        // A fail-closed host check (currently: push_stdout_line's
+        // max_output_bytes enforcement) may have stashed an error without
+        // Rhai itself failing; abort promptly instead of letting the script
+        // keep running until it happens to yield control back naturally.
+        // `eval_cell` prefers the stashed error over this sentinel's text.
+        if deadline_ctx.buffers.host_error_pending() {
+            return Some(Dynamic::from(DEADLINE_EXCEEDED_TOKEN.to_string()));
         }
-        _ => None,
+        match deadline_ctx.buffers.deadline() {
+            Some(deadline) if Instant::now() >= deadline => {
+                Some(Dynamic::from(DEADLINE_EXCEEDED_TOKEN.to_string()))
+            }
+            _ => None,
+        }
     });
 
     // ── stdout capture ──

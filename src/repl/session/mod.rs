@@ -79,6 +79,12 @@ pub(super) struct CellBuffers {
     /// the deadline is enforced fail-closed both for pure script loops and for
     /// in-flight model/tool/agent/graph calls.
     deadline: Arc<Mutex<Option<Instant>>>,
+    /// The current cell's [`ReplPolicy::max_output_bytes`] budget, armed at
+    /// the start of every [`ReplSession::eval_cell`] call and enforced
+    /// fail-closed inside [`CellBuffers::push_stdout_line`] itself, so a
+    /// print-heavy runaway script cannot buffer unbounded output before the
+    /// end-of-cell check in `eval_cell` ever runs.
+    max_output_bytes: Arc<Mutex<Option<usize>>>,
 }
 
 /// The persistent variable namespace of a session.
@@ -400,6 +406,7 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
         self.buffers.reset();
         self.buffers
             .arm_deadline(self.policy.timeout.map(|d| start + d));
+        self.buffers.arm_output_limit(self.policy.max_output_bytes);
 
         let before = self.variables.snapshot();
         // Expose the pre-cell namespace to `show_vars()`.
@@ -420,7 +427,17 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
         self.variables.restore_reserved();
 
         let value_dynamic = match eval {
-            Ok(value) => value,
+            Ok(value) => {
+                // The script may have completed "successfully" from Rhai's
+                // point of view even though a host-side fail-closed check
+                // (e.g. push_stdout_line's max_output_bytes enforcement)
+                // stashed an error — `on_print`/`on_debug` cannot themselves
+                // fail a script, so this is the only place that catches it.
+                if let Some(host_err) = self.buffers.take_host_error() {
+                    return Err(host_err);
+                }
+                value
+            }
             Err(err) => {
                 // A fallible capability function stashes its precise crate error
                 // here; prefer it over the generic Rhai runtime wrapper so the
@@ -473,11 +490,24 @@ impl CellBuffers {
         *self.answer.lock().expect("answer poisoned") = None;
         *self.host_error.lock().expect("host_error poisoned") = None;
         *self.deadline.lock().expect("deadline poisoned") = None;
+        *self
+            .max_output_bytes
+            .lock()
+            .expect("max_output_bytes poisoned") = None;
     }
 
     /// Arms the per-cell wall-clock deadline, replacing any previous one.
     fn arm_deadline(&self, deadline: Option<Instant>) {
         *self.deadline.lock().expect("deadline poisoned") = deadline;
+    }
+
+    /// Arms the per-cell output-byte budget, replacing any previous one.
+    /// Read by [`CellBuffers::push_stdout_line`] on every captured line.
+    fn arm_output_limit(&self, max_bytes: usize) {
+        *self
+            .max_output_bytes
+            .lock()
+            .expect("max_output_bytes poisoned") = Some(max_bytes);
     }
 
     /// Returns the current cell's wall-clock deadline, if the policy
@@ -510,11 +540,42 @@ impl CellBuffers {
         self.calls.lock().expect("calls poisoned").push(record);
     }
 
-    /// Appends a line to the captured stdout buffer.
+    /// Appends a line to the captured stdout buffer, enforcing the armed
+    /// [`ReplPolicy::max_output_bytes`] budget fail-closed: once appending
+    /// would exceed the budget, the line is dropped (not buffered) and a
+    /// [`TinyAgentsError::LimitExceeded`] is stashed for `eval_cell` to
+    /// surface, instead of growing the buffer without bound for the rest of
+    /// the cell.
     pub(super) fn push_stdout_line(&self, line: &str) {
+        let limit = *self
+            .max_output_bytes
+            .lock()
+            .expect("max_output_bytes poisoned");
         let mut out = self.stdout.lock().expect("stdout poisoned");
+        if let Some(limit) = limit {
+            let projected = out.len() + line.len() + 1;
+            if projected > limit {
+                drop(out);
+                self.set_host_error(TinyAgentsError::LimitExceeded(format!(
+                    "ragsh cell produced more than {limit} bytes of output, exceeding the max_output_bytes limit"
+                )));
+                return;
+            }
+        }
         out.push_str(line);
         out.push('\n');
+    }
+
+    /// Returns whether a host error is currently stashed, without consuming
+    /// it. Used by the engine's `on_progress` hook to abort a script promptly
+    /// once [`push_stdout_line`](Self::push_stdout_line) has flagged the
+    /// output budget as exceeded, rather than letting the script keep running
+    /// until it happens to yield control back naturally.
+    pub(super) fn host_error_pending(&self) -> bool {
+        self.host_error
+            .lock()
+            .expect("host_error poisoned")
+            .is_some()
     }
 
     /// Sets the session's final answer.

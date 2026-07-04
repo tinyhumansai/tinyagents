@@ -203,6 +203,28 @@ fn output_byte_limit_fails_closed() {
     assert!(matches!(err, TinyAgentsError::LimitExceeded(_)));
 }
 
+#[test]
+fn output_byte_limit_bounds_intra_cell_buffering_in_a_print_loop() {
+    // A script that prints in a tight loop must not be allowed to buffer
+    // unbounded output before the limit is noticed: push_stdout_line itself
+    // must stop growing the buffer (and eval_cell must fail closed) well
+    // before the loop's total output would otherwise reach many times the
+    // configured budget.
+    let policy = ReplPolicy {
+        max_output_bytes: 100,
+        max_operations: 1_000_000,
+        ..ReplPolicy::default()
+    };
+    let mut s = ReplSession::<()>::new().with_policy(policy);
+
+    let err = s
+        .eval_cell(
+            r#"for i in 0..100000 { print("0123456789012345678901234567890123456789012345"); }"#,
+        )
+        .expect_err("should exceed the output byte limit");
+    assert!(matches!(err, TinyAgentsError::LimitExceeded(_)), "{err:?}");
+}
+
 /// A trivial [`HarnessAgent`] that returns a fixed response, for exercising
 /// `agent_query` without a real model/harness run.
 struct StubAgent;
