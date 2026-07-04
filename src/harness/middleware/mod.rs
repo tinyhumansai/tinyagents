@@ -40,6 +40,7 @@ use crate::error::{Result, TinyAgentsError};
 use crate::harness::cache::{CacheLayoutEvent, PromptCacheLayout};
 use crate::harness::context::RunContext;
 use crate::harness::events::AgentEvent;
+use crate::harness::message::Message;
 use crate::harness::model::{ModelDelta, ModelRequest, ModelResponse};
 use crate::harness::summarization::{
     ConcatSummarizer, SummarizationPolicy, Summarizer, SummaryRecord, TrimStrategy,
@@ -716,6 +717,98 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for ContextCom
             from_tokens,
             to_tokens,
         });
+        Ok(())
+    }
+}
+
+// ── MicrocompactMiddleware ────────────────────────────────────────────────────
+
+impl MicrocompactMiddleware {
+    /// Creates a micro-compaction middleware that keeps the newest `keep_recent`
+    /// tool-result bodies verbatim and blanks older ones with `placeholder`.
+    /// Event emission is off by default; enable it with
+    /// [`MicrocompactMiddleware::with_events`].
+    pub fn new(keep_recent: usize, placeholder: impl Into<String>) -> Self {
+        Self {
+            label: "microcompact",
+            keep_recent,
+            placeholder: placeholder.into(),
+            emit_events: false,
+        }
+    }
+
+    /// Enable or disable emitting an
+    /// [`AgentEvent::Compressed`][crate::harness::events::AgentEvent::Compressed]
+    /// event whenever at least one tool body is cleared. Off by default so the
+    /// middleware can be a silent transcript rewrite.
+    pub fn with_events(mut self, emit_events: bool) -> Self {
+        self.emit_events = emit_events;
+        self
+    }
+
+    /// The number of most-recent tool-result bodies kept verbatim.
+    pub fn keep_recent(&self) -> usize {
+        self.keep_recent
+    }
+
+    /// The placeholder text swapped in for cleared tool-result bodies.
+    pub fn placeholder(&self) -> &str {
+        &self.placeholder
+    }
+}
+
+#[async_trait]
+impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for MicrocompactMiddleware {
+    fn name(&self) -> &str {
+        self.label
+    }
+
+    async fn before_model(
+        &self,
+        ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        request: &mut ModelRequest,
+    ) -> Result<()> {
+        // Indices of every tool-result message, oldest → newest.
+        let tool_idxs: Vec<usize> = request
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| matches!(m, Message::Tool(_)))
+            .map(|(i, _)| i)
+            .collect();
+        if tool_idxs.len() <= self.keep_recent {
+            return Ok(());
+        }
+
+        let from_tokens = if self.emit_events {
+            total_message_tokens(&request.messages)
+        } else {
+            0
+        };
+
+        let cut = tool_idxs.len() - self.keep_recent;
+        let mut cleared = 0usize;
+        for &i in &tool_idxs[..cut] {
+            // Skip messages already reduced to the placeholder; otherwise swap the
+            // body for it (idempotent, preserves the tool_call_id).
+            if request.messages[i].text() == self.placeholder {
+                continue;
+            }
+            if let Message::Tool(t) = &request.messages[i] {
+                let id = t.tool_call_id.clone();
+                request.messages[i] = Message::tool(id, self.placeholder.clone());
+                cleared += 1;
+            }
+        }
+
+        if self.emit_events && cleared > 0 {
+            let to_tokens = total_message_tokens(&request.messages);
+            ctx.emit(AgentEvent::Compressed {
+                from_tokens,
+                to_tokens,
+            });
+        }
         Ok(())
     }
 }
