@@ -74,6 +74,19 @@ impl ChatHistory for InMemoryChatHistory {
         Ok(())
     }
 
+    async fn replace(&self, thread_id: &str, messages: Vec<Message>) -> Result<()> {
+        let mut threads = self
+            .threads
+            .lock()
+            .map_err(|e| TinyAgentsError::Memory(format!("chat history lock poisoned: {e}")))?;
+        if messages.is_empty() {
+            threads.remove(thread_id);
+        } else {
+            threads.insert(thread_id.to_string(), messages);
+        }
+        Ok(())
+    }
+
     async fn clear(&self, thread_id: &str) -> Result<()> {
         let mut threads = self
             .threads
@@ -116,6 +129,17 @@ impl<S: Store> ChatHistory for StoreChatHistory<S> {
     async fn append(&self, thread_id: &str, message: Message) -> Result<()> {
         let mut messages = self.messages(thread_id).await?;
         messages.push(message);
+        let value = serde_json::to_value(&messages)?;
+        self.store.put(Self::NAMESPACE, thread_id, value).await
+    }
+
+    async fn replace(&self, thread_id: &str, messages: Vec<Message>) -> Result<()> {
+        // A single put (or delete for an empty list) instead of a
+        // clear-then-N-appends: the whole thread is rewritten atomically, so a
+        // failed write cannot leave the thread with its history destroyed.
+        if messages.is_empty() {
+            return self.store.delete(Self::NAMESPACE, thread_id).await;
+        }
         let value = serde_json::to_value(&messages)?;
         self.store.put(Self::NAMESPACE, thread_id, value).await
     }
@@ -168,15 +192,13 @@ impl<H: ChatHistory> ShortTermMemory<H> {
 
     /// Replaces the thread's history with `messages` (trimmed first).
     ///
-    /// Clears the existing history then re-appends the trimmed list, so the
-    /// stored state matches what [`load`](Self::load) would return.
+    /// Delegates to [`ChatHistory::replace`], a single bulk write on the durable
+    /// and in-memory backends, so the stored state matches what
+    /// [`load`](Self::load) would return without clearing history first (an
+    /// intermediate failure can no longer destroy the thread).
     pub async fn save(&self, messages: Vec<Message>) -> Result<()> {
         let trimmed = self.apply_trim(messages);
-        self.history.clear(&self.thread_id).await?;
-        for message in trimmed {
-            self.history.append(&self.thread_id, message).await?;
-        }
-        Ok(())
+        self.history.replace(&self.thread_id, trimmed).await
     }
 
     /// Clears the thread's history.

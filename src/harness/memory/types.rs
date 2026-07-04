@@ -54,6 +54,21 @@ pub trait ChatHistory: Send + Sync {
     /// Appends `message` to the end of `thread_id`'s history.
     async fn append(&self, thread_id: &str, message: Message) -> Result<()>;
 
+    /// Replaces `thread_id`'s entire history with `messages` in one operation.
+    ///
+    /// The default implementation clears then re-appends one message at a time,
+    /// which is O(n) writes and — critically — non-atomic: a failure partway
+    /// through leaves the thread with the already-cleared prefix lost. Durable
+    /// and in-memory backends override this with a single bulk write so a
+    /// mid-write failure leaves the prior history intact.
+    async fn replace(&self, thread_id: &str, messages: Vec<Message>) -> Result<()> {
+        self.clear(thread_id).await?;
+        for message in messages {
+            self.append(thread_id, message).await?;
+        }
+        Ok(())
+    }
+
     /// Removes all history for `thread_id`.
     ///
     /// This is a no-op if the thread has no history; it does not error.

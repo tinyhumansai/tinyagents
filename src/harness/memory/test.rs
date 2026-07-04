@@ -111,6 +111,76 @@ async fn short_term_memory_trim_hook_applies() {
     assert_eq!(loaded[0].text(), "3");
 }
 
+/// A store whose `put` always fails, wrapping a working `get`/`delete`. Used to
+/// prove that a mid-save write failure does not destroy pre-existing history.
+#[derive(Clone)]
+struct PutFailsStore {
+    inner: InMemoryStore,
+}
+
+#[async_trait::async_trait]
+impl crate::harness::store::Store for PutFailsStore {
+    async fn get(&self, namespace: &str, key: &str) -> Result<Option<serde_json::Value>> {
+        self.inner.get(namespace, key).await
+    }
+    async fn put(&self, _namespace: &str, _key: &str, _value: serde_json::Value) -> Result<()> {
+        Err(TinyAgentsError::Memory("write refused".into()))
+    }
+    async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
+        self.inner.delete(namespace, key).await
+    }
+    async fn list(&self, namespace: &str) -> Result<Vec<String>> {
+        self.inner.list(namespace).await
+    }
+}
+
+#[tokio::test]
+async fn save_does_not_destroy_history_when_write_fails() {
+    // Seed a thread's history through the working inner store.
+    let inner = InMemoryStore::new();
+    let seed = StoreChatHistory::new(inner.clone());
+    seed.append("t", Message::user("kept-one")).await.unwrap();
+    seed.append("t", Message::user("kept-two")).await.unwrap();
+
+    // A memory whose backing store rejects writes: the atomic replace must fail
+    // WITHOUT having cleared the existing history first (the old clear-then-
+    // append path would have wiped the thread before the failing append).
+    let mem = ShortTermMemory::new(StoreChatHistory::new(PutFailsStore { inner }), "t");
+    let err = mem.save(vec![Message::system("new")]).await;
+    assert!(err.is_err(), "save should surface the write failure");
+
+    // The original two messages survive because nothing was cleared.
+    let survivor = StoreChatHistory::new(seed.store().clone());
+    let msgs = survivor.messages("t").await.unwrap();
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(msgs[0].text(), "kept-one");
+    assert_eq!(msgs[1].text(), "kept-two");
+}
+
+#[tokio::test]
+async fn replace_is_single_write_bulk() {
+    let store = InMemoryStore::new();
+    let history = StoreChatHistory::new(store.clone());
+    history.append("t", Message::user("old")).await.unwrap();
+
+    history
+        .replace(
+            "t",
+            vec![Message::user("a"), Message::user("b"), Message::user("c")],
+        )
+        .await
+        .unwrap();
+
+    let msgs = history.messages("t").await.unwrap();
+    assert_eq!(msgs.len(), 3);
+    assert_eq!(msgs[0].text(), "a");
+    assert_eq!(msgs[2].text(), "c");
+
+    // Replacing with an empty list removes the thread entirely.
+    history.replace("t", vec![]).await.unwrap();
+    assert!(history.messages("t").await.unwrap().is_empty());
+}
+
 #[test]
 fn memory_scope_serializes_snake_case() {
     assert_eq!(
