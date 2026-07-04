@@ -9,7 +9,7 @@ use super::*;
 
 // ── Graph-authoring implementations ─────────────────────────────────────────
 
-fn graph_define_impl<State: Send + Sync + 'static>(
+pub(super) fn graph_define_impl<State: Send + Sync + 'static>(
     ctx: &HostContext<State>,
     params: &Map,
 ) -> Result<Dynamic, Box<EvalAltResult>> {
@@ -119,7 +119,7 @@ fn draft_descriptor(handle: &GraphBlueprintHandle) -> Dynamic {
 }
 
 /// Looks up a graph draft by the `name` field of a descriptor map.
-fn lookup_draft<State: Send + Sync>(
+pub(super) fn lookup_draft<State: Send + Sync>(
     ctx: &HostContext<State>,
     descriptor: &Map,
     func: &str,
@@ -134,7 +134,7 @@ fn lookup_draft<State: Send + Sync>(
         .ok_or_else(|| invalid(ctx, format!("{func}: no graph draft named `{name}`")))
 }
 
-fn graph_validate_impl<State: Send + Sync + 'static>(
+pub(super) fn graph_validate_impl<State: Send + Sync + 'static>(
     ctx: &HostContext<State>,
     descriptor: &Map,
 ) -> Result<Dynamic, Box<EvalAltResult>> {
@@ -148,7 +148,7 @@ fn graph_validate_impl<State: Send + Sync + 'static>(
     Ok(Dynamic::from_array(array))
 }
 
-fn graph_compile_impl<State: Send + Sync + 'static>(
+pub(super) fn graph_compile_impl<State: Send + Sync + 'static>(
     ctx: &HostContext<State>,
     descriptor: &Map,
 ) -> Result<Dynamic, Box<EvalAltResult>> {
@@ -174,7 +174,7 @@ fn graph_compile_impl<State: Send + Sync + 'static>(
     Ok(draft_descriptor(&handle))
 }
 
-fn graph_diff_handles<State: Send + Sync>(
+pub(super) fn graph_diff_handles<State: Send + Sync>(
     ctx: &HostContext<State>,
     old: &Blueprint,
     new: &Blueprint,
@@ -185,7 +185,7 @@ fn graph_diff_handles<State: Send + Sync>(
     Ok(repl_value_to_dynamic(&json_to_repl_value(&value)))
 }
 
-fn graph_register_impl<State: Send + Sync + 'static>(
+pub(super) fn graph_register_impl<State: Send + Sync + 'static>(
     ctx: &HostContext<State>,
     params: &Map,
 ) -> Result<Dynamic, Box<EvalAltResult>> {

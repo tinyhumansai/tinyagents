@@ -24,7 +24,7 @@ fn batch_items<State: Send + Sync>(
         .collect()
 }
 
-fn model_query_batched_impl<State: Send + Sync + 'static>(
+pub(super) fn model_query_batched_impl<State: Send + Sync + 'static>(
     ctx: &HostContext<State>,
     items: &Array,
 ) -> Result<Dynamic, Box<EvalAltResult>> {
@@ -81,7 +81,7 @@ fn model_query_batched_impl<State: Send + Sync + 'static>(
     Ok(Dynamic::from_array(out))
 }
 
-fn tool_call_batched_impl<State: Send + Sync + 'static>(
+pub(super) fn tool_call_batched_impl<State: Send + Sync + 'static>(
     ctx: &HostContext<State>,
     items: &Array,
 ) -> Result<Dynamic, Box<EvalAltResult>> {
@@ -159,7 +159,7 @@ fn tool_call_batched_impl<State: Send + Sync + 'static>(
     Ok(Dynamic::from_array(out))
 }
 
-fn agent_query_batched_impl<State: Send + Sync + 'static>(
+pub(super) fn agent_query_batched_impl<State: Send + Sync + 'static>(
     ctx: &HostContext<State>,
     items: &Array,
 ) -> Result<Dynamic, Box<EvalAltResult>> {
@@ -215,7 +215,7 @@ fn agent_query_batched_impl<State: Send + Sync + 'static>(
     Ok(Dynamic::from_array(out))
 }
 
-fn graph_run_batched_impl<State: Send + Sync + 'static>(
+pub(super) fn graph_run_batched_impl<State: Send + Sync + 'static>(
     ctx: &HostContext<State>,
     items: &Array,
 ) -> Result<Dynamic, Box<EvalAltResult>> {

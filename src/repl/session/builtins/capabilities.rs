@@ -8,7 +8,7 @@ use super::*;
 
 // ── Single capability implementations ───────────────────────────────────────
 
-fn model_query_impl<State: Send + Sync + 'static>(
+pub(super) fn model_query_impl<State: Send + Sync + 'static>(
     ctx: &HostContext<State>,
     params: &Map,
 ) -> Result<Dynamic, Box<EvalAltResult>> {
@@ -40,7 +40,7 @@ fn model_query_impl<State: Send + Sync + 'static>(
     ))
 }
 
-fn tool_call_impl<State: Send + Sync + 'static>(
+pub(super) fn tool_call_impl<State: Send + Sync + 'static>(
     ctx: &HostContext<State>,
     params: &Map,
 ) -> Result<Dynamic, Box<EvalAltResult>> {
@@ -85,7 +85,7 @@ fn tool_call_impl<State: Send + Sync + 'static>(
     }
 }
 
-fn agent_query_impl<State: Send + Sync + 'static>(
+pub(super) fn agent_query_impl<State: Send + Sync + 'static>(
     ctx: &HostContext<State>,
     params: &Map,
 ) -> Result<Dynamic, Box<EvalAltResult>> {
@@ -129,7 +129,7 @@ fn agent_query_impl<State: Send + Sync + 'static>(
 /// `CompiledGraph` and driving its super-steps is owned by the graph runtime
 /// and wired in a later slice; this keeps the REPL an orchestration surface,
 /// not a topology-mutation surface.
-fn graph_run_impl<State: Send + Sync + 'static>(
+pub(super) fn graph_run_impl<State: Send + Sync + 'static>(
     ctx: &HostContext<State>,
     params: &Map,
 ) -> Result<Dynamic, Box<EvalAltResult>> {
