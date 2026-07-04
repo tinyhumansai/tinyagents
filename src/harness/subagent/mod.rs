@@ -185,7 +185,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
     ) -> Result<AgentRun> {
         let config = self.child_config(parent_depth, None, None)?;
         let ctx = RunContext::new(config, ctx_data);
-        self.run_child(state, ctx, input.into()).await
+        self.run_child(state, ctx, input.into(), false).await
     }
 
     /// Like [`Self::invoke`] but routes the child run's events (and the
@@ -201,7 +201,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
     ) -> Result<AgentRun> {
         let config = self.child_config(parent_depth, None, None)?;
         let ctx = RunContext::new(config, ctx_data).with_events(events.clone());
-        self.run_child(state, ctx, input.into()).await
+        self.run_child(state, ctx, input.into(), false).await
     }
 
     /// Runs the sub-agent as a child of the live `parent` context.
@@ -227,16 +227,24 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
             parent.config.max_turn_output_tokens,
         )?;
         let ctx = RunContext::new(config, ctx_data).with_events(parent.events.clone());
-        self.run_child(state, ctx, input.into()).await
+        self.run_child(state, ctx, input.into(), parent.streaming)
+            .await
     }
 
     /// Shared driver: emits the sub-agent lifecycle events around the child
     /// agent loop.
+    ///
+    /// When `streaming` is `true` the child runs through the streaming loop
+    /// path, so its per-token model/reasoning deltas are emitted onto the
+    /// shared [`EventSink`] and reach the parent's stream (stamped with the
+    /// child's own `run_id` and `depth`). When `false` the child runs the
+    /// unary path, leaving the parent's event stream unchanged.
     async fn run_child(
         &self,
         state: &State,
         ctx: RunContext<Ctx>,
         input: String,
+        streaming: bool,
     ) -> Result<AgentRun> {
         let depth = ctx.depth();
         let messages = self.seed_messages(input);
@@ -250,7 +258,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
             depth,
         });
 
-        let run = self.harness.invoke_in_context(state, ctx, messages).await?;
+        let run = if streaming {
+            self.harness
+                .invoke_streaming_in_context(state, ctx, messages)
+                .await?
+        } else {
+            self.harness.invoke_in_context(state, ctx, messages).await?
+        };
 
         events.emit(AgentEvent::SubAgentCompleted {
             name: self.name.clone(),
@@ -580,7 +594,14 @@ where
             }
         };
         let ctx = RunContext::new(config, Ctx::default()).with_events(context.events);
-        let run = match self.subagent.run_child(state, ctx, input).await {
+        // Match the parent's drive mode: when the parent run streams, the child
+        // streams too, so its deltas flow onto the shared sink and reach the
+        // parent's `invoke_stream` consumer with the child's own lineage.
+        let run = match self
+            .subagent
+            .run_child(state, ctx, input, context.streaming)
+            .await
+        {
             Ok(run) => run,
             Err(error) => {
                 if let Some(result) =

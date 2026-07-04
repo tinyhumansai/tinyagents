@@ -193,4 +193,12 @@ pub struct RunContext<Ctx = ()> {
     /// [`WorkspaceIsolation`][crate::harness::workspace::WorkspaceIsolation]
     /// provider; `None` means no workspace policy is in effect.
     pub workspace: Option<crate::harness::workspace::WorkspaceDescriptor>,
+    /// Whether this run is being driven through the streaming loop path
+    /// (`ChatModel::stream`), set by the agent-loop driver. Threaded into each
+    /// [`ToolExecutionContext`][crate::harness::tool::ToolExecutionContext] so a
+    /// sub-agent tool can run its child in the matching mode — the child's
+    /// model/reasoning deltas then propagate to the parent's stream via the
+    /// shared [`EventSink`]. A non-streaming parent leaves this `false`, so its
+    /// event stream is unchanged.
+    pub streaming: bool,
 }

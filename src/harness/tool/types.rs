@@ -111,6 +111,10 @@ pub struct ToolExecutionContext {
     pub max_turn_output_tokens: Option<u32>,
     /// Shared event sink for nested run observability.
     pub events: EventSink,
+    /// Whether the caller run is being driven through the streaming loop path.
+    /// A sub-agent tool uses this to run its child in the matching mode so the
+    /// child's deltas propagate onto the shared [`EventSink`].
+    pub streaming: bool,
     /// The isolated workspace/sandbox the tool may operate in, when the run was
     /// configured with a
     /// [`WorkspaceIsolation`][crate::harness::workspace::WorkspaceIsolation]
@@ -128,6 +132,7 @@ impl ToolExecutionContext {
             depth: ctx.config.depth,
             max_turn_output_tokens: ctx.config.max_turn_output_tokens,
             events: ctx.events.clone(),
+            streaming: ctx.streaming,
             workspace: ctx.workspace.clone(),
         }
     }

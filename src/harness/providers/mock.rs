@@ -91,6 +91,25 @@ impl MockModel {
         }
     }
 
+    /// Creates a `MockModel` that streams a caller-provided list of
+    /// [`ModelStreamItem`]s verbatim, so streaming tests are *truly*
+    /// incremental — fine-grained text/reasoning/tool-call deltas in the exact
+    /// order given — rather than the one-or-two synthetic deltas the other
+    /// constructors replay.
+    ///
+    /// [`ChatModel::stream`] emits the items as-is; [`ChatModel::invoke`] folds
+    /// them through a
+    /// [`StreamAccumulator`][crate::harness::model::StreamAccumulator] to
+    /// produce the equivalent unary [`ModelResponse`]. Items may end with a
+    /// terminal [`ModelStreamItem::Completed`], or be delta-only (the
+    /// accumulator reconstructs the response from the deltas).
+    pub fn streaming_script(items: Vec<ModelStreamItem>) -> Self {
+        Self {
+            behavior: MockBehavior::StreamScript(items),
+            inner: std::sync::Mutex::new(MockInner::default()),
+        }
+    }
+
     /// Returns the total number of [`ChatModel::invoke`] calls made so far.
     ///
     /// `stream` calls that delegate to `invoke` also increment this counter.
@@ -209,6 +228,16 @@ impl<State: Send + Sync> ChatModel<State> for MockModel {
                     resolved_model: None,
                 }
             }
+
+            MockBehavior::StreamScript(items) => {
+                // Fold the scripted stream items into the equivalent unary
+                // response so `invoke` and `stream` agree.
+                let mut accumulator = crate::harness::model::StreamAccumulator::new();
+                for item in items {
+                    accumulator.push(item);
+                }
+                accumulator.finish()?
+            }
         };
 
         // Stamp the message id on text-based responses for traceability.
@@ -231,6 +260,19 @@ impl<State: Send + Sync> ChatModel<State> for MockModel {
     /// infrastructure. Tool-call (or otherwise text-less) responses emit a
     /// single empty text delta before completing.
     async fn stream(&self, state: &State, request: ModelRequest) -> Result<ModelStream> {
+        // Scripted streams are emitted verbatim so tests see the exact,
+        // fine-grained item sequence rather than the invoke-and-replay split.
+        if let MockBehavior::StreamScript(items) = &self.behavior {
+            {
+                let mut inner = self
+                    .inner
+                    .lock()
+                    .map_err(|e| TinyAgentsError::Model(format!("MockModel lock poisoned: {e}")))?;
+                inner.call_count += 1;
+            }
+            return Ok(Box::pin(futures::stream::iter(items.clone())));
+        }
+
         let response = self.invoke(state, request).await?;
         let text = response.text();
 

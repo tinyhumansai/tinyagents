@@ -654,3 +654,120 @@ fn subagent_tool_schema_uses_name_and_description() {
     assert_eq!(schema.description, "writes prose");
     assert_eq!(schema.parameters["required"][0], "input");
 }
+
+#[tokio::test]
+async fn subagent_deltas_propagate_to_parent_stream() {
+    use crate::harness::agent_loop::AgentStreamItem;
+    use futures::StreamExt;
+
+    // Child streams its answer; parent delegates to it via a tool then finishes.
+    let child = Arc::new(SubAgent::new(
+        "researcher",
+        "answers research questions",
+        Arc::new(child_harness("the streamed child answer")),
+    ));
+    let tool = Arc::new(SubAgentTool::new(child));
+
+    let mut parent: AgentHarness<()> = AgentHarness::new();
+    parent.register_tool(tool);
+    parent.register_model(
+        "parent-model",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("c1", "researcher", json!({ "input": "what is rust?" })),
+            text_response("parent final answer"),
+        ])),
+    );
+
+    let items: Vec<AgentStreamItem> = parent
+        .invoke_stream(
+            &(),
+            (),
+            RunConfig::new("parent"),
+            vec![Message::user("delegate")],
+        )
+        .collect()
+        .await;
+    let events: Vec<AgentEvent> = items
+        .iter()
+        .filter_map(|i| match i {
+            AgentStreamItem::Event(record) => Some(record.event.clone()),
+            _ => None,
+        })
+        .collect();
+
+    // Sub-agent lifecycle at depth 1 is visible in the parent stream.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SubAgentStarted { depth: 1, .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SubAgentCompleted { depth: 1, .. }))
+    );
+
+    // The CHILD's own model deltas propagate to the parent stream, stamped with
+    // the child's run id (lineage), not the parent's.
+    let child_delta_pos = events.iter().position(|e| {
+        matches!(e, AgentEvent::ModelDelta { run_id, .. } if run_id.as_str().starts_with("researcher-d1"))
+    });
+    assert!(
+        child_delta_pos.is_some(),
+        "child model deltas must appear in the parent stream"
+    );
+    // The parent's own deltas are stamped with the parent run id.
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::ModelDelta { run_id, .. } if run_id.as_str() == "parent")
+    ));
+    // The child delta arrives before the parent's run completes.
+    let parent_completed_pos = events.iter().position(
+        |e| matches!(e, AgentEvent::RunCompleted { run_id } if run_id.as_str() == "parent"),
+    );
+    assert!(child_delta_pos < parent_completed_pos);
+
+    match items.last() {
+        Some(AgentStreamItem::Completed(run)) => {
+            assert_eq!(run.text().as_deref(), Some("parent final answer"))
+        }
+        other => panic!("expected Completed terminal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn non_streaming_parent_does_not_stream_child_deltas() {
+    // A non-streaming parent (invoke, not invoke_stream) must leave the child on
+    // the unary path: no child ModelDelta events land on the shared sink.
+    let recorder = Arc::new(RecordingListener::new());
+    let child = Arc::new(SubAgent::new(
+        "researcher",
+        "answers",
+        Arc::new(child_harness("child answer")),
+    ));
+    let tool = Arc::new(SubAgentTool::new(child));
+
+    let mut parent: AgentHarness<()> = AgentHarness::new();
+    parent.register_tool(tool);
+    parent.register_model(
+        "parent-model",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("c1", "researcher", json!({ "input": "q" })),
+            text_response("done"),
+        ])),
+    );
+
+    let ctx: RunContext<()> = RunContext::new(RunConfig::new("parent"), ());
+    ctx.events.subscribe(recorder.clone());
+    parent
+        .invoke_in_context(&(), ctx, vec![Message::user("go")])
+        .await
+        .expect("run succeeds");
+
+    let child_deltas = recorder.events().into_iter().any(|record| {
+        matches!(record.event, AgentEvent::ModelDelta { ref run_id, .. } if run_id.as_str().starts_with("researcher-d1"))
+    });
+    assert!(
+        !child_deltas,
+        "a non-streaming parent must not emit child model deltas"
+    );
+}

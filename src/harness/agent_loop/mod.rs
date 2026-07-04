@@ -94,7 +94,10 @@ use serde_json::Value;
 mod entry;
 mod model_call;
 mod run_loop;
+mod stream;
 mod tools;
+
+pub use stream::AgentStreamItem;
 
 #[cfg(test)]
 mod test;
