@@ -197,7 +197,31 @@ impl CapabilityPolicy {
 /// An interactive REPL session holding session variables, a capability policy,
 /// and a command history.
 ///
-/// `ReplSession` is the primary entry point for driving the `.ragsh` skeleton.
+/// `ReplSession` is the primary entry point for driving the `.ragsh` skeleton
+/// — the **line-oriented command REPL** (verbs like `set`/`get`/`run`/`call`
+/// parsed from a single line; see the [`repl`](crate::repl) module docs for
+/// the grammar).
+///
+/// # Not to be confused with `repl::session::ReplSession`
+///
+/// There are two distinct types named `ReplSession` in this crate, gated
+/// differently and serving different layers of the `.ragsh` design:
+///
+/// - **This type** (`repl::ReplSession`, always available) — the
+///   line-oriented command skeleton documented here.
+/// - [`crate::repl::session::ReplSession`] (feature `repl` only) — the
+///   Rhai-backed scripting session: a persistent namespace evaluated one cell
+///   (small script) at a time, with capability calls (`model_query`,
+///   `tool_call`, `graph_run`, …) wired to live registries.
+///
+/// Only **this** type is re-exported as `repl::ReplSession`; the scripting
+/// session is deliberately *not* re-exported there to avoid shadowing it, and
+/// must be reached via `repl::session::ReplSession`. With the `repl` feature
+/// enabled, `crate::ReplSession` (the crate-root re-export) resolves to the
+/// **scripting** session instead — the crate root and the `repl` module
+/// re-export different types under the same final path segment, so always
+/// check which path (`crate::ReplSession` vs. `crate::repl::ReplSession`) you
+/// actually imported from.
 ///
 /// ## Execution model
 ///

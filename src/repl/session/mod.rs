@@ -159,6 +159,24 @@ impl Default for ReplVariables {
 /// stateless session with [`ReplSession::new`]; supply registries, a custom
 /// policy, or a run context with [`ReplSession::builder`]-style `with_*`
 /// methods.
+///
+/// # Not to be confused with `repl::ReplSession`
+///
+/// This crate has two distinct types named `ReplSession`:
+///
+/// - **This type** (`repl::session::ReplSession`, feature `repl` only) — the
+///   Rhai-backed scripting session described above; also reachable as
+///   `crate::ReplSession` (the crate-root re-export) when the `repl` feature
+///   is enabled.
+/// - [`crate::repl::ReplSession`] (always available, no feature required) —
+///   the line-oriented command skeleton (verbs like `set`/`get`/`run`/`call`
+///   parsed from a single line). It is *not* re-exported at the crate root
+///   under this feature, so `crate::ReplSession` only ever means this
+///   scripting session once `repl` is enabled.
+///
+/// The two are unrelated types serving different layers of the `.ragsh`
+/// design; always check which module path (`crate::repl::session::ReplSession`
+/// vs. `crate::repl::ReplSession`) you imported from.
 pub struct ReplSession<State = (), Ctx = ()>
 where
     State: Send + Sync,
