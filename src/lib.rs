@@ -242,6 +242,6 @@ pub use graph::testkit::{
 // remains available as `repl::ReplSession`.
 #[cfg(feature = "repl")]
 pub use repl::session::{
-    LanguageCompiler, ReplCallKind, ReplCallRecord, ReplCapabilities, ReplPolicy, ReplResult,
-    ReplSession, ReplValue, ReplVariables,
+    LanguageCompiler, ReplCallKind, ReplCallRecord, ReplCancelFlag, ReplCapabilities, ReplPolicy,
+    ReplResult, ReplSession, ReplValue, ReplVariables,
 };

@@ -32,6 +32,7 @@ pub(super) fn model_query_batched_impl<State: Send + Sync + 'static>(
 
     let items = batch_items(ctx, items, "model_query_batched")?;
     let mut prepared = Vec::with_capacity(items.len());
+    let mut call_ids = Vec::with_capacity(items.len());
     for params in &items {
         let model_name = map_str(params, "model")
             .ok_or_else(|| invalid(ctx, "model_query_batched: missing `model`"))?;
@@ -42,12 +43,17 @@ pub(super) fn model_query_batched_impl<State: Send + Sync + 'static>(
             .ok_or_else(|| raise(ctx, TinyAgentsError::ModelNotFound(model_name.clone())))?;
         let request = build_model_request(&model_name, params);
         let structured = map_bool(params, "structured").unwrap_or(false);
+        // Stream a "started" event for every fan-out leg up front, so a live
+        // observer sees the whole batch dispatch before any leg completes.
+        let call_id = new_call_id();
+        emit_call_started(ctx, &call_id, ReplCallKind::Model, &model_name);
+        call_ids.push(call_id);
         prepared.push((model_name, model, request, structured));
     }
 
     let concurrency = ctx.policy.max_concurrency.max(1);
     let results: Vec<Result<ModelBatchItem, TinyAgentsError>> =
-        bridge_block_on_raw(ctx.buffers.deadline(), async {
+        bridge_block_on_raw(ctx.buffers.deadline(), &ctx.cancel, async {
             stream::iter(prepared.iter().map(|(name, model, request, structured)| {
                 let name = name.clone();
                 let structured = *structured;
@@ -65,12 +71,14 @@ pub(super) fn model_query_batched_impl<State: Send + Sync + 'static>(
         })
         .map_err(|err| raise(ctx, err))?;
 
+    // `buffered` preserves input order, so results align 1:1 with `call_ids`.
     let mut out = Array::with_capacity(results.len());
-    for result in results {
+    for (call_id, result) in call_ids.into_iter().zip(results) {
         let (name, text, finish_reason, structured, elapsed) =
             result.map_err(|err| raise(ctx, err))?;
         record(
             ctx,
+            call_id,
             ReplCallKind::Model,
             &name,
             json!({ "chars": text.len() }),
@@ -89,6 +97,7 @@ pub(super) fn tool_call_batched_impl<State: Send + Sync + 'static>(
 
     let items = batch_items(ctx, items, "tool_call_batched")?;
     let mut prepared = Vec::with_capacity(items.len());
+    let mut call_ids = Vec::with_capacity(items.len());
     for params in &items {
         let tool_name = map_str(params, "tool")
             .ok_or_else(|| invalid(ctx, "tool_call_batched: missing `tool`"))?;
@@ -98,26 +107,31 @@ pub(super) fn tool_call_batched_impl<State: Send + Sync + 'static>(
             .tool(&tool_name)
             .ok_or_else(|| raise(ctx, TinyAgentsError::ToolNotFound(tool_name.clone())))?;
         let arguments = map_json(params, "arguments").unwrap_or(Value::Null);
+        let call_id = new_call_id();
+        emit_call_started(ctx, &call_id, ReplCallKind::Tool, &tool_name);
+        call_ids.push(call_id);
         prepared.push((tool_name, tool, arguments));
     }
 
     let concurrency = ctx.policy.max_concurrency.max(1);
     let results: Vec<
         Result<(String, crate::harness::tool::ToolResult, Duration), TinyAgentsError>,
-    > = bridge_block_on_raw(ctx.buffers.deadline(), async {
-        stream::iter(prepared.iter().map(|(name, tool, arguments)| {
-            let name = name.clone();
-            let call = ToolCall {
-                id: new_call_id().as_str().to_string(),
-                name: name.clone(),
-                arguments: arguments.clone(),
-            };
-            async move {
-                let start = Instant::now();
-                let result = tool.call(&ctx.state, call).await?;
-                Ok((name, result, start.elapsed()))
-            }
-        }))
+    > = bridge_block_on_raw(ctx.buffers.deadline(), &ctx.cancel, async {
+        stream::iter(prepared.iter().zip(call_ids.iter()).map(
+            |((name, tool, arguments), call_id)| {
+                let name = name.clone();
+                let call = ToolCall {
+                    id: call_id.as_str().to_string(),
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                };
+                async move {
+                    let start = Instant::now();
+                    let result = tool.call(&ctx.state, call).await?;
+                    Ok((name, result, start.elapsed()))
+                }
+            },
+        ))
         .buffered(concurrency)
         .collect()
         .await
@@ -132,10 +146,11 @@ pub(super) fn tool_call_batched_impl<State: Send + Sync + 'static>(
     // above (a harness-level failure, not a tool-reported one) still aborts
     // the whole batch, since no results exist to preserve in that case.
     let mut out = Array::with_capacity(results.len());
-    for result in results {
+    for (call_id, result) in call_ids.into_iter().zip(results) {
         let (name, tool_result, elapsed) = result.map_err(|err| raise(ctx, err))?;
         record(
             ctx,
+            call_id,
             ReplCallKind::Tool,
             &name,
             json!({ "chars": tool_result.content.len() }),
@@ -168,6 +183,7 @@ pub(super) fn agent_query_batched_impl<State: Send + Sync + 'static>(
 
     let items = batch_items(ctx, items, "agent_query_batched")?;
     let mut prepared = Vec::with_capacity(items.len());
+    let mut call_ids = Vec::with_capacity(items.len());
     for params in &items {
         let agent_name = map_str(params, "agent")
             .ok_or_else(|| invalid(ctx, "agent_query_batched: missing `agent`"))?;
@@ -186,12 +202,15 @@ pub(super) fn agent_query_batched_impl<State: Send + Sync + 'static>(
         if let Some(data) = map_json(params, "input") {
             input = input.with_data(data);
         }
+        let call_id = new_call_id();
+        emit_call_started(ctx, &call_id, ReplCallKind::Agent, &agent_name);
+        call_ids.push(call_id);
         prepared.push((agent_name, agent, input));
     }
 
     let concurrency = ctx.policy.max_concurrency.max(1);
     let results: Vec<Result<AgentBatchItem, TinyAgentsError>> =
-        bridge_block_on_raw(ctx.buffers.deadline(), async {
+        bridge_block_on_raw(ctx.buffers.deadline(), &ctx.cancel, async {
             stream::iter(prepared.iter().map(|(name, agent, input)| {
                 let name = name.clone();
                 async move {
@@ -207,9 +226,9 @@ pub(super) fn agent_query_batched_impl<State: Send + Sync + 'static>(
         .map_err(|err| raise(ctx, err))?;
 
     let mut out = Array::with_capacity(results.len());
-    for result in results {
+    for (call_id, result) in call_ids.into_iter().zip(results) {
         let (name, text, elapsed) = result.map_err(|err| raise(ctx, err))?;
-        record(ctx, ReplCallKind::Agent, &name, json!({}), elapsed);
+        record(ctx, call_id, ReplCallKind::Agent, &name, json!({}), elapsed);
         out.push(Dynamic::from(text));
     }
     Ok(Dynamic::from_array(out))

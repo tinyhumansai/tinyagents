@@ -10,12 +10,56 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::language::types::{Blueprint, Origin};
 use crate::registry::CapabilityRegistry;
+
+// ── External cancellation ────────────────────────────────────────────────────
+
+/// A shared, cheaply-cloneable cancellation flag for a [`super::ReplSession`].
+///
+/// A cell can otherwise only be stopped by its wall-clock
+/// [`ReplPolicy::timeout`]. A host that drives sessions from an async runtime
+/// (for example when a user cancels the surrounding run) needs to abort an
+/// **in-flight** cell on demand, without waiting out the timeout. It holds a
+/// clone of this flag and calls [`ReplCancelFlag::cancel`]; the session observes
+/// it fail-closed at the same two enforcement points as the deadline:
+///
+/// - the engine `on_progress` hook, which terminates a running *script* at the
+///   next statement/operation (a pure `while true {}` loop with no host calls);
+/// - the blocking bridge around every `model_query`/`tool_call`/`agent_query`
+///   call, which drops an in-flight (possibly hung) capability future promptly.
+///
+/// In both cases [`super::ReplSession::eval_cell`] returns
+/// [`TinyAgentsError::Cancelled`](crate::error::TinyAgentsError::Cancelled). The
+/// flag is *sticky*: once cancelled it stays cancelled, so a session observed as
+/// cancelled will refuse to start further cells until a fresh flag is installed.
+/// Construct one with [`ReplCancelFlag::new`] and install it with
+/// [`super::ReplSession::with_cancel_flag`].
+#[derive(Clone, Debug, Default)]
+pub struct ReplCancelFlag(Arc<AtomicBool>);
+
+impl ReplCancelFlag {
+    /// Creates a fresh, un-cancelled flag.
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Requests cancellation. Idempotent and safe to call from any thread; every
+    /// clone of this flag observes the change.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Returns whether cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
 
 // ── Reserved names ──────────────────────────────────────────────────────────
 
