@@ -827,10 +827,19 @@ fn parse_tool_arguments(context: &str, call_id: &str, name: &str, raw: &str) -> 
 
 /// Converts an OpenAI [`UsageWire`] into the harness-neutral [`Usage`].
 fn convert_usage(wire: UsageWire) -> Usage {
+    // OpenAI-compatible endpoints sometimes omit `total_tokens` entirely
+    // (deserializes to `0` via `#[serde(default)]`); fall back to
+    // `prompt + completion` so `total_tokens` is never a misleading zero for
+    // a call that clearly consumed tokens.
+    let total_tokens = if wire.total_tokens > 0 {
+        wire.total_tokens
+    } else {
+        wire.prompt_tokens + wire.completion_tokens
+    };
     Usage {
         input_tokens: wire.prompt_tokens,
         output_tokens: wire.completion_tokens,
-        total_tokens: wire.total_tokens,
+        total_tokens,
         cache_read_tokens: wire
             .prompt_tokens_details
             .map(|d| d.cached_tokens)

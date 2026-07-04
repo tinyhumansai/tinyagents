@@ -31,12 +31,35 @@ fn estimates_each_component() {
         reasoning_tokens: 10,
     };
     let cost = estimate_cost(&pricing(), &usage);
-    assert!((cost.input_cost - 1.0).abs() < 1e-9);
-    assert!((cost.output_cost - 1.0).abs() < 1e-9);
+    // cache_read_tokens (100) and reasoning_tokens (10) are subsets of
+    // input_tokens/output_tokens, so the standard-rate cost only applies to
+    // the non-cached/non-reasoning remainder: (1000-100)*0.001 = 0.9,
+    // (500-10)*0.002 = 0.98.
+    assert!((cost.input_cost - 0.9).abs() < 1e-9);
+    assert!((cost.output_cost - 0.98).abs() < 1e-9);
     // 100*0.0001 + 200*0.0005 = 0.01 + 0.1 = 0.11
     assert!((cost.cache_cost - 0.11).abs() < 1e-9);
     assert!((cost.reasoning_cost - 0.03).abs() < 1e-9);
-    assert!((cost.total_cost - 2.14).abs() < 1e-9);
+    assert!((cost.total_cost - 2.02).abs() < 1e-9);
+}
+
+#[test]
+fn cache_and_reasoning_tokens_are_not_double_counted() {
+    // A fully-cached prompt: all 90k input tokens were served from cache.
+    // Charging the full input_tokens at the standard rate *and* the
+    // cache_read_tokens at the cache rate would double-bill the cached
+    // tokens; only the cache rate should apply to them.
+    let usage = Usage {
+        input_tokens: 90_000,
+        output_tokens: 100,
+        total_tokens: 90_100,
+        cache_read_tokens: 90_000,
+        cache_creation_tokens: 0,
+        reasoning_tokens: 0,
+    };
+    let cost = estimate_cost(&pricing(), &usage);
+    assert_eq!(cost.input_cost, 0.0);
+    assert!((cost.cache_cost - 9.0).abs() < 1e-9);
 }
 
 #[test]

@@ -55,12 +55,22 @@ impl AddAssign for CostTotals {
 /// Missing prices contribute zero. Cache read and cache creation tokens are
 /// priced independently when the catalog provides those rates and folded into
 /// `cache_cost`.
+///
+/// Providers report `cache_read_tokens` as a *subset* of `input_tokens` (and
+/// `reasoning_tokens` as a subset of `output_tokens`), not an addition to
+/// them. Pricing the full `input_tokens`/`output_tokens` count at the
+/// standard rate *and* separately pricing the cached/reasoning subset would
+/// double-charge those tokens, so the standard-rate cost is computed on the
+/// non-cached/non-reasoning remainder only.
 pub fn estimate_cost(pricing: &ModelPricing, usage: &Usage) -> CostTotals {
     let price = |rate: Option<f64>, tokens: u64| rate.unwrap_or(0.0) * tokens as f64;
 
+    let billable_input_tokens = usage.input_tokens.saturating_sub(usage.cache_read_tokens);
+    let billable_output_tokens = usage.output_tokens.saturating_sub(usage.reasoning_tokens);
+
     let mut totals = CostTotals {
-        input_cost: price(pricing.input_per_token, usage.input_tokens),
-        output_cost: price(pricing.output_per_token, usage.output_tokens),
+        input_cost: price(pricing.input_per_token, billable_input_tokens),
+        output_cost: price(pricing.output_per_token, billable_output_tokens),
         cache_cost: price(pricing.cache_read_input_per_token, usage.cache_read_tokens)
             + price(
                 pricing.cache_creation_input_per_token,

@@ -50,6 +50,23 @@ fn effective_total_falls_back() {
 }
 
 #[test]
+fn add_assign_does_not_lose_totals_when_one_side_omits_total_tokens() {
+    // A record whose provider omitted `total_tokens` (so it's a real `0`)
+    // combined with a normal record must still sum both records' effective
+    // totals, not just the raw `total_tokens` fields.
+    let mut a = Usage {
+        input_tokens: 100,
+        output_tokens: 50,
+        total_tokens: 0,
+        ..Usage::default()
+    };
+    let b = Usage::new(10, 5);
+    a += b;
+    assert_eq!(a.effective_total(), 165);
+    assert_eq!(a.total_tokens, 165);
+}
+
+#[test]
 fn usage_totals_count_calls() {
     let mut totals = UsageTotals::new();
     totals.record(Usage::new(10, 10));

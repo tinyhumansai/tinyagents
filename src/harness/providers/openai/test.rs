@@ -347,6 +347,32 @@ fn parses_text_only_response_without_usage_details() {
 }
 
 #[test]
+fn total_tokens_falls_back_to_prompt_plus_completion_when_omitted() {
+    // Some OpenAI-compatible backends omit `total_tokens` entirely; it must
+    // not silently deserialize to a misleading `0` when prompt/completion
+    // tokens were clearly reported.
+    let body = json!({
+        "id": "chatcmpl-omit",
+        "choices": [
+            {
+                "message": { "role": "assistant", "content": "Hi!" },
+                "finish_reason": "stop"
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 5,
+            "completion_tokens": 2
+        }
+    });
+
+    let response = parse_response(body).unwrap();
+    let usage = response.usage.unwrap();
+    assert_eq!(usage.input_tokens, 5);
+    assert_eq!(usage.output_tokens, 2);
+    assert_eq!(usage.total_tokens, 7);
+}
+
+#[test]
 fn parses_empty_tool_arguments_as_empty_object() {
     // Some compat backends send an empty arguments string for a zero-argument
     // tool call; it must map to `{}`, not fail as malformed JSON.
