@@ -70,7 +70,6 @@ pub use types::{CompiledGraph, GraphExecution, GraphInput, ResumeTarget, StateSn
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use crate::graph::builder::{
@@ -92,13 +91,6 @@ use crate::harness::ids::{
 };
 use crate::harness::retry::is_retryable;
 use crate::{Result, TinyAgentsError};
-
-static SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// Returns a process-unique monotonic sequence number for id generation.
-pub(crate) fn next_seq() -> u64 {
-    SEQ.fetch_add(1, Ordering::Relaxed)
-}
 
 /// Allocates a fresh checkpoint id (string form) that is collision-free across
 /// process restarts.

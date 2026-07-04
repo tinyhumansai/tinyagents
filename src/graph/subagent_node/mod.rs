@@ -38,9 +38,9 @@ use async_trait::async_trait;
 
 use crate::graph::builder::NodeContext;
 use crate::graph::command::NodeResult;
-use crate::graph::compiled::next_seq;
 use crate::graph::recursion::ChildRun;
 use crate::harness::events::EventSink;
+use crate::harness::ids::next_seq;
 use crate::harness::ids::{GraphId, RunId};
 use crate::harness::subagent::SubAgent;
 use crate::registry::{CapabilityRegistry, ComponentId};
