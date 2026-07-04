@@ -26,7 +26,7 @@ use crate::error::{Result, TinyAgentsError};
 use crate::harness::model::{ChatModel, ModelRegistry};
 use crate::harness::tool::{Tool, ToolRegistry};
 use crate::language::Blueprint;
-use crate::language::compiler::CapabilityResolver;
+use crate::language::capability_resolver::CapabilityResolver;
 use crate::registry::component::{ComponentKind, ComponentMetadata};
 
 pub use types::*;

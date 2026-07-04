@@ -4,9 +4,8 @@
 use std::sync::Arc;
 
 use crate::graph::{Command, NodeContext, NodeFuture, NodeResult};
-use crate::language::compiler::{
-    BoxedNode, CapabilityResolver, NodeFactory, bind_capabilities, build_graph, compile,
-};
+use crate::language::capability_resolver::{CapabilityResolver, bind_capabilities};
+use crate::language::compiler::{BoxedNode, NodeFactory, build_graph, compile};
 use crate::language::lexer::tokenize;
 use crate::language::parser::{parse, parse_str};
 use crate::language::types::{Literal, NodeSpec, Routing, Token};
@@ -775,7 +774,7 @@ fn extended_kinds_bind_against_a_resolver() {
         .allow_reducer("aggregate")
         .allow_reducer("barrier")
         .with_node_kinds(
-            crate::language::compiler::DEFAULT_NODE_KINDS
+            crate::language::capability_resolver::DEFAULT_NODE_KINDS
                 .iter()
                 .map(|k| k.to_string()),
         );
@@ -789,7 +788,7 @@ fn bind_blueprint_rejects_unregistered_subagent_and_script() {
     // check. Both were previously admitted, so this exercises the fail-closed
     // path the `Resolver` already covered but `bind_blueprint` did not.
     let node_kinds = || {
-        crate::language::compiler::DEFAULT_NODE_KINDS
+        crate::language::capability_resolver::DEFAULT_NODE_KINDS
             .iter()
             .map(|k| k.to_string())
     };
@@ -972,9 +971,8 @@ async fn build_graph_handles_linear_terminal() {
 // Registry-backed capability binding (registry → language binding)
 // ---------------------------------------------------------------------------
 
-use crate::language::compiler::{
-    DEFAULT_NODE_KINDS, bind_capabilities_with_registry, compile_source,
-};
+use crate::language::capability_resolver::{DEFAULT_NODE_KINDS, bind_capabilities_with_registry};
+use crate::language::compiler::compile_source;
 use crate::registry::CapabilityRegistry;
 
 /// A `.rag` graph that exercises every registry-backed reference kind: a model,

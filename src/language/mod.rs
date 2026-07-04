@@ -48,6 +48,7 @@ pub mod source;
 pub mod span;
 pub mod types;
 
+pub mod capability_resolver;
 pub mod compiler;
 pub mod diff;
 pub mod lexer;

@@ -33,7 +33,10 @@
 
 use crate::error::{Result, TinyAgentsError};
 use crate::language::ast::{ChannelDecl, GraphDecl, NodeDecl, Program};
-use crate::language::compiler::{CapabilityResolver, DEFAULT_NODE_KINDS, ReferenceClass, compile};
+use crate::language::capability_resolver::{
+    CapabilityResolver, DEFAULT_NODE_KINDS, ReferenceClass,
+};
+use crate::language::compiler::compile;
 use crate::language::diagnostic::Diagnostic;
 use crate::language::parser::parse_str;
 use crate::language::source::SourceFile;

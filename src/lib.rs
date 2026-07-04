@@ -88,10 +88,10 @@ pub use registry::{
 // The strict, registry-backed entry points the REPL and orchestrators use to
 // turn `.rag`/`.ragsh` source into validated blueprints. `compile_source` runs
 // parse -> compile -> registry-bind in one call.
-pub use language::compiler::{
-    CapabilityResolver, bind_capabilities, bind_capabilities_with_registry, compile,
-    compile_source, compile_with_provenance,
+pub use language::capability_resolver::{
+    CapabilityResolver, bind_capabilities, bind_capabilities_with_registry,
 };
+pub use language::compiler::{compile, compile_source, compile_with_provenance};
 // `Resolver` is the registry-backed binding gate: it resolves every reference in
 // a `.rag` plan (file-backed or model-generated) against the registry, producing
 // spanned diagnostics for unknown/disallowed capabilities. `resolve_source` is
