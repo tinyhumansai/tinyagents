@@ -16,7 +16,7 @@
 
 mod types;
 
-pub use types::*;
+pub use types::{FailurePolicy, ItemOutcome, ParallelOptions, ParallelOutcome};
 
 use futures::stream::StreamExt;
 use std::future::Future;
