@@ -77,7 +77,8 @@ fn canonical_value(v: Value) -> Value {
 
 /// Produces a stable, deterministic cache key for `request`.
 ///
-/// The key is a 16-character lowercase hex string derived from:
+/// The key is a 64-character lowercase hex string (the full SHA-256 digest)
+/// derived from:
 /// 1. Serializing `request` to a [`serde_json::Value`].
 /// 2. Sorting all JSON object keys recursively (canonical form).
 /// 3. Re-serializing to a compact JSON string.
