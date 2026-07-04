@@ -32,7 +32,7 @@ mod types;
 pub use types::*;
 // EventSinkInner is pub(crate) so bring it into scope explicitly for impls
 // below; it is not re-exported by `pub use types::*`.
-use types::EventSinkInner;
+use types::{EventSinkInner, JournalRecorder};
 
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -69,6 +69,8 @@ impl EventSink {
                 stream_id: stream_id.into(),
                 next_offset: 0,
                 listeners: Vec::new(),
+                pending: std::collections::VecDeque::new(),
+                dispatching: false,
             })),
         }
     }
@@ -83,23 +85,50 @@ impl EventSink {
     /// Emits an event, assigning a monotonic [`EventId`] and offset, then
     /// notifying all registered listeners in insertion order.
     ///
-    /// Returns the [`EventRecord`] that was dispatched so the caller can
-    /// record the assigned id or offset.
+    /// Returns the [`EventRecord`] that was enqueued so the caller can record
+    /// the assigned id or offset.
     ///
-    /// Listener invocations are synchronous. The sink lock is held only while
-    /// assigning the record id and cloning the listener list, so callbacks may
-    /// safely emit to the same sink when they guard against event recursion.
+    /// Offset assignment and enqueueing happen under one critical section, and
+    /// a single emitter at a time drains the queue, so **listeners observe
+    /// records in offset order** even when multiple threads emit concurrently.
+    /// When another emitter is already draining, this call returns after
+    /// enqueueing and that emitter delivers the record; otherwise delivery is
+    /// synchronous before this call returns. The sink lock is never held while
+    /// a listener runs, so callbacks may safely emit to the same sink (the
+    /// re-entrant record is queued and delivered by the active drain loop)
+    /// when they guard against unbounded event recursion.
     pub fn emit(&self, event: AgentEvent) -> EventRecord {
-        let (record, listeners) = {
+        let (record, should_drain) = {
             let mut inner = self.inner.lock().expect("EventSink lock poisoned");
             let offset = inner.next_offset;
             inner.next_offset += 1;
             let id = crate::harness::ids::EventId::new(format!("{}-evt-{offset}", inner.stream_id));
             let record = EventRecord { id, offset, event };
-            (record, inner.listeners.clone())
+            let listeners = inner.listeners.clone();
+            inner.pending.push_back((record.clone(), listeners));
+            let should_drain = !inner.dispatching;
+            if should_drain {
+                inner.dispatching = true;
+            }
+            (record, should_drain)
         };
-        for listener in &listeners {
-            listener.on_event(&record);
+        if should_drain {
+            loop {
+                let next = {
+                    let mut inner = self.inner.lock().expect("EventSink lock poisoned");
+                    match inner.pending.pop_front() {
+                        Some(entry) => entry,
+                        None => {
+                            inner.dispatching = false;
+                            break;
+                        }
+                    }
+                };
+                let (queued, listeners) = next;
+                for listener in &listeners {
+                    listener.on_event(&queued);
+                }
+            }
         }
         record
     }
@@ -181,25 +210,28 @@ impl Default for RecordingListener {
 impl EventJournal {
     /// Creates a new, empty journal.
     pub fn new() -> Self {
-        Self {
-            records: Arc::new(Mutex::new(Vec::new())),
-            sink: EventSink::new(),
-        }
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let sink = EventSink::new();
+        // Populate the buffer from the sink's ordered dispatch path so records
+        // land in offset order even when appends race: pushing after `emit`
+        // returned used to store racing appends in completion order.
+        sink.subscribe(Arc::new(JournalRecorder {
+            records: records.clone(),
+        }));
+        Self { records, sink }
     }
 
     /// Appends an event to the journal, assigning a monotonic id and offset.
     ///
-    /// Returns the [`EventRecord`] that was stored.
+    /// Returns the [`EventRecord`] that was stored. Records become visible to
+    /// [`Self::replay_from`] in offset order: when appends race, a record may
+    /// be published momentarily after this call returns (by the emitter
+    /// currently draining the sink's dispatch queue), but never out of order.
     pub fn append(&self, event: AgentEvent) -> EventRecord {
-        let record = self.sink.emit(event);
-        self.records
-            .lock()
-            .expect("EventJournal lock poisoned")
-            .push(record.clone());
-        record
+        self.sink.emit(event)
     }
 
-    /// Returns all records with `offset >= from_offset`, in insertion order.
+    /// Returns all records with `offset >= from_offset`, in offset order.
     ///
     /// Callers can use this to replay run history from any known checkpoint.
     /// A `from_offset` of `0` replays the full journal.
@@ -224,6 +256,15 @@ impl EventJournal {
     /// Returns `true` when the journal contains no events.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl EventListener for JournalRecorder {
+    fn on_event(&self, record: &EventRecord) {
+        self.records
+            .lock()
+            .expect("EventJournal lock poisoned")
+            .push(record.clone());
     }
 }
 

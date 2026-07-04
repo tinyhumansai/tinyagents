@@ -1614,3 +1614,83 @@ async fn middleware_control_can_interrupt_run() {
         other => panic!("expected Interrupted, got {other:?}"),
     }
 }
+
+// ── Explicit model override fall-through diagnostics ────────────────────────
+
+/// Middleware that stamps an explicit model override onto every request.
+struct OverrideModelMiddleware(&'static str);
+
+#[async_trait]
+impl Middleware<(), ()> for OverrideModelMiddleware {
+    fn name(&self) -> &str {
+        "override_model"
+    }
+
+    async fn before_model(
+        &self,
+        _ctx: &mut RunContext<()>,
+        _state: &(),
+        request: &mut ModelRequest,
+    ) -> Result<()> {
+        request.model = Some(self.0.to_string());
+        Ok(())
+    }
+}
+
+/// When an explicit request override cannot be honored (here: an unregistered
+/// model name) resolution falls through to the registry default by documented
+/// fail-closed semantics — but the fall-through must be observable via
+/// `ModelOverrideSkipped` rather than silent.
+#[tokio::test]
+async fn skipped_model_override_emits_diagnostic_event() {
+    use crate::harness::events::AgentEvent;
+    use crate::harness::testkit::EventRecorder;
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("ok")));
+    harness.push_middleware(Arc::new(OverrideModelMiddleware("missing-model")));
+
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(RunConfig::new("override-run"), ()).with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("run falls through to the default model");
+    assert_eq!(run.text(), Some("ok".to_string()));
+
+    assert!(
+        recorder.events().iter().any(|e| matches!(
+            e,
+            AgentEvent::ModelOverrideSkipped { requested, resolved }
+                if requested == "missing-model" && resolved == "mock"
+        )),
+        "the skipped override must be surfaced as a diagnostic event; got kinds {:?}",
+        recorder.kinds()
+    );
+}
+
+/// An override that resolution honors must not emit the diagnostic.
+#[tokio::test]
+async fn honored_model_override_emits_no_diagnostic_event() {
+    use crate::harness::testkit::EventRecorder;
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("default")));
+    harness.register_model("special", Arc::new(MockModel::constant("special answer")));
+    harness.push_middleware(Arc::new(OverrideModelMiddleware("special")));
+
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(RunConfig::new("override-ok-run"), ()).with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("run uses the override");
+    assert_eq!(run.text(), Some("special answer".to_string()));
+    assert!(
+        !recorder
+            .kinds()
+            .iter()
+            .any(|k| k == "model.override_skipped"),
+        "an honored override must not emit the diagnostic"
+    );
+}

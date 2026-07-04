@@ -163,3 +163,84 @@ fn fingerprint_changes_with_stable_prefix() {
     // The built request carries the same fingerprint as the builder.
     assert_eq!(a.build(vec![]).prompt_fingerprint.unwrap(), a.fingerprint());
 }
+
+// ── Fingerprint content coverage and stability ───────────────────────────────
+
+#[test]
+fn fingerprint_is_64_hex_and_deterministic() {
+    let mut builder = PromptBuilder::new();
+    builder.push_system("sys", vec![Message::system("stable")]);
+    let fp = builder.fingerprint();
+    assert_eq!(fp.len(), 64, "SHA-256 hex digest");
+    assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(fp, builder.fingerprint());
+}
+
+#[test]
+fn fingerprint_changes_with_tool_schema_not_just_name() {
+    use crate::harness::tool::ToolSchema;
+
+    let tool_v1 = ToolSchema::new("calc", "adds numbers", json!({"type": "object"}));
+    let mut tool_v2 = tool_v1.clone();
+    tool_v2.parameters = json!({"type": "object", "required": ["a"]});
+
+    let mut a = PromptBuilder::new();
+    a.push_tools_segment("tools", vec![tool_v1]);
+    let mut b = PromptBuilder::new();
+    b.push_tools_segment("tools", vec![tool_v2]);
+
+    assert_ne!(
+        a.fingerprint(),
+        b.fingerprint(),
+        "a parameter-schema change must change the fingerprint even when the tool name is unchanged"
+    );
+}
+
+#[test]
+fn fingerprint_changes_with_image_content_and_message_role() {
+    use crate::harness::message::{ContentBlock, ImageRef, UserMessage};
+
+    // Same (empty) text, different image URL.
+    let image = |url: &str| {
+        Message::User(UserMessage {
+            content: vec![ContentBlock::Image(ImageRef {
+                url: url.to_string(),
+                mime_type: Some("image/png".to_string()),
+            })],
+        })
+    };
+    let mut a = PromptBuilder::new();
+    a.push_system("sys", vec![image("https://example.com/a.png")]);
+    let mut b = PromptBuilder::new();
+    b.push_system("sys", vec![image("https://example.com/b.png")]);
+    assert_ne!(
+        a.fingerprint(),
+        b.fingerprint(),
+        "image content must participate in the fingerprint"
+    );
+
+    // Same text, different role.
+    let mut sys = PromptBuilder::new();
+    sys.push_system("seg", vec![Message::system("same text")]);
+    let mut user = PromptBuilder::new();
+    user.push_system("seg", vec![Message::user("same text")]);
+    assert_ne!(
+        sys.fingerprint(),
+        user.fingerprint(),
+        "message role must participate in the fingerprint"
+    );
+}
+
+/// Pins the fingerprint of a fixed prefix so accidental changes to the hash
+/// input or algorithm are caught: the value must be stable across processes,
+/// platforms, and Rust versions. Update this constant only on a deliberate,
+/// documented fingerprint-format change.
+#[test]
+fn fingerprint_value_is_pinned_for_cross_process_stability() {
+    let mut builder = PromptBuilder::new();
+    builder.push_system("sys", vec![Message::system("pinned prefix")]);
+    assert_eq!(
+        builder.fingerprint(),
+        "0c8eb74fc9194b5d7845d787735eb2e36a68dc9d2ed91e5e7e07a13035d7d2a6"
+    );
+}

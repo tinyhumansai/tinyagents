@@ -365,6 +365,69 @@ async fn rate_limit_wait_then_proceed_with_advancing_clock() {
         .count();
     assert_eq!(waited, 1);
     assert_eq!(model_base.calls(), 1);
+
+    // `waited_ms` reports the actual wall-clock wait per the injected clock:
+    // the bucket was empty at `base` and refilled at `base + 1s`.
+    assert!(
+        events(&recorder)
+            .iter()
+            .any(|e| matches!(e, AgentEvent::RateLimitWaited { waited_ms } if *waited_ms == 1_000))
+    );
+}
+
+/// A `Wait` gate over a bucket that never refills must fail fast instead of
+/// livelocking in the poll loop forever.
+#[tokio::test]
+async fn rate_limit_wait_errors_when_bucket_can_never_refill() {
+    let (mut ctx, recorder) = ctx_with_recorder();
+
+    // Drain a zero-refill bucket, then gate a call on it.
+    let base_instant = Instant::now();
+    let limiter = Arc::new(RateLimiter::new(1, 0.0));
+    assert!(limiter.try_acquire(1, base_instant));
+
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_model_middleware(Arc::new(
+        RateLimitMiddleware::new(limiter).waiting(Duration::ZERO),
+    ));
+
+    let model_base = FakeModelBase::new(|_n, _req| Ok(ok_response()));
+    let err = stack
+        .run_wrapped_model(&mut ctx, &(), ModelRequest::default(), &model_base)
+        .await
+        .expect_err("a never-refilling bucket must fail fast, not spin");
+    assert!(matches!(err, TinyAgentsError::LimitExceeded(_)), "{err:?}");
+    assert!(err.to_string().contains("can never succeed"), "{err}");
+    assert_eq!(model_base.calls(), 0);
+    assert!(
+        !events(&recorder)
+            .iter()
+            .any(|e| matches!(e, AgentEvent::RateLimitWaited { .. })),
+        "no wait event when the call is rejected"
+    );
+}
+
+/// A `Wait` gate requesting more tokens than the bucket capacity must also
+/// fail fast: no amount of refill can ever admit the call.
+#[tokio::test]
+async fn rate_limit_wait_errors_when_tokens_exceed_capacity() {
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let limiter = Arc::new(RateLimiter::new(1, 10.0));
+
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_model_middleware(Arc::new(
+        RateLimitMiddleware::new(limiter)
+            .with_tokens(2)
+            .waiting(Duration::ZERO),
+    ));
+
+    let model_base = FakeModelBase::new(|_n, _req| Ok(ok_response()));
+    let err = stack
+        .run_wrapped_model(&mut ctx, &(), ModelRequest::default(), &model_base)
+        .await
+        .expect_err("requesting more tokens than capacity must fail fast");
+    assert!(matches!(err, TinyAgentsError::LimitExceeded(_)), "{err:?}");
+    assert_eq!(model_base.calls(), 0);
 }
 
 // ── ContextualToolSelectionMiddleware ───────────────────────────────────────
@@ -1189,6 +1252,96 @@ async fn redaction_masks_response_and_tool_text() {
         .expect("redaction runs on tool");
     assert_eq!(result.content, "token [REDACTED]");
     assert_eq!(redaction.redactions(), 3);
+}
+
+/// Redaction must be idempotent and never self-matching: a pattern that occurs
+/// inside the mask text (here `RED` inside `[REDACTED]`) must not corrupt the
+/// mask, and re-running the middleware over already-redacted text is a no-op.
+#[tokio::test]
+async fn redaction_is_idempotent_and_never_matches_inside_mask() {
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let redaction = Arc::new(RedactionMiddleware::new(["RED", "secret"]));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(redaction.clone());
+
+    let mut response = ModelResponse::assistant("the secret is RED");
+    stack
+        .run_after_model(&mut ctx, &(), &mut response)
+        .await
+        .expect("redaction runs");
+    assert_eq!(
+        response.text(),
+        "the [REDACTED] is [REDACTED]",
+        "patterns must not match inside mask text introduced by a replacement"
+    );
+    assert_eq!(redaction.redactions(), 2);
+
+    // Second application over already-redacted text is a no-op.
+    stack
+        .run_after_model(&mut ctx, &(), &mut response)
+        .await
+        .expect("redaction runs again");
+    assert_eq!(response.text(), "the [REDACTED] is [REDACTED]");
+    assert_eq!(redaction.redactions(), 2, "re-run must not re-count");
+}
+
+/// Tool-call arguments (before the tool runs and in the model response) and
+/// raw payloads must be scrubbed, not just plain text content.
+#[tokio::test]
+async fn redaction_scrubs_tool_call_arguments_and_raw_payloads() {
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let redaction = Arc::new(RedactionMiddleware::new(["sk-secret"]));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(redaction.clone());
+
+    // Model-authored tool call arguments and the raw provider payload.
+    let mut response = ModelResponse::assistant("ok");
+    response.message.tool_calls.push(ToolCall {
+        id: "c1".to_string(),
+        name: "http".to_string(),
+        arguments: json!({"header": "Bearer sk-secret", "nested": ["sk-secret"]}),
+    });
+    response.raw = Some(json!({"choices": [{"text": "token sk-secret"}]}));
+    stack
+        .run_after_model(&mut ctx, &(), &mut response)
+        .await
+        .expect("redaction runs");
+    assert_eq!(
+        response.message.tool_calls[0].arguments,
+        json!({"header": "Bearer [REDACTED]", "nested": ["[REDACTED]"]})
+    );
+    assert_eq!(
+        response.raw,
+        Some(json!({"choices": [{"text": "token [REDACTED]"}]}))
+    );
+
+    // Outbound tool-call arguments via before_tool.
+    let mut call = ToolCall {
+        id: "c2".to_string(),
+        name: "http".to_string(),
+        arguments: json!({"key": "sk-secret"}),
+    };
+    stack
+        .run_before_tool(&mut ctx, &(), &mut call)
+        .await
+        .expect("redaction runs before tool");
+    assert_eq!(call.arguments, json!({"key": "[REDACTED]"}));
+
+    // Tool result raw payload and error message via after_tool.
+    let mut result = ToolResult {
+        call_id: "c2".to_string(),
+        name: "http".to_string(),
+        content: "done".to_string(),
+        raw: Some(json!({"echo": "sk-secret"})),
+        error: Some("auth failed for sk-secret".to_string()),
+        elapsed_ms: 0,
+    };
+    stack
+        .run_after_tool(&mut ctx, &(), &mut result)
+        .await
+        .expect("redaction runs after tool");
+    assert_eq!(result.raw, Some(json!({"echo": "[REDACTED]"})));
+    assert_eq!(result.error.as_deref(), Some("auth failed for [REDACTED]"));
 }
 
 // ── TracingMiddleware ───────────────────────────────────────────────────────

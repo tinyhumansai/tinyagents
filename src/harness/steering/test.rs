@@ -372,3 +372,27 @@ async fn disallowed_command_fails_the_run() {
         AgentEvent::Steered { command_kind, accepted: false } if command_kind == "inject_message"
     )));
 }
+
+/// Queue accessors must recover from a poisoned mutex (a panic in another
+/// holder) instead of panicking: steering is reachable from arbitrary caller
+/// threads, so a single panicking user must not brick the queue.
+#[test]
+fn steering_queue_recovers_from_poisoned_lock() {
+    let handle = SteeringHandle::allow_all();
+    handle.send(SteeringCommand::InjectMessage(Message::user("before")));
+
+    // Poison the queue mutex by panicking while holding it.
+    let poisoner = handle.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = poisoner.inner.queue.lock().unwrap();
+        panic!("poison the steering queue");
+    })
+    .join();
+
+    // Every accessor still works on the recovered state.
+    assert!(!handle.is_empty());
+    assert_eq!(handle.pending(), 1);
+    handle.send(SteeringCommand::InjectMessage(Message::user("after")));
+    assert_eq!(handle.drain().len(), 2);
+    assert!(handle.is_empty());
+}
