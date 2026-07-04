@@ -654,3 +654,55 @@ fn full_session_workflow() {
     let q = parse_command("quit").unwrap();
     assert_eq!(session.execute(q).unwrap(), ReplOutcome::Quit);
 }
+
+// ── History cap ───────────────────────────────────────────────────────────────
+
+#[test]
+fn history_is_capped_and_drops_oldest_entries() {
+    let mut session = ReplSession::new().with_history_capacity(3);
+    for i in 0..5 {
+        session
+            .execute(ReplCommand::Set {
+                key: format!("k{i}"),
+                value: i.to_string(),
+            })
+            .unwrap();
+    }
+
+    // Only the newest 3 commands are retained, oldest first.
+    assert_eq!(session.history.len(), 3);
+    let keys: Vec<_> = session
+        .history
+        .iter()
+        .map(|cmd| match cmd {
+            ReplCommand::Set { key, .. } => key.clone(),
+            other => panic!("unexpected command in history: {other:?}"),
+        })
+        .collect();
+    assert_eq!(keys, vec!["k2", "k3", "k4"]);
+}
+
+#[test]
+fn history_capacity_defaults_to_documented_cap() {
+    let mut session = ReplSession::new();
+    session.execute(ReplCommand::Help).unwrap();
+    assert_eq!(session.history.len(), 1);
+    assert_eq!(super::DEFAULT_HISTORY_CAPACITY, 1000);
+}
+
+#[test]
+fn zero_history_capacity_disables_recording() {
+    let mut session = ReplSession::new().with_history_capacity(0);
+    session.execute(ReplCommand::Help).unwrap();
+    assert!(session.history.is_empty());
+}
+
+#[test]
+fn shrinking_history_capacity_trims_existing_overflow() {
+    let mut session = ReplSession::new();
+    for _ in 0..4 {
+        session.execute(ReplCommand::Help).unwrap();
+    }
+    let session = session.with_history_capacity(2);
+    assert_eq!(session.history.len(), 2);
+}

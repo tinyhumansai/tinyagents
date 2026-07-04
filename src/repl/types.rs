@@ -10,7 +10,7 @@
 //! All public types for the REPL skeleton live here.  Logic (parsing) lives in
 //! [`super`]; tests live in `test.rs`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -250,23 +250,53 @@ pub struct ReplSession {
     variables: HashMap<String, serde_json::Value>,
     /// The capability allowlist governing this session.
     policy: CapabilityPolicy,
-    /// Ordered history of every command submitted to this session.
-    pub history: Vec<ReplCommand>,
+    /// Ordered history of the most recent commands submitted to this session
+    /// (oldest first). Bounded by the session's history capacity —
+    /// [`DEFAULT_HISTORY_CAPACITY`] unless overridden with
+    /// [`ReplSession::with_history_capacity`] — with the **oldest** entries
+    /// dropped once the cap is reached, so a long-lived session does not grow
+    /// without bound (`Call` commands clone their full JSON args into history).
+    pub history: VecDeque<ReplCommand>,
+    /// Maximum number of retained history entries.
+    history_capacity: usize,
 }
 
+/// Default cap on [`ReplSession::history`] entries.
+///
+/// Chosen to comfortably cover interactive and replay sessions while bounding
+/// memory in long-lived processes; override per session with
+/// [`ReplSession::with_history_capacity`].
+pub const DEFAULT_HISTORY_CAPACITY: usize = 1000;
+
 impl ReplSession {
-    /// Create a new session with an empty namespace and a deny-all policy.
+    /// Create a new session with an empty namespace, a deny-all policy, and
+    /// the default history capacity ([`DEFAULT_HISTORY_CAPACITY`]).
     pub fn new() -> Self {
         Self {
             variables: HashMap::new(),
             policy: CapabilityPolicy::new(),
-            history: Vec::new(),
+            history: VecDeque::new(),
+            history_capacity: DEFAULT_HISTORY_CAPACITY,
         }
     }
 
     /// Replace the session's capability policy, returning the updated session.
     pub fn with_policy(mut self, policy: CapabilityPolicy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Set the maximum number of history entries retained by this session,
+    /// returning the updated session.
+    ///
+    /// Once the cap is reached the **oldest** entry is dropped per new
+    /// command. A capacity of `0` disables history recording entirely. Any
+    /// existing overflow is trimmed immediately.
+    pub fn with_history_capacity(mut self, capacity: usize) -> Self {
+        self.history_capacity = capacity;
+        while self.history.len() > capacity {
+            self.history.pop_front();
+        }
         self
     }
 
@@ -287,8 +317,9 @@ impl ReplSession {
 
     /// Execute a command against this session and return a [`ReplOutcome`].
     ///
-    /// The command is always appended to [`ReplSession::history`] before
-    /// execution begins.
+    /// The command is appended to [`ReplSession::history`] before execution
+    /// begins; when the history is at capacity the oldest entry is dropped
+    /// first (see [`ReplSession::with_history_capacity`]).
     ///
     /// # Errors
     ///
@@ -297,7 +328,12 @@ impl ReplSession {
     /// * [`crate::error::TinyAgentsError::Serialization`] — an internal
     ///   serialization step failed (e.g. serialising variables for `show vars`).
     pub fn execute(&mut self, cmd: ReplCommand) -> crate::error::Result<ReplOutcome> {
-        self.history.push(cmd.clone());
+        if self.history_capacity > 0 {
+            if self.history.len() == self.history_capacity {
+                self.history.pop_front();
+            }
+            self.history.push_back(cmd.clone());
+        }
 
         match cmd {
             ReplCommand::Help => {
