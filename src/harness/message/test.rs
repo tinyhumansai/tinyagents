@@ -64,3 +64,88 @@ fn message_delta_default() {
     assert_eq!(delta.text, "");
     assert!(delta.tool_call.is_none());
 }
+
+#[test]
+fn text_ignores_thinking_blocks() {
+    let msg = Message::Assistant(AssistantMessage {
+        id: None,
+        content: vec![
+            ContentBlock::thinking("let me reason about this"),
+            ContentBlock::Text("the answer is 42".into()),
+            ContentBlock::RedactedThinking {
+                data: "opaque".into(),
+            },
+        ],
+        tool_calls: Vec::new(),
+        usage: None,
+    });
+    // Reasoning blocks must never leak into visible text.
+    assert_eq!(msg.text(), "the answer is 42");
+}
+
+#[test]
+fn thinking_accessors() {
+    let signed = ContentBlock::Thinking {
+        text: "reasoning".into(),
+        signature: Some("sig-abc".into()),
+    };
+    assert_eq!(signed.as_thinking(), Some(("reasoning", Some("sig-abc"))));
+    assert!(signed.is_reasoning());
+    assert!(signed.as_text().is_none());
+
+    let unsigned = ContentBlock::thinking("just thinking");
+    assert_eq!(unsigned.as_thinking(), Some(("just thinking", None)));
+    assert!(unsigned.is_reasoning());
+
+    let redacted = ContentBlock::RedactedThinking {
+        data: "opaque".into(),
+    };
+    assert!(redacted.is_reasoning());
+    assert!(redacted.as_thinking().is_none());
+
+    assert!(!ContentBlock::Text("hi".into()).is_reasoning());
+}
+
+#[test]
+fn thinking_block_serde_round_trips() {
+    let signed = ContentBlock::Thinking {
+        text: "step by step".into(),
+        signature: Some("sig-1".into()),
+    };
+    let wire = serde_json::to_value(&signed).unwrap();
+    assert_eq!(
+        wire,
+        json!({ "thinking": { "text": "step by step", "signature": "sig-1" } })
+    );
+    let back: ContentBlock = serde_json::from_value(wire).unwrap();
+    assert_eq!(back, signed);
+
+    // An unsigned thinking block omits the signature key entirely.
+    let unsigned = ContentBlock::thinking("no sig");
+    let wire = serde_json::to_value(&unsigned).unwrap();
+    assert_eq!(wire, json!({ "thinking": { "text": "no sig" } }));
+    let back: ContentBlock = serde_json::from_value(wire).unwrap();
+    assert_eq!(back, unsigned);
+
+    let redacted = ContentBlock::RedactedThinking {
+        data: "opaque".into(),
+    };
+    let wire = serde_json::to_value(&redacted).unwrap();
+    assert_eq!(wire, json!({ "redacted_thinking": { "data": "opaque" } }));
+    let back: ContentBlock = serde_json::from_value(wire).unwrap();
+    assert_eq!(back, redacted);
+}
+
+#[test]
+fn legacy_content_without_thinking_still_parses() {
+    // Additive tagging: transcripts serialized before thinking blocks existed
+    // (only text/json/image/provider_extension) must deserialize unchanged.
+    let legacy = json!([
+        { "text": "hello" },
+        { "json": { "k": "v" } }
+    ]);
+    let blocks: Vec<ContentBlock> = serde_json::from_value(legacy).unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0].as_text(), Some("hello"));
+    assert!(!blocks[1].is_reasoning());
+}
