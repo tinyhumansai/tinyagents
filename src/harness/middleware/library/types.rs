@@ -113,9 +113,13 @@ pub enum RateLimitBehavior {
     /// [`TinyAgentsError::LimitExceeded`][crate::error::TinyAgentsError::LimitExceeded].
     Error,
     /// Wait (polling at the configured interval) until the bucket refills enough
-    /// to admit the call, emitting
+    /// to admit the call, then emit a single
     /// [`AgentEvent::RateLimitWaited`][crate::harness::events::AgentEvent::RateLimitWaited]
-    /// for each wait.
+    /// carrying the actual wall-clock time waited. When waiting can never
+    /// succeed — the limiter's refill rate is zero (or negative), or the call
+    /// requests more tokens than the bucket capacity — the call fails fast
+    /// with [`TinyAgentsError::LimitExceeded`][crate::error::TinyAgentsError::LimitExceeded]
+    /// instead of polling forever.
     Wait,
 }
 

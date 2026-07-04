@@ -234,9 +234,10 @@ pub enum AgentEvent {
     /// A rate-limit gate (token bucket) blocked a model call until capacity was
     /// available. Emitted by
     /// [`RateLimitMiddleware`][crate::harness::middleware::RateLimitMiddleware]
-    /// each time it must wait before acquiring tokens.
+    /// once per gated call, after the tokens were finally acquired.
     RateLimitWaited {
-        /// Approximate time the call was held back, in milliseconds.
+        /// Actual wall-clock time the call was held back, in milliseconds
+        /// (measured with the middleware's injectable clock).
         waited_ms: u64,
     },
 

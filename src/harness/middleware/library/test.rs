@@ -365,6 +365,69 @@ async fn rate_limit_wait_then_proceed_with_advancing_clock() {
         .count();
     assert_eq!(waited, 1);
     assert_eq!(model_base.calls(), 1);
+
+    // `waited_ms` reports the actual wall-clock wait per the injected clock:
+    // the bucket was empty at `base` and refilled at `base + 1s`.
+    assert!(
+        events(&recorder)
+            .iter()
+            .any(|e| matches!(e, AgentEvent::RateLimitWaited { waited_ms } if *waited_ms == 1_000))
+    );
+}
+
+/// A `Wait` gate over a bucket that never refills must fail fast instead of
+/// livelocking in the poll loop forever.
+#[tokio::test]
+async fn rate_limit_wait_errors_when_bucket_can_never_refill() {
+    let (mut ctx, recorder) = ctx_with_recorder();
+
+    // Drain a zero-refill bucket, then gate a call on it.
+    let base_instant = Instant::now();
+    let limiter = Arc::new(RateLimiter::new(1, 0.0));
+    assert!(limiter.try_acquire(1, base_instant));
+
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_model_middleware(Arc::new(
+        RateLimitMiddleware::new(limiter).waiting(Duration::ZERO),
+    ));
+
+    let model_base = FakeModelBase::new(|_n, _req| Ok(ok_response()));
+    let err = stack
+        .run_wrapped_model(&mut ctx, &(), ModelRequest::default(), &model_base)
+        .await
+        .expect_err("a never-refilling bucket must fail fast, not spin");
+    assert!(matches!(err, TinyAgentsError::LimitExceeded(_)), "{err:?}");
+    assert!(err.to_string().contains("can never succeed"), "{err}");
+    assert_eq!(model_base.calls(), 0);
+    assert!(
+        !events(&recorder)
+            .iter()
+            .any(|e| matches!(e, AgentEvent::RateLimitWaited { .. })),
+        "no wait event when the call is rejected"
+    );
+}
+
+/// A `Wait` gate requesting more tokens than the bucket capacity must also
+/// fail fast: no amount of refill can ever admit the call.
+#[tokio::test]
+async fn rate_limit_wait_errors_when_tokens_exceed_capacity() {
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let limiter = Arc::new(RateLimiter::new(1, 10.0));
+
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_model_middleware(Arc::new(
+        RateLimitMiddleware::new(limiter)
+            .with_tokens(2)
+            .waiting(Duration::ZERO),
+    ));
+
+    let model_base = FakeModelBase::new(|_n, _req| Ok(ok_response()));
+    let err = stack
+        .run_wrapped_model(&mut ctx, &(), ModelRequest::default(), &model_base)
+        .await
+        .expect_err("requesting more tokens than capacity must fail fast");
+    assert!(matches!(err, TinyAgentsError::LimitExceeded(_)), "{err:?}");
+    assert_eq!(model_base.calls(), 0);
 }
 
 // ── ContextualToolSelectionMiddleware ───────────────────────────────────────
