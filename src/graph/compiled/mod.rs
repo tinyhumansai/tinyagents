@@ -733,7 +733,10 @@ where
     /// name a real node (else [`TinyAgentsError::MissingNode`]); the write is
     /// attributed to that node and the new checkpoint's pending nodes become that
     /// node's routing successors (so a subsequent resume continues from after the
-    /// attributed node). With `as_node == None` the latest pending node set is
+    /// attributed node). A command node cannot be used as `as_node` (it routes
+    /// dynamically and has no static successors); doing so returns
+    /// [`TinyAgentsError::Graph`] rather than silently producing a non-resumable
+    /// checkpoint. With `as_node == None` the latest pending node set is
     /// preserved. Requires a configured checkpointer and an existing checkpoint
     /// for the thread.
     pub async fn update_state(
@@ -743,10 +746,22 @@ where
         as_node: Option<NodeId>,
     ) -> Result<CheckpointConfig> {
         let checkpointer = self.require_checkpointer()?;
-        if let Some(node) = &as_node
-            && !self.nodes.contains_key(node)
-        {
-            return Err(TinyAgentsError::MissingNode(node.to_string()));
+        if let Some(node) = &as_node {
+            if !self.nodes.contains_key(node) {
+                return Err(TinyAgentsError::MissingNode(node.to_string()));
+            }
+            // A command node routes dynamically (via the [`Command`] it returns
+            // at runtime), so it has no static successors to schedule here.
+            // Attributing a manual write to one would persist an empty
+            // `next_nodes` and silently render the thread non-resumable, so
+            // reject it at write time instead.
+            if self.command_nodes.contains(node) {
+                return Err(TinyAgentsError::Graph(format!(
+                    "cannot update state as node `{node}`: it routes dynamically \
+                     via Command and has no static successors, so the resulting \
+                     checkpoint would be non-resumable"
+                )));
+            }
         }
 
         let base = checkpointer

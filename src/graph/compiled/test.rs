@@ -665,6 +665,43 @@ async fn update_state_as_node_sets_successor_pending_nodes() {
 }
 
 #[tokio::test]
+async fn update_state_as_command_node_is_rejected() {
+    // A command node routes dynamically, so it has no static successors. Using
+    // it as `as_node` would persist an empty `next_nodes` and silently render
+    // the thread non-resumable; the write must be rejected instead.
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("router", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Command(
+                Command::update(5).with_goto(["target"]),
+            ))
+        })
+        .add_node("target", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .set_entry("router")
+        .mark_command_routing("router")
+        .set_finish("target")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp);
+    graph.run_with_thread("t", 0).await.unwrap();
+
+    let err = graph
+        .update_state("t", 1, Some("router".into()))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Graph(_)), "got {err:?}");
+    assert!(err.to_string().contains("non-resumable"), "{err}");
+
+    // A plain node is still accepted.
+    graph
+        .update_state("t", 1, Some("target".into()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn bulk_update_state_applies_successive_updates() {
     use crate::graph::CheckpointSource;
 
