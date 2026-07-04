@@ -847,6 +847,13 @@ fn tool_call_batched_impl<State: Send + Sync + 'static>(
     })
     .map_err(|err| raise(ctx, err))?;
 
+    // Each item's own tool-reported error is surfaced per item, matching the
+    // single-call path's behavior for that one call, rather than aborting the
+    // whole batch and discarding every other item's already-computed result —
+    // a batch of N independent tool calls should not lose N-1 successes
+    // because item N/2 failed. A `bridge_block_on_raw`/transport failure
+    // above (a harness-level failure, not a tool-reported one) still aborts
+    // the whole batch, since no results exist to preserve in that case.
     let mut out = Array::with_capacity(results.len());
     for result in results {
         let (name, tool_result, elapsed) = result.map_err(|err| raise(ctx, err))?;
@@ -857,10 +864,20 @@ fn tool_call_batched_impl<State: Send + Sync + 'static>(
             json!({ "chars": tool_result.content.len() }),
             elapsed,
         );
-        if let Some(error) = tool_result.error {
-            return Err(raise(ctx, TinyAgentsError::Tool(error)));
+        match tool_result.error {
+            Some(error) => {
+                let mut map = Map::new();
+                map.insert("ok".into(), Dynamic::from(false));
+                map.insert("error".into(), Dynamic::from(error));
+                out.push(Dynamic::from_map(map));
+            }
+            None => {
+                let mut map = Map::new();
+                map.insert("ok".into(), Dynamic::from(true));
+                map.insert("content".into(), Dynamic::from(tool_result.content));
+                out.push(Dynamic::from_map(map));
+            }
         }
-        out.push(Dynamic::from(tool_result.content));
     }
     Ok(Dynamic::from_array(out))
 }

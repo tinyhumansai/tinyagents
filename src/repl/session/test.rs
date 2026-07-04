@@ -293,6 +293,106 @@ fn graph_define_does_not_consume_the_limit_on_a_failed_draft() {
     );
 }
 
+/// A tool that succeeds for every call except one whose `arguments.id`
+/// matches `fail_id`, for which it returns a *tool-reported* error (a
+/// `ToolResult` with `error: Some(..)`), not a `Result::Err` — exercising the
+/// per-item error path distinct from a harness/transport-level failure.
+struct SometimesFailingTool {
+    fail_id: String,
+}
+
+#[async_trait::async_trait]
+impl crate::harness::tool::Tool<()> for SometimesFailingTool {
+    fn name(&self) -> &str {
+        "sometimes_fails"
+    }
+
+    fn description(&self) -> &str {
+        "Succeeds unless called with the configured failing id."
+    }
+
+    fn schema(&self) -> crate::harness::tool::ToolSchema {
+        crate::harness::tool::ToolSchema {
+            name: self.name().to_string(),
+            description: self.description().to_string(),
+            parameters: serde_json::json!({ "type": "object" }),
+            format: Default::default(),
+        }
+    }
+
+    async fn call(
+        &self,
+        _state: &(),
+        call: crate::harness::tool::ToolCall,
+    ) -> crate::Result<crate::harness::tool::ToolResult> {
+        let id = call
+            .arguments
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if id == self.fail_id {
+            Ok(crate::harness::tool::ToolResult::error(
+                call.id,
+                call.name,
+                format!("tool reported an error for id {id}"),
+            ))
+        } else {
+            Ok(crate::harness::tool::ToolResult::text(
+                call.id,
+                call.name,
+                format!("ok:{id}"),
+            ))
+        }
+    }
+}
+
+fn session_with_sometimes_failing_tool(fail_id: &str) -> ReplSession {
+    let mut registry = crate::registry::CapabilityRegistry::<()>::new();
+    registry
+        .register_tool(std::sync::Arc::new(SometimesFailingTool {
+            fail_id: fail_id.to_string(),
+        }))
+        .expect("register tool");
+    let capabilities = ReplCapabilities::new(std::sync::Arc::new(registry));
+    ReplSession::<()>::new().with_capabilities(capabilities)
+}
+
+#[test]
+fn tool_call_batched_keeps_successes_when_one_item_tool_errors() {
+    // Regression test: a per-item *tool-reported* error (ToolResult::error,
+    // as opposed to a harness/transport-level Err) used to abort the whole
+    // batch, discarding every other item's already-computed successful
+    // result. Each item's outcome must be reported independently.
+    let mut s = session_with_sometimes_failing_tool("2");
+
+    let script = r#"
+        tool_call_batched([
+            #{ tool: "sometimes_fails", arguments: #{ id: "1" } },
+            #{ tool: "sometimes_fails", arguments: #{ id: "2" } },
+            #{ tool: "sometimes_fails", arguments: #{ id: "3" } },
+        ])
+    "#;
+    let result = s.eval_cell(script).expect("batch call should not abort");
+    let value = result.value.expect("value").to_json();
+    let items = value.as_array().expect("array result");
+    assert_eq!(items.len(), 3, "{items:?}");
+
+    assert_eq!(items[0]["ok"], serde_json::json!(true));
+    assert_eq!(items[0]["content"], serde_json::json!("ok:1"));
+
+    assert_eq!(items[1]["ok"], serde_json::json!(false));
+    assert!(
+        items[1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("tool reported an error"),
+        "{items:?}"
+    );
+
+    assert_eq!(items[2]["ok"], serde_json::json!(true));
+    assert_eq!(items[2]["content"], serde_json::json!("ok:3"));
+}
+
 /// A trivial [`HarnessAgent`] that returns a fixed response, for exercising
 /// `agent_query` without a real model/harness run.
 struct StubAgent;
