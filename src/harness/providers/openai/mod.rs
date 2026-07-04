@@ -255,26 +255,12 @@ impl OpenAiModel {
         let url = format!("{}/models", self.base_url);
 
         let response = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .send()
-            .await
-            .map_err(|e| {
-                let error =
-                    self.provider_error(format!("request to {url} failed: {e}"), None, None, None);
-                TinyAgentsError::Model(self.provider_failure_message(&error))
-            })?;
+            .send_checked(self.authorized(self.client.get(&url)), "request", &url)
+            .await?;
 
-        let status = response.status();
         let text = response.text().await.map_err(|e| {
             TinyAgentsError::Model(format!("openai response body read failed: {e}"))
         })?;
-
-        if !status.is_success() {
-            let error = self.parse_error_body(status.as_u16(), &text);
-            return Err(TinyAgentsError::Provider(Box::new(error)));
-        }
 
         let listing: ModelListWire = serde_json::from_str(&text)?;
         Ok(listing.data)
@@ -471,6 +457,65 @@ impl OpenAiModel {
             stream_options: None,
             extra: provider_extra_options(&request.provider_options)?,
         })
+    }
+
+    /// Attaches the provider's bearer credential to an outbound request.
+    ///
+    /// The single place the `Authorization` header is set, shared by the chat
+    /// and model-listing calls.
+    fn authorized(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        builder.header("Authorization", format!("Bearer {}", self.api_key))
+    }
+
+    /// Sends `builder` and returns the checked (2xx) [`reqwest::Response`].
+    ///
+    /// The shared transport tail for every OpenAI call: a send/transport failure
+    /// is mapped to a [`TinyAgentsError::Model`] describing `what` (e.g.
+    /// `"request"`, `"stream request"`) against `url`, and any non-2xx status is
+    /// decoded through [`Self::parse_error_body`] into a structured
+    /// [`TinyAgentsError::Provider`]. On success the raw response is handed back
+    /// so the caller can read it as text (unary/list) or stream its body.
+    async fn send_checked(
+        &self,
+        builder: reqwest::RequestBuilder,
+        what: &str,
+        url: &str,
+    ) -> Result<reqwest::Response> {
+        let response = builder.send().await.map_err(|e| {
+            let error =
+                self.provider_error(format!("{what} to {url} failed: {e}"), None, None, None);
+            TinyAgentsError::Model(self.provider_failure_message(&error))
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            let error = self.parse_error_body(status.as_u16(), &text);
+            return Err(TinyAgentsError::Provider(Box::new(error)));
+        }
+        Ok(response)
+    }
+
+    /// Issues an authenticated `POST {base_url}/chat/completions` with `body`,
+    /// applying the resolved per-request timeout, and returns the checked
+    /// response.
+    ///
+    /// Shared by the unary ([`Self::invoke`]) and streaming ([`Self::stream`])
+    /// paths so URL construction, auth, timeout selection, and transport/status
+    /// handling live in exactly one place.
+    async fn post_json(
+        &self,
+        body: &ChatCompletionRequest,
+        timeout_ms: Option<u64>,
+        streaming: bool,
+        what: &str,
+    ) -> Result<reqwest::Response> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let mut builder = self.authorized(self.client.post(&url)).json(body);
+        if let Some(timeout) = request_timeout(timeout_ms, streaming) {
+            builder = builder.timeout(timeout);
+        }
+        self.send_checked(builder, what, &url).await
     }
 
     fn provider_error(
@@ -1249,31 +1294,14 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
     /// [`TinyAgentsError::Serialization`] when the response cannot be decoded.
     async fn invoke(&self, _state: &State, request: ModelRequest) -> Result<ModelResponse> {
         let body = self.translate_request(&request)?;
-        let url = format!("{}/chat/completions", self.base_url);
 
-        let mut builder = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body);
-        if let Some(timeout) = request_timeout(request.timeout_ms, false) {
-            builder = builder.timeout(timeout);
-        }
-        let response = builder.send().await.map_err(|e| {
-            let error =
-                self.provider_error(format!("request to {url} failed: {e}"), None, None, None);
-            TinyAgentsError::Model(self.provider_failure_message(&error))
-        })?;
+        let response = self
+            .post_json(&body, request.timeout_ms, false, "request")
+            .await?;
 
-        let status = response.status();
         let text = response.text().await.map_err(|e| {
             TinyAgentsError::Model(format!("openai response body read failed: {e}"))
         })?;
-
-        if !status.is_success() {
-            let error = self.parse_error_body(status.as_u16(), &text);
-            return Err(TinyAgentsError::Provider(Box::new(error)));
-        }
 
         let value: Value = serde_json::from_str(&text)?;
         parse_response(value)
@@ -1302,32 +1330,10 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         let mut body = self.translate_request(&request)?;
         body.stream = true;
         body.stream_options = Some(json!({ "include_usage": true }));
-        let url = format!("{}/chat/completions", self.base_url);
 
-        let mut builder = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body);
-        if let Some(timeout) = request_timeout(request.timeout_ms, true) {
-            builder = builder.timeout(timeout);
-        }
-        let response = builder.send().await.map_err(|e| {
-            let error = self.provider_error(
-                format!("stream request to {url} failed: {e}"),
-                None,
-                None,
-                None,
-            );
-            TinyAgentsError::Model(self.provider_failure_message(&error))
-        })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            let error = self.parse_error_body(status.as_u16(), &text);
-            return Err(TinyAgentsError::Provider(Box::new(error)));
-        }
+        let response = self
+            .post_json(&body, request.timeout_ms, true, "stream request")
+            .await?;
 
         // Map each raw byte chunk onto an owned `Vec<u8>` so the boxed stream's
         // item type is nameable without depending on the `bytes` crate.
