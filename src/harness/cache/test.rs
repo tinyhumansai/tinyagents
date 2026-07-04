@@ -5,7 +5,10 @@
 //! [`super::PromptCacheLayout`] correctly detects stable vs. changed prefixes.
 
 use super::*;
+use crate::harness::message::Message;
 use crate::harness::model::{ModelRequest, ModelResponse, PromptSegment, SegmentRole};
+use crate::harness::tool::ToolSchema;
+use serde_json::json;
 
 #[tokio::test]
 async fn response_cache_put_get() {
@@ -33,6 +36,97 @@ fn cache_key_differs_for_different_requests() {
     let r1 = ModelRequest::new(vec![]).with_model("gpt-4");
     let r2 = ModelRequest::new(vec![]).with_model("claude-3");
     assert_ne!(cache_key(&r1), cache_key(&r2));
+}
+
+#[test]
+fn cache_key_is_deterministic_with_messages_and_tools() {
+    let build = || {
+        ModelRequest::new(vec![
+            Message::system("you are terse"),
+            Message::user("hello"),
+        ])
+        .with_model("gpt-4")
+        .with_tools(vec![ToolSchema::new(
+            "spin",
+            "spin a value",
+            json!({"type": "object"}),
+        )])
+    };
+    assert_eq!(cache_key(&build()), cache_key(&build()));
+}
+
+#[test]
+fn cache_key_reflects_message_content() {
+    let r1 = ModelRequest::new(vec![Message::user("hello")]);
+    let r2 = ModelRequest::new(vec![Message::user("goodbye")]);
+    assert_ne!(
+        cache_key(&r1),
+        cache_key(&r2),
+        "a changed message body must change the key"
+    );
+}
+
+#[test]
+fn cache_key_reflects_message_count() {
+    let r1 = ModelRequest::new(vec![Message::user("hello")]);
+    let r2 = ModelRequest::new(vec![Message::user("hello"), Message::user("again")]);
+    assert_ne!(
+        cache_key(&r1),
+        cache_key(&r2),
+        "appending a message must change the key"
+    );
+}
+
+#[test]
+fn cache_key_is_order_sensitive() {
+    let r1 = ModelRequest::new(vec![Message::user("a"), Message::user("b")]);
+    let r2 = ModelRequest::new(vec![Message::user("b"), Message::user("a")]);
+    assert_ne!(
+        cache_key(&r1),
+        cache_key(&r2),
+        "message order must change the key (length-prefixed frames)"
+    );
+}
+
+#[test]
+fn cache_key_reflects_tool_schemas() {
+    let base = ModelRequest::new(vec![Message::user("hi")]);
+    let with_tool = base.clone().with_tools(vec![ToolSchema::new(
+        "spin",
+        "spin a value",
+        json!({"type": "object"}),
+    )]);
+    assert_ne!(
+        cache_key(&base),
+        cache_key(&with_tool),
+        "adding a tool schema must change the key"
+    );
+}
+
+#[test]
+fn cache_key_reflects_scalar_envelope_fields() {
+    let base = ModelRequest::new(vec![Message::user("hi")]);
+    let mut hot = base.clone();
+    hot.temperature = Some(0.9);
+    assert_ne!(
+        cache_key(&base),
+        cache_key(&hot),
+        "a scalar field change must change the key via the envelope frame"
+    );
+}
+
+#[test]
+fn cache_key_does_not_confuse_messages_with_tools() {
+    // A message array of length 1 and a tool array of length 1 are folded under
+    // distinct tags with count frames, so a request carrying one must not
+    // collide with an otherwise-empty request carrying the other.
+    let one_message = ModelRequest::new(vec![Message::user("x")]);
+    let one_tool = ModelRequest::new(vec![]).with_tools(vec![ToolSchema::new(
+        "x",
+        "x",
+        json!({"type": "object"}),
+    )]);
+    assert_ne!(cache_key(&one_message), cache_key(&one_tool));
 }
 
 #[test]
