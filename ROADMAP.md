@@ -1,66 +1,50 @@
 # Roadmap
 
-TinyAgents is pre-1.0. The roadmap favors small, well-tested modules that build
-toward a production-grade Rust agent runtime.
+TinyAgents is at v1.5.0. The roadmap favors small, well-tested modules that
+build toward a production-grade Rust agent runtime.
 
-## Current Foundation
+## Shipped Foundation
 
-- chat message primitives
-- model request and response types
-- async chat model trait
-- async tool trait
-- executable state graph
-- direct and conditional routing
-- graph validation and recursion limits
-- basic examples and serialization tests
+- typed harness model calls, tools, middleware, structured output, streaming,
+  usage/cost tracking, retry/limits, cache, memory/embeddings, sub-agents,
+  and steering (`harness/`)
+- durable typed state graph runtime: `START`/`END`, nodes, conditional
+  routing, `Command`s, fan-out, reducers/channels, checkpoints, interrupts,
+  subgraphs, streaming, and topology export (`graph/`)
+- per-thread `ThreadGoal` and `TaskBoard` productivity primitives, exposed as
+  harness tools
+- named capability registry (models, tools, agents, graphs, stores,
+  middleware, policy) bound by name (`registry/`)
+- the declarative `.rag` blueprint language: lexer, parser, compiler, and
+  registry-backed binding (`language/`)
+- the imperative `.ragsh` REPL language for capability-bound interactive
+  orchestration (`repl/`)
+- an optional SQLite-backed checkpointer (`sqlite` feature) and an optional
+  Rhai-backed `.ragsh` session runtime (`repl` feature)
+- an embedded Langfuse client and graph exporter for observability
 
 ## Near-Term Work
 
-- split broad modules into focused module directories with `types.rs` and
-  `test.rs`
-- expand graph tests for routing, recursion, validation, and error behavior
-- strengthen harness model, tool, prompt, context, middleware, and usage APIs
-- add more examples for model calls, tools, and graph composition
-- define reducer and state-channel APIs for parallel writes
-- document stable public API boundaries as modules mature
-
-## Declarative Workflow Language
-
-The `.rag` language should let humans and LLMs describe agent workflows without
-embedding arbitrary host code.
-
-Planned capabilities:
-
-- graph topology declarations
-- allowed models, tools, agents, stores, middleware, and subgraphs
-- state channels and reducers
-- direct routes, conditional routes, commands, sends, joins, and barriers
-- parallel sub-agent fanout
-- blocking and optional child-agent policies
-- checkpoint, interrupt, timeout, retry, budget, and concurrency policies
-- source spans and diagnostics
-- blueprint review before execution
+- broaden `.rag`/`.ragsh` example coverage for less-common routing and
+  parallel-fanout shapes
+- continue splitting any module or doc that grows past the 500-line limit
+  into focused files
+- expand live (network-gated) provider contract tests as new
+  OpenAI-compatible endpoints are added
+- track and close the internal SDK feature-parity backlog in
+  [`docs/sdk-gaps.md`](docs/sdk-gaps.md)
 
 ## Parallel Agents And Sub-Agents
 
-TinyAgents should support workflow-native parallelism:
+Shipped: forked child contexts, shared caches with explicit isolation policy,
+child event namespaces, parent/child run ids, deterministic reducer-based
+merges, optional/blocking/race/quorum/fallback/compare policies, and
+resumable checkpoints across parallel branches. Ongoing work focuses on
+hardening edge cases surfaced by the `e2e_parallel_*` and `live_subagent_*`
+test suites.
 
-- forked child contexts
-- shared caches with explicit isolation policy
-- child event namespaces
-- parent and child run ids
-- deterministic reducer-based merges
-- optional, blocking, race, quorum, fallback, and compare policies
-- resumable checkpoints across parallel branches
+## Stability
 
-## REPL And Agent-Authored Workflows
-
-The `.ragsh` REPL layer should let agents and humans inspect, script, and
-control graph runs through capability-bound functions. It should be able to
-propose `.rag` workflows, but those workflows must pass through parser,
-registry, policy, and compiler checks before execution.
-
-## Pre-1.0 Stability
-
-APIs may change before 1.0. Changes should be documented, tested, and shaped by
-real examples rather than speculative abstraction.
+The public API is versioned via semver starting at 1.0. Breaking changes are
+documented in release notes, tested, and shaped by real examples rather than
+speculative abstraction.
