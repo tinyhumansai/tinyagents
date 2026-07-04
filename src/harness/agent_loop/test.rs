@@ -2106,3 +2106,62 @@ async fn invoke_stream_yields_failed_terminal_on_error() {
         other => panic!("expected Failed terminal, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn invoke_stream_scripted_incremental_deltas_surface_reasoning() {
+    // A scripted stream drives truly incremental deltas — a reasoning fragment
+    // and two text fragments — which must all surface on the event stream.
+    let script = vec![
+        ModelStreamItem::Started,
+        ModelStreamItem::MessageDelta(MessageDelta::reasoning("thinking hard")),
+        ModelStreamItem::MessageDelta(MessageDelta::text("hel")),
+        ModelStreamItem::MessageDelta(MessageDelta::text("lo")),
+        ModelStreamItem::Completed(ModelResponse::assistant("hello")),
+    ];
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::streaming_script(script)));
+
+    let items: Vec<AgentStreamItem> = harness
+        .invoke_stream(
+            &(),
+            (),
+            RunConfig::new("run-script"),
+            vec![Message::user("hi")],
+        )
+        .collect()
+        .await;
+    let (events, terminal) = collect_stream(items).await;
+
+    // The scripted reasoning fragment surfaces on a ModelDelta event.
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::ModelDelta { delta, .. } if delta.reasoning == "thinking hard")
+    ));
+    // Text arrives as multiple incremental deltas, not one merged blob.
+    let text_deltas = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::ModelDelta { delta, .. } if !delta.text.is_empty()))
+        .count();
+    assert!(
+        text_deltas >= 2,
+        "expected incremental text deltas, got {text_deltas}"
+    );
+
+    match terminal {
+        AgentStreamItem::Completed(run) => assert_eq!(run.text().as_deref(), Some("hello")),
+        other => panic!("expected Completed terminal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn mock_streaming_script_invoke_folds_items_to_response() {
+    // `invoke` on a scripted-stream mock folds the items into the equivalent
+    // unary response (delta-only script → reconstructed from deltas).
+    let model = MockModel::streaming_script(vec![
+        ModelStreamItem::MessageDelta(MessageDelta::text("ab")),
+        ModelStreamItem::MessageDelta(MessageDelta::text("cd")),
+    ]);
+    let response = ChatModel::invoke(&model, &(), ModelRequest::new(vec![]))
+        .await
+        .expect("fold succeeds");
+    assert_eq!(response.text(), "abcd");
+}

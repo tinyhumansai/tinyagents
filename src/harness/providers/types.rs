@@ -261,6 +261,14 @@ pub(crate) enum MockBehavior {
         /// JSON arguments to supply to the tool.
         arguments: Value,
     },
+
+    /// Emits a caller-provided list of [`ModelStreamItem`]s verbatim when
+    /// streamed, so tests exercise truly incremental streaming (fine-grained
+    /// text/reasoning/tool-call deltas). See [`MockModel::streaming_script`].
+    /// `invoke` folds the same items through a
+    /// [`StreamAccumulator`][crate::harness::model::StreamAccumulator] to
+    /// produce the equivalent unary response.
+    StreamScript(Vec<crate::harness::model::ModelStreamItem>),
 }
 
 // ---------------------------------------------------------------------------
