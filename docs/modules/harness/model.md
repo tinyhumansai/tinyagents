@@ -131,8 +131,13 @@ Resolution order should be explicit and configurable. A conservative default is:
 6. configured fallback chain that satisfies required capabilities
 
 If a candidate fails capability, budget, tenant, provider-availability, or
-policy checks, the resolver should skip it and emit a diagnostic event. If no
-candidate remains, the model call fails before contacting a provider. A model
+policy checks, the resolver should skip it and emit a diagnostic event. In
+particular, when the request-level explicit override is skipped (unregistered
+name, missing capability, or provider-retired) and resolution falls through to
+a lower-priority candidate, the agent loop emits
+`AgentEvent::ModelOverrideSkipped { requested, resolved }`
+(`model.override_skipped`) so the substitution is observable. If no candidate
+remains, the model call fails before contacting a provider. A model
 with no advertised profile is treated as unknown and does not satisfy non-empty
 required capabilities; callers that need capability filtering should register
 profiles for every candidate they expect the resolver to consider.

@@ -117,6 +117,21 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 })?;
             let model_name = binding.resolved.name.clone();
 
+            // An explicit request override that resolution skipped (unknown
+            // name, missing capability, or provider-retired) falls through to
+            // a lower-priority candidate by documented fail-closed semantics;
+            // surface that fall-through as a diagnostic event instead of
+            // silently substituting a different model.
+            if let Some(requested) = &request.model
+                && binding.resolved.source
+                    != crate::harness::model::ModelResolutionSource::RequestOverride
+            {
+                ctx.emit(AgentEvent::ModelOverrideSkipped {
+                    requested: requested.clone(),
+                    resolved: model_name.clone(),
+                });
+            }
+
             // Resolve the structured-output plan against the resolved model.
             // `Auto` consults the model profile to choose provider-native schema
             // mode versus a tool-call fallback; an explicit `JsonSchema` always

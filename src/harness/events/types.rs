@@ -251,6 +251,18 @@ pub enum AgentEvent {
         to: String,
     },
 
+    /// An explicit per-request model override was skipped during resolution —
+    /// the requested model is unregistered, lacks a required capability, or is
+    /// provider-retired — and resolution fell through to a lower-priority
+    /// candidate (documented fail-closed behavior). Emitted by the agent loop
+    /// so the silent fall-through is observable.
+    ModelOverrideSkipped {
+        /// The model name the request explicitly asked for.
+        requested: String,
+        /// The model that was actually resolved instead.
+        resolved: String,
+    },
+
     /// A sub-agent child run is about to be invoked from a parent run.
     SubAgentStarted {
         /// Name of the sub-agent being invoked.
@@ -506,6 +518,7 @@ impl AgentEvent {
             AgentEvent::RetryScheduled { .. } => "retry.scheduled",
             AgentEvent::RateLimitWaited { .. } => "rate_limit.waited",
             AgentEvent::FallbackSelected { .. } => "model.fallback_selected",
+            AgentEvent::ModelOverrideSkipped { .. } => "model.override_skipped",
             AgentEvent::SubAgentStarted { .. } => "subagent.started",
             AgentEvent::SubAgentCompleted { .. } => "subagent.completed",
             AgentEvent::SubAgentReused { .. } => "subagent.reused",
