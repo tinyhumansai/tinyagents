@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::harness::events::{AgentEvent, EventListener, EventRecord, HarnessRunStatus, LimitKind};
 use crate::harness::ids::{CallId, ComponentId, EventId, RunId, ThreadId};
+use crate::harness::observability::AppendWorker;
 use crate::harness::observability::{
     AgentLatencyMetrics, AgentObservation, FanOutSink, HarnessEventJournal, HarnessStatusStore,
     InMemoryEventJournal, InMemoryStatusStore, JournalSink, RedactingSink, StoreEventJournal,
@@ -300,6 +301,9 @@ async fn journal_sink_persists_observations() {
         event: AgentEvent::StreamClosed,
     });
 
+    // Persistence is asynchronous; block until the durable log catches up.
+    sink.flush();
+
     let stored = journal.read_from("run-sink", 0).await.unwrap();
     assert_eq!(stored.len(), 2);
     assert_eq!(stored[0].event.kind(), "run.started");
@@ -307,6 +311,50 @@ async fn journal_sink_persists_observations() {
     assert_eq!(stored[1].event.kind(), "stream.closed");
     assert_eq!(stored[1].run_id, RunId::new("run-sink"));
     assert_eq!(stored[1].root_run_id, RunId::new("run-sink"));
+}
+
+#[tokio::test]
+async fn append_worker_flush_persists_all_submissions_in_order() {
+    use std::sync::Mutex;
+
+    let seen: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let worker = AppendWorker::spawn("test", 8, move |n: u64| {
+        let sink = Arc::clone(&sink);
+        async move {
+            sink.lock().unwrap().push(n);
+            Ok(())
+        }
+    });
+
+    for n in 0..8 {
+        worker.submit(n);
+    }
+    // Before flush, persistence may still be in flight; after flush every
+    // submission is durably recorded, in submit order.
+    worker.flush();
+    assert_eq!(*seen.lock().unwrap(), (0..8).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn append_worker_drops_and_counts_when_queue_is_full() {
+    // A slow backend cannot keep up with a burst; the bounded queue drops the
+    // overflow rather than blocking the caller, and the drops are counted (not
+    // silently discarded).
+    let worker = AppendWorker::spawn("test-slow", 1, move |_n: u64| async move {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        Ok(())
+    });
+
+    for n in 0..50 {
+        worker.submit(n);
+    }
+    worker.flush();
+    assert!(
+        worker.dropped() > 0,
+        "a saturated bounded queue must drop and count overflow, got {}",
+        worker.dropped()
+    );
 }
 
 /// Collects forwarded records for assertions.

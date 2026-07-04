@@ -19,11 +19,16 @@
 //!   to a JSONL stream).
 //!
 //! Persisting sinks bridge the synchronous [`EventListener::on_event`] hook to
-//! the async journal/store APIs with `futures::executor::block_on` and treat
-//! persistence as best-effort: a backend error never aborts the run.
+//! the async journal/store APIs through a background [`worker::AppendWorker`]:
+//! `on_event` never blocks the run on I/O, persistence is best-effort (a full
+//! bounded queue drops rather than stalls; backend errors are reported, not
+//! propagated), and `flush` blocks until the durable log has caught up.
 
 mod langfuse;
 mod types;
+mod worker;
+
+pub(crate) use worker::{AppendWorker, DEFAULT_DRAIN_CAPACITY};
 
 pub use langfuse::{LangfuseAuth, LangfuseClient, LangfuseTraceConfig};
 // Shared Langfuse payload helpers reused by the graph observability exporter so
@@ -444,11 +449,19 @@ impl JournalSink {
     /// lineage. `root_run_id` defaults to `run_id` for a top-level run; use
     /// [`Self::with_lineage`] to set a parent and a different root.
     pub fn new(journal: Arc<dyn HarnessEventJournal>, run_id: RunId) -> Self {
+        let worker = Arc::new(AppendWorker::spawn(
+            "journal-sink",
+            DEFAULT_DRAIN_CAPACITY,
+            move |obs: AgentObservation| {
+                let journal = Arc::clone(&journal);
+                async move { journal.append(obs).await.map(|_| ()) }
+            },
+        ));
         Self {
             root_run_id: run_id.clone(),
             run_id,
             parent_run_id: None,
-            journal,
+            worker,
         }
     }
 
@@ -457,6 +470,15 @@ impl JournalSink {
         self.parent_run_id = parent_run_id;
         self.root_run_id = root_run_id;
         self
+    }
+
+    /// Blocks until every observation submitted so far has been persisted.
+    ///
+    /// Persistence is otherwise asynchronous and best-effort; call this before
+    /// reading the journal back or shutting down to guarantee the durable log
+    /// has caught up with the events emitted so far.
+    pub fn flush(&self) {
+        self.worker.flush();
     }
 }
 
@@ -468,8 +490,8 @@ impl EventListener for JournalSink {
             self.parent_run_id.clone(),
             self.root_run_id.clone(),
         );
-        // Best-effort durable append; never abort the run on a journal error.
-        let _ = futures::executor::block_on(self.journal.append(obs));
+        // Hand off to the background drain; never block the run on I/O.
+        self.worker.submit(obs);
     }
 }
 
@@ -483,10 +505,26 @@ impl JsonlSink {
     ///
     /// [`EventRecord`]: crate::harness::events::EventRecord
     pub fn new(store: JsonlAppendStore, stream: impl Into<String>) -> Self {
-        Self {
-            store,
-            stream: stream.into(),
-        }
+        let stream = stream.into();
+        let worker = Arc::new(AppendWorker::spawn(
+            "jsonl-sink",
+            DEFAULT_DRAIN_CAPACITY,
+            move |value: serde_json::Value| {
+                let store = store.clone();
+                let stream = stream.clone();
+                async move { store.append(&stream, value).await.map(|_| ()) }
+            },
+        ));
+        Self { worker }
+    }
+
+    /// Blocks until every record submitted so far has been appended.
+    ///
+    /// Persistence is otherwise asynchronous and best-effort; call this before
+    /// reading the stream back or shutting down to guarantee the durable log has
+    /// caught up with the events emitted so far.
+    pub fn flush(&self) {
+        self.worker.flush();
     }
 }
 
@@ -495,8 +533,8 @@ impl EventListener for JsonlSink {
         let Ok(value) = serde_json::to_value(record) else {
             return;
         };
-        // Best-effort durable append; never abort the run on a store error.
-        let _ = futures::executor::block_on(self.store.append(&self.stream, value));
+        // Hand off to the background drain; never block the run on I/O.
+        self.worker.submit(value);
     }
 }
 

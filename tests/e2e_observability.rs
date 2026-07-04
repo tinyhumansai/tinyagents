@@ -96,6 +96,9 @@ async fn harness_run_journals_redacted_replayable_events() {
     // RedactingSink wraps the JournalSink: every event is masked *before* it is
     // persisted, so the durable journal never sees the secret.
     let journal_sink = JournalSink::new(journal.clone(), run_id.clone());
+    // Persistence is asynchronous; keep a handle to flush the shared drain
+    // before reading the journal back. Clones share the same background worker.
+    let journal_flush = journal_sink.clone();
     let redacting = RedactingSink::new(Arc::new(journal_sink), vec![SECRET.to_string()]);
 
     // Attach the sinks through RunContext.events, then drive the run in-context.
@@ -128,6 +131,7 @@ async fn harness_run_journals_redacted_replayable_events() {
     assert!(stored.error.is_none());
 
     // --- Journal replays the whole run from offset 0. ---
+    journal_flush.flush();
     let all = journal
         .read_from(run_id.as_str(), 0)
         .await
@@ -209,13 +213,16 @@ async fn harness_run_with_capture_exports_generation_and_tool_io() {
     let journal: Arc<InMemoryEventJournal> = Arc::new(InMemoryEventJournal::new());
     let run_id = RunId::new("run-capture");
     let ctx: RunContext<()> = RunContext::new(RunConfig::new(run_id.as_str()), ());
-    ctx.events
-        .subscribe(Arc::new(JournalSink::new(journal.clone(), run_id.clone())));
+    let journal_sink = JournalSink::new(journal.clone(), run_id.clone());
+    let journal_flush = journal_sink.clone();
+    ctx.events.subscribe(Arc::new(journal_sink));
 
     harness
         .invoke_in_context_with_status(&(), ctx, vec![Message::user("please look up")])
         .await
         .expect("run succeeds");
+    // Persistence is asynchronous; block until the durable log catches up.
+    journal_flush.flush();
 
     let observations = journal
         .read_from(run_id.as_str(), 0)

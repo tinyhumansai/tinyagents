@@ -45,11 +45,15 @@ surface and operational constraints.
 ## Persistence bridge
 
 Persisting sinks (`JournalSink`, `JsonlSink`) bridge the synchronous
-`EventListener::on_event` hook to the async journal/store APIs with
-`futures::executor::block_on`, and treat persistence as **best-effort**: a
-backend error is logged/dropped and never aborts the run. Do not rely on a
-sink for delivery guarantees stronger than "usually persisted, never
-run-blocking."
+`EventListener::on_event` hook to the async journal/store APIs through a
+background `AppendWorker`: `on_event` hands the observation to a **bounded**
+channel drained on a dedicated thread, so it never blocks the run on I/O.
+Persistence is **best-effort**: if the queue is full the observation is dropped
+(and counted), backend errors are reported to stderr rather than propagated,
+and neither ever aborts the run. Call `JournalSink::flush` / `JsonlSink::flush`
+to block until the durable log has caught up (for example before reading it back
+or shutting down). Do not rely on a sink for delivery guarantees stronger than
+"usually persisted, never run-blocking."
 
 ## Latency metrics semantics
 

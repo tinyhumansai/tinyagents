@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::harness::events::{AgentEvent, EventListener, HarnessRunStatus};
 use crate::harness::ids::{CallId, EventId, RunId};
-use crate::harness::store::{AppendStore, JsonlAppendStore};
+use crate::harness::store::AppendStore;
+
+use super::worker::AppendWorker;
 
 // ---------------------------------------------------------------------------
 // AgentObservation
@@ -300,37 +302,39 @@ pub struct RedactingSink {
 /// a [`HarnessEventJournal`].
 ///
 /// The sink is configured with the emitting run's lineage; each received
-/// [`EventRecord`] is wrapped into an [`AgentObservation`] and appended. The
-/// async append is bridged synchronously with `futures::executor::block_on`,
-/// and append errors are swallowed so a failing journal never aborts the run.
+/// [`EventRecord`] is wrapped into an [`AgentObservation`] and handed to a
+/// background [`AppendWorker`] that persists it off the emitting thread. The
+/// append is best-effort: see [`AppendWorker`] for the backpressure/drop and
+/// error policy, and use [`JournalSink::flush`] to block until the durable log
+/// has caught up.
 ///
 /// [`EventRecord`]: crate::harness::events::EventRecord
 #[derive(Clone)]
 pub struct JournalSink {
-    /// The journal observations are appended to.
-    pub(crate) journal: Arc<dyn HarnessEventJournal>,
     /// The run that owns events delivered to this sink.
     pub(crate) run_id: RunId,
     /// Parent run id stamped onto every observation.
     pub(crate) parent_run_id: Option<RunId>,
     /// Root run id stamped onto every observation.
     pub(crate) root_run_id: RunId,
+    /// Background drain that persists observations without blocking the run.
+    pub(crate) worker: Arc<AppendWorker<AgentObservation>>,
 }
 
 /// An [`EventListener`] that appends each [`EventRecord`] as a JSON line into a
-/// [`JsonlAppendStore`] stream.
+/// [`JsonlAppendStore`](crate::harness::store::JsonlAppendStore) stream.
 ///
 /// This is the lightweight durable sink: it persists the live record (id,
-/// offset, event) under a fixed stream name. The async append is bridged
-/// synchronously and errors are swallowed (best-effort).
+/// offset, event) under a fixed stream name. Each record is handed to a
+/// background [`AppendWorker`] that appends it off the emitting thread
+/// (best-effort — see [`AppendWorker`] for the drop/error policy). Use
+/// [`JsonlSink::flush`] to block until the durable log has caught up.
 ///
 /// [`EventRecord`]: crate::harness::events::EventRecord
 #[derive(Clone, Debug)]
 pub struct JsonlSink {
-    /// The JSONL append store records are written to.
-    pub(crate) store: JsonlAppendStore,
-    /// The stream name appended records land in.
-    pub(crate) stream: String,
+    /// Background drain that appends records without blocking the run.
+    pub(crate) worker: Arc<AppendWorker<serde_json::Value>>,
 }
 
 /// Returns the current time in Unix-epoch milliseconds, saturating at `0`.

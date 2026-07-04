@@ -435,6 +435,7 @@ async fn fanout_redaction_journal_and_jsonl_sinks_forward_best_effort_events() {
     let journal_sink = JournalSink::new(journal.clone(), RunId::new("child-run"))
         .with_lineage(Some(RunId::new("parent-run")), RunId::new("root-run"));
     journal_sink.on_event(&secret_record);
+    journal_sink.flush();
     let observations = journal.read_from("child-run", 0).await.unwrap();
     assert_eq!(observations.len(), 1);
     assert_eq!(
@@ -453,6 +454,7 @@ async fn fanout_redaction_journal_and_jsonl_sinks_forward_best_effort_events() {
     let jsonl_store = JsonlAppendStore::new(root.clone());
     let jsonl_sink = JsonlSink::new(jsonl_store.clone(), "events");
     jsonl_sink.on_event(&secret_record);
+    jsonl_sink.flush();
     let rows = jsonl_store.read_from("events", 0).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].0, 0);
