@@ -2165,3 +2165,76 @@ async fn mock_streaming_script_invoke_folds_items_to_response() {
         .expect("fold succeeds");
     assert_eq!(response.text(), "abcd");
 }
+
+#[tokio::test]
+async fn tool_completed_event_carries_outcome() {
+    use crate::harness::events::RecordingListener;
+
+    // A tool that fails: its ToolCompleted event must carry the failure message,
+    // a real duration, and the output size — from the event itself, not a
+    // side-channel — so journal-backed exporters can render the outcome.
+    struct FailTool;
+    #[async_trait]
+    impl Tool<()> for FailTool {
+        fn name(&self) -> &str {
+            "boom"
+        }
+        fn description(&self) -> &str {
+            "always fails"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new("boom", "always fails", json!({ "type": "object" }))
+        }
+        async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+            Ok(ToolResult {
+                call_id: call.id,
+                name: "boom".to_string(),
+                content: "nope".to_string(),
+                raw: None,
+                error: Some("kaboom".to_string()),
+                elapsed_ms: 0,
+            })
+        }
+    }
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("c1", "boom", json!({})),
+            text_response("done", 1, 1),
+        ])),
+    );
+    harness.register_tool(Arc::new(FailTool));
+
+    let recorder = Arc::new(RecordingListener::new());
+    let ctx: RunContext<()> = RunContext::new(RunConfig::new("run-tc"), ());
+    ctx.events.subscribe(recorder.clone());
+    harness
+        .invoke_in_context(&(), ctx, vec![Message::user("go")])
+        .await
+        .expect("run succeeds");
+
+    let (error, duration_ms, output_bytes) = recorder
+        .events()
+        .into_iter()
+        .find_map(|record| match record.event {
+            AgentEvent::ToolCompleted {
+                tool_name,
+                error,
+                duration_ms,
+                output_bytes,
+                ..
+            } if tool_name == "boom" => Some((error, duration_ms, output_bytes)),
+            _ => None,
+        })
+        .expect("a ToolCompleted event for `boom`");
+
+    assert_eq!(
+        error.as_deref(),
+        Some("kaboom"),
+        "failure message on the event"
+    );
+    assert!(duration_ms.is_some(), "wall-clock duration present");
+    assert_eq!(output_bytes, Some(4), "\"nope\".len() == 4");
+}

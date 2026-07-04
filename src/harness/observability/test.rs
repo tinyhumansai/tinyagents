@@ -140,6 +140,9 @@ fn agent_latency_metrics_include_model_tool_and_run_elapsed() {
                 started_at_ms: None,
                 input: None,
                 output: None,
+                duration_ms: None,
+                output_bytes: None,
+                error: None,
             },
         ),
         obs(
