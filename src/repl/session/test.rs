@@ -44,6 +44,28 @@ fn variables_persist_across_cells() {
 }
 
 #[test]
+fn variables_changed_diffs_against_shared_baseline() {
+    // The pre-cell baseline is snapshotted once into the shared `vars_snapshot`
+    // and the change diff reads it back from there (no second retained copy).
+    // A cell that introduces several new bindings and mutates an existing one
+    // must still report every changed name, and leave an unchanged binding out.
+    let mut s = session();
+    s.eval_cell("let kept = 1; let touched = 2;").expect("seed");
+
+    let result = s
+        .eval_cell("let a = 10; let b = 20; touched = 99; kept")
+        .expect("cell");
+
+    assert!(result.variables_changed.contains(&"a".to_string()));
+    assert!(result.variables_changed.contains(&"b".to_string()));
+    assert!(result.variables_changed.contains(&"touched".to_string()));
+    assert!(
+        !result.variables_changed.contains(&"kept".to_string()),
+        "an unmodified binding is not reported as changed"
+    );
+}
+
+#[test]
 fn over_limit_script_fails_closed() {
     // A tiny operation budget makes an otherwise-bounded loop trip the limit.
     let policy = ReplPolicy {

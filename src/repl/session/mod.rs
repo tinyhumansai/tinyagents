@@ -408,13 +408,16 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
             .arm_deadline(self.policy.timeout.map(|d| start + d));
         self.buffers.arm_output_limit(self.policy.max_output_bytes);
 
-        let before = self.variables.snapshot();
-        // Expose the pre-cell namespace to `show_vars()`.
+        // Snapshot the pre-cell namespace once and move it into the shared
+        // `vars_snapshot` (read by `show_vars()` during the cell). The diff below
+        // reads this same baseline back rather than keeping a second full copy,
+        // so a cell pays one baseline snapshot instead of a snapshot *plus* a
+        // full O(namespace-bytes) clone.
         *self
             .buffers
             .vars_snapshot
             .lock()
-            .expect("vars_snapshot poisoned") = before.clone();
+            .expect("vars_snapshot poisoned") = self.variables.snapshot();
 
         // Disjoint field borrows: the engine is read-only while the scope is
         // mutated in place, so top-level `let` bindings persist into the scope.
@@ -470,7 +473,16 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
         }
 
         let after = self.variables.snapshot();
-        let variables_changed = diff_changed(&before, &after);
+        // Diff against the baseline stored in `vars_snapshot` instead of a
+        // separately retained `before` map, avoiding a redundant full copy.
+        let variables_changed = {
+            let before = self
+                .buffers
+                .vars_snapshot
+                .lock()
+                .expect("vars_snapshot poisoned");
+            diff_changed(&before, &after)
+        };
 
         Ok(ReplResult {
             stdout,
