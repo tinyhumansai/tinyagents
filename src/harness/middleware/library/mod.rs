@@ -338,9 +338,23 @@ impl BudgetTracker {
         Self::default()
     }
 
+    /// Locks the inner spend, recovering the last-known state if the mutex
+    /// was poisoned by a panicking holder.
+    ///
+    /// A poisoned mutex still holds a valid (if possibly stale) last-written
+    /// value; treating poisoning as "spend unknown, default to zero" would
+    /// make the budget enforcer fail *open* (every subsequent call sees an
+    /// empty budget and is admitted). Recovering the poisoned guard keeps
+    /// enforcement fail-closed: accumulated spend is never lost.
+    fn lock_recovering(&self) -> std::sync::MutexGuard<'_, BudgetSpend> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Returns a snapshot of the accumulated spend.
     pub fn snapshot(&self) -> BudgetSpend {
-        self.inner.lock().map(|g| *g).unwrap_or_default()
+        *self.lock_recovering()
     }
 
     /// Folds a model call's usage and estimated cost into the tracker.
@@ -349,10 +363,9 @@ impl BudgetTracker {
         usage: crate::harness::usage::Usage,
         cost: crate::harness::cost::CostTotals,
     ) {
-        if let Ok(mut guard) = self.inner.lock() {
-            guard.usage += usage;
-            guard.cost += cost;
-        }
+        let mut guard = self.lock_recovering();
+        guard.usage += usage;
+        guard.cost += cost;
     }
 }
 
@@ -457,6 +470,7 @@ impl BudgetMiddleware {
             limits,
             tracker: BudgetTracker::new(),
             pricing: std::collections::HashMap::new(),
+            pending_reservation: std::sync::Mutex::new(0),
         }
     }
 
@@ -508,40 +522,58 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for BudgetMidd
         _state: &State,
         request: &mut ModelRequest,
     ) -> Result<()> {
-        let spend = self.tracker.snapshot();
-        // (1) Already exhausted before this call.
-        if let Some(reason) = self.limits.exceeded_reason(&spend) {
-            ctx.emit(AgentEvent::BudgetExceeded {
-                reason: reason.clone(),
-                blocked: true,
-            });
-            return Err(TinyAgentsError::LimitExceeded(format!(
-                "budget exhausted: {reason}"
-            )));
+        // Preflight is check-and-reserve under a single lock acquisition so
+        // concurrent runs sharing this tracker cannot all observe capacity
+        // and reserve past it (a separate check-then-lock-then-write window
+        // lets N concurrent callers each pass the check before any of them
+        // records a reservation, collectively overshooting the budget).
+        let estimated = estimated_input_tokens(request);
+        {
+            let mut guard = self.tracker.lock_recovering();
+            // (1) Already exhausted before this call.
+            if let Some(reason) = self.limits.exceeded_reason(&guard) {
+                drop(guard);
+                ctx.emit(AgentEvent::BudgetExceeded {
+                    reason: reason.clone(),
+                    blocked: true,
+                });
+                return Err(TinyAgentsError::LimitExceeded(format!(
+                    "budget exhausted: {reason}"
+                )));
+            }
+
+            // (2) Preflight reservation: estimate this call's input tokens
+            // (plus every other in-flight reservation on this shared
+            // tracker) and block *before* dispatching if it would breach the
+            // input budget, so a single large call — or several concurrent
+            // ones — cannot collectively overshoot it.
+            if let Some(max) = self.limits.max_input_tokens
+                && guard.usage.usage.input_tokens + guard.reserved_input_total + estimated > max
+            {
+                let reason = format!(
+                    "reserved input tokens {} + {estimated} > budget {max}",
+                    guard.usage.usage.input_tokens + guard.reserved_input_total
+                );
+                drop(guard);
+                ctx.emit(AgentEvent::BudgetExceeded {
+                    reason: reason.clone(),
+                    blocked: true,
+                });
+                return Err(TinyAgentsError::LimitExceeded(format!(
+                    "budget reservation exceeded: {reason}"
+                )));
+            }
+            guard.reserved_input_total += estimated;
         }
 
-        // (2) Preflight reservation: estimate this call's input tokens and block
-        // *before* dispatching if the reservation would breach the input budget,
-        // so a single large call cannot overshoot arbitrarily.
-        let estimated = estimated_input_tokens(request);
-        if let Some(max) = self.limits.max_input_tokens
-            && spend.usage.usage.input_tokens + estimated > max
-        {
-            let reason = format!(
-                "reserved input tokens {} + {estimated} > budget {max}",
-                spend.usage.usage.input_tokens
-            );
-            ctx.emit(AgentEvent::BudgetExceeded {
-                reason: reason.clone(),
-                blocked: true,
-            });
-            return Err(TinyAgentsError::LimitExceeded(format!(
-                "budget reservation exceeded: {reason}"
-            )));
-        }
-        if let Ok(mut guard) = self.tracker.inner.lock() {
-            guard.last_reserved_input = estimated;
-        }
+        // Remember this run's own outstanding reservation for reconciliation
+        // in `after_model` (local to this middleware instance, so concurrent
+        // runs sharing the tracker never clobber each other's amount).
+        *self
+            .pending_reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = estimated;
+
         ctx.emit(AgentEvent::BudgetReserved {
             estimated_input_tokens: estimated,
         });
@@ -554,17 +586,25 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for BudgetMidd
         _state: &State,
         response: &mut ModelResponse,
     ) -> Result<()> {
+        // Release this run's outstanding reservation regardless of whether
+        // usage came back, so a call that fails to report usage (or errors
+        // out before this hook) never leaks a permanent reservation that
+        // starves later calls on a shared tracker.
+        let reserved = std::mem::take(
+            &mut *self
+                .pending_reservation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        {
+            let mut guard = self.tracker.lock_recovering();
+            guard.reserved_input_total = guard.reserved_input_total.saturating_sub(reserved);
+        }
+
         let Some(usage) = response.usage else {
             return Ok(());
         };
         let cost = self.price(response);
-        // Reconcile the preflight reservation against the actual usage.
-        let reserved = self
-            .tracker
-            .inner
-            .lock()
-            .map(|mut guard| std::mem::take(&mut guard.last_reserved_input))
-            .unwrap_or(0);
         ctx.emit(AgentEvent::BudgetReconciled {
             estimated_input_tokens: reserved,
             actual_input_tokens: usage.input_tokens,
@@ -576,18 +616,27 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for BudgetMidd
             ctx.emit(AgentEvent::CostRecorded { cost });
         }
 
-        let mut spend = self.tracker.snapshot();
-        // Warn-once on threshold crossing.
-        if !spend.warned
-            && let Some(reason) = self.limits.warn_reason(&spend)
-        {
+        // Warn-once on threshold crossing: check-and-set the `warned` flag
+        // under a single lock so two concurrent calls crossing the
+        // threshold at once can't both observe `warned == false` and both
+        // emit the warning.
+        let (spend, warning) = {
+            let mut guard = self.tracker.lock_recovering();
+            let warning = if !guard.warned {
+                let reason = self.limits.warn_reason(&guard);
+                if reason.is_some() {
+                    guard.warned = true;
+                }
+                reason
+            } else {
+                None
+            };
+            (*guard, warning)
+        };
+        if let Some(reason) = warning {
             ctx.emit(AgentEvent::BudgetWarning {
                 reason: format!("approaching {reason}"),
             });
-            if let Ok(mut guard) = self.tracker.inner.lock() {
-                guard.warned = true;
-            }
-            spend.warned = true;
         }
         if let Some(reason) = self.limits.exceeded_reason(&spend) {
             ctx.emit(AgentEvent::BudgetExceeded {

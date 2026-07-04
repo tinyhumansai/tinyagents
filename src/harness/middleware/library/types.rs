@@ -204,9 +204,14 @@ pub struct BudgetSpend {
     pub cost: crate::harness::cost::CostTotals,
     /// Whether a warning has already been emitted (warn-once).
     pub warned: bool,
-    /// Input tokens reserved by the most recent preflight, awaiting
-    /// reconciliation against the provider-reported usage in `after_model`.
-    pub last_reserved_input: u64,
+    /// Sum of input tokens preflight-reserved by calls that have not yet
+    /// reconciled in `after_model`. Shared trackers (handed to concurrent
+    /// sub-agent runs) can have more than one outstanding reservation at
+    /// once, so this is a running total, not a single call's estimate;
+    /// each in-flight call's own reservation is tracked separately by its
+    /// [`BudgetMiddleware`] instance and released from this total when it
+    /// reconciles (or is abandoned).
+    pub reserved_input_total: u64,
 }
 
 /// Around-nothing lifecycle middleware that enforces a token/money
@@ -233,6 +238,11 @@ pub struct BudgetMiddleware {
     pub(crate) limits: BudgetLimits,
     pub(crate) tracker: BudgetTracker,
     pub(crate) pricing: std::collections::HashMap<String, crate::registry::catalog::ModelPricing>,
+    /// This run's own outstanding preflight reservation (input tokens),
+    /// awaiting reconciliation in `after_model`. Local to this middleware
+    /// instance (one per run) so concurrent runs sharing the same
+    /// [`BudgetTracker`] never clobber each other's reservation.
+    pub(crate) pending_reservation: std::sync::Mutex<u64>,
 }
 
 // ── ToolPolicyMiddleware ──────────────────────────────────────────────────────

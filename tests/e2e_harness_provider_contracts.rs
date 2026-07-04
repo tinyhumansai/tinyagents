@@ -362,14 +362,18 @@ fn model_profiles_stream_chunks_usage_and_cost_are_additive() {
         output_reasoning_per_token: Some(0.003),
         ..ModelPricing::default()
     };
+    // cache_read_tokens (3) and reasoning_tokens (4) are subsets of
+    // input_tokens/output_tokens, not additions to them, so the standard
+    // rate only applies to the non-cached/non-reasoning remainder:
+    // (10-3)*0.001 = 0.007, (5-4)*0.002 = 0.002.
     let cost = estimate_cost(&pricing, &usage);
-    assert_eq!(cost.input_cost, 0.01);
-    assert_eq!(cost.output_cost, 0.01);
+    assert_eq!(cost.input_cost, 0.007);
+    assert_eq!(cost.output_cost, 0.002);
     assert_eq!(cost.cache_cost, 0.0013);
     assert_eq!(cost.reasoning_cost, 0.012);
-    assert!((cost.total_cost - 0.0333).abs() < f64::EPSILON);
+    assert!((cost.total_cost - 0.0223).abs() < f64::EPSILON);
     let combined = CostTotals::new() + cost + cost;
-    assert!((combined.total_cost - 0.0666).abs() < f64::EPSILON);
+    assert!((combined.total_cost - 0.0446).abs() < f64::EPSILON);
 }
 
 #[test]

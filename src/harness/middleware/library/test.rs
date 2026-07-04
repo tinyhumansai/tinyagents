@@ -643,6 +643,120 @@ async fn budget_preflight_reserves_and_reconciles() {
     ));
 }
 
+#[tokio::test]
+async fn reservation_is_released_even_when_response_carries_no_usage() {
+    // A call whose response never reports `usage` (provider error, dropped
+    // stream, etc.) must still release its preflight reservation in
+    // `after_model` — otherwise the reservation leaks forever and
+    // permanently starves later calls on this (or a shared) tracker.
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let mw = BudgetMiddleware::new(BudgetLimits {
+        max_input_tokens: Some(5),
+        ..BudgetLimits::default()
+    });
+    let tracker = mw.tracker();
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    let mut req = ModelRequest::new(vec![Message::user("hi")]);
+    stack
+        .run_before_model(&mut ctx, &(), &mut req)
+        .await
+        .expect("small call fits the reservation");
+    assert!(tracker.snapshot().reserved_input_total > 0);
+
+    let mut resp = ModelResponse::assistant("ok"); // usage: None
+    stack
+        .run_after_model(&mut ctx, &(), &mut resp)
+        .await
+        .unwrap();
+    assert_eq!(tracker.snapshot().reserved_input_total, 0);
+}
+
+#[test]
+fn poisoned_tracker_stays_fail_closed() {
+    // A poisoned mutex still holds a valid last-written spend value; a
+    // `snapshot()` that defaulted to zero on poison would make every
+    // subsequent budget check see an empty budget and admit calls forever
+    // (fail-open). Recovering the poisoned guard must keep the previously
+    // accumulated spend intact.
+    use crate::harness::cost::CostTotals;
+    use crate::harness::usage::Usage;
+
+    let tracker = BudgetTracker::new();
+    tracker.record(Usage::new(100, 100), CostTotals::default());
+    assert!(!tracker.inner.is_poisoned());
+
+    let poison_tracker = tracker.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = poison_tracker.inner.lock().unwrap();
+        panic!("simulated panic while holding the tracker lock");
+    })
+    .join();
+    assert!(tracker.inner.is_poisoned());
+
+    // The accumulated spend from before the panic must still be visible,
+    // not silently reset to zero.
+    let spend = tracker.snapshot();
+    assert_eq!(spend.usage.usage.input_tokens, 100);
+    assert_eq!(spend.usage.usage.output_tokens, 100);
+
+    let limits = BudgetLimits {
+        max_total_tokens: Some(200),
+        ..BudgetLimits::default()
+    };
+    assert!(limits.exceeded_reason(&spend).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn shared_tracker_reservation_is_atomic_under_concurrency() {
+    // N concurrent "runs" (their own `BudgetMiddleware`, sharing one
+    // `BudgetTracker` — the documented sub-agent pattern) all reserve the
+    // same input-token estimate at once. A racy check-then-act preflight
+    // would let every one of them observe spare capacity and reserve past
+    // it; an atomic check-and-reserve admits only as many as the budget
+    // actually allows.
+    use crate::harness::middleware::Middleware;
+
+    let tracker = BudgetTracker::new();
+    let per_call_tokens = 10u64; // "x" * 40 chars / 4 == 10 estimated tokens.
+    let concurrent_capacity = 4u64;
+    let attempts = 10usize;
+    let limits = BudgetLimits {
+        max_input_tokens: Some(per_call_tokens * concurrent_capacity),
+        ..BudgetLimits::default()
+    };
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(attempts));
+    let mut handles = Vec::new();
+    for _ in 0..attempts {
+        let mw = BudgetMiddleware::new(limits).with_tracker(tracker.clone());
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            let mut ctx: RunContext = RunContext::new(RunConfig::new("test-run"), ());
+            let mut request = ModelRequest::new(vec![Message::user("x".repeat(40))]);
+            barrier.wait().await;
+            mw.before_model(&mut ctx, &(), &mut request).await
+        }));
+    }
+
+    let mut ok_count = 0usize;
+    for handle in handles {
+        if handle.await.unwrap().is_ok() {
+            ok_count += 1;
+        }
+    }
+
+    // Exactly the number of reservations the budget can hold succeed; the
+    // rest are rejected before dispatch. A racy implementation would let
+    // more than `concurrent_capacity` through.
+    assert_eq!(ok_count, concurrent_capacity as usize);
+    assert_eq!(
+        tracker.snapshot().reserved_input_total,
+        per_call_tokens * concurrent_capacity
+    );
+}
+
 // ── ToolAllowlistMiddleware ─────────────────────────────────────────────────
 
 #[tokio::test]
