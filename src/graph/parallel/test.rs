@@ -62,6 +62,33 @@ async fn fail_fast_returns_first_error() {
 }
 
 #[tokio::test]
+async fn fail_fast_returns_first_error_in_input_order_not_completion_order() {
+    // Two items fail. The later-index one (index 2) completes almost
+    // immediately, while the earlier-index one (index 0) fails after a delay.
+    // FailFast must return the earlier item's error (input order), not the
+    // first-to-complete error.
+    let result = map_reduce(
+        vec![0usize, 1, 2],
+        ParallelOptions::default().with_failure_policy(FailurePolicy::FailFast),
+        |i, _n| async move {
+            match i {
+                0 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                    Err(TinyAgentsError::Graph("first".to_string()))
+                }
+                2 => Err(TinyAgentsError::Graph("third".to_string())),
+                _ => Ok(i),
+            }
+        },
+    )
+    .await;
+    match result {
+        Err(TinyAgentsError::Graph(msg)) => assert_eq!(msg, "first"),
+        other => panic!("expected the input-order-first error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn quorum_requires_minimum_successes() {
     let opts = ParallelOptions::default().with_failure_policy(FailurePolicy::Quorum(3));
     let items = vec![1, 2, 3, 4];
