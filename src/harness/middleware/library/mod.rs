@@ -50,6 +50,7 @@ use crate::harness::structured::{StructuredExtractor, StructuredStrategy};
 use crate::harness::tool::{ToolCall, ToolDelta, ToolResult, ToolSchema};
 
 mod budget;
+mod context;
 mod observe;
 mod resilience;
 mod tool_policy;

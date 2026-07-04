@@ -5,6 +5,10 @@
 //! full built-in middleware library overview.
 
 use super::*;
+use crate::harness::middleware::{
+    AgentRun, HookCounts, LoggingMiddleware, UsageAccountingMiddleware,
+};
+use crate::harness::usage::UsageTotals;
 
 // ── StructuredOutputValidatorMiddleware ───────────────────────────────────────
 
@@ -346,6 +350,195 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for TracingMid
 
     async fn on_error(&self, _ctx: &mut RunContext<Ctx>, _error: &TinyAgentsError) -> Result<()> {
         self.counts.lock().expect("counts mutex poisoned").error += 1;
+        Ok(())
+    }
+}
+
+// ── LoggingMiddleware ─────────────────────────────────────────────────────────
+
+// ── LoggingMiddleware ─────────────────────────────────────────────────────────
+
+impl LoggingMiddleware {
+    /// Creates a logging middleware with the default label `"logging"`.
+    pub fn new() -> Self {
+        Self::with_label("logging")
+    }
+
+    /// Creates a logging middleware with a custom static label.
+    pub fn with_label(label: &'static str) -> Self {
+        Self {
+            label,
+            counts: std::sync::Mutex::new(HookCounts::default()),
+        }
+    }
+
+    /// Returns a snapshot of the per-hook invocation counts recorded so far.
+    pub fn counts(&self) -> HookCounts {
+        self.counts.lock().expect("counts mutex poisoned").clone()
+    }
+}
+
+impl Default for LoggingMiddleware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for LoggingMiddleware {
+    fn name(&self) -> &str {
+        self.label
+    }
+
+    async fn before_agent(&self, _ctx: &mut RunContext<Ctx>, _state: &State) -> Result<()> {
+        self.counts
+            .lock()
+            .expect("counts mutex poisoned")
+            .before_agent += 1;
+        Ok(())
+    }
+
+    async fn after_agent(
+        &self,
+        _ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        _run: &mut AgentRun,
+    ) -> Result<()> {
+        self.counts
+            .lock()
+            .expect("counts mutex poisoned")
+            .after_agent += 1;
+        Ok(())
+    }
+
+    async fn before_model(
+        &self,
+        _ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        _request: &mut ModelRequest,
+    ) -> Result<()> {
+        self.counts
+            .lock()
+            .expect("counts mutex poisoned")
+            .before_model += 1;
+        Ok(())
+    }
+
+    async fn on_model_delta(
+        &self,
+        _ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        _delta: &mut ModelDelta,
+    ) -> Result<()> {
+        self.counts
+            .lock()
+            .expect("counts mutex poisoned")
+            .on_model_delta += 1;
+        Ok(())
+    }
+
+    async fn after_model(
+        &self,
+        _ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        _response: &mut ModelResponse,
+    ) -> Result<()> {
+        self.counts
+            .lock()
+            .expect("counts mutex poisoned")
+            .after_model += 1;
+        Ok(())
+    }
+
+    async fn before_tool(
+        &self,
+        _ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        _call: &mut ToolCall,
+    ) -> Result<()> {
+        self.counts
+            .lock()
+            .expect("counts mutex poisoned")
+            .before_tool += 1;
+        Ok(())
+    }
+
+    async fn on_tool_delta(
+        &self,
+        _ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        _delta: &mut ToolDelta,
+    ) -> Result<()> {
+        self.counts
+            .lock()
+            .expect("counts mutex poisoned")
+            .on_tool_delta += 1;
+        Ok(())
+    }
+
+    async fn after_tool(
+        &self,
+        _ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        _result: &mut ToolResult,
+    ) -> Result<()> {
+        self.counts
+            .lock()
+            .expect("counts mutex poisoned")
+            .after_tool += 1;
+        Ok(())
+    }
+
+    async fn on_error(&self, _ctx: &mut RunContext<Ctx>, _error: &TinyAgentsError) -> Result<()> {
+        self.counts.lock().expect("counts mutex poisoned").on_error += 1;
+        Ok(())
+    }
+}
+
+// ── UsageAccountingMiddleware ─────────────────────────────────────────────────
+
+// ── UsageAccountingMiddleware ─────────────────────────────────────────────────
+
+impl UsageAccountingMiddleware {
+    /// Creates a usage-accounting middleware with the default label
+    /// `"usage_accounting"`.
+    pub fn new() -> Self {
+        Self {
+            label: "usage_accounting",
+            totals: std::sync::Mutex::new(UsageTotals::new()),
+        }
+    }
+
+    /// Returns a snapshot of the accumulated usage totals.
+    pub fn totals(&self) -> UsageTotals {
+        *self.totals.lock().expect("totals mutex poisoned")
+    }
+}
+
+impl Default for UsageAccountingMiddleware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for UsageAccountingMiddleware {
+    fn name(&self) -> &str {
+        self.label
+    }
+
+    async fn after_model(
+        &self,
+        _ctx: &mut RunContext<Ctx>,
+        _state: &State,
+        response: &mut ModelResponse,
+    ) -> Result<()> {
+        if let Some(usage) = response.usage {
+            self.totals
+                .lock()
+                .expect("totals mutex poisoned")
+                .record(usage);
+        }
         Ok(())
     }
 }
