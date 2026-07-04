@@ -116,7 +116,8 @@ let exec = graph.run_with_thread("thread-1", St::default()).await?;
 
 | File | Role |
 | --- | --- |
-| `types.rs` | Data model + `GoalProgress` + `active_goal_context_block`. |
+| `types.rs` | Data model: `ThreadGoal`, `ThreadGoalStatus`, `GoalProgress`. |
+| `prompt.rs` | `active_goal_context_block` — renders the per-iteration prompt context block. |
 | `store.rs` | `Store`-backed CRUD, per-thread RMW lock, budget + CAS guards. |
 | `tool.rs` | `GoalTool` / `GoalToolKind` harness tools. |
 | `continuation.rs` | `goal_gate_node`, `run_continuation_tick`, `note_user_turn`. |

@@ -1,5 +1,6 @@
 //! Unit tests for the thread-goal domain types.
 
+use super::prompt::*;
 use super::types::*;
 
 fn goal(status: ThreadGoalStatus, token_budget: Option<u64>, tokens_used: u64) -> ThreadGoal {
