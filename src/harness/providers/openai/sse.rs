@@ -1,0 +1,343 @@
+//! Server-sent-events stream parsing and incremental accumulation
+//! (`SseState`, `OpenAiStreamAcc`, `sse_next`).
+//!
+//! Split out of `openai/mod.rs`; see that module's doc comment for the
+//! full provider overview.
+
+use super::*;
+
+/// In-progress reconstruction of a single tool call across streamed fragments.
+#[derive(Clone, Debug, Default)]
+pub(super) struct ToolCallBuild {
+    /// Provider-assigned call id (filled from the first fragment carrying it).
+    id: String,
+    /// Function name (filled from the first fragment carrying it).
+    name: String,
+    /// Concatenated stringified-JSON argument fragments.
+    args: String,
+}
+
+/// Provider-side accumulator that rebuilds the authoritative [`ModelResponse`]
+/// from streamed chunks. Distinct from the generic
+/// [`StreamAccumulator`][crate::harness::model::StreamAccumulator]: it tracks
+/// tool-call names and ids (which the neutral deltas omit) so the terminal
+/// [`ModelStreamItem::Completed`] carries a faithful response.
+#[derive(Clone, Debug, Default)]
+pub(super) struct OpenAiStreamAcc {
+    id: Option<String>,
+    text: String,
+    tool_calls: Vec<ToolCallBuild>,
+    usage: Option<Usage>,
+    finish_reason: Option<String>,
+}
+
+impl OpenAiStreamAcc {
+    /// Folds one parsed chunk into the accumulator and pushes the corresponding
+    /// neutral [`ModelStreamItem`]s onto `pending`.
+    fn ingest(&mut self, chunk: ChatCompletionChunk, pending: &mut VecDeque<ModelStreamItem>) {
+        if let Some(id) = chunk.id
+            && self.id.is_none()
+        {
+            self.id = Some(id);
+        }
+        if let Some(usage_wire) = chunk.usage {
+            let usage = convert_usage(usage_wire);
+            self.usage = Some(usage);
+            pending.push_back(ModelStreamItem::UsageDelta(usage));
+        }
+        for mut choice in chunk.choices {
+            if let Some(reason) = choice.finish_reason {
+                self.finish_reason = Some(reason);
+            }
+            let reasoning = delta_reasoning_text(&mut choice.delta);
+            if !reasoning.is_empty() {
+                pending.push_back(ModelStreamItem::MessageDelta(MessageDelta {
+                    text: String::new(),
+                    reasoning,
+                    tool_call: None,
+                }));
+            }
+            if let Some(content) = choice.delta.content.filter(|c| !c.is_empty()) {
+                self.text.push_str(&content);
+                pending.push_back(ModelStreamItem::MessageDelta(MessageDelta {
+                    text: content,
+                    reasoning: String::new(),
+                    tool_call: None,
+                }));
+            }
+            for fragment in choice.delta.tool_calls {
+                let idx = self.resolve_slot(&fragment);
+                let slot = &mut self.tool_calls[idx];
+                if let Some(id) = fragment.id.filter(|id| !id.is_empty()) {
+                    slot.id = id;
+                }
+                if let Some(function) = fragment.function {
+                    if let Some(name) = function.name.filter(|n| !n.is_empty()) {
+                        slot.name = name;
+                    }
+                    if let Some(args) = function.arguments.filter(|a| !a.is_empty()) {
+                        slot.args.push_str(&args);
+                        let call_id = tool_call_id(idx, &slot.id);
+                        pending.push_back(ModelStreamItem::ToolCallDelta(ToolDelta {
+                            call_id,
+                            content: args,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolves the accumulator slot a streamed tool-call fragment belongs to.
+    ///
+    /// OpenAI itself always sends a stable `index`; some OpenAI-compatible
+    /// backends omit it. When `index` is present it selects the slot directly
+    /// (growing the vector as needed). When it is absent, fragments are
+    /// correlated by `id`: a fragment carrying a new id opens a new slot, one
+    /// carrying a known id reuses that slot, and an id-less continuation fragment
+    /// (arguments only) appends to the most recent slot — so parallel calls no
+    /// longer all collapse onto slot 0.
+    fn resolve_slot(&mut self, fragment: &ToolCallChunkWire) -> usize {
+        if let Some(index) = fragment.index {
+            let idx = index as usize;
+            while self.tool_calls.len() <= idx {
+                self.tool_calls.push(ToolCallBuild::default());
+            }
+            return idx;
+        }
+        if let Some(id) = fragment.id.as_deref().filter(|id| !id.is_empty()) {
+            if let Some(pos) = self.tool_calls.iter().position(|slot| slot.id == id) {
+                return pos;
+            }
+            self.tool_calls.push(ToolCallBuild::default());
+            return self.tool_calls.len() - 1;
+        }
+        if self.tool_calls.is_empty() {
+            self.tool_calls.push(ToolCallBuild::default());
+        }
+        self.tool_calls.len() - 1
+    }
+
+    /// Consumes the accumulator into the final, merged [`ModelResponse`].
+    fn into_response(self) -> Result<ModelResponse> {
+        let mut content = Vec::new();
+        if !self.text.is_empty() {
+            content.push(ContentBlock::Text(self.text));
+        }
+        // Enumerate over the full slot vector *before* filtering so the synthetic
+        // fallback id (`tool-{idx}`) matches the one streamed in `ToolCallDelta`
+        // items — filtering first would renumber the slots and desynchronize the
+        // delta ids from the final call ids.
+        let tool_calls = self
+            .tool_calls
+            .into_iter()
+            .enumerate()
+            .filter(|(_, b)| !b.name.is_empty() || !b.args.is_empty())
+            .map(|(idx, b)| {
+                let id = tool_call_id(idx, &b.id);
+                Ok(ToolCall {
+                    id: id.clone(),
+                    name: b.name.clone(),
+                    arguments: parse_tool_arguments("openai stream", &id, &b.name, &b.args)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let message = AssistantMessage {
+            id: self.id,
+            content,
+            tool_calls,
+            usage: self.usage,
+        };
+        Ok(ModelResponse {
+            message,
+            usage: self.usage,
+            finish_reason: self.finish_reason,
+            raw: None,
+            resolved_model: None,
+        })
+    }
+}
+
+/// Mutable driver state threaded through [`futures::stream::unfold`] while
+/// parsing the SSE byte stream into [`ModelStreamItem`]s.
+pub(super) struct SseState {
+    /// Raw response byte chunks (errors already mapped onto the crate error).
+    pub(super) bytes: Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>,
+    /// Raw bytes received but not yet split into complete lines. Kept as bytes
+    /// (not a `String`) so a multi-byte UTF-8 character split across two network
+    /// chunks is reassembled before decoding, instead of being corrupted into
+    /// replacement characters by a premature lossy decode.
+    pub(super) buf: Vec<u8>,
+    /// Parsed items waiting to be yielded, in order.
+    pub(super) pending: VecDeque<ModelStreamItem>,
+    /// Provider-side response reconstruction.
+    pub(super) acc: OpenAiStreamAcc,
+    /// Provider family id used in normalized stream failures.
+    pub(super) provider: String,
+    /// Provider model id used in normalized stream failures.
+    pub(super) model: String,
+    /// Whether the leading [`ModelStreamItem::Started`] has been emitted.
+    pub(super) started: bool,
+    /// Whether the byte stream ended or `[DONE]` was seen.
+    pub(super) finished: bool,
+    /// Whether the terminal [`ModelStreamItem::Completed`]/[`ModelStreamItem::Failed`]
+    /// has been emitted.
+    pub(super) terminal_emitted: bool,
+}
+
+impl SseState {
+    /// Splits buffered bytes into complete newline-terminated lines and folds
+    /// each SSE `data:` payload into the accumulator. The trailing partial line
+    /// (if any) is kept in `buf` for the next chunk, so a `data:` line split
+    /// across chunk boundaries — including one that splits a multi-byte UTF-8
+    /// character — is only decoded once it is complete.
+    fn drain_lines(&mut self) {
+        // Scan with a moving start offset and drain the whole consumed prefix
+        // once at the end, rather than `drain(..=pos)` per line: the old form
+        // allocated a `Vec<u8>` per line and shifted the remaining buffer down
+        // on every line (O(n^2) over a chunk carrying many lines).
+        let mut start = 0;
+        while let Some(rel) = self.buf[start..].iter().position(|&b| b == b'\n') {
+            let end = start + rel;
+            // A complete line (bounded by the ASCII `\n`) is whole UTF-8, so a
+            // lossy decode here can no longer straddle a chunk boundary. The
+            // `into_owned` detaches the line from `buf` so `process_line` can
+            // borrow `self` mutably.
+            let line = String::from_utf8_lossy(&self.buf[start..end]).into_owned();
+            start = end + 1;
+            self.process_line(&line);
+        }
+        if start > 0 {
+            self.buf.drain(..start);
+        }
+    }
+
+    /// Folds any bytes still buffered after the byte stream ends into a final
+    /// line. Providers that terminate the last SSE event without a trailing
+    /// newline would otherwise leave the final `data:` payload unprocessed.
+    fn drain_remaining(&mut self) {
+        if self.buf.is_empty() {
+            return;
+        }
+        let line = String::from_utf8_lossy(&self.buf).into_owned();
+        self.buf.clear();
+        self.process_line(&line);
+    }
+
+    /// Parses one SSE line and folds any resulting chunk into the accumulator.
+    fn process_line(&mut self, line: &str) {
+        let line = line.trim();
+        if line.is_empty() {
+            return;
+        }
+        let Some(rest) = line.strip_prefix("data:") else {
+            return;
+        };
+        let payload = rest.trim();
+        if payload == "[DONE]" {
+            self.finished = true;
+            return;
+        }
+        // Ignore keepalives / unparseable lines rather than failing the run.
+        let Ok(value) = serde_json::from_str::<Value>(payload) else {
+            return;
+        };
+        // Some providers stream a mid-stream `{"error": ...}` payload instead of
+        // a chunk. This also deserializes cleanly as an all-defaults
+        // `ChatCompletionChunk`, so it must be detected first and surfaced as a
+        // terminal failure rather than folded in as an empty chunk and swallowed.
+        if let Some(error) = value.get("error") {
+            self.pending
+                .push_back(ModelStreamItem::ProviderFailed(self.stream_error(error)));
+            self.finished = true;
+            self.terminal_emitted = true;
+            return;
+        }
+        if let Ok(chunk) = serde_json::from_value::<ChatCompletionChunk>(value) {
+            let mut pending = std::mem::take(&mut self.pending);
+            self.acc.ingest(chunk, &mut pending);
+            self.pending = pending;
+        }
+    }
+
+    /// Builds a normalized [`ProviderError`] from a streamed `error` payload.
+    fn stream_error(&self, error: &Value) -> ProviderError {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or("provider reported a stream error")
+            .to_string();
+        let code = error
+            .get("code")
+            .or_else(|| error.get("type"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        ProviderError {
+            provider: self.provider.clone(),
+            model: Some(self.model.clone()),
+            code,
+            message,
+            retryable: false,
+            raw: Some(error.clone()),
+            ..ProviderError::default()
+        }
+    }
+}
+
+/// Advances the SSE [`SseState`] by one item for [`futures::stream::unfold`].
+pub(super) async fn sse_next(mut state: SseState) -> Option<(ModelStreamItem, SseState)> {
+    loop {
+        if let Some(item) = state.pending.pop_front() {
+            return Some((item, state));
+        }
+        if !state.started {
+            state.started = true;
+            return Some((ModelStreamItem::Started, state));
+        }
+        if state.finished {
+            if state.terminal_emitted {
+                return None;
+            }
+            state.terminal_emitted = true;
+            return match std::mem::take(&mut state.acc).into_response() {
+                Ok(response) => Some((ModelStreamItem::Completed(response), state)),
+                Err(error) => {
+                    let provider_error = ProviderError {
+                        provider: state.provider.clone(),
+                        model: Some(state.model.clone()),
+                        code: Some("invalid_tool_arguments".to_string()),
+                        message: error.to_string(),
+                        retryable: false,
+                        ..ProviderError::default()
+                    };
+                    Some((ModelStreamItem::ProviderFailed(provider_error), state))
+                }
+            };
+        }
+        match state.bytes.next().await {
+            Some(Ok(chunk)) => {
+                state.buf.extend_from_slice(&chunk);
+                state.drain_lines();
+            }
+            Some(Err(error)) => {
+                state.finished = true;
+                state.terminal_emitted = true;
+                let provider_error = ProviderError {
+                    provider: state.provider.clone(),
+                    model: Some(state.model.clone()),
+                    message: error.to_string(),
+                    retryable: true,
+                    ..ProviderError::default()
+                };
+                return Some((ModelStreamItem::ProviderFailed(provider_error), state));
+            }
+            None => {
+                // Drain any final `data:` line the provider sent without a
+                // trailing newline before terminating.
+                state.drain_remaining();
+                state.finished = true;
+            }
+        }
+    }
+}

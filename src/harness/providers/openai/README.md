@@ -21,9 +21,10 @@ It:
    `AssistantMessage`, `ToolCall`s, `Usage`, and finish reason — or, for
    streaming, a `ModelStream` of `ModelStreamItem`s.
 
-The wire (de)serialization shapes live in `types.rs`; `mod.rs` owns only the
-translation logic and the HTTP transport, keeping OpenAI-specific JSON out of
-the rest of the harness.
+The wire (de)serialization shapes live in `types.rs`; `transport.rs`,
+`convert.rs`, and `sse.rs` own the HTTP transport, request/response
+translation, and SSE decoding respectively, keeping OpenAI-specific JSON out
+of the rest of the harness.
 
 ## Construction
 
@@ -56,8 +57,7 @@ Together, Groq, OpenRouter, ...); returned ids can be fed straight into
 ## Streaming (SSE)
 
 Streaming responses are decoded by a small state machine (`SseState` /
-`SseAccumulator`, roughly lines 845+ in `mod.rs`) built on
-`futures::stream::unfold`:
+`OpenAiStreamAcc` in `sse.rs`) built on `futures::stream::unfold`:
 
 - Bytes are accumulated across chunk boundaries and only lossily decoded once
   a complete line is available, so a multi-byte UTF-8 character split across
@@ -99,6 +99,9 @@ via `provider_failure_message`. Malformed JSON bodies surface as
 
 | File | Role |
 | --- | --- |
-| `mod.rs` | `OpenAiModel`, translation logic, HTTP transport, SSE decoding. |
+| `mod.rs` | Module wiring: shared imports/constants and re-exports (`OpenAiModel`). |
+| `transport.rs` | `OpenAiModel` construction, provider presets, request building, and the `ChatModel` impl (`invoke`/`stream`). |
+| `convert.rs` | Request/response translation between harness types and the OpenAI wire format. |
+| `sse.rs` | SSE stream parsing and incremental accumulation (`SseState`, `OpenAiStreamAcc`, `sse_next`). |
 | `types.rs` | Wire (de)serialization shapes (`ModelListWire`, `ModelListing`, request/response bodies). |
 | `test.rs` | Unit tests (SSE boundary decoding, tool-call correlation, error mapping, presets). |
