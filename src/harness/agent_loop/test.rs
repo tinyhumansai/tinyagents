@@ -1614,3 +1614,203 @@ async fn middleware_control_can_interrupt_run() {
         other => panic!("expected Interrupted, got {other:?}"),
     }
 }
+
+// ── Parallel tool execution ─────────────────────────────────────────────────
+
+/// A tool that tracks how many probe tools are in flight at once (and the
+/// maximum observed), sleeping briefly so overlapping calls are observable.
+struct ConcurrencyProbeTool {
+    name: &'static str,
+    reply: &'static str,
+    delay: std::time::Duration,
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    max_seen: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl Tool<()> for ConcurrencyProbeTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        "concurrency probe"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(self.name, "concurrency probe", json!({"type": "object"}))
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        use std::sync::atomic::Ordering;
+        let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_seen.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(ToolResult::text(call.id, self.name, self.reply))
+    }
+}
+
+/// Builds an assistant response carrying several tool calls in one turn.
+fn multi_tool_call_response(calls: Vec<(&str, &str)>) -> ModelResponse {
+    let tool_calls = calls
+        .into_iter()
+        .map(|(id, name)| ToolCall::new(id, name, json!({})))
+        .collect::<Vec<_>>();
+    ModelResponse {
+        message: AssistantMessage {
+            id: Some("msg-multi".to_string()),
+            content: Vec::new(),
+            tool_calls,
+            usage: Some(Usage::new(7, 3)),
+        },
+        usage: Some(Usage::new(7, 3)),
+        finish_reason: Some("tool_calls".to_string()),
+        raw: None,
+        resolved_model: None,
+    }
+}
+
+/// Registers two probe tools sharing one active/max counter pair.
+fn probe_pair(
+    harness: &mut AgentHarness<()>,
+    delay_ms: (u64, u64),
+) -> Arc<std::sync::atomic::AtomicUsize> {
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let max_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    harness.register_tool(Arc::new(ConcurrencyProbeTool {
+        name: "alpha",
+        reply: "alpha-out",
+        delay: std::time::Duration::from_millis(delay_ms.0),
+        active: active.clone(),
+        max_seen: max_seen.clone(),
+    }));
+    harness.register_tool(Arc::new(ConcurrencyProbeTool {
+        name: "beta",
+        reply: "beta-out",
+        delay: std::time::Duration::from_millis(delay_ms.1),
+        active,
+        max_seen: max_seen.clone(),
+    }));
+    max_seen
+}
+
+#[tokio::test]
+async fn independent_tool_calls_in_one_turn_run_concurrently() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            multi_tool_call_response(vec![("call-a", "alpha"), ("call-b", "beta")]),
+            text_response("done", 4, 2),
+        ])),
+    );
+    let max_seen = probe_pair(&mut harness, (80, 80));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(run.tool_calls, 2);
+    assert_eq!(
+        max_seen.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "both tools must be in flight at once (latency ~max, not ~sum)"
+    );
+}
+
+#[tokio::test]
+async fn parallel_tool_results_keep_original_call_order_and_ids() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            multi_tool_call_response(vec![("call-a", "alpha"), ("call-b", "beta")]),
+            text_response("done", 4, 2),
+        ])),
+    );
+    // alpha finishes *after* beta; the transcript must still list alpha first.
+    let _ = probe_pair(&mut harness, (120, 0));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("run succeeds");
+
+    // user, assistant(2 tool calls), tool(alpha), tool(beta), assistant(final).
+    assert_eq!(run.messages.len(), 5);
+    let Message::Tool(first) = &run.messages[2] else {
+        panic!("expected tool message at index 2");
+    };
+    let Message::Tool(second) = &run.messages[3] else {
+        panic!("expected tool message at index 3");
+    };
+    assert_eq!(first.tool_call_id, "call-a");
+    assert_eq!(run.messages[2].text(), "alpha-out");
+    assert_eq!(second.tool_call_id, "call-b");
+    assert_eq!(run.messages[3].text(), "beta-out");
+}
+
+#[tokio::test]
+async fn tool_wrap_middleware_forces_serial_execution() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            multi_tool_call_response(vec![("call-a", "alpha"), ("call-b", "beta")]),
+            text_response("done", 4, 2),
+        ])),
+    );
+    let max_seen = probe_pair(&mut harness, (40, 40));
+    // A tool-wrap middleware holds `&mut RunContext` across each wrapped call,
+    // so the loop must fall back to serial execution.
+    harness.push_tool_middleware(Arc::new(StampToolWrap));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(run.tool_calls, 2);
+    assert_eq!(
+        max_seen.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "wrapped tool calls must never overlap"
+    );
+    // The wrap still fired around each call.
+    assert_eq!(run.messages[2].text(), "[wrapped] alpha-out");
+    assert_eq!(run.messages[3].text(), "[wrapped] beta-out");
+}
+
+#[tokio::test]
+async fn unknown_tool_recovery_keeps_its_slot_in_a_parallel_turn() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            multi_tool_call_response(vec![("call-x", "missing"), ("call-b", "beta")]),
+            text_response("done", 4, 2),
+        ])),
+    );
+    let _ = probe_pair(&mut harness, (0, 0));
+    harness.with_policy(RunPolicy {
+        unknown_tool: UnknownToolPolicy::ReturnToolError,
+        ..Default::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("run recovers from the unknown tool");
+
+    assert_eq!(run.tool_calls, 2, "recovery consumes a tool-call slot");
+    let Message::Tool(first) = &run.messages[2] else {
+        panic!("expected tool message at index 2");
+    };
+    let Message::Tool(second) = &run.messages[3] else {
+        panic!("expected tool message at index 3");
+    };
+    // The recovery message occupies the unknown call's original slot.
+    assert_eq!(first.tool_call_id, "call-x");
+    assert!(run.messages[2].text().contains("unknown tool `missing`"));
+    assert_eq!(second.tool_call_id, "call-b");
+    assert_eq!(run.messages[3].text(), "beta-out");
+}
