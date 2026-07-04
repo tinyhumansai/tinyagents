@@ -183,18 +183,23 @@ impl Diagnostic {
 
     /// Folds the diagnostic into a [`TinyAgentsError::Parse`].
     ///
-    /// When `source` is provided the message is the full caret-underline
-    /// rendering and the `line`/`column` are resolved from the primary span's
-    /// byte offset; otherwise the message is the source-free rendering and the
-    /// span's own `line`/`column` anchor is used. Either way the existing
-    /// `Parse` variant's `line`/`column` fields are preserved.
+    /// When `source` is provided *and* the primary span carries real byte
+    /// offsets, the message is the full caret-underline rendering and the
+    /// `line`/`column` are resolved from that byte offset. Otherwise (no
+    /// `source`, or a back-compat span built with [`Span::new`] — which
+    /// anchors only a `line`/`column` and leaves `start`/`end` at `0`) the
+    /// message is the source-free rendering and the span's own stored
+    /// `line`/`column` is used directly: resolving byte offset `0` against a
+    /// real file would otherwise always render `1:1`, silently discarding
+    /// whatever real position the caller anchored the span at.
     pub fn into_parse_error(self, source: Option<&SourceFile>) -> TinyAgentsError {
+        let has_offsets = self.primary.start != 0 || self.primary.end != 0;
         let (line, column, message) = match source {
-            Some(file) => {
+            Some(file) if has_offsets => {
                 let (line, column) = file.location(self.primary.start);
                 (line, column, self.render(file))
             }
-            None => (self.primary.line, self.primary.column, self.render_plain()),
+            _ => (self.primary.line, self.primary.column, self.render_plain()),
         };
         TinyAgentsError::Parse {
             message,

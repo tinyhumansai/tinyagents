@@ -221,6 +221,56 @@ fn diagnostic_renders_span_past_end_of_source_without_panic() {
 }
 
 #[test]
+fn into_parse_error_honors_stored_line_col_for_back_compat_spans_even_with_source() {
+    // `Span::new(line, column)` is the back-compat constructor for callers
+    // that only have a line/column, not a byte offset — `start`/`end` are
+    // both left at 0. Even when a `SourceFile` is supplied, resolving byte
+    // offset 0 against it would always yield 1:1, silently discarding the
+    // real position the caller anchored the span at.
+    let source = "graph g {\n  start missing\n}\n";
+    let file = SourceFile::new("flow.rag", source);
+    let span = Span::new(2, 9);
+    let diagnostic = Diagnostic::error("unknown start node", span).with_primary_label("here");
+
+    let err = diagnostic.into_parse_error(Some(&file));
+    match err {
+        crate::error::TinyAgentsError::Parse {
+            line,
+            column,
+            message,
+        } => {
+            assert_eq!(
+                (line, column),
+                (2, 9),
+                "must honor the span's stored anchor"
+            );
+            assert!(message.contains("unknown start node"), "{message}");
+        }
+        other => panic!("expected Parse error, got {other:?}"),
+    }
+}
+
+#[test]
+fn into_parse_error_uses_real_offsets_when_present() {
+    // A span with real byte offsets (built via `Span::at`) must still resolve
+    // its line/column from the source, not just echo the stored anchor —
+    // this pins the happy path the previous test's fix must not regress.
+    let source = "graph g {\n  start missing\n}\n";
+    let file = SourceFile::new("flow.rag", source);
+    let offset = source.find("missing").unwrap();
+    let span = Span::at(offset, offset + "missing".len(), 2, 9);
+    let diagnostic = Diagnostic::error("unknown start node", span).with_primary_label("here");
+
+    let err = diagnostic.into_parse_error(Some(&file));
+    match err {
+        crate::error::TinyAgentsError::Parse { line, column, .. } => {
+            assert_eq!((line, column), (2, 9));
+        }
+        other => panic!("expected Parse error, got {other:?}"),
+    }
+}
+
+#[test]
 fn severity_labels_are_lowercase() {
     assert_eq!(Severity::Error.label(), "error");
     assert_eq!(Severity::Warning.label(), "warning");
