@@ -77,7 +77,10 @@ error surfaced by a model, tool, middleware, or structured-output extraction.
 
 | File | Role |
 | --- | --- |
-| `mod.rs` | `AgentHarness::invoke` / `invoke_with_status` and the loop body. |
+| `mod.rs` | Module wiring: shared imports and the module-level doc comment. |
+| `entry.rs` | Public entry points (`invoke`/`invoke_with_status`/`invoke_streaming*`) and the shared `drive` lifecycle wrapper. |
+| `run_loop.rs` | The core loop body (`run_loop`) and response-cache decision logic. |
+| `model_call.rs` | Cache-aware retry/fallback model dispatch, the streaming variant, and the innermost `ModelBaseCall`/`ToolBaseCall` impls the middleware wrap-onion terminates into. |
 | `types.rs` | `AgentLoopResult`. |
 | `test.rs` | Unit tests (limits, retry/fallback, tool execution, structured extraction). |
 
