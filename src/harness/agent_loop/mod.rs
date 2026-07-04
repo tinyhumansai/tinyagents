@@ -321,6 +321,11 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
 
         let mut messages = input;
 
+        // The tool set is fixed for the duration of a run, so build the sorted
+        // schema vec once here instead of re-collecting, re-calling every tool's
+        // `schema()`, and re-sorting on every turn (per model call).
+        let tool_schemas = self.tools.schemas();
+
         status.mark_running(HarnessPhase::Middleware);
         self.middleware.run_before_agent(ctx, state).await?;
 
@@ -366,7 +371,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // Build the request from the working transcript, tool schemas, and
             // policy response format.
             status.mark_running(HarnessPhase::BuildingRequest);
-            let mut request = ModelRequest::new(messages.clone()).with_tools(self.tools.schemas());
+            let mut request = ModelRequest::new(messages.clone()).with_tools(tool_schemas.clone());
             if let Some(format) = &self.policy.default_response_format {
                 request = request.with_response_format(format.clone());
             }
