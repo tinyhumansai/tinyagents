@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use crate::harness::events::{AgentEvent, EventListener, EventRecord, HarnessRunStatus, LimitKind};
-use crate::harness::ids::{CallId, ComponentId, EventId, RunId, ThreadId};
+use crate::harness::ids::{CallId, ComponentId, EventId, ExecutionStatus, RunId, ThreadId};
 use crate::harness::observability::AppendWorker;
 use crate::harness::observability::{
     AgentLatencyMetrics, AgentObservation, FanOutSink, HarnessEventJournal, HarnessStatusStore,
@@ -487,4 +487,65 @@ fn fan_out_sink_reaches_all_listeners() {
     assert_eq!(b.events().len(), 1);
     assert_eq!(c.events().len(), 1);
     assert_eq!(a.events()[0].event.kind(), "state.update");
+}
+
+#[tokio::test]
+async fn in_memory_journal_evicts_oldest_run_once_max_runs_exceeded() {
+    // Regression test: without a cap, a long-lived process journaling many
+    // runs grows the `run_id -> Vec` map without bound. With a cap of 2, the
+    // third distinct run must evict the oldest ("run-0").
+    let journal = InMemoryEventJournal::with_max_runs(2);
+
+    journal
+        .append(obs("run-0", 0, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+    journal
+        .append(obs("run-1", 0, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+    assert_eq!(journal.run_count(), 2);
+
+    journal
+        .append(obs("run-2", 0, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+
+    assert_eq!(journal.run_count(), 2, "cap must not be exceeded");
+    assert!(journal.is_empty("run-0"), "oldest run must be evicted");
+    assert!(!journal.is_empty("run-1"));
+    assert!(!journal.is_empty("run-2"));
+}
+
+#[tokio::test]
+async fn status_store_evicts_oldest_terminal_run_but_never_active_ones() {
+    // Regression test: without a cap, a supervisor tracking many short-lived
+    // runs grows this map without bound. With a cap of 2: inserting a
+    // terminal run then an active one, then a third run, must evict the
+    // oldest *terminal* run rather than the active one.
+    let store = InMemoryStatusStore::with_max_runs(2);
+
+    let mut terminal = HarnessRunStatus::new(RunId::new("run-a"), ComponentId::new("agent"));
+    terminal.status = ExecutionStatus::Completed;
+    store.put_status(terminal).await.unwrap();
+
+    // Default status is Pending (active).
+    let active = HarnessRunStatus::new(RunId::new("run-b"), ComponentId::new("agent"));
+    store.put_status(active).await.unwrap();
+    assert_eq!(store.len(), 2);
+
+    let mut run_c = HarnessRunStatus::new(RunId::new("run-c"), ComponentId::new("agent"));
+    run_c.status = ExecutionStatus::Completed;
+    store.put_status(run_c).await.unwrap();
+
+    assert_eq!(store.len(), 2, "cap must not be exceeded");
+    assert!(
+        store.get_status("run-a").await.unwrap().is_none(),
+        "oldest terminal run must be evicted"
+    );
+    assert!(
+        store.get_status("run-b").await.unwrap().is_some(),
+        "active run must never be evicted"
+    );
+    assert!(store.get_status("run-c").await.unwrap().is_some());
 }

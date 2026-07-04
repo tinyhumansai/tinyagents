@@ -37,7 +37,7 @@ pub(crate) use langfuse::{clean_nulls, iso_ms};
 pub use types::*;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -149,16 +149,28 @@ impl AgentLatencyMetrics {
 // ---------------------------------------------------------------------------
 
 impl InMemoryEventJournal {
-    /// Creates a new, empty in-memory journal.
+    /// Creates a new, empty in-memory journal with the default run-retention
+    /// cap ([`DEFAULT_JOURNAL_MAX_RUNS`]).
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Creates a new, empty in-memory journal that retains at most
+    /// `max_runs` distinct `run_id` streams, evicting the oldest (by first
+    /// append) once exceeded. `0` means unbounded.
+    pub fn with_max_runs(max_runs: usize) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(EventJournalState::default())),
+            max_runs,
+        }
+    }
+
     /// Returns the number of observations stored for `run_id`.
     pub fn len(&self, run_id: &str) -> usize {
-        self.runs
+        self.state
             .lock()
             .expect("InMemoryEventJournal lock poisoned")
+            .streams
             .get(run_id)
             .map(|v| v.len())
             .unwrap_or(0)
@@ -168,27 +180,52 @@ impl InMemoryEventJournal {
     pub fn is_empty(&self, run_id: &str) -> bool {
         self.len(run_id) == 0
     }
+
+    /// Returns the number of distinct `run_id` streams currently retained.
+    pub fn run_count(&self) -> usize {
+        self.state
+            .lock()
+            .expect("InMemoryEventJournal lock poisoned")
+            .streams
+            .len()
+    }
 }
 
 #[async_trait]
 impl HarnessEventJournal for InMemoryEventJournal {
     async fn append(&self, obs: AgentObservation) -> Result<u64> {
-        let mut runs = self
-            .runs
+        let mut state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryEventJournal", e))?;
-        let entries = runs.entry(obs.run_id.as_str().to_string()).or_default();
+        let run_id = obs.run_id.as_str().to_string();
+        if !state.streams.contains_key(&run_id) {
+            state.order.push_back(run_id.clone());
+            // Evict the oldest run(s) once the cap is exceeded so a
+            // long-lived process journaling many runs doesn't grow this
+            // map without bound. `max_runs == 0` disables the cap.
+            if self.max_runs > 0 {
+                while state.order.len() > self.max_runs {
+                    if let Some(oldest) = state.order.pop_front() {
+                        state.streams.remove(&oldest);
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        let entries = state.streams.entry(run_id).or_default();
         let offset = entries.len() as u64;
         entries.push(obs);
         Ok(offset)
     }
 
     async fn read_from(&self, run_id: &str, offset: u64) -> Result<Vec<AgentObservation>> {
-        let runs = self
-            .runs
+        let state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryEventJournal", e))?;
-        let Some(entries) = runs.get(run_id) else {
+        let Some(entries) = state.streams.get(run_id) else {
             return Ok(Vec::new());
         };
         Ok(entries.iter().skip(offset as usize).cloned().collect())
@@ -233,17 +270,39 @@ impl<A: AppendStore + 'static> HarnessEventJournal for StoreEventJournal<A> {
 // InMemoryStatusStore
 // ---------------------------------------------------------------------------
 
+/// Returns `true` for statuses that are still in flight and must never be
+/// evicted to make room for new runs.
+fn is_active_status(status: &HarnessRunStatus) -> bool {
+    use crate::harness::ids::ExecutionStatus;
+    matches!(
+        status.status,
+        ExecutionStatus::Pending | ExecutionStatus::Running | ExecutionStatus::Interrupted
+    )
+}
+
 impl InMemoryStatusStore {
-    /// Creates a new, empty in-memory status store.
+    /// Creates a new, empty in-memory status store with the default
+    /// run-retention cap ([`DEFAULT_STATUS_STORE_MAX_RUNS`]).
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Creates a new, empty in-memory status store that retains at most
+    /// `max_runs` distinct runs, evicting the oldest terminal run once
+    /// exceeded. `0` means unbounded.
+    pub fn with_max_runs(max_runs: usize) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(StatusStoreState::default())),
+            max_runs,
+        }
+    }
+
     /// Returns the number of distinct runs with a recorded status.
     pub fn len(&self) -> usize {
-        self.statuses
+        self.state
             .lock()
             .expect("InMemoryStatusStore lock poisoned")
+            .statuses
             .len()
     }
 
@@ -256,28 +315,57 @@ impl InMemoryStatusStore {
 #[async_trait]
 impl HarnessStatusStore for InMemoryStatusStore {
     async fn put_status(&self, status: HarnessRunStatus) -> Result<()> {
-        let mut statuses = self
-            .statuses
+        let mut state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryStatusStore", e))?;
-        statuses.insert(status.run_id.as_str().to_string(), status);
+        let run_id = status.run_id.as_str().to_string();
+        if !state.statuses.contains_key(&run_id) {
+            state.order.push_back(run_id.clone());
+        }
+        state.statuses.insert(run_id, status);
+
+        // Evict the oldest terminal runs once the cap is exceeded so a
+        // supervisor tracking many short-lived runs doesn't grow this map
+        // without bound. Active runs are never evicted; if every retained
+        // run is still active we simply exceed the cap rather than drop
+        // in-flight state. `max_runs == 0` disables the cap.
+        if self.max_runs > 0 && state.statuses.len() > self.max_runs {
+            let mut requeue = Vec::new();
+            while state.statuses.len() > self.max_runs {
+                let Some(candidate) = state.order.pop_front() else {
+                    break;
+                };
+                match state.statuses.get(&candidate) {
+                    Some(s) if is_active_status(s) => requeue.push(candidate),
+                    Some(_) => {
+                        state.statuses.remove(&candidate);
+                    }
+                    None => {}
+                }
+            }
+            for id in requeue.into_iter().rev() {
+                state.order.push_front(id);
+            }
+        }
         Ok(())
     }
 
     async fn get_status(&self, run_id: &str) -> Result<Option<HarnessRunStatus>> {
-        let statuses = self
-            .statuses
+        let state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryStatusStore", e))?;
-        Ok(statuses.get(run_id).cloned())
+        Ok(state.statuses.get(run_id).cloned())
     }
 
     async fn list_by_thread(&self, thread_id: &str) -> Result<Vec<HarnessRunStatus>> {
-        let statuses = self
-            .statuses
+        let state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryStatusStore", e))?;
-        Ok(statuses
+        Ok(state
+            .statuses
             .values()
             .filter(|s| {
                 s.thread_id
@@ -289,11 +377,12 @@ impl HarnessStatusStore for InMemoryStatusStore {
     }
 
     async fn list_by_root(&self, root_run_id: &str) -> Result<Vec<HarnessRunStatus>> {
-        let statuses = self
-            .statuses
+        let state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryStatusStore", e))?;
-        Ok(statuses
+        Ok(state
+            .statuses
             .values()
             .filter(|s| s.root_run_id.as_str() == root_run_id)
             .cloned()
@@ -301,21 +390,14 @@ impl HarnessStatusStore for InMemoryStatusStore {
     }
 
     async fn list_active(&self) -> Result<Vec<HarnessRunStatus>> {
-        use crate::harness::ids::ExecutionStatus;
-        let statuses = self
-            .statuses
+        let state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryStatusStore", e))?;
-        Ok(statuses
+        Ok(state
+            .statuses
             .values()
-            .filter(|s| {
-                matches!(
-                    s.status,
-                    ExecutionStatus::Pending
-                        | ExecutionStatus::Running
-                        | ExecutionStatus::Interrupted
-                )
-            })
+            .filter(|s| is_active_status(s))
             .cloned()
             .collect())
     }

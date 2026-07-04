@@ -11,7 +11,7 @@
 //! implementations, sink logic, and tests live in the sibling `mod.rs` and
 //! `test.rs` files.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -195,14 +195,42 @@ pub trait HarnessEventJournal: Send + Sync {
     }
 }
 
+/// Default number of distinct `run_id` streams an [`InMemoryEventJournal`]
+/// retains before evicting the oldest (by insertion order) to bound memory.
+pub const DEFAULT_JOURNAL_MAX_RUNS: usize = 10_000;
+
+/// Inner state for [`InMemoryEventJournal`]: the per-run observation streams
+/// plus insertion order so the oldest run can be evicted once `max_runs` is
+/// exceeded.
+#[derive(Debug, Default)]
+pub(crate) struct EventJournalState {
+    pub(crate) streams: HashMap<String, Vec<AgentObservation>>,
+    /// Oldest-first insertion order of run ids, used for FIFO eviction.
+    pub(crate) order: VecDeque<String>,
+}
+
 /// In-memory [`HarnessEventJournal`] backed by a per-run `Vec`.
 ///
 /// Cheaply clonable through an inner [`Arc`]; clones share the same streams.
 /// There is no durability — entries are lost when the last clone drops.
-#[derive(Clone, Debug, Default)]
+///
+/// Retains at most [`InMemoryEventJournal::max_runs`] distinct `run_id`
+/// streams (default [`DEFAULT_JOURNAL_MAX_RUNS`]); once exceeded, the oldest
+/// run (by first-append order) is evicted wholesale to keep memory bounded
+/// across long-lived processes that journal many runs.
+#[derive(Clone, Debug)]
 pub struct InMemoryEventJournal {
-    /// `run_id → ordered observations`.
-    pub(crate) runs: Arc<Mutex<HashMap<String, Vec<AgentObservation>>>>,
+    pub(crate) state: Arc<Mutex<EventJournalState>>,
+    pub(crate) max_runs: usize,
+}
+
+impl Default for InMemoryEventJournal {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(EventJournalState::default())),
+            max_runs: DEFAULT_JOURNAL_MAX_RUNS,
+        }
+    }
 }
 
 /// [`HarnessEventJournal`] backed by any [`AppendStore`].
@@ -257,13 +285,42 @@ pub trait HarnessStatusStore: Send + Sync {
     }
 }
 
+/// Default number of distinct runs an [`InMemoryStatusStore`] retains before
+/// evicting terminal runs (oldest first) to bound memory.
+pub const DEFAULT_STATUS_STORE_MAX_RUNS: usize = 10_000;
+
+/// Inner state for [`InMemoryStatusStore`]: the `run_id → status` map plus
+/// insertion order so terminal runs can be evicted oldest-first once
+/// `max_runs` is exceeded.
+#[derive(Debug, Default)]
+pub(crate) struct StatusStoreState {
+    pub(crate) statuses: HashMap<String, HarnessRunStatus>,
+    /// Oldest-first insertion order of run ids, used for eviction.
+    pub(crate) order: VecDeque<String>,
+}
+
 /// In-memory [`HarnessStatusStore`] backed by a `run_id → status` map.
 ///
 /// Cheaply clonable through an inner [`Arc`]; clones share the same map.
-#[derive(Clone, Debug, Default)]
+///
+/// Retains at most [`InMemoryStatusStore::max_runs`] distinct runs (default
+/// [`DEFAULT_STATUS_STORE_MAX_RUNS`]). Once exceeded, the oldest **terminal**
+/// runs (anything not `Pending`/`Running`/`Interrupted`) are evicted first so
+/// an in-flight run's status is never dropped out from under it; active runs
+/// are only evicted once no terminal run remains to make room.
+#[derive(Clone, Debug)]
 pub struct InMemoryStatusStore {
-    /// `run_id → latest status`.
-    pub(crate) statuses: Arc<Mutex<HashMap<String, HarnessRunStatus>>>,
+    pub(crate) state: Arc<Mutex<StatusStoreState>>,
+    pub(crate) max_runs: usize,
+}
+
+impl Default for InMemoryStatusStore {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(StatusStoreState::default())),
+            max_runs: DEFAULT_STATUS_STORE_MAX_RUNS,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
