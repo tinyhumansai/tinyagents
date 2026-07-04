@@ -127,7 +127,24 @@ fn store_lock_err(e: impl std::fmt::Display) -> crate::error::TinyAgentsError {
 #[async_trait]
 impl VectorStore for InMemoryVectorStore {
     async fn add(&self, id: String, vector: Vec<f32>, metadata: Value) -> Result<()> {
+        if vector.is_empty() {
+            return Err(crate::error::TinyAgentsError::Validation(
+                "cannot add a zero-dimensional vector to the vector store".to_string(),
+            ));
+        }
         let mut inner = self.inner.lock().map_err(store_lock_err)?;
+        // The store's dimensionality is fixed by its first vector; every later
+        // insert must match so queries always compare like with like (a
+        // mismatched stored vector would silently score 0.0 forever).
+        if let Some(first) = inner.entries.first()
+            && first.vector.len() != vector.len()
+        {
+            return Err(crate::error::TinyAgentsError::Validation(format!(
+                "vector for id `{id}` has {} dimensions but the store holds {}-dimensional vectors",
+                vector.len(),
+                first.vector.len()
+            )));
+        }
         // Replace an existing entry with the same id so re-indexing updates it.
         // The id → index map makes the upsert O(1) instead of a linear scan.
         match inner.index.get(&id) {
@@ -154,6 +171,20 @@ impl VectorStore for InMemoryVectorStore {
             return Ok(Vec::new());
         }
         let inner = self.inner.lock().map_err(store_lock_err)?;
+        // An empty store has no dimensionality to validate against; it answers
+        // every query with no hits.
+        let Some(first) = inner.entries.first() else {
+            return Ok(Vec::new());
+        };
+        // A wrong-length query vector would cosine-score 0.0 against every
+        // entry and return arbitrary "matches"; fail loudly instead.
+        if vector.len() != first.vector.len() {
+            return Err(crate::error::TinyAgentsError::Validation(format!(
+                "query vector has {} dimensions but the store holds {}-dimensional vectors",
+                vector.len(),
+                first.vector.len()
+            )));
+        }
         // Score first (index + score only), pick the top-k, and clone ids and
         // metadata only for the winners — entries outside the top-k are never
         // cloned.
@@ -227,6 +258,14 @@ impl Retriever {
     /// Embeds `query` and returns up to `top_k` most-similar documents.
     ///
     /// Results are sorted by descending cosine similarity (most similar first).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TinyAgentsError::Validation`](crate::error::TinyAgentsError::Validation)
+    /// (from the backing store) when the query embedding's dimensionality does
+    /// not match the indexed vectors — for example when the store was indexed
+    /// with a different embedding model. An empty store never errors: it
+    /// answers every query with no hits.
     pub async fn retrieve(&self, query: &str, top_k: usize) -> Result<Vec<ScoredDoc>> {
         let mut vectors = self.model.embed(&[query.to_string()]).await?;
         let query_vector = vectors.pop().unwrap_or_default();

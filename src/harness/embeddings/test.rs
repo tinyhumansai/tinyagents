@@ -132,6 +132,76 @@ async fn vector_store_add_replaces_existing_id() {
 }
 
 #[tokio::test]
+async fn vector_store_rejects_mismatched_query_dimension() {
+    let store = InMemoryVectorStore::new();
+    store
+        .add("a".into(), vec![1.0, 0.0], json!({}))
+        .await
+        .unwrap();
+
+    let err = store.query(&[1.0, 0.0, 0.0], 1).await.unwrap_err();
+    assert!(
+        matches!(err, crate::error::TinyAgentsError::Validation(_)),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("dimensions"), "{err}");
+}
+
+#[tokio::test]
+async fn vector_store_rejects_mismatched_or_empty_add() {
+    let store = InMemoryVectorStore::new();
+    // Zero-dimensional vectors are rejected outright.
+    let err = store.add("z".into(), vec![], json!({})).await.unwrap_err();
+    assert!(
+        matches!(err, crate::error::TinyAgentsError::Validation(_)),
+        "{err:?}"
+    );
+
+    store
+        .add("a".into(), vec![1.0, 0.0], json!({}))
+        .await
+        .unwrap();
+    // The first vector fixes the store's dimensionality.
+    let err = store
+        .add("b".into(), vec![1.0, 0.0, 0.0], json!({}))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, crate::error::TinyAgentsError::Validation(_)),
+        "{err:?}"
+    );
+    assert_eq!(store.len(), 1, "rejected vectors must not be stored");
+}
+
+#[tokio::test]
+async fn vector_store_empty_store_accepts_any_query_dimension() {
+    let store = InMemoryVectorStore::new();
+    // No stored dimensionality to compare against: any query returns no hits.
+    assert!(store.query(&[1.0, 2.0, 3.0], 5).await.unwrap().is_empty());
+    assert!(store.query(&[], 5).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn retriever_rejects_query_of_wrong_dimension() {
+    // Index with a 8-dim model, then retrieve with a 4-dim model over the same
+    // store: the mismatch must surface as a Validation error, not zero-score
+    // arbitrary hits.
+    let store = Arc::new(InMemoryVectorStore::new());
+    let indexer = Retriever::new(Arc::new(MockEmbeddingModel::new(8)), store.clone());
+    indexer
+        .index(vec![("doc".into(), "some text".into(), json!({}))])
+        .await
+        .unwrap();
+
+    let querier = Retriever::new(Arc::new(MockEmbeddingModel::new(4)), store);
+    let err = querier.retrieve("some text", 1).await.unwrap_err();
+    assert!(
+        matches!(err, crate::error::TinyAgentsError::Validation(_)),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
 async fn retriever_index_and_retrieve_most_similar_first() {
     let retriever = Retriever::new(
         Arc::new(MockEmbeddingModel::new(64)),

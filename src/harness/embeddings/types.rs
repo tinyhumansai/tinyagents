@@ -156,13 +156,23 @@ pub struct ScoredDoc {
 pub trait VectorStore: Send + Sync {
     /// Adds (or overwrites, when `id` already exists) a vector with associated
     /// `metadata`.
+    ///
+    /// Implementations should reject vectors whose dimensionality does not
+    /// match the vectors already stored (and zero-length vectors) with
+    /// [`TinyAgentsError::Validation`](crate::error::TinyAgentsError::Validation),
+    /// so a store never mixes incomparable vectors.
     async fn add(&self, id: String, vector: Vec<f32>, metadata: Value) -> Result<()>;
 
     /// Returns up to `top_k` documents most similar to `vector`, sorted by
     /// descending similarity score.
     ///
     /// Returns fewer than `top_k` documents when the store holds fewer entries,
-    /// and an empty `Vec` when `top_k` is `0` or the store is empty.
+    /// and an empty `Vec` when `top_k` is `0` or the store is empty (an empty
+    /// store has no dimensionality to validate against, so any query vector is
+    /// answered with no hits). Implementations should reject a query vector
+    /// whose dimensionality does not match the stored vectors with
+    /// [`TinyAgentsError::Validation`](crate::error::TinyAgentsError::Validation)
+    /// instead of returning meaningless scores.
     async fn query(&self, vector: &[f32], top_k: usize) -> Result<Vec<ScoredDoc>>;
 }
 
@@ -201,6 +211,11 @@ pub(crate) struct VectorStoreInner {
 ///
 /// Adding a vector whose `id` already exists **replaces** the previous entry
 /// (an O(1) id-indexed upsert), so re-indexing a document updates it in place.
+///
+/// The store's dimensionality is fixed by the first vector added: later `add`s
+/// and non-empty-store `query`s with a different vector length are rejected
+/// with [`TinyAgentsError::Validation`](crate::error::TinyAgentsError::Validation),
+/// as are zero-length vectors, so every stored comparison is meaningful.
 ///
 /// # Example
 /// ```
