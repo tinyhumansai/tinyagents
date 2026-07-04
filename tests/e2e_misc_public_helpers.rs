@@ -175,6 +175,8 @@ async fn graph_reducers_streams_observability_and_status_helpers_work() {
     journal_sink.emit(GraphEvent::CheckpointSaved {
         checkpoint_id: CheckpointId::new("cp-3"),
     });
+    // Persistence is asynchronous; block until the durable log catches up.
+    journal_sink.flush();
     assert_eq!(journal.len("run-g"), 2);
     let observations = journal.read_from("run-g", 0).await.unwrap();
     assert_eq!(observations[0].step, 3);

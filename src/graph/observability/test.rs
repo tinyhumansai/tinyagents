@@ -420,6 +420,9 @@ async fn journal_sink_used_directly_forwards_to_inner() {
     // Forwarded to the live sink.
     assert_eq!(collector.len(), 3);
 
+    // Persistence is asynchronous; block until the durable log catches up.
+    sink.flush();
+
     // Journaled with dense offsets; the step is carried forward onto the
     // step-less RouteSelected event.
     let obs = journal.read_from("fixed-run", 0).await.unwrap();

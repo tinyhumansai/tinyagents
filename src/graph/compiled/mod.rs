@@ -416,7 +416,17 @@ impl<State, Update> CompiledGraph<State, Update> {
 
     fn emit(&self, event: GraphEvent) {
         if let Some(sink) = &self.event_sink {
+            // Durable sinks persist asynchronously off the executor thread. On a
+            // terminal run event, flush so a caller that reads the journal right
+            // after the run returns sees a complete log.
+            let terminal = matches!(
+                event,
+                GraphEvent::RunCompleted { .. } | GraphEvent::RunFailed { .. }
+            );
             sink.emit(event);
+            if terminal {
+                sink.flush();
+            }
         }
     }
 }

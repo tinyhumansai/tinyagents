@@ -47,10 +47,14 @@ so existing runs are unchanged.
 ## Persistence bridge
 
 `JournalGraphSink` bridges the synchronous `GraphEventSink::emit` hook to the
-async journal API with `futures::executor::block_on`, and treats persistence
-as **best-effort**: a backend error never aborts the run. Do not rely on the
-sink for delivery guarantees stronger than "usually persisted, never
-run-blocking."
+async journal API through a background `AppendWorker`: `emit` hands the
+observation to a bounded channel drained on a dedicated thread, so it never
+blocks the executor on I/O. Persistence is **best-effort**: a full queue drops
+(and counts) the overflow, backend errors are reported to stderr rather than
+propagated, and neither aborts the run. The executor calls `GraphEventSink::flush`
+after the terminal run event (and callers can call it directly) to block until
+the durable log has caught up. Do not rely on the sink for delivery guarantees
+stronger than "usually persisted, never run-blocking."
 
 ## Files
 
