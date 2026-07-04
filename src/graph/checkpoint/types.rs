@@ -75,10 +75,20 @@ pub enum DurabilityMode {
     /// durable before any successor node runs — the strongest guarantee.
     #[default]
     Sync,
-    /// Persist after the step's state is committed, conceptually while the next
-    /// step executes. Currently treated like [`DurabilityMode::Sync`]: the
-    /// checkpoint is written at the boundary, but the mode documents the intent
-    /// to move persistence off the critical path.
+    /// Persist off the critical path: the boundary checkpoint write is handed
+    /// to a spawned background task while the next step executes, so superstep
+    /// latency does not pay for checkpoint I/O.
+    ///
+    /// Failure semantics: a background write error is **not** silently lost.
+    /// The executor records it and fails the run at the next durability
+    /// boundary that observes it; at the terminal boundary (and at any
+    /// interrupt boundary) every in-flight write is awaited, so a completed
+    /// run's result always reflects its checkpoints' persistence. The final
+    /// (terminal) and interrupt checkpoints themselves are always written
+    /// synchronously. The `CheckpointSaved` event for a background write is
+    /// emitted when the write completes, so its ordering relative to later
+    /// step events is not deterministic. Outside a tokio runtime this mode
+    /// degrades to [`DurabilityMode::Sync`].
     Async,
     /// Persist only the final checkpoint when the graph exits (or pauses on an
     /// interrupt). Intermediate boundaries are not written, trading

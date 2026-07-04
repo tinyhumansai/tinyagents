@@ -121,6 +121,89 @@ impl<State, Update> Clone for CompiledGraph<State, Update> {
     }
 }
 
+/// Tracks checkpoint writes handed to background tasks under
+/// [`DurabilityMode::Async`].
+///
+/// # Failure semantics
+///
+/// Async durability is fire-and-forget for *latency*, never for *outcome*: a
+/// background `put` error is recorded here rather than dropped, and the
+/// executor surfaces it at the next durability boundary
+/// ([`Self::take_failure`]) or — at the latest — when the run drains all
+/// in-flight writes at its terminal/interrupt boundary ([`Self::drain`]). A
+/// run therefore never reports success while one of its checkpoints silently
+/// failed to persist.
+#[derive(Default)]
+pub(crate) struct AsyncCheckpointWrites {
+    /// In-flight (or finished-but-unharvested) background writes, in the order
+    /// they were spawned.
+    handles: Vec<tokio::task::JoinHandle<crate::error::Result<CheckpointId>>>,
+}
+
+impl AsyncCheckpointWrites {
+    /// Tracks one spawned background write.
+    pub(crate) fn push(
+        &mut self,
+        handle: tokio::task::JoinHandle<crate::error::Result<CheckpointId>>,
+    ) {
+        self.handles.push(handle);
+    }
+
+    /// Harvests writes that have already finished, without blocking on the
+    /// ones still in flight. Returns the first error found (a failed `put` or
+    /// a panicked task), or `None` when every finished write succeeded.
+    pub(crate) async fn take_failure(&mut self) -> Option<crate::error::TinyAgentsError> {
+        let mut failure = None;
+        let mut remaining = Vec::with_capacity(self.handles.len());
+        for handle in self.handles.drain(..) {
+            if !handle.is_finished() {
+                remaining.push(handle);
+                continue;
+            }
+            // Finished, so this await is immediate.
+            if let Some(err) = Self::harvest(handle.await)
+                && failure.is_none()
+            {
+                failure = Some(err);
+            }
+        }
+        self.handles = remaining;
+        failure
+    }
+
+    /// Awaits every in-flight write. Returns the first error (spawn order),
+    /// after all writes have settled. This is the "final await at run end":
+    /// terminal, interrupt, and failure boundaries drain before returning so
+    /// the run result reflects persistence failures.
+    pub(crate) async fn drain(&mut self) -> crate::error::Result<()> {
+        let mut failure = None;
+        for handle in self.handles.drain(..) {
+            if let Some(err) = Self::harvest(handle.await)
+                && failure.is_none()
+            {
+                failure = Some(err);
+            }
+        }
+        match failure {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+    /// Maps one settled join result onto its error, if any.
+    fn harvest(
+        joined: std::result::Result<crate::error::Result<CheckpointId>, tokio::task::JoinError>,
+    ) -> Option<crate::error::TinyAgentsError> {
+        match joined {
+            Ok(Ok(_)) => None,
+            Ok(Err(err)) => Some(err),
+            Err(join_err) => Some(crate::error::TinyAgentsError::Checkpoint(format!(
+                "background checkpoint write task failed: {join_err}"
+            ))),
+        }
+    }
+}
+
 /// The result of a durable graph run.
 ///
 /// Carries the final committed state, the visited node history, the superstep

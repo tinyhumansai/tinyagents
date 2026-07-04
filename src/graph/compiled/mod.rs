@@ -71,6 +71,8 @@ mod types;
 
 pub use types::{CompiledGraph, GraphExecution, GraphInput, ResumeTarget, StateSnapshot};
 
+pub(crate) use types::AsyncCheckpointWrites;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -315,11 +317,15 @@ impl<State, Update> CompiledGraph<State, Update> {
     /// persisted.
     ///
     /// The default is [`DurabilityMode::Sync`] (persist before the next step).
-    /// [`DurabilityMode::Async`] is currently treated like `Sync` — it persists
-    /// the boundary state once committed — and documents the intent to move
-    /// persistence off the critical path. [`DurabilityMode::Exit`] persists only
-    /// the terminal checkpoint (and any interrupt boundary, which is required
-    /// for resume), skipping intermediate boundaries.
+    /// [`DurabilityMode::Async`] hands non-terminal boundary writes to spawned
+    /// background tasks so checkpoint I/O stays off the superstep critical
+    /// path; a failed background write fails the run at the next durability
+    /// boundary, and every in-flight write is awaited at the terminal /
+    /// interrupt boundary so the run result reflects persistence failures (see
+    /// [`DurabilityMode::Async`] for the full semantics).
+    /// [`DurabilityMode::Exit`] persists only the terminal checkpoint (and any
+    /// interrupt boundary, which is required for resume), skipping
+    /// intermediate boundaries.
     pub fn with_durability(mut self, durability: DurabilityMode) -> Self {
         self.durability = durability;
         self

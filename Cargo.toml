@@ -27,9 +27,11 @@ sha2 = "0.10"
 thiserror = "2"
 
 # Async runtime primitives used by the streaming pipeline. The library only
-# needs the lightweight pieces (synchronization + timers); the full
-# multi-threaded runtime stays a dev-dependency for examples and tests.
-tokio = { version = "1", default-features = false, features = ["sync", "time", "macros"] }
+# needs the lightweight pieces (synchronization + timers + task spawning for
+# `DurabilityMode::Async` background checkpoint writes and `spawn_blocking`
+# file I/O); the full multi-threaded runtime stays a dev-dependency for
+# examples and tests.
+tokio = { version = "1", default-features = false, features = ["sync", "time", "macros", "rt"] }
 
 # HTTP client used by hosted providers and the embedded Langfuse exporter. The
 # `stream` feature enables `Response::bytes_stream` for Server-Sent-Events
