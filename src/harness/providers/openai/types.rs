@@ -103,6 +103,13 @@ pub struct ChunkDeltaWire {
     /// Incremental text fragment, when present.
     #[serde(default)]
     pub content: Option<String>,
+    /// Incremental reasoning/thinking fragment used by some OpenAI-compatible
+    /// providers (for example DeepSeek-compatible streams).
+    #[serde(default)]
+    pub reasoning_content: Option<Value>,
+    /// Alternate reasoning/thinking fragment key used by some gateways.
+    #[serde(default)]
+    pub reasoning: Option<Value>,
     /// Incremental tool-call fragments, correlated by `index`.
     #[serde(default)]
     pub tool_calls: Vec<ToolCallChunkWire>,
@@ -272,6 +279,13 @@ pub struct ResponseMessageWire {
     /// Textual content, when present.
     #[serde(default)]
     pub content: Option<String>,
+    /// Reasoning/thinking content on non-streaming responses, when a compatible
+    /// provider exposes it. Kept off visible assistant text by the translator.
+    #[serde(default)]
+    pub reasoning_content: Option<Value>,
+    /// Alternate reasoning/thinking field used by some gateways.
+    #[serde(default)]
+    pub reasoning: Option<Value>,
     /// Tool calls requested by the model.
     #[serde(default)]
     pub tool_calls: Vec<ToolCallWire>,
@@ -292,6 +306,9 @@ pub struct UsageWire {
     /// Optional input-token breakdown (carries cached tokens).
     #[serde(default)]
     pub prompt_tokens_details: Option<PromptTokensDetailsWire>,
+    /// Optional completion-token breakdown (carries reasoning tokens).
+    #[serde(default)]
+    pub completion_tokens_details: Option<CompletionTokensDetailsWire>,
 }
 
 /// The `prompt_tokens_details` breakdown of a [`UsageWire`].
@@ -300,6 +317,14 @@ pub struct PromptTokensDetailsWire {
     /// Input tokens served from OpenAI's prompt cache.
     #[serde(default)]
     pub cached_tokens: u64,
+}
+
+/// The `completion_tokens_details` breakdown of a [`UsageWire`].
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct CompletionTokensDetailsWire {
+    /// Output tokens spent on hidden reasoning/thinking.
+    #[serde(default)]
+    pub reasoning_tokens: u64,
 }
 
 // ---------------------------------------------------------------------------

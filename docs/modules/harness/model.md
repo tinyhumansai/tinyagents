@@ -412,6 +412,12 @@ pub enum ModelStreamItem {
 }
 ```
 
+`MessageDelta` carries separate visible text and reasoning/thinking fields.
+Provider adapters must map exposed thinking fragments, such as
+OpenAI-compatible `reasoning_content` or `reasoning` deltas, onto the reasoning
+field so UIs can render them without appending them to final assistant text.
+Middleware receives the same side channel through `ModelDelta.reasoning`.
+
 The final merged stream must be equivalent to `invoke` for the same provider
 where the provider supports both paths. If a provider emits cumulative usage
 rather than delta usage, the adapter must normalize it before sending usage

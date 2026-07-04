@@ -255,7 +255,8 @@ fn parses_openai_response_with_content_tool_call_and_usage() {
             "prompt_tokens": 42,
             "completion_tokens": 8,
             "total_tokens": 50,
-            "prompt_tokens_details": { "cached_tokens": 30 }
+            "prompt_tokens_details": { "cached_tokens": 30 },
+            "completion_tokens_details": { "reasoning_tokens": 6 }
         }
     });
 
@@ -281,6 +282,7 @@ fn parses_openai_response_with_content_tool_call_and_usage() {
     assert_eq!(usage.output_tokens, 8);
     assert_eq!(usage.total_tokens, 50);
     assert_eq!(usage.cache_read_tokens, 30);
+    assert_eq!(usage.reasoning_tokens, 6);
 
     // Raw JSON preserved verbatim.
     assert_eq!(response.raw, Some(body));
@@ -548,6 +550,47 @@ async fn sse_stream_parses_text_tool_calls_and_usage() {
     assert_eq!(calls[0].arguments, json!({ "q": 42 }));
     assert_eq!(response.finish_reason.as_deref(), Some("tool_calls"));
     assert_eq!(response.usage.unwrap().total_tokens, 8);
+}
+
+#[tokio::test]
+async fn sse_stream_preserves_reasoning_content_as_side_channel() {
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think \"}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"reasoning\":\"carefully\"}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n"
+            .to_vec(),
+        b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":7,\"total_tokens\":12,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+
+    let reasoning: String = items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta.reasoning.clone()),
+            _ => None,
+        })
+        .collect();
+    let text: String = items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning, "think carefully");
+    assert_eq!(text, "answer");
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    assert_eq!(merged.reasoning(), "think carefully");
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "answer");
+    let usage = response.usage.unwrap();
+    assert_eq!(usage.reasoning_tokens, 4);
 }
 
 #[tokio::test]

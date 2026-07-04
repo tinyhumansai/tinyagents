@@ -432,6 +432,9 @@ pub struct ModelDelta {
     /// Incremental text content.
     #[serde(default)]
     pub content: String,
+    /// Incremental reasoning/thinking content, kept separate from visible text.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning: String,
     /// Incremental tool-call fragment, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call: Option<ToolDelta>,

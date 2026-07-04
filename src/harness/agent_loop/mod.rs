@@ -1039,6 +1039,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 let mut model_delta = ModelDelta {
                     call_id: call_id.as_str().to_string(),
                     content: message_delta.text.clone(),
+                    reasoning: message_delta.reasoning.clone(),
                     tool_call: message_delta.tool_call.clone(),
                 };
                 self.middleware

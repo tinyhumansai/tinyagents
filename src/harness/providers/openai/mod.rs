@@ -837,8 +837,52 @@ fn convert_usage(wire: UsageWire) -> Usage {
             .prompt_tokens_details
             .map(|d| d.cached_tokens)
             .unwrap_or(0),
+        reasoning_tokens: wire
+            .completion_tokens_details
+            .map(|d| d.reasoning_tokens)
+            .unwrap_or(0),
         ..Usage::default()
     }
+}
+
+/// Normalizes provider-specific reasoning/thinking payloads into text.
+///
+/// OpenAI-compatible gateways do not agree on this field: some stream a plain
+/// `reasoning_content` string, others use `reasoning`, and a few wrap text in
+/// an object/array. Preserve renderable text when obvious and ignore opaque
+/// shapes rather than failing an otherwise valid completion.
+fn reasoning_value_text(value: Value) -> Option<String> {
+    match value {
+        Value::String(text) => (!text.is_empty()).then_some(text),
+        Value::Object(map) => ["text", "content", "summary"]
+            .into_iter()
+            .find_map(|key| map.get(key).and_then(Value::as_str))
+            .filter(|text| !text.is_empty())
+            .map(str::to_string),
+        Value::Array(values) => {
+            let text = values
+                .into_iter()
+                .filter_map(reasoning_value_text)
+                .collect::<String>();
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    }
+}
+
+/// Extracts the reasoning/thinking text from a streamed delta, accepting the
+/// common OpenAI-compatible aliases.
+fn delta_reasoning_text(delta: &mut ChunkDeltaWire) -> String {
+    let mut text = String::new();
+    for value in [delta.reasoning_content.take(), delta.reasoning.take()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(fragment) = reasoning_value_text(value) {
+            text.push_str(&fragment);
+        }
+    }
+    text
 }
 
 // ---------------------------------------------------------------------------
@@ -884,9 +928,17 @@ impl OpenAiStreamAcc {
             self.usage = Some(usage);
             pending.push_back(ModelStreamItem::UsageDelta(usage));
         }
-        for choice in chunk.choices {
+        for mut choice in chunk.choices {
             if let Some(reason) = choice.finish_reason {
                 self.finish_reason = Some(reason);
+            }
+            let reasoning = delta_reasoning_text(&mut choice.delta);
+            if !reasoning.is_empty() {
+                pending.push_back(ModelStreamItem::MessageDelta(MessageDelta {
+                    text: String::new(),
+                    reasoning,
+                    tool_call: None,
+                }));
             }
             if let Some(content) = choice.delta.content.filter(|c| !c.is_empty()) {
                 self.text.push_str(&content);

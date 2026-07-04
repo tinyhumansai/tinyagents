@@ -14,13 +14,14 @@ use serde_json::json;
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::limits::RunLimits;
-use crate::harness::message::{AssistantMessage, ContentBlock, Message};
+use crate::harness::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
 use crate::harness::middleware::{
     AgentRun, Middleware, MiddlewareModelOutcome, MiddlewareToolOutcome, ModelHandler,
     ModelMiddleware, ToolHandler, ToolMiddleware,
 };
 use crate::harness::model::{
-    ChatModel, ModelProfile, ModelRequest, ModelResponse, ResponseFormat, ToolChoice,
+    ChatModel, ModelProfile, ModelRequest, ModelResponse, ModelStreamItem, ResponseFormat,
+    ToolChoice,
 };
 use crate::harness::providers::MockModel;
 use crate::harness::retry::{FallbackPolicy, RetryPolicy};
@@ -856,6 +857,7 @@ fn agent_run_default_is_empty() {
 struct DeltaRecorder {
     count: Arc<Mutex<usize>>,
     texts: Arc<Mutex<Vec<String>>>,
+    reasonings: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -871,6 +873,10 @@ impl Middleware<(), ()> for DeltaRecorder {
     ) -> Result<()> {
         *self.count.lock().unwrap() += 1;
         self.texts.lock().unwrap().push(delta.content.clone());
+        self.reasonings
+            .lock()
+            .unwrap()
+            .push(delta.reasoning.clone());
         Ok(())
     }
 }
@@ -881,6 +887,7 @@ async fn invoke_streaming_fires_on_model_delta_per_delta_and_accumulates() {
 
     let count = Arc::new(Mutex::new(0usize));
     let texts = Arc::new(Mutex::new(Vec::new()));
+    let reasonings = Arc::new(Mutex::new(Vec::new()));
 
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model(
@@ -890,6 +897,7 @@ async fn invoke_streaming_fires_on_model_delta_per_delta_and_accumulates() {
     harness.push_middleware(Arc::new(DeltaRecorder {
         count: count.clone(),
         texts: texts.clone(),
+        reasonings: reasonings.clone(),
     }));
 
     let run = harness
@@ -912,6 +920,64 @@ async fn invoke_streaming_fires_on_model_delta_per_delta_and_accumulates() {
         *texts.lock().unwrap(),
         vec!["Hel".to_string(), "lo, ".to_string(), "world".to_string()]
     );
+    assert_eq!(
+        *reasonings.lock().unwrap(),
+        vec![String::new(), String::new(), String::new()]
+    );
+}
+
+#[tokio::test]
+async fn invoke_streaming_forwards_reasoning_deltas_to_middleware_and_events() {
+    use crate::harness::testkit::{EventRecorder, StreamingMock};
+
+    let count = Arc::new(Mutex::new(0usize));
+    let texts = Arc::new(Mutex::new(Vec::new()));
+    let reasonings = Arc::new(Mutex::new(Vec::new()));
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "stream",
+        Arc::new(StreamingMock::new(vec![
+            ModelStreamItem::Started,
+            ModelStreamItem::MessageDelta(MessageDelta::reasoning("think ")),
+            ModelStreamItem::MessageDelta(MessageDelta::text("answer")),
+            ModelStreamItem::Completed(ModelResponse::assistant("answer")),
+        ])),
+    );
+    harness.push_middleware(Arc::new(DeltaRecorder {
+        count: count.clone(),
+        texts: texts.clone(),
+        reasonings: reasonings.clone(),
+    }));
+
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(RunConfig::new("stream-run"), ()).with_events(recorder.sink());
+
+    let run = harness
+        .invoke_streaming_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("streaming run succeeds");
+
+    assert_eq!(run.text(), Some("answer".to_string()));
+    assert_eq!(*count.lock().unwrap(), 2);
+    assert_eq!(
+        *texts.lock().unwrap(),
+        vec![String::new(), "answer".to_string()]
+    );
+    assert_eq!(
+        *reasonings.lock().unwrap(),
+        vec!["think ".to_string(), String::new()]
+    );
+
+    let event_reasoning: String = recorder
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            crate::harness::events::AgentEvent::ModelDelta { delta, .. } => Some(delta.reasoning),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(event_reasoning, "think ");
 }
 
 #[tokio::test]
