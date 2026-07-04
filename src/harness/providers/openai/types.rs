@@ -245,6 +245,10 @@ pub struct UsageWire {
     /// Optional input-token breakdown (carries cached tokens).
     #[serde(default)]
     pub prompt_tokens_details: Option<PromptTokensDetailsWire>,
+    /// Optional output-token breakdown (carries reasoning tokens for
+    /// o-series/reasoning models).
+    #[serde(default)]
+    pub completion_tokens_details: Option<CompletionTokensDetailsWire>,
 }
 
 /// The `prompt_tokens_details` breakdown of a [`UsageWire`].
@@ -253,6 +257,18 @@ pub struct PromptTokensDetailsWire {
     /// Input tokens served from OpenAI's prompt cache.
     #[serde(default)]
     pub cached_tokens: u64,
+}
+
+/// The `completion_tokens_details` breakdown of a [`UsageWire`].
+///
+/// OpenAI reports `reasoning_tokens` here for reasoning models (the o-series);
+/// they are a subset of `completion_tokens` already billed as output, surfaced
+/// so callers can price and display the reasoning portion separately.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct CompletionTokensDetailsWire {
+    /// Output tokens spent on model reasoning, when reported.
+    #[serde(default)]
+    pub reasoning_tokens: u64,
 }
 
 // ---------------------------------------------------------------------------

@@ -714,6 +714,10 @@ fn convert_usage(wire: UsageWire) -> Usage {
             .prompt_tokens_details
             .map(|d| d.cached_tokens)
             .unwrap_or(0),
+        reasoning_tokens: wire
+            .completion_tokens_details
+            .map(|d| d.reasoning_tokens)
+            .unwrap_or(0),
         ..Usage::default()
     }
 }

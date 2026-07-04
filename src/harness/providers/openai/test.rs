@@ -287,6 +287,52 @@ fn parses_openai_response_with_content_tool_call_and_usage() {
 }
 
 #[test]
+fn parses_reasoning_tokens_from_completion_details() {
+    // A reasoning-model response carries reasoning tokens under
+    // `completion_tokens_details`.
+    let body = json!({
+        "id": "chatcmpl-o1",
+        "choices": [
+            { "message": { "role": "assistant", "content": "42" }, "finish_reason": "stop" }
+        ],
+        "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 100,
+            "total_tokens": 112,
+            "completion_tokens_details": { "reasoning_tokens": 64 }
+        }
+    });
+
+    let usage = parse_response(body)
+        .unwrap()
+        .usage
+        .expect("usage present");
+    assert_eq!(usage.output_tokens, 100);
+    assert_eq!(
+        usage.reasoning_tokens, 64,
+        "reasoning tokens must map from completion_tokens_details"
+    );
+}
+
+#[test]
+fn usage_reasoning_tokens_default_to_zero_when_absent() {
+    // Non-reasoning responses omit `completion_tokens_details` entirely.
+    let body = json!({
+        "id": "chatcmpl-plain",
+        "choices": [
+            { "message": { "role": "assistant", "content": "hi" }, "finish_reason": "stop" }
+        ],
+        "usage": { "prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4 }
+    });
+
+    let usage = parse_response(body)
+        .unwrap()
+        .usage
+        .expect("usage present");
+    assert_eq!(usage.reasoning_tokens, 0);
+}
+
+#[test]
 fn parse_response_errors_on_invalid_tool_argument_json() {
     let body = json!({
         "id": "chatcmpl-badargs",
