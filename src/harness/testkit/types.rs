@@ -255,6 +255,7 @@ pub struct EventRecorder {
 ///     AgentEvent::ModelStarted { call_id: CallId::new("c1"), model: "gpt".into() },
 ///     AgentEvent::ModelCompleted {
 ///         call_id: CallId::new("c1"),
+///         started_at_ms: None,
 ///         usage: None,
 ///         input: None,
 ///         output: None,

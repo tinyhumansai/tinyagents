@@ -385,6 +385,12 @@ where
         // Seeded from the resumed checkpoint so a join's precondition survives
         // an interrupt/failure boundary.
         let mut barrier_arrivals: HashMap<NodeId, HashSet<NodeId>> = initial_barriers;
+        // Under `DurabilityMode::Async`, boundary checkpoint writes run on
+        // spawned background tasks tracked here. Failures are surfaced at the
+        // next durability boundary; every terminal path drains the tracker so
+        // the run result reflects persistence failures (see
+        // `AsyncCheckpointWrites`).
+        let mut async_writes = AsyncCheckpointWrites::default();
 
         self.emit(GraphEvent::RunStarted {
             run_id: run_id.clone(),
@@ -524,6 +530,12 @@ where
                 let mut pending = successors;
                 pending.extend(active[failed_index..].iter().cloned());
                 let completed_nodes = activation_nodes(&active[..failed_index]);
+                // Settle any in-flight Async background writes before the
+                // failure-boundary persist so earlier boundaries are durable
+                // when the run aborts. Like the persist error below, a
+                // background write error must not replace the original node
+                // error, so it is intentionally dropped here.
+                let _ = async_writes.drain().await;
                 // A failure-boundary persist error must not replace the original
                 // node error: keep reporting the node error and just drop the
                 // resumable checkpoint reference.
@@ -585,6 +597,15 @@ where
                 pending.extend(active[index..].iter().cloned());
                 let pending_nodes = activation_nodes(&pending);
                 let interrupt_id = InterruptId::new(emitted.id.clone());
+                // An interrupt hands control back to the caller expecting a
+                // fully durable pause point: settle any in-flight Async
+                // background writes first, failing the run if one was lost
+                // (a broken lineage cannot be safely resumed from).
+                if let Err(err) = async_writes.drain().await {
+                    return self
+                        .fail_and_return(&run_id, &thread_id, started_at, steps, err)
+                        .await;
+                }
                 let checkpoint_id = match self
                     .persist_checkpoint(
                         &thread_id,
@@ -649,14 +670,51 @@ where
 
             // Persist a boundary checkpoint. Under `Exit` durability only the
             // terminal boundary (the step that empties the active set) is
-            // written; `Sync`/`Async` persist every boundary.
+            // written; `Sync`/`Async` persist every boundary. `Async` hands
+            // non-terminal writes to background tasks instead of awaiting them
+            // inline.
             let persist_now = match self.durability {
                 DurabilityMode::Exit => next.is_empty(),
                 DurabilityMode::Sync | DurabilityMode::Async => true,
             };
+            // Async durability: surface any background write failure recorded
+            // since the previous boundary. The run fails at the first
+            // durability boundary that observes the loss rather than silently
+            // continuing with a hole in its lineage.
+            if let Some(err) = async_writes.take_failure().await {
+                return self
+                    .fail_and_return(&run_id, &thread_id, started_at, steps, err)
+                    .await;
+            }
+            let terminal = next.is_empty();
             let checkpoint_id = if persist_now {
-                match self
-                    .persist_checkpoint(
+                let persisted = if matches!(self.durability, DurabilityMode::Async) && !terminal {
+                    self.persist_checkpoint_nonblocking(
+                        &mut async_writes,
+                        &thread_id,
+                        &run_id,
+                        &state,
+                        &next,
+                        &completed_nodes,
+                        &barrier_arrivals,
+                        parent_checkpoint.clone(),
+                        steps,
+                        &recursion_meta,
+                        &child_runs_meta,
+                    )
+                    .await
+                } else {
+                    // Terminal boundary: drain every in-flight background
+                    // write first (the "final await at run end"), so a lost
+                    // Async checkpoint fails the run instead of being
+                    // swallowed. The final checkpoint itself is then written
+                    // synchronously in every mode.
+                    if terminal && let Err(err) = async_writes.drain().await {
+                        return self
+                            .fail_and_return(&run_id, &thread_id, started_at, steps, err)
+                            .await;
+                    }
+                    self.persist_checkpoint(
                         &thread_id,
                         &run_id,
                         &state,
@@ -671,7 +729,8 @@ where
                         &child_runs_meta,
                     )
                     .await
-                {
+                };
+                match persisted {
                     Ok(id) => id,
                     Err(persist_err) => {
                         return self
@@ -1271,10 +1330,127 @@ where
         let (Some(checkpointer), Some(thread)) = (&self.checkpointer, thread_id) else {
             return Ok(None);
         };
-        let checkpoint_id = next_checkpoint_id();
-        let checkpoint = Checkpoint {
+        let checkpoint = self.build_loop_checkpoint(
+            thread,
+            run_id,
+            state,
+            pending,
+            completed_tasks,
+            interrupts,
+            barrier_arrivals,
+            parent,
+            step,
+            source,
+            recursion,
+            child_runs,
+        );
+        let id = checkpointer.put(checkpoint).await?;
+        self.emit(GraphEvent::CheckpointSaved {
+            checkpoint_id: id.clone(),
+        });
+        Ok(Some(id))
+    }
+
+    /// Persists a boundary checkpoint without blocking the superstep loop
+    /// ([`DurabilityMode::Async`]).
+    ///
+    /// The checkpoint id is minted up front and returned immediately so the
+    /// loop keeps chaining lineage onto it, while the actual `put` (and the
+    /// [`GraphEvent::CheckpointSaved`] emitted on its success) runs on a
+    /// spawned background task tracked in `writes`.
+    ///
+    /// # Failure semantics
+    ///
+    /// A background write error is never dropped: it is recorded in `writes`
+    /// and surfaced by the executor at the next durability boundary, or at the
+    /// latest when the run drains all in-flight writes at its terminal /
+    /// interrupt boundary — so the run result reflects persistence failures.
+    /// Because the `CheckpointSaved` event is emitted from the background
+    /// task, its ordering relative to subsequent step events is not
+    /// deterministic under `Async` durability.
+    ///
+    /// Outside a tokio runtime there is nothing to spawn onto, so the write
+    /// happens inline — degrading to [`DurabilityMode::Sync`] behavior.
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_checkpoint_nonblocking(
+        &self,
+        writes: &mut AsyncCheckpointWrites,
+        thread_id: &Option<ThreadId>,
+        run_id: &RunId,
+        state: &State,
+        pending: &[Activation],
+        completed_tasks: &[NodeId],
+        barrier_arrivals: &HashMap<NodeId, HashSet<NodeId>>,
+        parent: Option<String>,
+        step: usize,
+        recursion: &serde_json::Value,
+        child_runs: &serde_json::Value,
+    ) -> Result<Option<CheckpointId>> {
+        let (Some(checkpointer), Some(thread)) = (&self.checkpointer, thread_id) else {
+            return Ok(None);
+        };
+        let checkpoint = self.build_loop_checkpoint(
+            thread,
+            run_id,
+            state,
+            pending,
+            completed_tasks,
+            Vec::new(),
+            barrier_arrivals,
+            parent,
+            step,
+            "loop",
+            recursion,
+            child_runs,
+        );
+        let id = CheckpointId::new(checkpoint.checkpoint_id.clone());
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let checkpointer = Arc::clone(checkpointer);
+                let sink = self.event_sink.clone();
+                writes.push(handle.spawn(async move {
+                    let id = checkpointer.put(checkpoint).await?;
+                    if let Some(sink) = sink {
+                        sink.emit(GraphEvent::CheckpointSaved {
+                            checkpoint_id: id.clone(),
+                        });
+                    }
+                    Ok(id)
+                }));
+                Ok(Some(id))
+            }
+            Err(_) => {
+                let id = checkpointer.put(checkpoint).await?;
+                self.emit(GraphEvent::CheckpointSaved {
+                    checkpoint_id: id.clone(),
+                });
+                Ok(Some(id))
+            }
+        }
+    }
+
+    /// Builds the loop-boundary [`Checkpoint`] record shared by the sync and
+    /// async persist paths, minting a fresh checkpoint id.
+    #[allow(clippy::too_many_arguments)]
+    fn build_loop_checkpoint(
+        &self,
+        thread: &ThreadId,
+        run_id: &RunId,
+        state: &State,
+        pending: &[Activation],
+        completed_tasks: &[NodeId],
+        interrupts: Vec<Interrupt>,
+        barrier_arrivals: &HashMap<NodeId, HashSet<NodeId>>,
+        parent: Option<String>,
+        step: usize,
+        source: &str,
+        recursion: &serde_json::Value,
+        child_runs: &serde_json::Value,
+    ) -> Checkpoint<State> {
+        Checkpoint {
             thread_id: thread.to_string(),
-            checkpoint_id,
+            checkpoint_id: next_checkpoint_id(),
             run_id: Some(run_id.to_string()),
             parent_checkpoint_id: parent,
             namespace: self.namespace.clone(),
@@ -1291,12 +1467,7 @@ where
                 "recursion": recursion,
                 "child_runs": child_runs,
             }),
-        };
-        let id = checkpointer.put(checkpoint).await?;
-        self.emit(GraphEvent::CheckpointSaved {
-            checkpoint_id: id.clone(),
-        });
-        Ok(Some(id))
+        }
     }
 
     fn base_status(

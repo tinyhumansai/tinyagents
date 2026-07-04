@@ -18,6 +18,11 @@ Each step:
 3. Collect updates / commands / interrupts.
 4. Apply the reducer at the step boundary.
 5. Persist a checkpoint at the boundary (when a checkpointer is configured).
+   Under `DurabilityMode::Async` non-terminal boundary writes run on spawned
+   background tasks; a failed write fails the run at the next durability
+   boundary, and all in-flight writes are drained at the terminal / interrupt /
+   failure boundary so the run result reflects persistence failures (see
+   `docs/modules/graph/checkpointing.md`).
 6. Select the next active set.
 
 The loop stops when the active set empties, every branch reaches `END`, an

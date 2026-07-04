@@ -164,11 +164,19 @@ The checkpoint core lives in `src/graph/checkpoint/`:
 - `CheckpointSource` — `Input | Loop | Update | Fork` with serde (lowercase wire
   form) and `Display`. `CheckpointSource::parse` recovers it from a string.
 - `DurabilityMode` — `Sync | Async | Exit`, default `Sync`. `Sync` persists a
-  checkpoint before the next step starts. `Async` persists the boundary state
-  once committed (today identical to `Sync`; the variant documents moving
-  persistence off the critical path). `Exit` persists only the terminal
-  checkpoint and any interrupt boundary (interrupts must persist so the run can
-  resume). Set it with `CompiledGraph::with_durability(mode)`.
+  checkpoint before the next step starts. `Async` hands non-terminal boundary
+  writes to spawned background tasks so checkpoint I/O stays off the superstep
+  critical path; the checkpoint id is minted up front so lineage stays chained.
+  A failed background write is never silently lost: the run fails at the next
+  durability boundary that observes it, and every in-flight write is awaited
+  (drained) at the terminal, interrupt, and failure boundaries so the run
+  result reflects persistence failures. The terminal and interrupt checkpoints
+  themselves are always written synchronously; `CheckpointSaved` events for
+  background writes arrive when the write completes, so their ordering
+  relative to later step events is not deterministic. Outside a tokio runtime
+  `Async` degrades to `Sync`. `Exit` persists only the terminal checkpoint and
+  any interrupt boundary (interrupts must persist so the run can resume). Set
+  it with `CompiledGraph::with_durability(mode)`.
 - `CheckpointConfig { thread_id, checkpoint_id, namespace }` — checkpoint
   coordinates. `CheckpointConfig::latest(thread_id)` addresses the newest
   checkpoint at the root namespace.

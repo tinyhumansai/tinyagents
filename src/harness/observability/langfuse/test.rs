@@ -57,6 +57,7 @@ fn builds_trace_and_generation_batch() {
                     1,
                     AgentEvent::ModelCompleted {
                         call_id: CallId::new("model-call"),
+                        started_at_ms: None,
                         usage: Some(Usage {
                             input_tokens: 3,
                             output_tokens: 4,
@@ -84,6 +85,9 @@ fn builds_trace_and_generation_batch() {
     // Payload-free generation: no input/output body fields.
     assert!(events[2]["body"].get("input").is_none());
     assert!(events[2]["body"].get("output").is_none());
+    // Without a captured start time (a pre-`started_at_ms` journal entry) the
+    // start falls back to the completion timestamp, a zero-width point.
+    assert_eq!(events[2]["body"]["startTime"], events[2]["body"]["endTime"]);
 }
 
 #[test]
@@ -98,6 +102,7 @@ fn populates_generation_and_tool_io_when_captured() {
                     0,
                     AgentEvent::ModelCompleted {
                         call_id: CallId::new("model-call"),
+                        started_at_ms: Some(1_704_067_199_000),
                         usage: None,
                         input: Some(json!([{ "role": "user", "content": "hi" }])),
                         output: Some(json!({ "content": "hello there" })),
@@ -108,6 +113,7 @@ fn populates_generation_and_tool_io_when_captured() {
                     AgentEvent::ToolCompleted {
                         call_id: CallId::new("tool-call"),
                         tool_name: "lookup".to_string(),
+                        started_at_ms: Some(1_704_067_199_500),
                         input: Some(json!({ "query": "weather" })),
                         output: Some(json!("sunny")),
                     },
@@ -123,6 +129,13 @@ fn populates_generation_and_tool_io_when_captured() {
     assert_eq!(events[2]["type"], "span-create");
     assert_eq!(events[2]["body"]["input"]["query"], "weather");
     assert_eq!(events[2]["body"]["output"], "sunny");
+
+    // The loop-captured start time gives each observation a real duration
+    // (start < end) instead of the zero-width start == end point.
+    assert_eq!(events[1]["body"]["startTime"], iso_ms(1_704_067_199_000));
+    assert_eq!(events[1]["body"]["endTime"], iso_ms(1_704_067_200_000));
+    assert_eq!(events[2]["body"]["startTime"], iso_ms(1_704_067_199_500));
+    assert_eq!(events[2]["body"]["endTime"], iso_ms(1_704_067_200_001));
 
     // Observation metadata carries only lineage + event kind, not the whole
     // event payload (which would duplicate input/output already in `body`).

@@ -72,6 +72,14 @@ pub enum AgentEvent {
     ModelCompleted {
         /// Identifier for the model call that completed.
         call_id: CallId,
+        /// Wall-clock time the model call *started*, in Unix-epoch
+        /// milliseconds. Captured by the agent loop when it dispatches the
+        /// call (alongside [`AgentEvent::ModelStarted`]) so exporters can
+        /// render a real duration instead of a zero-width point. `None` for
+        /// events serialized before this field existed (`#[serde(default)]`
+        /// keeps old journals deserializable).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at_ms: Option<u64>,
         /// Token usage reported by the provider, when available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<Usage>,
@@ -115,6 +123,14 @@ pub enum AgentEvent {
         call_id: CallId,
         /// Name of the tool that was invoked.
         tool_name: String,
+        /// Wall-clock time the tool call *started*, in Unix-epoch
+        /// milliseconds. Captured by the agent loop when it dispatches the
+        /// call (alongside [`AgentEvent::ToolStarted`]) so exporters can
+        /// render a real duration instead of a zero-width point. `None` for
+        /// events serialized before this field existed (`#[serde(default)]`
+        /// keeps old journals deserializable).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at_ms: Option<u64>,
         /// The arguments the tool was invoked with, captured only when
         /// [`PayloadCapture::tool_io`][crate::harness::runtime::PayloadCapture::tool_io]
         /// is enabled. `None` in the default payload-free mode. Populated so an

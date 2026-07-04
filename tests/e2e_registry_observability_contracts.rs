@@ -171,6 +171,7 @@ fn component_metadata_and_event_kinds_are_stable_serializable_contracts() {
         },
         AgentEvent::ModelCompleted {
             call_id: CallId::new("model-1"),
+            started_at_ms: None,
             usage: None,
             input: None,
             output: None,
@@ -182,6 +183,7 @@ fn component_metadata_and_event_kinds_are_stable_serializable_contracts() {
         AgentEvent::ToolCompleted {
             call_id: CallId::new("tool-1"),
             tool_name: "lookup".into(),
+            started_at_ms: None,
             input: None,
             output: None,
         },
@@ -305,6 +307,7 @@ async fn event_sinks_journals_and_status_stores_preserve_run_lineage() {
     journal.append(AgentEvent::ToolCompleted {
         call_id: CallId::new("tool-1"),
         tool_name: "lookup".into(),
+        started_at_ms: None,
         input: None,
         output: None,
     });

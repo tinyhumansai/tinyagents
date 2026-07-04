@@ -2046,3 +2046,230 @@ async fn parallel_partial_progress_is_preserved_on_failure() {
     assert_eq!(resumed.state, 11, "1 (preserved) + 10 (re-run branch)");
     assert_eq!(resumed.status.status, ExecutionStatus::Completed);
 }
+
+// ---------------------------------------------------------------------------
+// DurabilityMode::Async
+// ---------------------------------------------------------------------------
+
+/// Delegating checkpointer whose `put` sleeps first, then records completion,
+/// so tests can observe whether the executor awaited the write inline.
+struct SlowCheckpointer {
+    inner: Arc<InMemoryCheckpointer<i32>>,
+    delay: Duration,
+    completed_puts: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Checkpointer<i32> for SlowCheckpointer {
+    async fn put(
+        &self,
+        checkpoint: crate::graph::checkpoint::Checkpoint<i32>,
+    ) -> crate::error::Result<crate::harness::ids::CheckpointId> {
+        tokio::time::sleep(self.delay).await;
+        let id = self.inner.put(checkpoint).await?;
+        self.completed_puts.fetch_add(1, AtomicOrdering::SeqCst);
+        Ok(id)
+    }
+
+    async fn get(
+        &self,
+        thread_id: &str,
+        checkpoint_id: Option<&str>,
+    ) -> crate::error::Result<Option<crate::graph::checkpoint::Checkpoint<i32>>> {
+        self.inner.get(thread_id, checkpoint_id).await
+    }
+
+    async fn list(
+        &self,
+        thread_id: &str,
+    ) -> crate::error::Result<Vec<crate::graph::checkpoint::CheckpointMetadata>> {
+        self.inner.list(thread_id).await
+    }
+
+    async fn list_threads(&self) -> crate::error::Result<Vec<String>> {
+        self.inner.list_threads().await
+    }
+
+    async fn delete_thread(&self, thread_id: &str) -> crate::error::Result<()> {
+        self.inner.delete_thread(thread_id).await
+    }
+
+    async fn delete_checkpoints(
+        &self,
+        thread_id: &str,
+        ids: &[String],
+    ) -> crate::error::Result<usize> {
+        self.inner.delete_checkpoints(thread_id, ids).await
+    }
+}
+
+/// Delegating checkpointer that fails every *non-terminal* boundary `put`
+/// (records with pending next nodes), simulating a broken store while the
+/// terminal write still succeeds.
+struct FailNonTerminalCheckpointer {
+    inner: Arc<InMemoryCheckpointer<i32>>,
+}
+
+#[async_trait::async_trait]
+impl Checkpointer<i32> for FailNonTerminalCheckpointer {
+    async fn put(
+        &self,
+        checkpoint: crate::graph::checkpoint::Checkpoint<i32>,
+    ) -> crate::error::Result<crate::harness::ids::CheckpointId> {
+        if !checkpoint.next_nodes.is_empty() {
+            return Err(crate::error::TinyAgentsError::Checkpoint(
+                "injected background write failure".to_string(),
+            ));
+        }
+        self.inner.put(checkpoint).await
+    }
+
+    async fn get(
+        &self,
+        thread_id: &str,
+        checkpoint_id: Option<&str>,
+    ) -> crate::error::Result<Option<crate::graph::checkpoint::Checkpoint<i32>>> {
+        self.inner.get(thread_id, checkpoint_id).await
+    }
+
+    async fn list(
+        &self,
+        thread_id: &str,
+    ) -> crate::error::Result<Vec<crate::graph::checkpoint::CheckpointMetadata>> {
+        self.inner.list(thread_id).await
+    }
+
+    async fn list_threads(&self) -> crate::error::Result<Vec<String>> {
+        self.inner.list_threads().await
+    }
+
+    async fn delete_thread(&self, thread_id: &str) -> crate::error::Result<()> {
+        self.inner.delete_thread(thread_id).await
+    }
+
+    async fn delete_checkpoints(
+        &self,
+        thread_id: &str,
+        ids: &[String],
+    ) -> crate::error::Result<usize> {
+        self.inner.delete_checkpoints(thread_id, ids).await
+    }
+}
+
+fn two_step_graph() -> crate::graph::GraphBuilder<i32, i32> {
+    GraphBuilder::<i32, i32>::overwrite()
+        .add_node("a", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .add_node("b", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .set_entry("a")
+        .add_edge("a", "b")
+        .set_finish("b")
+}
+
+#[tokio::test]
+async fn async_durability_persists_every_boundary_with_intact_lineage() {
+    use crate::graph::checkpoint::DurabilityMode;
+
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let graph = two_step_graph()
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone())
+        .with_durability(DurabilityMode::Async);
+
+    let run = graph.run_with_thread("t-async", 0).await.unwrap();
+    assert_eq!(run.state, 2);
+    // Both boundaries are durable by run end: the run drained its background
+    // writes before writing the terminal checkpoint.
+    let list = cp.list("t-async").await.unwrap();
+    assert_eq!(list.len(), 2);
+    // Lineage stays chained even though the first write ran in the background
+    // (its id was minted before the write was handed off).
+    assert_eq!(
+        list[1].parent_checkpoint_id.as_deref(),
+        Some(list[0].checkpoint_id.as_str())
+    );
+    assert_eq!(
+        run.checkpoint_id.as_ref().map(|id| id.as_str()),
+        Some(list[1].checkpoint_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn async_durability_does_not_await_non_terminal_writes_inline() {
+    use crate::graph::checkpoint::DurabilityMode;
+
+    let completed_puts = Arc::new(AtomicUsize::new(0));
+    let observed_at_b = Arc::new(AtomicUsize::new(usize::MAX));
+    let cp = Arc::new(SlowCheckpointer {
+        inner: Arc::new(InMemoryCheckpointer::new()),
+        delay: Duration::from_millis(100),
+        completed_puts: completed_puts.clone(),
+    });
+
+    let puts_for_b = completed_puts.clone();
+    let seen = observed_at_b.clone();
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("a", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .add_node("b", move |s, _c: NodeContext| {
+            let puts = puts_for_b.clone();
+            let seen = seen.clone();
+            async move {
+                // Record how many checkpoint writes had *completed* when this
+                // node ran. Under Sync durability the step-1 boundary write
+                // (100ms) would have finished first; under Async it is still
+                // in flight.
+                seen.store(puts.load(AtomicOrdering::SeqCst), AtomicOrdering::SeqCst);
+                Ok(NodeResult::Update(s + 1))
+            }
+        })
+        .set_entry("a")
+        .add_edge("a", "b")
+        .set_finish("b")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp)
+        .with_durability(DurabilityMode::Async);
+
+    let run = graph.run_with_thread("t-async-slow", 0).await.unwrap();
+    assert_eq!(run.state, 2);
+    assert_eq!(
+        observed_at_b.load(AtomicOrdering::SeqCst),
+        0,
+        "node b must start while the step-1 boundary write is still in flight"
+    );
+    // ...but by run end every write has been drained and is durable.
+    assert_eq!(completed_puts.load(AtomicOrdering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn async_durability_surfaces_background_write_failure_in_run_result() {
+    use crate::graph::checkpoint::DurabilityMode;
+
+    let cp = Arc::new(FailNonTerminalCheckpointer {
+        inner: Arc::new(InMemoryCheckpointer::new()),
+    });
+    let graph = two_step_graph()
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp)
+        .with_durability(DurabilityMode::Async);
+
+    // The step-1 boundary write fails in the background; the run must not
+    // report success — the failure surfaces at the next durability boundary
+    // or, at the latest, at the terminal drain.
+    let err = graph
+        .run_with_thread("t-async-fail", 0)
+        .await
+        .expect_err("a lost background checkpoint must fail the run");
+    assert!(
+        err.to_string()
+            .contains("injected background write failure"),
+        "unexpected error: {err}"
+    );
+}

@@ -11,6 +11,12 @@ categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
 async-trait = "0.1"
+# Cheap, reference-counted byte buffers. Used only on the *internal* SSE
+# byte-stream seam (`harness::providers::openai::sse::SseState`) so each
+# network chunk from `reqwest::Response::bytes_stream` is forwarded without a
+# per-chunk `Vec<u8>` copy. Already in the dependency tree via `reqwest`;
+# `bytes` never appears in the public API.
+bytes = "1"
 # Runtime-agnostic future combinators (`join_all` for concurrent supersteps) and
 # the `Stream`/`StreamExt` traits backing the real streaming pipeline
 # (`harness::model::ModelStream`).
@@ -20,10 +26,11 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 
-# Async runtime primitives used by the streaming pipeline. The library only
-# needs the lightweight pieces (synchronization + timers); the full
-# multi-threaded runtime stays a dev-dependency for examples and tests.
-tokio = { version = "1", default-features = false, features = ["sync", "time", "macros", "rt-multi-thread"] }
+# Async runtime primitives used by the streaming pipeline, plus task spawning
+# for `DurabilityMode::Async` background checkpoint writes, `spawn_blocking`
+# file I/O, and `block_in_place` JSONL task-store writes (which requires the
+# multi-threaded runtime feature).
+tokio = { version = "1", default-features = false, features = ["sync", "time", "macros", "rt", "rt-multi-thread"] }
 
 # HTTP client used by hosted providers and the embedded Langfuse exporter. The
 # `stream` feature enables `Response::bytes_stream` for Server-Sent-Events

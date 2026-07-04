@@ -115,6 +115,46 @@ fn smoke_event_journal_replay() {
 }
 
 #[test]
+fn completed_events_deserialize_without_started_at_ms() {
+    // Journals written before `started_at_ms` existed must keep
+    // deserializing: the field defaults to `None` and is omitted from the
+    // serialized form when absent.
+    let event: AgentEvent = serde_json::from_str(r#"{"kind":"model_completed","call_id":"c1"}"#)
+        .expect("pre-started_at_ms model_completed still deserializes");
+    assert!(matches!(
+        event,
+        AgentEvent::ModelCompleted {
+            started_at_ms: None,
+            ..
+        }
+    ));
+
+    let event: AgentEvent =
+        serde_json::from_str(r#"{"kind":"tool_completed","call_id":"t1","tool_name":"lookup"}"#)
+            .expect("pre-started_at_ms tool_completed still deserializes");
+    assert!(matches!(
+        event,
+        AgentEvent::ToolCompleted {
+            started_at_ms: None,
+            ..
+        }
+    ));
+
+    // A populated start time round-trips.
+    let event = AgentEvent::ToolCompleted {
+        call_id: crate::harness::ids::CallId::new("t2"),
+        tool_name: "lookup".to_string(),
+        started_at_ms: Some(1_704_067_199_000),
+        input: None,
+        output: None,
+    };
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["started_at_ms"], 1_704_067_199_000u64);
+    let back: AgentEvent = serde_json::from_value(json).unwrap();
+    assert_eq!(back, event);
+}
+
+#[test]
 fn smoke_harness_run_status_lifecycle() {
     let run_id = RunId::new("run-status");
     let component = ComponentId::new("agent");

@@ -162,7 +162,12 @@ impl OpenAiStreamAcc {
 /// parsing the SSE byte stream into [`ModelStreamItem`]s.
 pub(super) struct SseState {
     /// Raw response byte chunks (errors already mapped onto the crate error).
-    pub(super) bytes: Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>,
+    ///
+    /// The item type is [`bytes::Bytes`] — the buffer `reqwest` hands us — so
+    /// each network chunk is forwarded by reference count instead of being
+    /// copied into a fresh `Vec<u8>`. This type is crate-internal
+    /// (`pub(super)`), so `bytes` stays out of the public API.
+    pub(super) bytes: Pin<Box<dyn Stream<Item = Result<bytes::Bytes>> + Send>>,
     /// Raw bytes received but not yet split into complete lines. Kept as bytes
     /// (not a `String`) so a multi-byte UTF-8 character split across two network
     /// chunks is reassembled before decoding, instead of being corrupted into

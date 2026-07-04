@@ -1178,6 +1178,7 @@ name = "tinyagents"
 version = "1.5.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "dotenvy",
  "futures",
  "reqwest",

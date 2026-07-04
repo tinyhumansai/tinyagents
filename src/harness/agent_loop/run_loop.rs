@@ -5,7 +5,7 @@
 //! Split out of `agent_loop/mod.rs`; see that module's doc comment for
 //! the full loop lifecycle, limits, and backoff design.
 
-use super::model_call::{ModelCallBase, ToolCallBase};
+use super::model_call::ModelCallBase;
 use super::*;
 
 impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
@@ -168,6 +168,9 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             let call_id = CallId::new(format!("{}-model-{}", ctx.run_id(), run.model_calls + 1));
             status.mark_running(HarnessPhase::Model);
             status.active_model_call = Some(call_id.clone());
+            // Captured here (where the call actually starts) so the completed
+            // event carries a real start time for duration-aware exporters.
+            let model_started_at_ms = crate::harness::ids::now_ms();
             let record = ctx.emit(AgentEvent::ModelStarted {
                 call_id: call_id.clone(),
                 model: model_name,
@@ -223,6 +226,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 .then(|| serde_json::to_value(&response.message).unwrap_or(Value::Null));
             let record = ctx.emit(AgentEvent::ModelCompleted {
                 call_id,
+                started_at_ms: Some(model_started_at_ms),
                 usage: response.usage,
                 input: captured_input,
                 output: captured_output,
@@ -280,149 +284,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 break;
             }
 
-            // Execute requested tools serially.
+            // Execute requested tools: serial admission -> serial or
+            // concurrent execution -> ordered fold. Multi-call turns run
+            // concurrently when no tool-wrap middleware is registered; see
+            // `agent_loop/tools.rs` for the dispatch rules and the semantics
+            // preserved in each mode.
             status.mark_running(HarnessPhase::Tools);
-            for mut call in tool_calls {
-                // Safe cancellation checkpoint: stop before invoking the next
-                // (side-effecting) tool if cancellation was requested.
-                if ctx.cancellation.is_cancelled() {
-                    return Err(TinyAgentsError::Cancelled);
-                }
-                if ctx.check_deadline().is_err() {
-                    ctx.emit(AgentEvent::LimitReached {
-                        kind: LimitKind::WallClock,
-                    });
-                    return Err(TinyAgentsError::Timeout(format!(
-                        "run `{}` exceeded its wall-clock deadline",
-                        ctx.run_id()
-                    )));
-                }
-                // The context's `LimitTracker` (synced with `RunPolicy::limits`
-                // above) is the single enforced source of truth for the
-                // tool-call cap, so the reported limit always matches the one
-                // that trips.
-                if let Err(err) = ctx.record_tool_call() {
-                    ctx.emit(AgentEvent::LimitReached {
-                        kind: LimitKind::ToolCalls,
-                    });
-                    return Err(TinyAgentsError::LimitExceeded(err.to_string()));
-                }
-
-                self.middleware
-                    .run_before_tool(ctx, state, &mut call)
-                    .await?;
-
-                let tool = match self.tools.get(&call.name) {
-                    Some(tool) => tool,
-                    None => {
-                        // The model called an unregistered tool. Apply the run's
-                        // `UnknownToolPolicy` instead of unconditionally aborting.
-                        let requested = call.name.clone();
-                        let arguments = call.arguments.clone();
-                        let call_id = CallId::new(call.id.clone());
-
-                        // Rewrite mode: retarget to a fixed compatibility tool if
-                        // that tool exists, otherwise fall through to recovery.
-                        let rewrite_target = match &self.policy.unknown_tool {
-                            UnknownToolPolicy::Rewrite { tool_name } => {
-                                self.tools.get(tool_name).map(|t| (tool_name.clone(), t))
-                            }
-                            _ => None,
-                        };
-
-                        if let Some((tool_name, tool)) = rewrite_target {
-                            call.name = tool_name.clone();
-                            let record = ctx.emit(AgentEvent::UnknownToolCall {
-                                call_id,
-                                requested_name: requested,
-                                arguments,
-                                recovery: format!("rewrite:{tool_name}"),
-                            });
-                            status.set_last_event(record.id);
-                            tool
-                        } else if matches!(self.policy.unknown_tool, UnknownToolPolicy::Fail) {
-                            return Err(TinyAgentsError::ToolNotFound(requested));
-                        } else {
-                            // `ReturnToolError` (or a Rewrite whose target is also
-                            // missing): inject a tool-error result naming the
-                            // requested tool and the valid tools, then continue so
-                            // the model can correct itself. This consumed one
-                            // tool-call budget slot above, bounding the loop.
-                            let valid = self.tools.names().join(", ");
-                            let args_repr = serde_json::to_string(&arguments)
-                                .unwrap_or_else(|_| "<unserializable>".to_string());
-                            let message = format!(
-                                "unknown tool `{requested}` (arguments: {args_repr}); \
-                                 valid tools: [{valid}]"
-                            );
-                            let record = ctx.emit(AgentEvent::UnknownToolCall {
-                                call_id,
-                                requested_name: requested.clone(),
-                                arguments,
-                                recovery: "tool_error".to_string(),
-                            });
-                            status.set_last_event(record.id);
-                            run.tool_calls += 1;
-                            status.tool_calls = run.tool_calls;
-                            messages.push(Message::tool(call.id.clone(), message));
-                            continue;
-                        }
-                    }
-                };
-                tool.schema().validate_call(&call)?;
-
-                let tool_call_id = CallId::new(call.id.clone());
-                let tool_name = call.name.clone();
-                status.active_tool_calls.push(tool_call_id.clone());
-                let record = ctx.emit(AgentEvent::ToolStarted {
-                    call_id: tool_call_id.clone(),
-                    tool_name: tool_name.clone(),
-                });
-                status.set_last_event(record.id);
-
-                // Snapshot the arguments for observability before `call` is
-                // moved into the tool-wrap onion, gated by the capture policy.
-                let captured_input = self.policy.capture.tool_io.then(|| call.arguments.clone());
-
-                // The real tool call is the innermost base of the tool-wrap
-                // onion (same before -> wrap -> after ordering as the model
-                // path): lifecycle `before_tool` ran above, the wrap onion runs
-                // here, and lifecycle `after_tool` runs below. Bounded by the
-                // same remaining wall-clock budget as a model call, so a
-                // hanging tool cannot block the run past its deadline either.
-                let base = ToolCallBase { tool };
-                let remaining = self.call_budget(ctx);
-                let run_id = ctx.run_id().as_str().to_string();
-                let fut = self.middleware.run_wrapped_tool(ctx, state, call, &base);
-                let mut result = Self::with_call_budget(remaining, &run_id, "tool call", fut)
-                    .await?
-                    .into_result();
-
-                self.middleware
-                    .run_after_tool(ctx, state, &mut result)
-                    .await?;
-
-                run.tool_calls += 1;
-                status.tool_calls = run.tool_calls;
-                status.active_tool_calls.retain(|c| c != &tool_call_id);
-                let captured_output = self
-                    .policy
-                    .capture
-                    .tool_io
-                    .then(|| Value::String(result.content.clone()));
-                let record = ctx.emit(AgentEvent::ToolCompleted {
-                    call_id: tool_call_id,
-                    tool_name,
-                    input: captured_input,
-                    output: captured_output,
-                });
-                status.set_last_event(record.id);
-
-                messages.push(Message::tool(
-                    result.call_id.clone(),
-                    result.content.clone(),
-                ));
-            }
+            self.execute_tools(state, ctx, run, status, &mut messages, tool_calls)
+                .await?;
         }
 
         run.messages = messages;
