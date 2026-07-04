@@ -16,11 +16,44 @@ pub use types::*;
 
 impl ContentBlock {
     /// Returns the text of this block if it is a [`ContentBlock::Text`].
+    ///
+    /// Reasoning blocks ([`ContentBlock::Thinking`] /
+    /// [`ContentBlock::RedactedThinking`]) are intentionally *not* treated as
+    /// text, so they never leak into visible assistant output via
+    /// [`concat_text`] / [`Message::text`].
     pub fn as_text(&self) -> Option<&str> {
         match self {
             ContentBlock::Text(text) => Some(text),
             _ => None,
         }
+    }
+
+    /// Creates a [`ContentBlock::Thinking`] block with no signature.
+    pub fn thinking(text: impl Into<String>) -> Self {
+        ContentBlock::Thinking {
+            text: text.into(),
+            signature: None,
+        }
+    }
+
+    /// Returns the reasoning text and optional signature if this is a
+    /// [`ContentBlock::Thinking`] block.
+    pub fn as_thinking(&self) -> Option<(&str, Option<&str>)> {
+        match self {
+            ContentBlock::Thinking { text, signature } => {
+                Some((text.as_str(), signature.as_deref()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns `true` if this is a reasoning block ([`ContentBlock::Thinking`]
+    /// or [`ContentBlock::RedactedThinking`]).
+    pub fn is_reasoning(&self) -> bool {
+        matches!(
+            self,
+            ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+        )
     }
 }
 

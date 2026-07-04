@@ -688,3 +688,46 @@ fn model_stream_item_failed_serializes_without_panicking() {
     assert_eq!(value["type"], json!("failed"));
     assert_eq!(value["content"], json!("boom"));
 }
+
+#[test]
+fn stream_accumulator_reconstruct_preserves_reasoning_as_thinking_block() {
+    use crate::harness::message::{ContentBlock, MessageDelta};
+
+    // No `Completed` item: `finish` reconstructs the message from deltas. The
+    // accumulated reasoning must survive as a leading `Thinking` block rather
+    // than being dropped.
+    let mut acc = StreamAccumulator::new();
+    acc.push(&ModelStreamItem::Started);
+    acc.push(&ModelStreamItem::MessageDelta(MessageDelta::reasoning(
+        "let me think",
+    )));
+    acc.push(&ModelStreamItem::MessageDelta(MessageDelta::text("42")));
+
+    let response = acc.finish().unwrap();
+    // Visible text excludes reasoning.
+    assert_eq!(response.text(), "42");
+    // Leading block is the preserved thinking; text follows.
+    let content = &response.message.content;
+    assert_eq!(content.len(), 2);
+    assert_eq!(
+        content[0],
+        ContentBlock::Thinking {
+            text: "let me think".into(),
+            signature: None,
+        }
+    );
+    assert_eq!(content[1], ContentBlock::Text("42".into()));
+}
+
+#[test]
+fn stream_accumulator_reconstruct_without_reasoning_has_no_thinking_block() {
+    use crate::harness::message::{ContentBlock, MessageDelta};
+
+    let mut acc = StreamAccumulator::new();
+    acc.push(&ModelStreamItem::MessageDelta(MessageDelta::text("hi")));
+    let response = acc.finish().unwrap();
+    assert_eq!(
+        response.message.content,
+        vec![ContentBlock::Text("hi".into())]
+    );
+}

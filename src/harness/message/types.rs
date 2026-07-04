@@ -25,6 +25,29 @@ pub enum ContentBlock {
     Json(Value),
     /// A reference to an image input.
     Image(ImageRef),
+    /// Model reasoning/thinking content.
+    ///
+    /// Kept out of visible assistant text ([`ContentBlock::as_text`] returns
+    /// `None`) but preserved on the message so providers that require verbatim
+    /// replay of the thinking turn preceding tool results (Anthropic) can round-
+    /// trip it. Providers that reject thinking blocks (the OpenAI-compatible
+    /// path, which serializes via [`crate::harness::message::Message::text`])
+    /// drop it naturally.
+    Thinking {
+        /// The reasoning text.
+        text: String,
+        /// Opaque provider signature required to replay the block verbatim.
+        /// `None` when the provider does not sign thinking blocks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    /// Redacted reasoning: an opaque, provider-encrypted thinking block whose
+    /// content is not human-readable but which must still be replayed verbatim
+    /// to preserve the provider's reasoning contract.
+    RedactedThinking {
+        /// Opaque provider payload, replayed verbatim.
+        data: String,
+    },
     /// An opaque provider-specific block preserved verbatim.
     ProviderExtension(Value),
 }

@@ -89,6 +89,11 @@ pub(super) fn translate_user_content(blocks: &[ContentBlock]) -> Result<MessageC
                 ContentBlock::Text(t) => text.push_str(t),
                 ContentBlock::Json(value) => text.push_str(&value.to_string()),
                 ContentBlock::Image(_) => unreachable!("guarded by has_image"),
+                // OpenAI-compatible requests have no representation for
+                // reasoning blocks; they are dropped rather than failing the
+                // request (matching the assistant path, which serializes via
+                // `Message::text` and drops them naturally).
+                ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
                 ContentBlock::ProviderExtension(_) => {
                     return Err(unrepresentable_block_error());
                 }
@@ -109,6 +114,9 @@ pub(super) fn translate_user_content(blocks: &[ContentBlock]) -> Result<MessageC
                     url: image.url.clone(),
                 },
             }),
+            // See the string-rendering arm above: reasoning blocks have no
+            // OpenAI representation and are dropped, not failed.
+            ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
             ContentBlock::ProviderExtension(_) => {
                 return Err(unrepresentable_block_error());
             }

@@ -26,6 +26,10 @@ pub(super) struct ToolCallBuild {
 pub(super) struct OpenAiStreamAcc {
     id: Option<String>,
     text: String,
+    /// Accumulated reasoning/thinking fragments, preserved on the final
+    /// message as a leading [`ContentBlock::Thinking`] block (unsigned — the
+    /// OpenAI-compatible path has no provider signature).
+    reasoning: String,
     tool_calls: Vec<ToolCallBuild>,
     usage: Option<Usage>,
     finish_reason: Option<String>,
@@ -51,6 +55,7 @@ impl OpenAiStreamAcc {
             }
             let reasoning = delta_reasoning_text(&mut choice.delta);
             if !reasoning.is_empty() {
+                self.reasoning.push_str(&reasoning);
                 pending.push_back(ModelStreamItem::MessageDelta(MessageDelta {
                     text: String::new(),
                     reasoning,
@@ -121,6 +126,14 @@ impl OpenAiStreamAcc {
     /// Consumes the accumulator into the final, merged [`ModelResponse`].
     fn into_response(self) -> Result<ModelResponse> {
         let mut content = Vec::new();
+        // Reasoning streamed on the side channel leads the final message as a
+        // `Thinking` block so it survives persistence and provider replay.
+        if !self.reasoning.is_empty() {
+            content.push(ContentBlock::Thinking {
+                text: self.reasoning,
+                signature: None,
+            });
+        }
         if !self.text.is_empty() {
             content.push(ContentBlock::Text(self.text));
         }

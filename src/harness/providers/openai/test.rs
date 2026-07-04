@@ -641,6 +641,14 @@ async fn sse_stream_preserves_reasoning_content_as_side_channel() {
     assert_eq!(merged.reasoning(), "think carefully");
     let response = merged.finish().unwrap();
     assert_eq!(response.text(), "answer");
+    // The merged response leads with the preserved (unsigned) thinking block.
+    assert_eq!(
+        response.message.content.first(),
+        Some(&crate::harness::message::ContentBlock::Thinking {
+            text: "think carefully".into(),
+            signature: None,
+        })
+    );
     let usage = response.usage.unwrap();
     assert_eq!(usage.reasoning_tokens, 4);
 }
