@@ -1780,25 +1780,55 @@ where
             );
             let handler = node.handler.clone();
             let owned_node = node_id.clone();
-            futures.push(async move {
+            // Box each branch future behind a concrete `Send` bound. This keeps
+            // the `buffer_unordered` rolling window below (used for a
+            // `max_concurrency` bound) from requiring a higher-ranked `Send`
+            // proof over the borrowed recursion frames, which the compiler
+            // cannot discharge for the bare `async` blocks.
+            let fut: std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<NodeResult<Update>>> + Send + '_>,
+            > = Box::pin(async move {
                 self.run_node_with_retry(&owned_node, &handler, state, ctx, step)
                     .await
             });
+            futures.push(fut);
         }
 
         // Drive branches to completion, bounding in-flight count when configured.
+        // With a bound, keep a rolling window of `limit` branches in flight
+        // instead of fixed `join_all` chunks. A chunked join runs each chunk to
+        // completion before starting the next, so a single slow branch
+        // head-of-line blocks the whole chunk; the rolling window starts a new
+        // branch as soon as *any* in-flight one finishes. `select_all` reports
+        // which pending future completed; a parallel index Vec maps it back to
+        // the branch's active-set position, so results are re-ordered into
+        // deterministic order for the fold below.
         let results = match self.max_concurrency {
             Some(limit) if limit < futures.len() => {
-                let mut out = Vec::with_capacity(futures.len());
-                let mut iter = futures.into_iter();
-                loop {
-                    let chunk: Vec<_> = iter.by_ref().take(limit).collect();
-                    if chunk.is_empty() {
-                        break;
-                    }
-                    out.extend(futures::future::join_all(chunk).await);
+                let total = futures.len();
+                let mut slots: Vec<Option<Result<NodeResult<Update>>>> =
+                    (0..total).map(|_| None).collect();
+                let mut source = futures.into_iter().enumerate();
+                let mut running = Vec::with_capacity(limit);
+                let mut running_index = Vec::with_capacity(limit);
+                for (index, fut) in source.by_ref().take(limit) {
+                    running.push(fut);
+                    running_index.push(index);
                 }
-                out
+                while !running.is_empty() {
+                    let (result, completed, rest) = futures::future::select_all(running).await;
+                    let index = running_index.remove(completed);
+                    slots[index] = Some(result);
+                    running = rest;
+                    if let Some((index, fut)) = source.next() {
+                        running.push(fut);
+                        running_index.push(index);
+                    }
+                }
+                slots
+                    .into_iter()
+                    .map(|slot| slot.expect("every branch produced a result"))
+                    .collect::<Vec<_>>()
             }
             _ => futures::future::join_all(futures).await,
         };

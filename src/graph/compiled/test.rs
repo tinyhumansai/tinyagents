@@ -12,7 +12,7 @@ use crate::harness::ids::ExecutionStatus;
 use crate::harness::retry::RetryPolicy;
 use serde_json::json;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1757,6 +1757,89 @@ async fn max_concurrency_bounds_in_flight_branches() {
     );
     // And concurrency actually happened (a chunk of 2 overlapped).
     assert_eq!(max_seen.load(AtomicOrdering::SeqCst), 2);
+}
+
+/// With `max_concurrency`, the executor uses a rolling `buffered(limit)` window
+/// rather than fixed `join_all` chunks, so a slow branch does not head-of-line
+/// block later branches: a new branch starts as soon as any in-flight one
+/// finishes. A fixed-chunk executor would run the long branch's chunk to
+/// completion before starting the next chunk, so the long branch would overlap
+/// at most its single chunk-mate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn max_concurrency_uses_rolling_window_not_chunks() {
+    // A shared flag marks the long branch as running; short branches count how
+    // many of them start while the long branch is still in flight.
+    let long_running = Arc::new(AtomicBool::new(false));
+    let overlapped_with_long = Arc::new(AtomicUsize::new(0));
+
+    let w_long = long_running.clone();
+    let w_overlap = overlapped_with_long.clone();
+
+    let graph = GraphBuilder::<Counter, i32>::new()
+        .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: i32| {
+            s.value += u;
+            Ok(s)
+        }))
+        .set_defaults(GraphDefaults {
+            parallel: Some(true),
+            max_concurrency: Some(2),
+            ..Default::default()
+        })
+        .add_node("dispatch", |_s: Counter, _c: NodeContext| async move {
+            // One long branch (arg 100) plus three short branches (arg 5).
+            Ok(NodeResult::Command(Command::send([
+                Send::new("worker", json!(100)),
+                Send::new("worker", json!(5)),
+                Send::new("worker", json!(5)),
+                Send::new("worker", json!(5)),
+            ])))
+        })
+        .add_node("worker", move |_s: Counter, c: NodeContext| {
+            let long_running = w_long.clone();
+            let overlapped = w_overlap.clone();
+            async move {
+                let ms = c.send_arg.and_then(|v| v.as_u64()).unwrap_or(0);
+                if ms >= 50 {
+                    // The long branch: flag itself running for its whole life.
+                    long_running.store(true, AtomicOrdering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                    long_running.store(false, AtomicOrdering::SeqCst);
+                } else {
+                    // A short branch: did it get to start while the long branch
+                    // was still running? Only possible with a rolling window.
+                    if long_running.load(AtomicOrdering::SeqCst) {
+                        overlapped.fetch_add(1, AtomicOrdering::SeqCst);
+                    }
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                }
+                Ok(NodeResult::Update(1))
+            }
+        })
+        .mark_command_routing("dispatch")
+        .set_entry("dispatch")
+        .set_finish("worker")
+        .compile()
+        .unwrap();
+
+    let run = graph
+        .run(Counter {
+            value: 0,
+            log: vec![],
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(run.state.value, 4, "all four workers ran");
+    // With a rolling window the two short branches that start after the initial
+    // pair (slot freed as each short one finishes) run while the long branch is
+    // still going. A fixed-chunk executor would finish the long branch's chunk
+    // first, so at most one short branch could overlap it.
+    assert!(
+        overlapped_with_long.load(AtomicOrdering::SeqCst) >= 2,
+        "expected the rolling window to overlap the long branch with >=2 short \
+         branches, saw {}",
+        overlapped_with_long.load(AtomicOrdering::SeqCst)
+    );
 }
 
 /// A per-node default timeout fails the run with [`TinyAgentsError::Timeout`]
