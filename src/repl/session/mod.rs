@@ -338,9 +338,9 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
     /// Returns a shared handle to the application state capability calls are
     /// invoked against.
     ///
-    /// The CodeAct driver ([`crate::repl::codeact`]) needs this to invoke the
-    /// session's driver model through the same state the in-cell capability
-    /// functions use, without exposing the private field.
+    /// A CodeAct-style driver loop needs this to invoke the session's driver
+    /// model through the same state the in-cell capability functions use,
+    /// without exposing the private field.
     pub fn app_state(&self) -> Arc<State> {
         self.state.clone()
     }
