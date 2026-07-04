@@ -32,4 +32,4 @@ pub use catalog::{
     ModelPricing,
 };
 pub use component::{ComponentId, ComponentKind, ComponentMetadata};
-pub use diagnostics::{DiagnosticSeverity, RegistryDiagnostic, RegistrySnapshot};
+pub use diagnostics::{AliasBinding, DiagnosticSeverity, RegistryDiagnostic, RegistrySnapshot};

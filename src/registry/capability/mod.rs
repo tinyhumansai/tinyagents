@@ -240,8 +240,15 @@ impl<State: Send + Sync> CapabilityRegistry<State> {
 
     /// Registers a name-only descriptor of an arbitrary [`ComponentKind`]. This
     /// backs [`register_router`](Self::register_router) and
-    /// [`register_reducer`](Self::register_reducer) and is exposed for the
-    /// reserved [`ComponentKind::Store`] / [`ComponentKind::Agent`] kinds.
+    /// [`register_reducer`](Self::register_reducer), and is the general
+    /// public fallback for every other kind that has no dedicated typed
+    /// registration method — [`ComponentKind::Store`],
+    /// [`ComponentKind::Script`], [`ComponentKind::Middleware`],
+    /// [`ComponentKind::Checkpointer`], [`ComponentKind::TaskStore`], and
+    /// [`ComponentKind::Listener`]. [`ComponentKind::Model`],
+    /// [`ComponentKind::Tool`], [`ComponentKind::Graph`], and
+    /// [`ComponentKind::Agent`] have their own dedicated `register_*` methods
+    /// instead.
     ///
     /// # Errors
     ///

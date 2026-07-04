@@ -79,8 +79,9 @@ pub use error::{Result, TinyAgentsError};
 
 // --- Registry: named capability catalog (.rag/.ragsh binding by name) ---
 pub use registry::{
-    CapabilityRegistry, ComponentId, ComponentKind, ComponentMetadata, DiagnosticSeverity,
-    RegistryDiagnostic, RegistrySnapshot,
+    AliasBinding, CapabilityRegistry, ComponentId, ComponentKind, ComponentMetadata,
+    DiagnosticSeverity, ModelCapabilities, ModelCatalog, ModelCatalogEntry, ModelCatalogSnapshot,
+    ModelCatalogSource, ModelPricing, RegistryDiagnostic, RegistrySnapshot,
 };
 
 // --- Language: registry → blueprint binding façade ---

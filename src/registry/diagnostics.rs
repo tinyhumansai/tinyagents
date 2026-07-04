@@ -78,11 +78,12 @@ impl RegistrySnapshot {
                 kind_label(kind)
             ));
             for meta in members {
+                let escaped_id = escape_dot_string(&meta.id.0);
                 out.push_str(&format!(
                     "    \"{}:{}\" [label=\"{}\"];\n",
                     kind_label(kind),
-                    meta.id.0,
-                    meta.id.0
+                    escaped_id,
+                    escaped_id
                 ));
             }
             out.push_str("  }\n");
@@ -117,6 +118,12 @@ pub struct RegistryDiagnostic {
 
 fn kind_label(kind: ComponentKind) -> &'static str {
     kind.as_str()
+}
+
+/// Escapes backslashes and double quotes so a component id can be embedded in
+/// a Graphviz DOT quoted string/id without breaking the surrounding syntax.
+fn escape_dot_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 pub(crate) fn alias_shadows_component(kind: ComponentKind, alias: &str) -> RegistryDiagnostic {
@@ -163,5 +170,33 @@ pub(crate) fn dangling_alias(
             "alias `{alias}` resolves to `{canonical}`, which is not a registered {}",
             kind_label(kind)
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::component::ComponentId;
+
+    #[test]
+    fn to_dot_escapes_quotes_and_backslashes_in_component_ids() {
+        let snapshot = RegistrySnapshot {
+            components: vec![ComponentMetadata {
+                id: ComponentId(r#"weird"name\with\backslashes"#.to_string()),
+                kind: ComponentKind::Tool,
+                description: None,
+                tags: Vec::new(),
+                aliases: Vec::new(),
+            }],
+            aliases: Vec::new(),
+        };
+
+        let dot = snapshot.to_dot();
+
+        // The raw id must never appear unescaped inside the DOT output, or a
+        // malicious/unlucky component name could break out of its quoted
+        // string and inject arbitrary DOT syntax.
+        assert!(!dot.contains("\"weird\"name"));
+        assert!(dot.contains(r#"weird\"name\\with\\backslashes"#));
     }
 }
