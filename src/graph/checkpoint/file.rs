@@ -191,18 +191,26 @@ where
 {
     async fn put(&self, checkpoint: Checkpoint<State>) -> Result<CheckpointId> {
         let id = CheckpointId::new(checkpoint.checkpoint_id.clone());
-        fs::create_dir_all(&self.base_dir).map_err(|e| io_err("create base dir", e))?;
+        // The serialize + filesystem append is synchronous, blocking work; run
+        // it on the blocking pool so it never stalls a tokio worker on the
+        // step-critical path.
+        let base_dir = self.base_dir.clone();
         let path = self.thread_path(&checkpoint.thread_id);
-        let mut line =
-            serde_json::to_string(&checkpoint).map_err(|e| io_err("encode record", e))?;
-        line.push('\n');
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| io_err("open thread file for append", e))?;
-        file.write_all(line.as_bytes())
-            .map_err(|e| io_err("append record", e))?;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            fs::create_dir_all(&base_dir).map_err(|e| io_err("create base dir", e))?;
+            let mut line =
+                serde_json::to_string(&checkpoint).map_err(|e| io_err("encode record", e))?;
+            line.push('\n');
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| io_err("open thread file for append", e))?;
+            file.write_all(line.as_bytes())
+                .map_err(|e| io_err("append record", e))
+        })
+        .await
+        .map_err(|e| io_err("join blocking put task", e))??;
         Ok(id)
     }
 
