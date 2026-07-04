@@ -569,9 +569,11 @@ pub trait EventListener: Send + Sync {
 ///
 /// All clones share the same underlying listener list and monotonic offset
 /// counter via an `Arc<Mutex<…>>`. Any clone can subscribe new listeners or
-/// emit events. The `emit` method assigns a monotonic [`EventId`] and offset,
-/// clones the current listener list, releases the sink lock, and then calls each
-/// listener in registration order.
+/// emit events. The `emit` method assigns a monotonic [`EventId`] and offset
+/// and enqueues the record under one critical section, then a single draining
+/// emitter delivers queued records to listeners in offset order — so listeners
+/// never observe offset `n + 1` before offset `n`, even under concurrent
+/// emits.
 ///
 /// # Example
 ///
@@ -603,6 +605,15 @@ pub(crate) struct EventSinkInner {
     pub(crate) next_offset: u64,
     /// Registered listeners, notified in insertion order.
     pub(crate) listeners: Vec<Arc<dyn EventListener>>,
+    /// Records assigned an offset but not yet delivered to listeners, in
+    /// offset order. Each entry carries the listener snapshot taken when the
+    /// offset was assigned so late subscribers never see earlier offsets.
+    pub(crate) pending: std::collections::VecDeque<(EventRecord, Vec<Arc<dyn EventListener>>)>,
+    /// `true` while some emitter is draining `pending`. Guarantees a single
+    /// drainer at a time, which is what makes listener delivery globally
+    /// ordered by offset (and keeps re-entrant emits from listeners safe:
+    /// they enqueue and return, and the active drainer delivers them).
+    pub(crate) dispatching: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -627,10 +638,22 @@ pub struct RecordingListener {
 /// Supports both live append from an active run and offset-based replay for
 /// late subscribers. The journal does not fan out to listeners; callers that
 /// need live delivery should use an [`EventSink`] alongside the journal.
+///
+/// Records are stored in offset order: the journal's buffer is populated by an
+/// internal listener on the sink's ordered dispatch path, so
+/// [`EventJournal::replay_from`] always returns a contiguous, offset-ordered
+/// prefix of the stream — never the completion order of racing appends.
 pub struct EventJournal {
     pub(crate) records: Arc<Mutex<Vec<EventRecord>>>,
     /// Internal sink used to assign monotonic ids and offsets.
     pub(crate) sink: EventSink,
+}
+
+/// Internal [`EventListener`] that copies each dispatched record into an
+/// [`EventJournal`]'s buffer. Because sink dispatch is globally ordered by
+/// offset, the buffer stays in offset order regardless of append concurrency.
+pub(crate) struct JournalRecorder {
+    pub(crate) records: Arc<Mutex<Vec<EventRecord>>>,
 }
 
 // ---------------------------------------------------------------------------
