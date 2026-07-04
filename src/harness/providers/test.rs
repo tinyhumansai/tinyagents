@@ -116,6 +116,47 @@ fn scripted_panics_on_empty_vec() {
     MockModel::with_responses(vec![]);
 }
 
+/// Concurrent scripted invocations must each consume a distinct slot: with as
+/// many calls as scripted responses, every response is served exactly once.
+/// (The call-id increment and the scripted-index reservation share one
+/// critical section; a racing second read of the call counter used to let two
+/// calls serve the same response while skipping another.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scripted_index_is_reserved_atomically_under_concurrency() {
+    const N: usize = 16;
+    let responses: Vec<_> = (0..N)
+        .map(|i| MockModel::text_response(format!("r{i}")))
+        .collect();
+    let model = std::sync::Arc::new(MockModel::with_responses(responses));
+
+    let handles: Vec<_> = (0..N)
+        .map(|_| {
+            let model = model.clone();
+            tokio::spawn(async move {
+                model
+                    .invoke(&(), ModelRequest::new(vec![]))
+                    .await
+                    .unwrap()
+                    .text()
+            })
+        })
+        .collect();
+
+    let mut served: Vec<String> = Vec::with_capacity(N);
+    for handle in handles {
+        served.push(handle.await.unwrap());
+    }
+    served.sort();
+
+    let mut expected: Vec<String> = (0..N).map(|i| format!("r{i}")).collect();
+    expected.sort();
+    assert_eq!(
+        served, expected,
+        "each scripted response must be served exactly once across N concurrent calls"
+    );
+    assert_eq!(model.call_count(), N as u64);
+}
+
 // ---------------------------------------------------------------------------
 // MockModel::with_tool_call
 // ---------------------------------------------------------------------------
