@@ -106,10 +106,10 @@ mod test;
 pub fn parse_command(line: &str) -> crate::error::Result<ReplCommand> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return Err(parse_err("empty input", 0, 0));
+        return Err(parse_err_at(trimmed, trimmed, "empty input"));
     }
 
-    let (verb, rest) = split_token(trimmed)?;
+    let (verb, rest) = split_token(trimmed, trimmed)?;
 
     match verb.to_lowercase().as_str() {
         "help" | "?" => Ok(ReplCommand::Help),
@@ -117,53 +117,62 @@ pub fn parse_command(line: &str) -> crate::error::Result<ReplCommand> {
         "quit" | "exit" | "q" => Ok(ReplCommand::Quit),
 
         "load" => {
-            let (path, _) = require_token(rest, "load <path>")?;
+            let (path, _) = require_token(trimmed, rest, "load <path>")?;
             Ok(ReplCommand::Load { path })
         }
 
         "compile" => {
-            let (name, _) = require_token(rest, "compile <name>")?;
+            let (name, _) = require_token(trimmed, rest, "compile <name>")?;
             Ok(ReplCommand::Compile { name })
         }
 
         "run" => {
-            let (graph, rest) = require_token(rest, "run <graph> <input>")?;
-            let (input, _) = require_token(rest, "run <graph> <input>")?;
+            let (graph, rest) = require_token(trimmed, rest, "run <graph> <input>")?;
+            let (input, _) = require_token(trimmed, rest, "run <graph> <input>")?;
             Ok(ReplCommand::Run { graph, input })
         }
 
         "set" => {
-            let (key, rest) = require_token(rest, "set <key> <value>")?;
-            let (value, _) = require_token(rest, "set <key> <value>")?;
+            let (key, rest) = require_token(trimmed, rest, "set <key> <value>")?;
+            let (value, _) = require_token(trimmed, rest, "set <key> <value>")?;
             Ok(ReplCommand::Set { key, value })
         }
 
         "get" => {
-            let (key, _) = require_token(rest, "get <key>")?;
+            let (key, _) = require_token(trimmed, rest, "get <key>")?;
             Ok(ReplCommand::Get { key })
         }
 
         "show" => {
-            let (what, _) = require_token(rest, "show <vars|graphs|status>")?;
+            let (what, _) = require_token(trimmed, rest, "show <vars|graphs|status>")?;
             Ok(ReplCommand::Show { what })
         }
 
         "call" => {
-            let (capability, json_rest) = require_token(rest, "call <capability> <json>")?;
+            let (capability, json_rest) = require_token(trimmed, rest, "call <capability> <json>")?;
             let json_str = json_rest.trim();
             if json_str.is_empty() {
-                return Err(parse_err(
+                return Err(parse_err_at(
+                    trimmed,
+                    json_rest,
                     "call requires a JSON argument: call <capability> <json>",
-                    0,
-                    0,
                 ));
             }
-            let args: serde_json::Value = serde_json::from_str(json_str)
-                .map_err(|e| parse_err(&format!("invalid JSON argument for `call`: {e}"), 0, 0))?;
+            let args: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
+                parse_err_at(
+                    trimmed,
+                    json_str,
+                    &format!("invalid JSON argument for `call`: {e}"),
+                )
+            })?;
             Ok(ReplCommand::Call { capability, args })
         }
 
-        other => Err(parse_err(&format!("unknown command `{other}`"), 0, 0)),
+        other => Err(parse_err_at(
+            trimmed,
+            trimmed,
+            &format!("unknown command `{other}`"),
+        )),
     }
 }
 
@@ -179,16 +188,48 @@ fn parse_err(message: &str, line: usize, column: usize) -> crate::error::TinyAge
     }
 }
 
+/// Builds a [`crate::error::TinyAgentsError::Parse`] pointing at `at` — a
+/// substring slice of `origin` — reporting a real 1-based line/column instead
+/// of the placeholder `(0, 0)`.
+///
+/// `parse_command` always parses a single command line, so the line is always
+/// `1`; the column is the 1-based character offset of `at` within `origin`.
+/// Falls back to the end of `origin` if `at` is not actually a subslice of it
+/// (defensive; should not happen given how callers use this).
+fn parse_err_at(origin: &str, at: &str, message: &str) -> crate::error::TinyAgentsError {
+    let column = char_column(origin, at);
+    parse_err(message, 1, column)
+}
+
+/// Computes the 1-based character column of `at` within `origin`, where `at`
+/// is a substring slice of `origin` obtained by slicing (not copying).
+fn char_column(origin: &str, at: &str) -> usize {
+    let origin_start = origin.as_ptr() as usize;
+    let origin_end = origin_start + origin.len();
+    let at_start = at.as_ptr() as usize;
+    let offset = if at_start >= origin_start && at_start <= origin_end {
+        at_start - origin_start
+    } else {
+        // `at` isn't a subslice of `origin` (shouldn't happen); point at the end.
+        origin.len()
+    };
+    origin[..offset].chars().count() + 1
+}
+
 /// Split the next token from `s`, returning `(token, remainder)`.
 ///
 /// Handles quoted strings (`"..."`) with `\\`, `\"`, `\n`, `\t` escapes.
 /// Bare tokens end at the first whitespace character.
 ///
 /// Returns `None` if `s` (after trimming leading whitespace) is empty.
-fn split_token(s: &str) -> crate::error::Result<(String, &str)> {
+///
+/// `origin` is the full trimmed command line `s` was sliced from; it is used
+/// only to compute a real 1-based column for any parse error, via
+/// [`parse_err_at`].
+fn split_token<'a>(origin: &str, s: &'a str) -> crate::error::Result<(String, &'a str)> {
     let s = s.trim_start();
     if s.is_empty() {
-        return Err(parse_err("unexpected end of input", 0, 0));
+        return Err(parse_err_at(origin, s, "unexpected end of input"));
     }
 
     if s.starts_with('"') {
@@ -206,7 +247,7 @@ fn split_token(s: &str) -> crate::error::Result<(String, &str)> {
             loop {
                 match chars.next() {
                     None => {
-                        return Err(parse_err("unterminated quoted string", 0, 0));
+                        return Err(parse_err_at(origin, s, "unterminated quoted string"));
                     }
                     Some((i, '"')) => break 'scan i,
                     Some((_, '\\')) => match chars.next() {
@@ -219,7 +260,7 @@ fn split_token(s: &str) -> crate::error::Result<(String, &str)> {
                             token.push(c);
                         }
                         None => {
-                            return Err(parse_err("unterminated escape sequence", 0, 0));
+                            return Err(parse_err_at(origin, s, "unterminated escape sequence"));
                         }
                     },
                     Some((_, c)) => token.push(c),
@@ -245,14 +286,18 @@ fn split_token(s: &str) -> crate::error::Result<(String, &str)> {
 
 /// Like [`split_token`] but returns a [`crate::error::TinyAgentsError::Parse`]
 /// mentioning the expected usage if the remaining input is empty.
-fn require_token<'a>(s: &'a str, usage: &str) -> crate::error::Result<(String, &'a str)> {
+fn require_token<'a>(
+    origin: &str,
+    s: &'a str,
+    usage: &str,
+) -> crate::error::Result<(String, &'a str)> {
     let s = s.trim_start();
     if s.is_empty() {
-        return Err(parse_err(
+        return Err(parse_err_at(
+            origin,
+            s,
             &format!("missing argument — usage: {usage}"),
-            0,
-            0,
         ));
     }
-    split_token(s)
+    split_token(origin, s)
 }
