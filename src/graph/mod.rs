@@ -37,6 +37,7 @@ pub mod stream;
 pub mod subagent_node;
 pub mod subgraph;
 pub mod testkit;
+pub(crate) mod thread_locks;
 pub mod todos;
 
 // --- Durable execution model ---

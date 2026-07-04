@@ -12,6 +12,7 @@
 //! shape; it does not consult provenance, clocks, or randomness, so the same
 //! pair always produces the same diff.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -248,9 +249,18 @@ pub fn blueprint_diff(old: &Blueprint, new: &Blueprint) -> BlueprintDiff {
         diff.joins_changed = Some((old_joins, new_joins));
     }
 
-    // Nodes.
+    // Nodes. Both sides are indexed by name up front so matching is
+    // O(old + new) instead of a nested scan; on a (hand-built) duplicate name
+    // the first occurrence wins, matching the previous `find` semantics.
+    // Output ordering is unchanged: additions and changes follow the new
+    // blueprint's declaration order, removals follow the old blueprint's.
+    let mut old_nodes: HashMap<&str, &NodeSpec> = HashMap::with_capacity(old.nodes.len());
+    for node in &old.nodes {
+        old_nodes.entry(node.name.as_str()).or_insert(node);
+    }
+    let new_node_names: HashSet<&str> = new.nodes.iter().map(|n| n.name.as_str()).collect();
     for node in &new.nodes {
-        match old.nodes.iter().find(|n| n.name == node.name) {
+        match old_nodes.get(node.name.as_str()) {
             None => diff.nodes_added.push(node.name.clone()),
             Some(prev) => {
                 let fields = node_field_changes(prev, node);
@@ -264,14 +274,19 @@ pub fn blueprint_diff(old: &Blueprint, new: &Blueprint) -> BlueprintDiff {
         }
     }
     for node in &old.nodes {
-        if !new.nodes.iter().any(|n| n.name == node.name) {
+        if !new_node_names.contains(node.name.as_str()) {
             diff.nodes_removed.push(node.name.clone());
         }
     }
 
-    // Channels.
+    // Channels — same indexing scheme as nodes.
+    let mut old_channels: HashMap<&str, &ChannelSpec> = HashMap::with_capacity(old.channels.len());
+    for channel in &old.channels {
+        old_channels.entry(channel.name.as_str()).or_insert(channel);
+    }
+    let new_channel_names: HashSet<&str> = new.channels.iter().map(|c| c.name.as_str()).collect();
     for channel in &new.channels {
-        match old.channels.iter().find(|c| c.name == channel.name) {
+        match old_channels.get(channel.name.as_str()) {
             None => diff.channels_added.push(channel.name.clone()),
             Some(prev) => {
                 let old_render = render_channel(prev);
@@ -287,27 +302,30 @@ pub fn blueprint_diff(old: &Blueprint, new: &Blueprint) -> BlueprintDiff {
         }
     }
     for channel in &old.channels {
-        if !new.channels.iter().any(|c| c.name == channel.name) {
+        if !new_channel_names.contains(channel.name.as_str()) {
             diff.channels_removed.push(channel.name.clone());
         }
     }
 
-    // Static edges (compared as whole from/to pairs).
+    // Static edges (compared as whole from/to pairs, membership-tested via
+    // per-side sets of pairs).
+    let old_edge_pairs: HashSet<(&str, &str)> = old
+        .edges
+        .iter()
+        .map(|e| (e.from.as_str(), e.to.as_str()))
+        .collect();
+    let new_edge_pairs: HashSet<(&str, &str)> = new
+        .edges
+        .iter()
+        .map(|e| (e.from.as_str(), e.to.as_str()))
+        .collect();
     for edge in &new.edges {
-        if !old
-            .edges
-            .iter()
-            .any(|e| e.from == edge.from && e.to == edge.to)
-        {
+        if !old_edge_pairs.contains(&(edge.from.as_str(), edge.to.as_str())) {
             diff.edges_added.push(edge.clone());
         }
     }
     for edge in &old.edges {
-        if !new
-            .edges
-            .iter()
-            .any(|e| e.from == edge.from && e.to == edge.to)
-        {
+        if !new_edge_pairs.contains(&(edge.from.as_str(), edge.to.as_str())) {
             diff.edges_removed.push(edge.clone());
         }
     }

@@ -8,6 +8,7 @@
 //! All public types declared here are re-exported through [`super`] so callers
 //! import them from `crate::harness::embeddings` directly.
 
+use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
@@ -155,13 +156,23 @@ pub struct ScoredDoc {
 pub trait VectorStore: Send + Sync {
     /// Adds (or overwrites, when `id` already exists) a vector with associated
     /// `metadata`.
+    ///
+    /// Implementations should reject vectors whose dimensionality does not
+    /// match the vectors already stored (and zero-length vectors) with
+    /// [`TinyAgentsError::Validation`](crate::error::TinyAgentsError::Validation),
+    /// so a store never mixes incomparable vectors.
     async fn add(&self, id: String, vector: Vec<f32>, metadata: Value) -> Result<()>;
 
     /// Returns up to `top_k` documents most similar to `vector`, sorted by
     /// descending similarity score.
     ///
     /// Returns fewer than `top_k` documents when the store holds fewer entries,
-    /// and an empty `Vec` when `top_k` is `0` or the store is empty.
+    /// and an empty `Vec` when `top_k` is `0` or the store is empty (an empty
+    /// store has no dimensionality to validate against, so any query vector is
+    /// answered with no hits). Implementations should reject a query vector
+    /// whose dimensionality does not match the stored vectors with
+    /// [`TinyAgentsError::Validation`](crate::error::TinyAgentsError::Validation)
+    /// instead of returning meaningless scores.
     async fn query(&self, vector: &[f32], top_k: usize) -> Result<Vec<ScoredDoc>>;
 }
 
@@ -178,6 +189,19 @@ pub(crate) struct VectorEntry {
     pub(crate) metadata: Value,
 }
 
+/// Shared interior state of an [`InMemoryVectorStore`]: the entries in
+/// insertion order plus an id → index map for O(1) upsert-by-id.
+///
+/// Entries are never removed, only appended or replaced in place, so the
+/// indices in `index` stay valid for the lifetime of the store.
+#[derive(Debug, Default)]
+pub(crate) struct VectorStoreInner {
+    /// All stored entries, in insertion order.
+    pub(crate) entries: Vec<VectorEntry>,
+    /// Maps each entry id to its position in `entries`.
+    pub(crate) index: HashMap<String, usize>,
+}
+
 /// Thread-safe in-process [`VectorStore`] backed by a plain [`Vec`].
 ///
 /// Search is a linear scan computing cosine similarity against every stored
@@ -185,8 +209,13 @@ pub(crate) struct VectorEntry {
 /// store is cheaply clonable through the inner [`Arc`]; clones share the same
 /// underlying data.
 ///
-/// Adding a vector whose `id` already exists **replaces** the previous entry,
-/// so re-indexing a document updates it in place.
+/// Adding a vector whose `id` already exists **replaces** the previous entry
+/// (an O(1) id-indexed upsert), so re-indexing a document updates it in place.
+///
+/// The store's dimensionality is fixed by the first vector added: later `add`s
+/// and non-empty-store `query`s with a different vector length are rejected
+/// with [`TinyAgentsError::Validation`](crate::error::TinyAgentsError::Validation),
+/// as are zero-length vectors, so every stored comparison is meaningful.
 ///
 /// # Example
 /// ```
@@ -203,8 +232,8 @@ pub(crate) struct VectorEntry {
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct InMemoryVectorStore {
-    /// All stored entries, protected by a standard mutex.
-    pub(crate) entries: Arc<Mutex<Vec<VectorEntry>>>,
+    /// Entries plus their id index, protected by a standard mutex.
+    pub(crate) inner: Arc<Mutex<VectorStoreInner>>,
 }
 
 // ── Retriever ─────────────────────────────────────────────────────────────────

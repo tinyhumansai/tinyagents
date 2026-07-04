@@ -90,6 +90,30 @@ where
     /// Lists checkpoint metadata for a thread in insertion order.
     async fn list(&self, thread_id: &str) -> Result<Vec<CheckpointMetadata>>;
 
+    /// Loads every checkpoint stored under `thread_id`, in listing order.
+    ///
+    /// This is the bulk-read companion to [`Checkpointer::list`]: it returns
+    /// full [`Checkpoint`] records (including state) rather than metadata, so
+    /// whole-thread operations such as [`Checkpointer::copy_thread`] can read
+    /// a thread once instead of issuing one [`Checkpointer::get`] per
+    /// checkpoint.
+    ///
+    /// The default is composed from [`Checkpointer::list`] +
+    /// [`Checkpointer::get`], which re-resolves each id individually (and, on
+    /// a backend whose `get` scans the whole thread, is O(H²)). Every bundled
+    /// backend overrides it with a single-pass read; other backends should do
+    /// the same when they can.
+    async fn get_thread(&self, thread_id: &str) -> Result<Vec<Checkpoint<State>>> {
+        let metas = self.list(thread_id).await?;
+        let mut out = Vec::with_capacity(metas.len());
+        for meta in metas {
+            if let Some(checkpoint) = self.get(thread_id, Some(&meta.checkpoint_id)).await? {
+                out.push(checkpoint);
+            }
+        }
+        Ok(out)
+    }
+
     /// Loads a [`CheckpointTuple`] — the checkpoint plus its addressing config,
     /// its parent's config, and the pending writes carried with it.
     ///
@@ -176,9 +200,10 @@ where
     //
     // Three storage-specific primitives (`list_threads`, `delete_thread`,
     // `delete_checkpoints`) have no default body. The higher-level operations
-    // (`delete_by_run`, `copy_thread`, `prune`) are composed from those plus the
-    // existing `list`/`get`/`put` surface, so every backend inherits them for
-    // free and only implements the three storage primitives.
+    // (`delete_by_run`, `copy_thread`, `prune`) are composed from those plus
+    // the existing `list`/`get_thread`/`put` surface, so every backend
+    // inherits them for free and only implements the three storage primitives
+    // (overriding `get_thread` when a single-pass bulk read is available).
 
     /// Lists the ids of every thread that currently has at least one checkpoint.
     ///
@@ -224,15 +249,11 @@ where
     /// the target keeps the parent lineage spine intact, so time-travel and
     /// resume walk the copied thread exactly as they would the source. Records
     /// are copied in listing order so parents always precede their children.
-    /// Composed from [`Checkpointer::list`] + [`Checkpointer::get`] +
-    /// [`Checkpointer::put`].
+    /// Composed from [`Checkpointer::get_thread`] + [`Checkpointer::put`], so
+    /// the source thread is read once (a bulk read, not one
+    /// [`Checkpointer::get`] per checkpoint).
     async fn copy_thread(&self, source_thread: &str, target_thread: &str) -> Result<()> {
-        let metas = self.list(source_thread).await?;
-        for meta in metas {
-            let Some(mut checkpoint) = self.get(source_thread, Some(&meta.checkpoint_id)).await?
-            else {
-                continue;
-            };
+        for mut checkpoint in self.get_thread(source_thread).await? {
             checkpoint.thread_id = target_thread.to_string();
             self.put(checkpoint).await?;
         }
@@ -383,6 +404,13 @@ where
             .get(thread_id)
             .map(|list| list.iter().map(metadata_of).collect())
             .unwrap_or_default())
+    }
+
+    async fn get_thread(&self, thread_id: &str) -> Result<Vec<Checkpoint<State>>> {
+        // Single-pass bulk read: clone the thread's records in insertion
+        // order, instead of the default's one `get` per listed id.
+        let map = self.inner.lock().map_err(|_| lock_err())?;
+        Ok(map.get(thread_id).cloned().unwrap_or_default())
     }
 
     async fn list_threads(&self) -> Result<Vec<String>> {

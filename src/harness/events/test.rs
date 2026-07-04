@@ -115,6 +115,46 @@ fn smoke_event_journal_replay() {
 }
 
 #[test]
+fn completed_events_deserialize_without_started_at_ms() {
+    // Journals written before `started_at_ms` existed must keep
+    // deserializing: the field defaults to `None` and is omitted from the
+    // serialized form when absent.
+    let event: AgentEvent = serde_json::from_str(r#"{"kind":"model_completed","call_id":"c1"}"#)
+        .expect("pre-started_at_ms model_completed still deserializes");
+    assert!(matches!(
+        event,
+        AgentEvent::ModelCompleted {
+            started_at_ms: None,
+            ..
+        }
+    ));
+
+    let event: AgentEvent =
+        serde_json::from_str(r#"{"kind":"tool_completed","call_id":"t1","tool_name":"lookup"}"#)
+            .expect("pre-started_at_ms tool_completed still deserializes");
+    assert!(matches!(
+        event,
+        AgentEvent::ToolCompleted {
+            started_at_ms: None,
+            ..
+        }
+    ));
+
+    // A populated start time round-trips.
+    let event = AgentEvent::ToolCompleted {
+        call_id: crate::harness::ids::CallId::new("t2"),
+        tool_name: "lookup".to_string(),
+        started_at_ms: Some(1_704_067_199_000),
+        input: None,
+        output: None,
+    };
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["started_at_ms"], 1_704_067_199_000u64);
+    let back: AgentEvent = serde_json::from_value(json).unwrap();
+    assert_eq!(back, event);
+}
+
+#[test]
 fn smoke_harness_run_status_lifecycle() {
     let run_id = RunId::new("run-status");
     let component = ComponentId::new("agent");
@@ -166,4 +206,69 @@ fn sink_listener_can_emit_to_same_sink_without_deadlock() {
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].offset, 0);
     assert_eq!(events[1].offset, 1);
+}
+
+/// Concurrent emits must be delivered to listeners in offset order: offset
+/// assignment and enqueueing share one critical section and a single drainer
+/// dispatches the queue, so no listener can observe offset 1 before offset 0.
+#[test]
+fn concurrent_emits_reach_listeners_in_offset_order() {
+    const THREADS: usize = 8;
+    const PER_THREAD: usize = 50;
+
+    let sink = EventSink::new();
+    let recorder = Arc::new(RecordingListener::new());
+    sink.subscribe(recorder.clone());
+
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let sink = sink.clone();
+            thread::spawn(move || {
+                for _ in 0..PER_THREAD {
+                    sink.emit(AgentEvent::StateUpdate);
+                }
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().expect("emit thread should finish");
+    }
+
+    let offsets: Vec<u64> = recorder.events().iter().map(|r| r.offset).collect();
+    let expected: Vec<u64> = (0..(THREADS * PER_THREAD) as u64).collect();
+    assert_eq!(
+        offsets, expected,
+        "listeners must observe every offset exactly once, in order"
+    );
+}
+
+/// Concurrent appends must land in the journal in offset order, so
+/// `replay_from` returns offset order rather than the completion order of
+/// racing appends.
+#[test]
+fn concurrent_journal_appends_replay_in_offset_order() {
+    const THREADS: usize = 8;
+    const PER_THREAD: usize = 50;
+
+    let journal = Arc::new(EventJournal::new());
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let journal = journal.clone();
+            thread::spawn(move || {
+                for _ in 0..PER_THREAD {
+                    journal.append(AgentEvent::StateUpdate);
+                }
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().expect("append thread should finish");
+    }
+
+    let offsets: Vec<u64> = journal.replay_from(0).iter().map(|r| r.offset).collect();
+    let expected: Vec<u64> = (0..(THREADS * PER_THREAD) as u64).collect();
+    assert_eq!(offsets, expected, "replay_from must return offset order");
+
+    let tail = journal.replay_from(expected.len() as u64 - 5);
+    assert_eq!(tail.len(), 5);
 }

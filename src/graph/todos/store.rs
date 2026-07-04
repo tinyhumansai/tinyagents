@@ -11,8 +11,7 @@
 //! Each mutator returns a [`TodosSnapshot`] — the normalised cards plus a
 //! markdown rendering — so an agent transcript and a UI stay in lock-step.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::Mutex;
 
@@ -21,18 +20,21 @@ use super::types::{
     now_stamp, render_markdown,
 };
 use crate::error::{Result, TinyAgentsError};
+use crate::graph::thread_locks::ThreadLockMap;
 use crate::harness::store::Store;
 
 /// The [`Store`] namespace holding one [`TaskBoard`] per thread.
 pub const TODOS_NAMESPACE: &str = "graph.todos";
 
 /// Serialises `load → mutate → put` per thread so a read-modify-write is atomic
-/// within the process.
+/// within the process. Unused mutexes are reclaimed (see
+/// [`ThreadLockMap`](crate::graph::thread_locks::ThreadLockMap)) so the map
+/// does not grow with every thread id ever seen.
 fn thread_lock(thread_id: &str) -> Arc<Mutex<()>> {
-    static LOCKS: OnceLock<StdMutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
-    let map = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
-    let mut guard = map.lock().expect("todo lock map poisoned");
-    guard.entry(thread_id.to_string()).or_default().clone()
+    static LOCKS: OnceLock<ThreadLockMap> = OnceLock::new();
+    LOCKS
+        .get_or_init(|| ThreadLockMap::new("todo lock map"))
+        .lock_for(thread_id)
 }
 
 /// Hex-encodes the thread id into a [`Store`]-safe key.

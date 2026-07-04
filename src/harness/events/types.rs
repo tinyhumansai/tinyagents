@@ -72,6 +72,14 @@ pub enum AgentEvent {
     ModelCompleted {
         /// Identifier for the model call that completed.
         call_id: CallId,
+        /// Wall-clock time the model call *started*, in Unix-epoch
+        /// milliseconds. Captured by the agent loop when it dispatches the
+        /// call (alongside [`AgentEvent::ModelStarted`]) so exporters can
+        /// render a real duration instead of a zero-width point. `None` for
+        /// events serialized before this field existed (`#[serde(default)]`
+        /// keeps old journals deserializable).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at_ms: Option<u64>,
         /// Token usage reported by the provider, when available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<Usage>,
@@ -115,6 +123,14 @@ pub enum AgentEvent {
         call_id: CallId,
         /// Name of the tool that was invoked.
         tool_name: String,
+        /// Wall-clock time the tool call *started*, in Unix-epoch
+        /// milliseconds. Captured by the agent loop when it dispatches the
+        /// call (alongside [`AgentEvent::ToolStarted`]) so exporters can
+        /// render a real duration instead of a zero-width point. `None` for
+        /// events serialized before this field existed (`#[serde(default)]`
+        /// keeps old journals deserializable).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at_ms: Option<u64>,
         /// The arguments the tool was invoked with, captured only when
         /// [`PayloadCapture::tool_io`][crate::harness::runtime::PayloadCapture::tool_io]
         /// is enabled. `None` in the default payload-free mode. Populated so an
@@ -234,9 +250,10 @@ pub enum AgentEvent {
     /// A rate-limit gate (token bucket) blocked a model call until capacity was
     /// available. Emitted by
     /// [`RateLimitMiddleware`][crate::harness::middleware::RateLimitMiddleware]
-    /// each time it must wait before acquiring tokens.
+    /// once per gated call, after the tokens were finally acquired.
     RateLimitWaited {
-        /// Approximate time the call was held back, in milliseconds.
+        /// Actual wall-clock time the call was held back, in milliseconds
+        /// (measured with the middleware's injectable clock).
         waited_ms: u64,
     },
 
@@ -248,6 +265,18 @@ pub enum AgentEvent {
         from: String,
         /// The fallback model now being tried.
         to: String,
+    },
+
+    /// An explicit per-request model override was skipped during resolution —
+    /// the requested model is unregistered, lacks a required capability, or is
+    /// provider-retired — and resolution fell through to a lower-priority
+    /// candidate (documented fail-closed behavior). Emitted by the agent loop
+    /// so the silent fall-through is observable.
+    ModelOverrideSkipped {
+        /// The model name the request explicitly asked for.
+        requested: String,
+        /// The model that was actually resolved instead.
+        resolved: String,
     },
 
     /// A sub-agent child run is about to be invoked from a parent run.
@@ -505,6 +534,7 @@ impl AgentEvent {
             AgentEvent::RetryScheduled { .. } => "retry.scheduled",
             AgentEvent::RateLimitWaited { .. } => "rate_limit.waited",
             AgentEvent::FallbackSelected { .. } => "model.fallback_selected",
+            AgentEvent::ModelOverrideSkipped { .. } => "model.override_skipped",
             AgentEvent::SubAgentStarted { .. } => "subagent.started",
             AgentEvent::SubAgentCompleted { .. } => "subagent.completed",
             AgentEvent::SubAgentReused { .. } => "subagent.reused",
@@ -569,9 +599,11 @@ pub trait EventListener: Send + Sync {
 ///
 /// All clones share the same underlying listener list and monotonic offset
 /// counter via an `Arc<Mutex<…>>`. Any clone can subscribe new listeners or
-/// emit events. The `emit` method assigns a monotonic [`EventId`] and offset,
-/// clones the current listener list, releases the sink lock, and then calls each
-/// listener in registration order.
+/// emit events. The `emit` method assigns a monotonic [`EventId`] and offset
+/// and enqueues the record under one critical section, then a single draining
+/// emitter delivers queued records to listeners in offset order — so listeners
+/// never observe offset `n + 1` before offset `n`, even under concurrent
+/// emits.
 ///
 /// # Example
 ///
@@ -603,6 +635,15 @@ pub(crate) struct EventSinkInner {
     pub(crate) next_offset: u64,
     /// Registered listeners, notified in insertion order.
     pub(crate) listeners: Vec<Arc<dyn EventListener>>,
+    /// Records assigned an offset but not yet delivered to listeners, in
+    /// offset order. Each entry carries the listener snapshot taken when the
+    /// offset was assigned so late subscribers never see earlier offsets.
+    pub(crate) pending: std::collections::VecDeque<(EventRecord, Vec<Arc<dyn EventListener>>)>,
+    /// `true` while some emitter is draining `pending`. Guarantees a single
+    /// drainer at a time, which is what makes listener delivery globally
+    /// ordered by offset (and keeps re-entrant emits from listeners safe:
+    /// they enqueue and return, and the active drainer delivers them).
+    pub(crate) dispatching: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -627,10 +668,22 @@ pub struct RecordingListener {
 /// Supports both live append from an active run and offset-based replay for
 /// late subscribers. The journal does not fan out to listeners; callers that
 /// need live delivery should use an [`EventSink`] alongside the journal.
+///
+/// Records are stored in offset order: the journal's buffer is populated by an
+/// internal listener on the sink's ordered dispatch path, so
+/// [`EventJournal::replay_from`] always returns a contiguous, offset-ordered
+/// prefix of the stream — never the completion order of racing appends.
 pub struct EventJournal {
     pub(crate) records: Arc<Mutex<Vec<EventRecord>>>,
     /// Internal sink used to assign monotonic ids and offsets.
     pub(crate) sink: EventSink,
+}
+
+/// Internal [`EventListener`] that copies each dispatched record into an
+/// [`EventJournal`]'s buffer. Because sink dispatch is globally ordered by
+/// offset, the buffer stays in offset order regardless of append concurrency.
+pub(crate) struct JournalRecorder {
+    pub(crate) records: Arc<Mutex<Vec<EventRecord>>>,
 }
 
 // ---------------------------------------------------------------------------

@@ -40,7 +40,10 @@ enters a model request.
 - Register named embedding providers.
 - Embed documents and queries separately.
 - Support batch embedding and async-native embedding.
-- Track vector dimensionality and distance metric.
+- Track vector dimensionality and distance metric. The in-memory store fixes
+  its dimensionality on the first vector added and rejects mismatched (or
+  zero-length) inserts and mismatched non-empty-store queries with a
+  `Validation` error; an empty store answers any query with no hits.
 - Normalize provider metadata, usage, cost, and errors.
 - Cache embeddings when policy allows.
 - Store and query dense vectors.

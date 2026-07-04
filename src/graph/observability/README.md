@@ -26,7 +26,11 @@ so existing runs are unchanged.
     observations.
 - `GraphStatusStore` (trait) — a compact "what is running now?" surface over
   `graph::GraphRunStatus`.
-  - `InMemoryGraphStatusStore` — in-process implementation.
+  - `InMemoryGraphStatusStore` — in-process implementation with a
+    `thread_id → run ids` index so `list_by_thread` is proportional to that
+    thread's runs. Unbounded by default; `with_max_runs(n)` caps retained
+    runs, evicting the oldest terminal run first (oldest live run when none
+    is terminal).
 - `JournalGraphSink` — a `GraphEventSink` that wraps each emitted event into a
   `GraphObservation` and appends it to a journal, optionally also forwarding
   to a live `inner` sink (`with_lineage`, `with_thread`, `with_namespace`,

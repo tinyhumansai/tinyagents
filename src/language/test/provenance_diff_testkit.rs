@@ -177,6 +177,74 @@ fn blueprint_diff_reports_command_only_change() {
     assert!(rendered.contains("command:"), "{rendered}");
 }
 
+/// Additions and changes must follow the new blueprint's declaration order,
+/// removals the old blueprint's — the ordering contract documented on
+/// [`blueprint_diff`]. Guards the map-indexed matching rewrite.
+#[test]
+fn blueprint_diff_preserves_declaration_ordering() {
+    let old = lang_testkit::blueprint(
+        r#"
+graph order {
+  start a
+  channel x append
+  channel y append
+  node a { kind model next END }
+  node b { kind model }
+  node c { kind model }
+  b -> a
+  c -> a
+}
+"#,
+    );
+    let new = lang_testkit::blueprint(
+        r#"
+graph order {
+  start a
+  channel p append
+  channel q append
+  node a { kind model next END }
+  node d { kind model }
+  node e { kind model }
+  d -> a
+  e -> a
+}
+"#,
+    );
+
+    let diff = blueprint_diff(&old, &new);
+    assert_eq!(diff.nodes_added, vec!["d".to_string(), "e".to_string()]);
+    assert_eq!(diff.nodes_removed, vec!["b".to_string(), "c".to_string()]);
+    assert_eq!(diff.channels_added, vec!["p".to_string(), "q".to_string()]);
+    assert_eq!(
+        diff.channels_removed,
+        vec!["x".to_string(), "y".to_string()]
+    );
+    let added: Vec<(String, String)> = diff
+        .edges_added
+        .iter()
+        .map(|e| (e.from.clone(), e.to.clone()))
+        .collect();
+    assert_eq!(
+        added,
+        vec![
+            ("d".to_string(), "a".to_string()),
+            ("e".to_string(), "a".to_string()),
+        ]
+    );
+    let removed: Vec<(String, String)> = diff
+        .edges_removed
+        .iter()
+        .map(|e| (e.from.clone(), e.to.clone()))
+        .collect();
+    assert_eq!(
+        removed,
+        vec![
+            ("b".to_string(), "a".to_string()),
+            ("c".to_string(), "a".to_string()),
+        ]
+    );
+}
+
 #[test]
 fn blueprint_diff_serializes_round_trip() {
     let old = lang_testkit::blueprint(DIFF_BASE);

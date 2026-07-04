@@ -166,10 +166,14 @@ impl InMemoryEventJournal {
     }
 
     /// Returns the number of observations stored for `run_id`.
+    ///
+    /// Read-only accessor: a poisoned lock (a panic in another holder) is
+    /// recovered rather than propagated, matching the `poisoned()` mapping the
+    /// fallible trait methods use.
     pub fn len(&self, run_id: &str) -> usize {
         self.state
             .lock()
-            .expect("InMemoryEventJournal lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .streams
             .get(run_id)
             .map(|s| s.entries.len())
@@ -182,10 +186,12 @@ impl InMemoryEventJournal {
     }
 
     /// Returns the number of distinct `run_id` streams currently retained.
+    ///
+    /// Recovers from a poisoned lock like [`Self::len`].
     pub fn run_count(&self) -> usize {
         self.state
             .lock()
-            .expect("InMemoryEventJournal lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .streams
             .len()
     }
@@ -336,10 +342,14 @@ impl InMemoryStatusStore {
     }
 
     /// Returns the number of distinct runs with a recorded status.
+    ///
+    /// Read-only accessor: a poisoned lock (a panic in another holder) is
+    /// recovered rather than propagated, matching the `poisoned()` mapping the
+    /// fallible trait methods use.
     pub fn len(&self) -> usize {
         self.state
             .lock()
-            .expect("InMemoryStatusStore lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .statuses
             .len()
     }

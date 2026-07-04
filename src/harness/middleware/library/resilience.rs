@@ -231,9 +231,17 @@ impl<State: Send + Sync, Ctx: Send + Sync> ModelMiddleware<State, Ctx> for RateL
         request: ModelRequest,
         next: ModelHandler<'_, State, Ctx>,
     ) -> Result<MiddlewareModelOutcome> {
+        let mut wait_start: Option<Instant> = None;
         loop {
             let now = (self.now)();
             if self.limiter.try_acquire(self.tokens, now) {
+                // Report the *actual* wall-clock time spent waiting (per the
+                // injectable clock), not the intended per-poll interval.
+                if let Some(start) = wait_start {
+                    ctx.emit(AgentEvent::RateLimitWaited {
+                        waited_ms: now.saturating_duration_since(start).as_millis() as u64,
+                    });
+                }
                 break;
             }
             match self.behavior {
@@ -244,9 +252,20 @@ impl<State: Send + Sync, Ctx: Send + Sync> ModelMiddleware<State, Ctx> for RateL
                     )));
                 }
                 RateLimitBehavior::Wait => {
-                    ctx.emit(AgentEvent::RateLimitWaited {
-                        waited_ms: self.poll_interval.as_millis() as u64,
-                    });
+                    // A bucket that never refills (refill rate <= 0) or a
+                    // request larger than the bucket capacity can never be
+                    // satisfied by waiting: fail fast instead of livelocking
+                    // in the poll loop forever.
+                    if !self.limiter.can_ever_acquire(self.tokens) {
+                        return Err(TinyAgentsError::LimitExceeded(format!(
+                            "rate limit: waiting for {} token(s) can never succeed \
+                             (bucket capacity {}, refill {}/s)",
+                            self.tokens,
+                            self.limiter.capacity(),
+                            self.limiter.refill_per_sec()
+                        )));
+                    }
+                    wait_start.get_or_insert(now);
                     tokio::time::sleep(self.poll_interval).await;
                 }
             }

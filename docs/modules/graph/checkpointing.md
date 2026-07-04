@@ -164,11 +164,19 @@ The checkpoint core lives in `src/graph/checkpoint/`:
 - `CheckpointSource` — `Input | Loop | Update | Fork` with serde (lowercase wire
   form) and `Display`. `CheckpointSource::parse` recovers it from a string.
 - `DurabilityMode` — `Sync | Async | Exit`, default `Sync`. `Sync` persists a
-  checkpoint before the next step starts. `Async` persists the boundary state
-  once committed (today identical to `Sync`; the variant documents moving
-  persistence off the critical path). `Exit` persists only the terminal
-  checkpoint and any interrupt boundary (interrupts must persist so the run can
-  resume). Set it with `CompiledGraph::with_durability(mode)`.
+  checkpoint before the next step starts. `Async` hands non-terminal boundary
+  writes to spawned background tasks so checkpoint I/O stays off the superstep
+  critical path; the checkpoint id is minted up front so lineage stays chained.
+  A failed background write is never silently lost: the run fails at the next
+  durability boundary that observes it, and every in-flight write is awaited
+  (drained) at the terminal, interrupt, and failure boundaries so the run
+  result reflects persistence failures. The terminal and interrupt checkpoints
+  themselves are always written synchronously; `CheckpointSaved` events for
+  background writes arrive when the write completes, so their ordering
+  relative to later step events is not deterministic. Outside a tokio runtime
+  `Async` degrades to `Sync`. `Exit` persists only the terminal checkpoint and
+  any interrupt boundary (interrupts must persist so the run can resume). Set
+  it with `CompiledGraph::with_durability(mode)`.
 - `CheckpointConfig { thread_id, checkpoint_id, namespace }` — checkpoint
   coordinates. `CheckpointConfig::latest(thread_id)` addresses the newest
   checkpoint at the root namespace.
@@ -225,10 +233,14 @@ so every backend inherits them:
 
 - `delete_by_run(thread_id, run_id)` — deletes the checkpoints stamped with a
   run id (composed from `list` + `delete_checkpoints`), returning the count.
+- `get_thread(thread_id)` — bulk-reads every full checkpoint record for a
+  thread in listing order. The default is composed from `list` + `get` (one
+  lookup per id); all three bundled backends override it with a single-pass
+  read (map clone / one file parse / one indexed range query).
 - `copy_thread(source, target)` — deep-copies every checkpoint into a new thread
   id, preserving each record's `checkpoint_id` and `parent_checkpoint_id` so the
-  lineage spine stays walkable for time-travel/resume (composed from `list` +
-  `get` + `put`).
+  lineage spine stays walkable for time-travel/resume (composed from
+  `get_thread` + `put`, so the source thread is read once).
 - `prune(thread_id, keep_last)` — retains the most recent `keep_last`
   checkpoints **plus the full `parent_checkpoint_id` ancestor chain of every
   retained checkpoint**, then deletes the rest. Protecting the entire ancestor
@@ -237,8 +249,9 @@ so every backend inherits them:
   be orphaned from the state it needs. `keep_last == 0` is clamped to `1` so the
   latest checkpoint always survives.
 
-`InMemoryCheckpointer` implements only the three storage primitives; it inherits
-`delete_by_run`, `copy_thread`, and `prune` from the trait defaults.
+`InMemoryCheckpointer` implements the three storage primitives (plus a
+single-pass `get_thread`); it inherits `delete_by_run`, `copy_thread`, and
+`prune` from the trait defaults.
 
 ### State inspection & time travel
 

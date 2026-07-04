@@ -630,12 +630,12 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             .post_json(&body, request.timeout_ms, true, "stream request")
             .await?;
 
-        // Map each raw byte chunk onto an owned `Vec<u8>` so the boxed stream's
-        // item type is nameable without depending on the `bytes` crate.
+        // Forward each raw chunk as the `bytes::Bytes` buffer reqwest already
+        // produced (a cheap refcount clone, no per-chunk copy); only the error
+        // type is mapped onto the crate error. `SseState` is crate-internal,
+        // so `bytes` never leaks into the public API.
         let bytes = response.bytes_stream().map(|chunk| {
-            chunk
-                .map(|b| b.to_vec())
-                .map_err(|e| TinyAgentsError::Model(format!("stream chunk failed: {e}")))
+            chunk.map_err(|e| TinyAgentsError::Model(format!("stream chunk failed: {e}")))
         });
 
         let state = SseState {

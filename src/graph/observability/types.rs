@@ -319,13 +319,38 @@ pub trait GraphStatusStore: Send + Sync {
     async fn list_by_thread(&self, thread_id: &str) -> Result<Vec<GraphRunStatus>>;
 }
 
-/// In-memory [`GraphStatusStore`] backed by a `run_id → status` map.
+/// In-memory [`GraphStatusStore`] backed by a `run_id → status` map plus a
+/// `thread_id → run ids` secondary index, so
+/// [`list_by_thread`](GraphStatusStore::list_by_thread) is proportional to
+/// that thread's runs rather than every recorded run.
 ///
-/// Cheaply clonable through an inner [`Arc`]; clones share the same map.
+/// # Retention
+/// Unbounded by default. Long-lived processes should opt into a run cap with
+/// [`InMemoryGraphStatusStore::with_max_runs`]: once the number of distinct
+/// runs exceeds the cap, the store evicts the oldest **terminal** run first
+/// (completed / failed / cancelled), falling back to the oldest run overall
+/// when every run is still live.
+///
+/// Cheaply clonable through an inner [`Arc`]; clones share the same state
+/// *and* the same cap.
 #[derive(Clone, Debug, Default)]
 pub struct InMemoryGraphStatusStore {
+    /// Shared map + indexes, kept coherent under one lock.
+    pub(crate) state: Arc<Mutex<StatusStoreState>>,
+    /// Maximum retained runs; `None` means unbounded (default).
+    pub(crate) max_runs: Option<usize>,
+}
+
+/// Internal state of [`InMemoryGraphStatusStore`]: the primary map plus the
+/// indexes that keep `list_by_thread` fast and eviction ordered.
+#[derive(Debug, Default)]
+pub(crate) struct StatusStoreState {
     /// `run_id → latest status`.
-    pub(crate) statuses: Arc<Mutex<HashMap<String, GraphRunStatus>>>,
+    pub(crate) statuses: HashMap<String, GraphRunStatus>,
+    /// `thread_id → run ids` secondary index for `list_by_thread`.
+    pub(crate) by_thread: HashMap<String, Vec<String>>,
+    /// Run ids in first-insertion order, driving oldest-first eviction.
+    pub(crate) order: std::collections::VecDeque<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -153,21 +153,46 @@ pub struct FileStore {
 
 /// Thread-safe, in-memory [`AppendStore`].
 ///
-/// Each stream is a `Vec` of `(created_at_ms, value)` entries held behind a
-/// single [`Mutex`]. Offsets are positional indexes into that `Vec`.
+/// Each stream is a deque of `(created_at_ms, value)` entries held behind a
+/// single [`Mutex`], plus the offset of its oldest retained entry so offsets
+/// stay stable when old entries are evicted.
 ///
 /// # Use cases
 /// - Unit tests and deterministic replay of event journals.
 /// - Examples and local prototyping.
 ///
+/// # Retention
+/// The store is **unbounded by default** — existing callers keep the full
+/// journal semantics. Long-lived processes should opt into a per-stream cap
+/// with [`InMemoryAppendStore::with_max_entries_per_stream`]: once a stream
+/// exceeds the cap, its **oldest** entries are dropped. Offsets remain
+/// monotonically increasing across eviction — an evicted offset is simply no
+/// longer readable, and [`AppendStore::read_from`] returns only the retained
+/// entries at or after the requested offset. [`AppendStore::len`] keeps
+/// returning the *logical* stream length (the offset the next append gets),
+/// which after eviction can exceed the number of retained entries.
+///
 /// # Caveats
 /// There is **no durability**: entries are lost when the value is dropped. The
 /// store is cheaply clonable through the inner [`Arc`]; clones share the same
-/// underlying streams.
+/// underlying streams *and* the same retention cap.
 #[derive(Clone, Debug, Default)]
 pub struct InMemoryAppendStore {
-    /// `stream → ordered entries`, each entry being `(created_at_ms, value)`.
-    pub(crate) streams: Arc<Mutex<HashMap<String, Vec<AppendEntry>>>>,
+    /// `stream → buffered entries + base offset`.
+    pub(crate) streams: Arc<Mutex<HashMap<String, StreamBuffer>>>,
+    /// Maximum retained entries per stream; `None` means unbounded (default).
+    pub(crate) max_entries_per_stream: Option<usize>,
+}
+
+/// One in-memory stream: retained entries plus the offset of the oldest one.
+#[derive(Debug, Default)]
+pub(crate) struct StreamBuffer {
+    /// Offset of the entry at the front of `entries` (the oldest retained
+    /// entry). Starts at `0` and advances by one per evicted entry, keeping
+    /// offsets monotonically increasing across eviction.
+    pub(crate) base_offset: u64,
+    /// Retained entries, oldest first, each entry being `(created_at_ms, value)`.
+    pub(crate) entries: std::collections::VecDeque<AppendEntry>,
 }
 
 /// A single in-memory append entry: `(created_at_ms, value)`.

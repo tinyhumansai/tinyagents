@@ -24,7 +24,7 @@
 //!    describes *topology*; runnable node behaviour comes entirely from the
 //!    Rust-side factory, never from the declarative source.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::error::{Result, TinyAgentsError};
@@ -128,25 +128,33 @@ fn compile_graph(graph: &crate::language::types::GraphDecl) -> Result<Blueprint>
         });
     }
 
-    // Nodes that already have a static outgoing edge declared at top level.
-    let nodes_with_static_edge: HashSet<&str> =
-        graph.edges.iter().map(|e| e.from.as_str()).collect();
+    // Group top-level edges by source node (targets in declaration order) so
+    // the multi-edge check and per-node routing lookups below are O(1) per
+    // node instead of a linear rescan of `graph.edges` each time.
+    let mut edge_targets: HashMap<&str, Vec<&str>> = HashMap::new();
+    for edge in &graph.edges {
+        edge_targets
+            .entry(edge.from.as_str())
+            .or_default()
+            .push(edge.to.as_str());
+    }
 
     // Reject contradictory multiple top-level edges from the same source: only
     // one static successor can ever be routed to, so a second edge from the
     // same node is silent data loss (the first edge wins, the rest are dead
     // weight in `blueprint.edges`) rather than a legitimate multi-successor.
-    for name in &nodes_with_static_edge {
-        let targets: Vec<&str> = graph
-            .edges
-            .iter()
-            .filter(|e| e.from == *name)
-            .map(|e| e.to.as_str())
-            .collect();
-        if targets.len() > 1 {
+    // Walking `graph.edges` in declaration order keeps the reported node (the
+    // first source that repeats) deterministic.
+    let mut seen_edge_sources: HashSet<&str> = HashSet::new();
+    for edge in &graph.edges {
+        let name = edge.from.as_str();
+        if !seen_edge_sources.insert(name) {
+            let targets = edge_targets
+                .get(name)
+                .map(|targets| targets.join(", "))
+                .unwrap_or_default();
             return Err(compile_err(format!(
-                "node `{name}` has multiple top-level edges ({}); a node may declare at most one outgoing edge",
-                targets.join(", ")
+                "node `{name}` has multiple top-level edges ({targets}); a node may declare at most one outgoing edge",
             )));
         }
     }
@@ -156,7 +164,7 @@ fn compile_graph(graph: &crate::language::types::GraphDecl) -> Result<Blueprint>
     for node in &graph.nodes {
         let has_routes = !node.routes.is_empty();
         let has_next = node.next.is_some();
-        let has_static_edge = nodes_with_static_edge.contains(node.name.as_str());
+        let has_static_edge = edge_targets.contains_key(node.name.as_str());
         let has_command_goto = node.command.as_ref().is_some_and(|c| c.goto.is_some());
 
         if has_routes && (has_next || has_static_edge) {
@@ -269,11 +277,16 @@ fn compile_graph(graph: &crate::language::types::GraphDecl) -> Result<Blueprint>
             } else {
                 Routing::Next(goto.clone())
             }
-        } else if let Some(edge) = graph.edges.iter().find(|e| e.from == node.name) {
-            if edge.to == END {
+        } else if let Some(to) = edge_targets
+            .get(node.name.as_str())
+            .and_then(|targets| targets.first())
+        {
+            // First declared edge wins, matching the previous linear `find`
+            // (after the multi-edge check above there is exactly one).
+            if *to == END {
                 Routing::Terminal
             } else {
-                Routing::Next(edge.to.clone())
+                Routing::Next((*to).to_string())
             }
         } else {
             Routing::Terminal

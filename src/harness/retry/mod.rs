@@ -260,6 +260,25 @@ impl RateLimiter {
         state.tokens.floor() as u64
     }
 
+    /// Returns the bucket capacity (maximum burst) in tokens.
+    pub fn capacity(&self) -> u64 {
+        self.inner.lock().unwrap().capacity as u64
+    }
+
+    /// Returns the sustained refill rate in tokens per second.
+    pub fn refill_per_sec(&self) -> f64 {
+        self.inner.lock().unwrap().refill_per_sec
+    }
+
+    /// Returns `true` when waiting could ever satisfy an acquisition of
+    /// `tokens`: the request fits the bucket capacity and the bucket actually
+    /// refills. With a zero (or negative) refill rate, or a request larger
+    /// than the capacity, a failed acquire can never succeed later.
+    pub fn can_ever_acquire(&self, tokens: u64) -> bool {
+        let state = self.inner.lock().unwrap();
+        tokens as f64 <= state.capacity && state.refill_per_sec > 0.0
+    }
+
     /// Adds tokens to the bucket based on time elapsed since the last refill.
     fn refill(&self, state: &mut types::RateLimiterState, now: Instant) {
         let elapsed = now.duration_since(state.last_refill).as_secs_f64();

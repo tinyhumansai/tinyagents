@@ -27,7 +27,7 @@ separate type — there is no standalone "AgentLoop" struct to construct.
    - resolve and invoke the model with retry + fallback,
    - run `after_model` middleware, emit `AgentEvent::ModelCompleted`, fold
      usage into the `AgentRun`, append the assistant message,
-   - if the assistant requested tools, execute each (enforcing the tool-call
+   - if the assistant requested tools, execute them (enforcing the tool-call
      cap, running `before_tool`/`after_tool`, emitting tool events) and append
      the tool results, then continue,
    - otherwise extract structured output when configured and break.
@@ -35,6 +35,25 @@ separate type — there is no standalone "AgentLoop" struct to construct.
 
 On any error the loop emits `AgentEvent::RunFailed`, fans the error out
 through `on_error` middleware, and returns the error.
+
+## Tool execution: serial vs. concurrent
+
+A turn's tool calls are driven in three phases — serial **admission**
+(cancellation/deadline/limit checks, `before_tool`, unknown-tool policy,
+schema validation, `ToolStarted`), **execution**, and a serial **fold** in
+original call order (`after_tool`, `ToolCompleted`, transcript append).
+
+When a turn requests two or more tools and **no tool-wrap middleware**
+(`ToolMiddleware`) is registered, execution runs concurrently (`join_all`),
+so turn latency is the slowest tool instead of the sum. Tool-wrap middleware
+holds `&mut RunContext` across each wrapped call — part of its public
+contract — so its presence keeps the historical serial path. In both modes
+results are attached to their original `tool_call_id` in the calls' original
+order, every call's `ToolStarted` precedes its `ToolCompleted`, and
+`ToolCompleted` events are emitted in call order. The first failing call (in
+call order) fails the turn; in concurrent mode already-launched siblings run
+to completion before the error surfaces. See `tools.rs` for the full design
+notes.
 
 ## Limits
 
@@ -80,6 +99,7 @@ error surfaced by a model, tool, middleware, or structured-output extraction.
 | `mod.rs` | Module wiring: shared imports and the module-level doc comment. |
 | `entry.rs` | Public entry points (`invoke`/`invoke_with_status`/`invoke_streaming*`) and the shared `drive` lifecycle wrapper. |
 | `run_loop.rs` | The core loop body (`run_loop`) and response-cache decision logic. |
+| `tools.rs` | Tool execution for one turn: serial admission, serial or concurrent execution, ordered fold. |
 | `model_call.rs` | Cache-aware retry/fallback model dispatch, the streaming variant, and the innermost `ModelBaseCall`/`ToolBaseCall` impls the middleware wrap-onion terminates into. |
 | `types.rs` | `AgentLoopResult`. |
 | `test.rs` | Unit tests (limits, retry/fallback, tool execution, structured extraction). |

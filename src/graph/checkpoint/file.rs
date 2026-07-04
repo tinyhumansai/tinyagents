@@ -264,6 +264,12 @@ where
             .collect())
     }
 
+    async fn get_thread(&self, thread_id: &str) -> Result<Vec<Checkpoint<State>>> {
+        // Single-pass bulk read: parse the thread file once, instead of the
+        // default's one whole-file `get` scan per listed id (O(H²)).
+        self.read_records(thread_id)
+    }
+
     async fn state_history(
         &self,
         thread_id: &str,

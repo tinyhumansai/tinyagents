@@ -283,6 +283,14 @@ impl TaskStore for InMemoryTaskStore {
 ///
 /// The in-memory state machine (transition validation, filtering) is reused from
 /// [`InMemoryTaskStore`]; this type layers durability and history on top.
+///
+/// # Blocking I/O
+/// Each transition appends exactly one JSON line (and pushes one record onto
+/// the in-memory timeline — the history is never rebuilt or re-cloned per
+/// transition). Because [`TaskStore`] is synchronous, the file write runs
+/// under [`tokio::task::block_in_place`] when called from a multi-thread
+/// tokio runtime so it does not stall other tasks scheduled on that worker;
+/// outside a runtime (or on a current-thread runtime) it runs inline.
 pub struct JsonlTaskStore {
     inner: InMemoryTaskStore,
     file: Arc<Mutex<std::fs::File>>,
@@ -336,16 +344,26 @@ impl JsonlTaskStore {
 
         let line = serde_json::to_string(record)
             .map_err(|e| TinyAgentsError::Graph(format!("serialize task record: {e}")))?;
-        {
+        // Blocking file I/O behind a sync trait: when called from a
+        // multi-thread tokio runtime, `block_in_place` tells the scheduler
+        // this worker will block so other tasks migrate off it. (The async
+        // analogue — `spawn_blocking` + await, as in
+        // `harness::store::JsonlAppendStore::append` — is unavailable here
+        // because `TaskStore` is deliberately synchronous.) The file mutex is
+        // only ever held inside this closure, never across an await point.
+        run_blocking(|| -> Result<()> {
             let mut file = self
                 .file
                 .lock()
                 .map_err(|_| TinyAgentsError::Graph("task log file lock poisoned".into()))?;
+            // `File` writes are unbuffered, so a single `writeln!` hands the
+            // whole line to the OS; no explicit flush is needed.
             writeln!(file, "{line}")
                 .map_err(|e| TinyAgentsError::Graph(format!("append task log: {e}")))?;
-            file.flush()
-                .map_err(|e| TinyAgentsError::Graph(format!("flush task log: {e}")))?;
-        }
+            Ok(())
+        })?;
+        // Append only the new record to the in-memory timeline — no
+        // full-history rebuild per transition.
         if let Ok(mut hist) = self.history.lock() {
             hist.entry(record.spec.task_id.clone())
                 .or_default()
@@ -443,6 +461,23 @@ impl TaskStore for JsonlTaskStore {
         let record = self.inner.set_timeout_ms(task_id, timeout_ms)?;
         self.persist(&record)?;
         Ok(record)
+    }
+}
+
+/// Runs blocking work, cooperating with an ambient tokio runtime.
+///
+/// Inside a **multi-thread** tokio runtime the closure runs under
+/// [`tokio::task::block_in_place`], which moves other scheduled tasks off the
+/// current worker before blocking it. Outside a runtime — or on a
+/// current-thread runtime, where `block_in_place` would panic — the closure
+/// runs inline.
+fn run_blocking<T>(f: impl FnOnce() -> T) -> T {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
     }
 }
 

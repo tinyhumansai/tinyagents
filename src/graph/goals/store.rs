@@ -22,13 +22,13 @@
 //! mutations through a single process (a clean fix would be a
 //! `Store::compare_and_swap` extension, out of scope here).
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::Mutex;
 
 use super::types::{ThreadGoal, ThreadGoalStatus};
 use crate::error::{Result, TinyAgentsError};
+use crate::graph::thread_locks::ThreadLockMap;
 use crate::harness::ids::{next_seq, now_ms};
 use crate::harness::store::Store;
 
@@ -37,12 +37,14 @@ pub const GOALS_NAMESPACE: &str = "graph.goals";
 
 /// Serialises `load → mutate → put` per thread so a read-modify-write is atomic
 /// within the process. Returns the thread's dedicated async mutex, creating it
-/// on first use.
+/// on first use; unused mutexes are reclaimed (see
+/// [`ThreadLockMap`](crate::graph::thread_locks::ThreadLockMap)) so the map
+/// does not grow with every thread id ever seen.
 fn thread_lock(thread_id: &str) -> Arc<Mutex<()>> {
-    static LOCKS: OnceLock<StdMutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
-    let map = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
-    let mut guard = map.lock().expect("goal lock map poisoned");
-    guard.entry(thread_id.to_string()).or_default().clone()
+    static LOCKS: OnceLock<ThreadLockMap> = OnceLock::new();
+    LOCKS
+        .get_or_init(|| ThreadLockMap::new("goal lock map"))
+        .lock_for(thread_id)
 }
 
 /// Hex-encodes the thread id into a [`Store`]-safe key. Required because

@@ -318,16 +318,30 @@ impl<A: AppendStore + 'static> GraphEventJournal for StoreGraphEventJournal<A> {
 // ---------------------------------------------------------------------------
 
 impl InMemoryGraphStatusStore {
-    /// Creates a new, empty in-memory status store.
+    /// Creates a new, empty, **unbounded** in-memory status store.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Caps the store at `max` distinct runs.
+    ///
+    /// Once a `put_status` for a *new* run pushes the store past the cap, the
+    /// oldest **terminal** run (completed / failed / cancelled) is evicted
+    /// first; when every retained run is still live, the oldest run overall is
+    /// evicted. Overwriting an already-recorded run never triggers eviction. A
+    /// `max` of `0` retains nothing. The default (via [`Self::new`] /
+    /// [`Default`]) is unbounded.
+    pub fn with_max_runs(mut self, max: usize) -> Self {
+        self.max_runs = Some(max);
+        self
+    }
+
     /// Returns the number of distinct runs with a recorded status.
     pub fn len(&self) -> usize {
-        self.statuses
+        self.state
             .lock()
             .expect("InMemoryGraphStatusStore lock poisoned")
+            .statuses
             .len()
     }
 
@@ -337,39 +351,103 @@ impl InMemoryGraphStatusStore {
     }
 }
 
+impl StatusStoreState {
+    /// Removes `run_id` from the thread index, dropping the thread's bucket
+    /// when it becomes empty.
+    fn unindex_thread(&mut self, thread_id: &str, run_id: &str) {
+        if let Some(runs) = self.by_thread.get_mut(thread_id) {
+            runs.retain(|id| id != run_id);
+            if runs.is_empty() {
+                self.by_thread.remove(thread_id);
+            }
+        }
+    }
+
+    /// Evicts one run: the oldest terminal run if any, otherwise the oldest
+    /// run overall. No-op when the store is empty.
+    fn evict_one(&mut self) {
+        let idx = self
+            .order
+            .iter()
+            .position(|id| self.statuses.get(id).is_none_or(|s| s.is_terminal()))
+            .unwrap_or(0);
+        let Some(run_id) = self.order.remove(idx) else {
+            return;
+        };
+        if let Some(evicted) = self.statuses.remove(&run_id)
+            && let Some(thread_id) = evicted.thread_id.as_ref()
+        {
+            self.unindex_thread(thread_id.as_str(), &run_id);
+        }
+    }
+}
+
 #[async_trait]
 impl GraphStatusStore for InMemoryGraphStatusStore {
     async fn put_status(&self, status: GraphRunStatus) -> Result<()> {
-        let mut statuses = self
-            .statuses
+        let mut state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryGraphStatusStore", e))?;
-        statuses.insert(status.run_id.as_str().to_string(), status);
+        let run_id = status.run_id.as_str().to_string();
+        let thread_id = status.thread_id.as_ref().map(|t| t.as_str().to_string());
+
+        match state.statuses.insert(run_id.clone(), status) {
+            Some(previous) => {
+                // Overwrite: keep the thread index coherent if the thread
+                // changed (rare, but cheap to handle).
+                let previous_thread = previous.thread_id.as_ref().map(|t| t.as_str().to_string());
+                if previous_thread != thread_id {
+                    if let Some(old) = previous_thread {
+                        state.unindex_thread(&old, &run_id);
+                    }
+                    if let Some(new) = thread_id {
+                        state.by_thread.entry(new).or_default().push(run_id);
+                    }
+                }
+            }
+            None => {
+                // First status for this run: index it and enforce the cap.
+                if let Some(thread) = thread_id {
+                    state
+                        .by_thread
+                        .entry(thread)
+                        .or_default()
+                        .push(run_id.clone());
+                }
+                state.order.push_back(run_id);
+                if let Some(max) = self.max_runs {
+                    while state.statuses.len() > max {
+                        state.evict_one();
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
     async fn get_status(&self, run_id: &str) -> Result<Option<GraphRunStatus>> {
-        let statuses = self
-            .statuses
+        let state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryGraphStatusStore", e))?;
-        Ok(statuses.get(run_id).cloned())
+        Ok(state.statuses.get(run_id).cloned())
     }
 
     async fn list_by_thread(&self, thread_id: &str) -> Result<Vec<GraphRunStatus>> {
-        let statuses = self
-            .statuses
+        let state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryGraphStatusStore", e))?;
-        Ok(statuses
-            .values()
-            .filter(|s| {
-                s.thread_id
-                    .as_ref()
-                    .is_some_and(|t| t.as_str() == thread_id)
+        Ok(state
+            .by_thread
+            .get(thread_id)
+            .map(|runs| {
+                runs.iter()
+                    .filter_map(|id| state.statuses.get(id).cloned())
+                    .collect()
             })
-            .cloned()
-            .collect())
+            .unwrap_or_default())
     }
 }
 

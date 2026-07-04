@@ -127,13 +127,27 @@ impl<State: Send + Sync> ChatModel<State> for MockModel {
     ///
     /// Increments the internal call counter on every invocation.
     async fn invoke(&self, _state: &State, request: ModelRequest) -> Result<ModelResponse> {
-        let call_id = {
+        // Reserve the call id *and* (for scripted behavior) the scripted index
+        // inside one critical section, so concurrent invocations each consume a
+        // distinct scripted slot: deriving the index from a later, separate
+        // read of `call_count` let two racing calls observe the same value and
+        // serve the same response while skipping another.
+        let (call_id, scripted_index) = {
             let mut inner = self
                 .inner
                 .lock()
                 .map_err(|e| TinyAgentsError::Model(format!("MockModel lock poisoned: {e}")))?;
             inner.call_count += 1;
-            inner.call_count
+            let index = match &self.behavior {
+                MockBehavior::Scripted(responses) => {
+                    // 0-based, cycling over the response list.
+                    let idx = ((inner.call_count - 1) as usize) % responses.len();
+                    inner.scripted_index = idx;
+                    Some(idx)
+                }
+                _ => None,
+            };
+            (inner.call_count, index)
         };
 
         let msg_id = format!("mock-msg-{call_id}");
@@ -168,16 +182,9 @@ impl<State: Send + Sync> ChatModel<State> for MockModel {
             }
 
             MockBehavior::Scripted(responses) => {
-                let index = {
-                    let mut inner = self.inner.lock().map_err(|e| {
-                        TinyAgentsError::Model(format!("MockModel lock poisoned: {e}"))
-                    })?;
-                    // We already incremented call_count above; derive index from
-                    // call_count - 1 (0-based) cycling over the response list.
-                    let idx = ((inner.call_count - 1) as usize) % responses.len();
-                    inner.scripted_index = idx;
-                    idx
-                };
+                // The index was reserved atomically alongside the call id
+                // above, so it is always `Some` for scripted behavior.
+                let index = scripted_index.unwrap_or_default();
                 responses[index].clone()
             }
 

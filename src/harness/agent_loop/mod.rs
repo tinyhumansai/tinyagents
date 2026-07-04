@@ -29,9 +29,12 @@
 //!    - resolve and invoke the model with retry + fallback,
 //!    - run `after_model` middleware, emit [`AgentEvent::ModelCompleted`], fold
 //!      usage into the [`AgentRun`], append the assistant message,
-//!    - if the assistant requested tools, execute each (enforcing the tool-call
+//!    - if the assistant requested tools, execute them (enforcing the tool-call
 //!      cap, running `before_tool`/`after_tool`, emitting tool events) and
-//!      append the tool results, then continue,
+//!      append the tool results, then continue. Multi-call turns run
+//!      concurrently when no tool-wrap middleware is registered — see the
+//!      `tools` submodule for the dispatch rules, the semantics preserved in
+//!      each mode, and why tool-wrap middleware forces serial execution,
 //!    - otherwise extract structured output when configured and break.
 //! 4. Run `after_agent` middleware and emit [`AgentEvent::RunCompleted`].
 //!
@@ -91,6 +94,7 @@ use serde_json::Value;
 mod entry;
 mod model_call;
 mod run_loop;
+mod tools;
 
 #[cfg(test)]
 mod test;
