@@ -32,6 +32,8 @@ fn contract_checkpoint(
         completed_tasks: vec![],
         pending_writes: vec![],
         interrupts: vec![],
+        pending_activations: None,
+        barrier_arrivals: vec![],
         metadata: serde_json::json!({ "source": "loop", "step": step }),
     }
 }
@@ -65,6 +67,25 @@ where
         .expect("some");
     assert_eq!(first.checkpoint_id, "c1", "specific checkpoint id");
 
+    // Duplicate-id lookup: every backend resolves a re-used checkpoint id to
+    // the *last* written record (matching the append-only history and
+    // `get(None)`), so the three backends stay interchangeable.
+    cp.put(contract_checkpoint("dup", "d1", None, 1))
+        .await
+        .expect("put dup first");
+    cp.put(contract_checkpoint("dup", "d1", None, 9))
+        .await
+        .expect("put dup second");
+    let dup = cp
+        .get("dup", Some("d1"))
+        .await
+        .expect("get dup")
+        .expect("some");
+    assert_eq!(
+        dup.state, 9,
+        "duplicate checkpoint id resolves to the last written record"
+    );
+
     // Unknown thread / checkpoint.
     assert!(cp.get("nope", None).await.expect("get miss").is_none());
     assert!(
@@ -72,6 +93,36 @@ where
             .await
             .expect("get miss")
             .is_none()
+    );
+
+    // Namespace-scoped lookup: checkpoints sharing a thread but differing in
+    // namespace never resolve to each other. `get_scoped(None, ns)` returns the
+    // latest in that namespace, not the global latest for the thread.
+    let mut root = contract_checkpoint("ns", "root1", None, 1);
+    root.namespace = vec![];
+    cp.put(root).await.expect("put root ns");
+    let mut child = contract_checkpoint("ns", "child1", None, 5);
+    child.namespace = vec!["child".to_string()];
+    cp.put(child).await.expect("put child ns");
+    // The global latest is the child checkpoint, but the root namespace still
+    // resolves to root1 (and vice versa).
+    let scoped_root = cp
+        .get_scoped("ns", None, &[])
+        .await
+        .expect("scoped root")
+        .expect("some");
+    assert_eq!(
+        scoped_root.checkpoint_id, "root1",
+        "root namespace ignores the child-namespace checkpoint"
+    );
+    let scoped_child = cp
+        .get_scoped("ns", None, &["child".to_string()])
+        .await
+        .expect("scoped child")
+        .expect("some");
+    assert_eq!(
+        scoped_child.checkpoint_id, "child1",
+        "child namespace resolves to its own checkpoint"
     );
 
     // Listing preserves insertion order and projects lineage.

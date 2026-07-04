@@ -16,7 +16,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::language::types::{Blueprint, ChannelSpec, EdgeSpec, NodeSpec, Routing};
+use crate::language::types::{
+    Blueprint, ChannelSpec, CommandSpec, EdgeSpec, IoFieldSpec, JoinSpec, Literal, NodeSpec,
+    Routing, SendSpec,
+};
 
 /// A field of a node whose value changed between two blueprints.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +89,24 @@ pub struct BlueprintDiff {
     /// Static edges present only in the old blueprint.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edges_removed: Vec<EdgeSpec>,
+    /// `(old, new)` when the graph-level `defaults` entries changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defaults_changed: Option<(String, String)>,
+    /// `(old, new)` when the declared graph `input` shape changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_changed: Option<(String, String)>,
+    /// `(old, new)` when the declared graph `output` shape changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_changed: Option<(String, String)>,
+    /// `(old, new)` when the graph-level checkpoint policy changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_changed: Option<(String, String)>,
+    /// `(old, new)` when the graph-level interrupt policy changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupt_changed: Option<(String, String)>,
+    /// `(old, new)` when the compiled join/barrier declarations changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub joins_changed: Option<(String, String)>,
 }
 
 impl BlueprintDiff {
@@ -102,6 +123,12 @@ impl BlueprintDiff {
             && self.channels_changed.is_empty()
             && self.edges_added.is_empty()
             && self.edges_removed.is_empty()
+            && self.defaults_changed.is_none()
+            && self.input_changed.is_none()
+            && self.output_changed.is_none()
+            && self.checkpoint_changed.is_none()
+            && self.interrupt_changed.is_none()
+            && self.joins_changed.is_none()
     }
 }
 
@@ -115,6 +142,24 @@ impl fmt::Display for BlueprintDiff {
         }
         if let Some((old, new)) = &self.start_changed {
             writeln!(f, "~ start: {old} -> {new}")?;
+        }
+        if let Some((old, new)) = &self.defaults_changed {
+            writeln!(f, "~ defaults: {old} -> {new}")?;
+        }
+        if let Some((old, new)) = &self.input_changed {
+            writeln!(f, "~ input: {old} -> {new}")?;
+        }
+        if let Some((old, new)) = &self.output_changed {
+            writeln!(f, "~ output: {old} -> {new}")?;
+        }
+        if let Some((old, new)) = &self.checkpoint_changed {
+            writeln!(f, "~ checkpoint: {old} -> {new}")?;
+        }
+        if let Some((old, new)) = &self.interrupt_changed {
+            writeln!(f, "~ interrupt: {old} -> {new}")?;
+        }
+        if let Some((old, new)) = &self.joins_changed {
+            writeln!(f, "~ joins: {old} -> {new}")?;
         }
         for name in &self.nodes_added {
             writeln!(f, "+ node {name}")?;
@@ -165,6 +210,42 @@ pub fn blueprint_diff(old: &Blueprint, new: &Blueprint) -> BlueprintDiff {
     }
     if old.start != new.start {
         diff.start_changed = Some((old.start.clone(), new.start.clone()));
+    }
+
+    let old_defaults = render_kv_list(&old.defaults);
+    let new_defaults = render_kv_list(&new.defaults);
+    if old_defaults != new_defaults {
+        diff.defaults_changed = Some((old_defaults, new_defaults));
+    }
+
+    let old_input = render_io_fields(&old.input);
+    let new_input = render_io_fields(&new.input);
+    if old_input != new_input {
+        diff.input_changed = Some((old_input, new_input));
+    }
+
+    let old_output = render_io_fields(&old.output);
+    let new_output = render_io_fields(&new.output);
+    if old_output != new_output {
+        diff.output_changed = Some((old_output, new_output));
+    }
+
+    let old_checkpoint = render_opt(&old.checkpoint);
+    let new_checkpoint = render_opt(&new.checkpoint);
+    if old_checkpoint != new_checkpoint {
+        diff.checkpoint_changed = Some((old_checkpoint, new_checkpoint));
+    }
+
+    let old_interrupt = render_opt(&old.interrupt);
+    let new_interrupt = render_opt(&new.interrupt);
+    if old_interrupt != new_interrupt {
+        diff.interrupt_changed = Some((old_interrupt, new_interrupt));
+    }
+
+    let old_joins = render_joins(&old.joins);
+    let new_joins = render_joins(&new.joins);
+    if old_joins != new_joins {
+        diff.joins_changed = Some((old_joins, new_joins));
     }
 
     // Nodes.
@@ -284,6 +365,22 @@ fn node_field_changes(old: &NodeSpec, new: &NodeSpec) -> Vec<FieldChange> {
         render_opt(&old.timeout),
         render_opt(&new.timeout),
     );
+    push(
+        "command",
+        render_command(&old.command),
+        render_command(&new.command),
+    );
+    push("sends", render_sends(&old.sends), render_sends(&new.sends));
+    push(
+        "retry",
+        render_kv_list(&old.retry),
+        render_kv_list(&new.retry),
+    );
+    push(
+        "metadata",
+        render_kv_list(&old.metadata),
+        render_kv_list(&new.metadata),
+    );
 
     changes
 }
@@ -327,4 +424,59 @@ fn render_opt(value: &Option<String>) -> String {
 /// Renders a list field as `[a, b]`.
 fn render_list(values: &[String]) -> String {
     format!("[{}]", values.join(", "))
+}
+
+/// Renders a `command { goto … update { … } }` declaration (`"(none)"` when absent).
+fn render_command(command: &Option<CommandSpec>) -> String {
+    match command {
+        None => "(none)".to_string(),
+        Some(cmd) => {
+            let goto = cmd.goto.clone().unwrap_or_else(|| "(none)".to_string());
+            let update = render_kv_list(&cmd.update);
+            format!("{{ goto {goto}, update {update} }}")
+        }
+    }
+}
+
+/// Renders fanout `send` declarations.
+fn render_sends(sends: &[SendSpec]) -> String {
+    let body = sends
+        .iter()
+        .map(|s| match &s.input {
+            Some(input) => format!("send {} {input}", s.target),
+            None => format!("send {}", s.target),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{body}]")
+}
+
+/// Renders a `(key, Literal)` list (used for `defaults`, `retry`, `metadata`).
+fn render_kv_list(entries: &[(String, Literal)]) -> String {
+    let body = entries
+        .iter()
+        .map(|(k, v)| format!("{k} {}", v.as_display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{ {body} }}")
+}
+
+/// Renders a graph `input`/`output` shape.
+fn render_io_fields(fields: &[IoFieldSpec]) -> String {
+    let body = fields
+        .iter()
+        .map(|f| format!("{} {}", f.name, f.ty))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{ {body} }}")
+}
+
+/// Renders compiled join/barrier declarations.
+fn render_joins(joins: &[JoinSpec]) -> String {
+    let body = joins
+        .iter()
+        .map(|j| format!("[{}] -> {}", j.sources.join(", "), j.target))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{body}]")
 }

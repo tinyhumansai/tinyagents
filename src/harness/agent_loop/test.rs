@@ -14,13 +14,14 @@ use serde_json::json;
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::limits::RunLimits;
-use crate::harness::message::{AssistantMessage, ContentBlock, Message};
+use crate::harness::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
 use crate::harness::middleware::{
     AgentRun, Middleware, MiddlewareModelOutcome, MiddlewareToolOutcome, ModelHandler,
     ModelMiddleware, ToolHandler, ToolMiddleware,
 };
 use crate::harness::model::{
-    ChatModel, ModelProfile, ModelRequest, ModelResponse, ResponseFormat, ToolChoice,
+    ChatModel, ModelProfile, ModelRequest, ModelResponse, ModelStreamItem, ResponseFormat,
+    ToolChoice,
 };
 use crate::harness::providers::MockModel;
 use crate::harness::retry::{FallbackPolicy, RetryPolicy};
@@ -61,6 +62,30 @@ impl Tool<()> for FakeTool {
     async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
         *self.calls.lock().unwrap() += 1;
         Ok(ToolResult::text(call.id, self.name, self.reply))
+    }
+}
+
+/// A tool that sleeps `delay` before returning a fixed reply, used to prove a
+/// hanging tool call is bounded by the run's remaining wall-clock budget the
+/// same way a hanging model call is.
+struct SlowTool {
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl Tool<()> for SlowTool {
+    fn name(&self) -> &str {
+        "slow"
+    }
+    fn description(&self) -> &str {
+        "slow tool"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new("slow", "slow tool", json!({"type": "object"}))
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        tokio::time::sleep(self.delay).await;
+        Ok(ToolResult::text(call.id, "slow", "too late"))
     }
 }
 
@@ -213,6 +238,51 @@ impl ChatModel<()> for FailingModel {
     async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
         *self.attempts.lock().unwrap() += 1;
         Err(TinyAgentsError::Model("transient boom".to_string()))
+    }
+}
+
+/// A model that always fails with a retryable error and records the
+/// (virtual) `tokio::time::Instant` of each `invoke` call, so a test can
+/// assert on the actual elapsed time between retries rather than just the
+/// attempt count.
+struct TimestampingFailingModel {
+    timestamps: Mutex<Vec<tokio::time::Instant>>,
+}
+
+#[async_trait]
+impl ChatModel<()> for TimestampingFailingModel {
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+        self.timestamps
+            .lock()
+            .unwrap()
+            .push(tokio::time::Instant::now());
+        Err(TinyAgentsError::Model("transient boom".to_string()))
+    }
+}
+
+/// A model that always fails with a structured `TinyAgentsError::Provider`
+/// error whose `retryable` flag is fixed at construction, and counts
+/// attempts. Used to prove the agent loop's retry decision consults the
+/// structured flag rather than retrying every provider failure.
+struct ProviderFailingModel {
+    retryable: bool,
+    status: u16,
+    attempts: Mutex<usize>,
+}
+
+#[async_trait]
+impl ChatModel<()> for ProviderFailingModel {
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+        *self.attempts.lock().unwrap() += 1;
+        Err(TinyAgentsError::Provider(Box::new(
+            crate::harness::model::ProviderError {
+                provider: "test-provider".to_string(),
+                status: Some(self.status),
+                retryable: self.retryable,
+                message: "boom".to_string(),
+                ..crate::harness::model::ProviderError::default()
+            },
+        )))
     }
 }
 
@@ -396,6 +466,42 @@ async fn max_model_calls_limit_triggers_limit_exceeded() {
     assert!(
         matches!(err, TinyAgentsError::LimitExceeded(_)),
         "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn policy_model_call_limit_above_run_config_default_is_honored() {
+    // Regression test: `RunConfig::new` defaults `max_model_calls` to 25, but
+    // a harness-wide `RunPolicy` can configure a higher cap. Before the two
+    // limit sources were unified, the context's tracker (seeded from the
+    // `RunConfig` default) tripped at call 26 while the error message
+    // incorrectly reported the policy's higher limit. This asserts the run
+    // survives past 25 calls and, once it does trip, reports the limit that
+    // actually applies.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_tool_call("spin", json!({}))),
+    );
+    harness.register_tool(Arc::new(FakeTool::new("spin", "again")));
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default()
+            .with_max_model_calls(30)
+            .with_max_tool_calls(1000),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect_err("limit should be exceeded");
+    assert!(
+        matches!(err, TinyAgentsError::LimitExceeded(_)),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("30"),
+        "expected error to report the policy's limit (30), got: {err}"
     );
 }
 
@@ -655,6 +761,56 @@ async fn no_model_registered_errors() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn retry_backoff_sleeps_the_documented_schedule() {
+    // Regression test: the loop used to compute the backoff from the
+    // *post-increment* attempt number, so the first retry's sleep skipped
+    // `initial_backoff_ms` entirely and the whole exponential schedule was
+    // shifted one step higher than `RetryPolicy::backoff_for_attempt`
+    // documents. With `initial_backoff_ms = 100`, `multiplier = 2.0`, no
+    // jitter: attempt 0 -> 100ms, attempt 1 -> 200ms, attempt 2 -> 400ms.
+    use std::time::Duration;
+
+    let policy = RetryPolicy::default()
+        .with_max_attempts(4)
+        .with_initial_backoff_ms(100)
+        .with_multiplier(2.0)
+        .with_jitter(false)
+        .with_backoff_sleep(true);
+
+    let model = Arc::new(TimestampingFailingModel {
+        timestamps: Mutex::new(Vec::new()),
+    });
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("flaky", model.clone());
+    harness.with_policy(RunPolicy {
+        retry: policy,
+        ..RunPolicy::default()
+    });
+
+    harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("all 4 attempts fail");
+
+    let timestamps = model.timestamps.lock().unwrap().clone();
+    assert_eq!(timestamps.len(), 4, "expected exactly max_attempts calls");
+
+    let gaps: Vec<Duration> = timestamps
+        .windows(2)
+        .map(|w| w[1].duration_since(w[0]))
+        .collect();
+    assert_eq!(
+        gaps,
+        vec![
+            Duration::from_millis(100), // before retry 1 (attempt 0's backoff)
+            Duration::from_millis(200), // before retry 2 (attempt 1's backoff)
+            Duration::from_millis(400), // before retry 3 (attempt 2's backoff)
+        ],
+        "backoff schedule does not match RetryPolicy::backoff_for_attempt"
+    );
+}
+
 #[tokio::test]
 async fn retry_then_fallback_succeeds() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
@@ -681,6 +837,80 @@ async fn retry_then_fallback_succeeds() {
 }
 
 #[tokio::test]
+async fn run_limits_max_retries_per_call_caps_a_looser_retry_policy() {
+    // Regression test: `RunLimits::max_retries_per_call` was parsed but never
+    // enforced, so a `RetryPolicy` with a higher `max_attempts` silently
+    // ignored the harness's "hard" limit. `max_retries_per_call: 1` (one
+    // retry, so 2 attempts total) must win over `max_attempts: 5`.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    let failing = Arc::new(FailingModel {
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("primary", failing.clone());
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(5),
+        limits: RunLimits::default().with_max_retries_per_call(1),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("no fallback, retries capped by RunLimits");
+    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
+    assert_eq!(*failing.attempts.lock().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn provider_error_401_is_not_retried() {
+    // Regression test: before `ProviderError` was preserved structurally, a
+    // 401 flattened into `Model(String)` was retried like any other model
+    // error. A non-retryable `Provider` error must fail on the first attempt.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    let model = Arc::new(ProviderFailingModel {
+        retryable: false,
+        status: 401,
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("primary", model.clone());
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(5),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("401 is not retryable");
+    assert!(matches!(err, TinyAgentsError::Provider(_)), "got {err:?}");
+    assert_eq!(*model.attempts.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn provider_error_429_is_retried_up_to_max_attempts() {
+    // Contrast with the 401 case: a retryable `Provider` error (e.g. a 429)
+    // must still be retried up to `max_attempts`.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    let model = Arc::new(ProviderFailingModel {
+        retryable: true,
+        status: 429,
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("primary", model.clone());
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(3),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("retries exhausted");
+    assert!(matches!(err, TinyAgentsError::Provider(_)), "got {err:?}");
+    assert_eq!(*model.attempts.lock().unwrap(), 3);
+}
+
+#[tokio::test]
 async fn non_retryable_or_exhausted_without_fallback_errors() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model(
@@ -699,6 +929,43 @@ async fn non_retryable_or_exhausted_without_fallback_errors() {
         .await
         .expect_err("no fallback, error propagates");
     assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn fallback_chain_with_repeated_model_name_terminates() {
+    // Regression test: a fallback chain that repeats a model name
+    // (`[primary, backup, primary]`) used to alternate primary <-> backup
+    // forever because `FallbackPolicy::next_after` always resolves from the
+    // *first* occurrence of the current name. Both models fail every call, so
+    // without a visited-set/hop-cap this run would never terminate.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    let primary = Arc::new(FailingModel {
+        attempts: Mutex::new(0),
+    });
+    let backup = Arc::new(FailingModel {
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("primary", primary.clone());
+    harness.register_model("backup", backup.clone());
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(1),
+        fallback: Some(FallbackPolicy::new(["primary", "backup", "primary"])),
+        ..RunPolicy::default()
+    });
+
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        harness.invoke_default(&(), vec![Message::user("hi")]),
+    )
+    .await
+    .expect("fallback chain must terminate, not hang")
+    .expect_err("both models fail, so the run must error out");
+
+    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
+    // Each model is visited at most once: primary, then backup, then the
+    // chain's repeated `primary` entry is skipped as already-visited.
+    assert_eq!(*primary.attempts.lock().unwrap(), 1);
+    assert_eq!(*backup.attempts.lock().unwrap(), 1);
 }
 
 #[tokio::test]
@@ -734,6 +1001,7 @@ fn agent_run_default_is_empty() {
 struct DeltaRecorder {
     count: Arc<Mutex<usize>>,
     texts: Arc<Mutex<Vec<String>>>,
+    reasonings: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -749,6 +1017,10 @@ impl Middleware<(), ()> for DeltaRecorder {
     ) -> Result<()> {
         *self.count.lock().unwrap() += 1;
         self.texts.lock().unwrap().push(delta.content.clone());
+        self.reasonings
+            .lock()
+            .unwrap()
+            .push(delta.reasoning.clone());
         Ok(())
     }
 }
@@ -759,6 +1031,7 @@ async fn invoke_streaming_fires_on_model_delta_per_delta_and_accumulates() {
 
     let count = Arc::new(Mutex::new(0usize));
     let texts = Arc::new(Mutex::new(Vec::new()));
+    let reasonings = Arc::new(Mutex::new(Vec::new()));
 
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model(
@@ -768,6 +1041,7 @@ async fn invoke_streaming_fires_on_model_delta_per_delta_and_accumulates() {
     harness.push_middleware(Arc::new(DeltaRecorder {
         count: count.clone(),
         texts: texts.clone(),
+        reasonings: reasonings.clone(),
     }));
 
     let run = harness
@@ -790,6 +1064,64 @@ async fn invoke_streaming_fires_on_model_delta_per_delta_and_accumulates() {
         *texts.lock().unwrap(),
         vec!["Hel".to_string(), "lo, ".to_string(), "world".to_string()]
     );
+    assert_eq!(
+        *reasonings.lock().unwrap(),
+        vec![String::new(), String::new(), String::new()]
+    );
+}
+
+#[tokio::test]
+async fn invoke_streaming_forwards_reasoning_deltas_to_middleware_and_events() {
+    use crate::harness::testkit::{EventRecorder, StreamingMock};
+
+    let count = Arc::new(Mutex::new(0usize));
+    let texts = Arc::new(Mutex::new(Vec::new()));
+    let reasonings = Arc::new(Mutex::new(Vec::new()));
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "stream",
+        Arc::new(StreamingMock::new(vec![
+            ModelStreamItem::Started,
+            ModelStreamItem::MessageDelta(MessageDelta::reasoning("think ")),
+            ModelStreamItem::MessageDelta(MessageDelta::text("answer")),
+            ModelStreamItem::Completed(ModelResponse::assistant("answer")),
+        ])),
+    );
+    harness.push_middleware(Arc::new(DeltaRecorder {
+        count: count.clone(),
+        texts: texts.clone(),
+        reasonings: reasonings.clone(),
+    }));
+
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(RunConfig::new("stream-run"), ()).with_events(recorder.sink());
+
+    let run = harness
+        .invoke_streaming_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("streaming run succeeds");
+
+    assert_eq!(run.text(), Some("answer".to_string()));
+    assert_eq!(*count.lock().unwrap(), 2);
+    assert_eq!(
+        *texts.lock().unwrap(),
+        vec![String::new(), "answer".to_string()]
+    );
+    assert_eq!(
+        *reasonings.lock().unwrap(),
+        vec!["think ".to_string(), String::new()]
+    );
+
+    let event_reasoning: String = recorder
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            crate::harness::events::AgentEvent::ModelDelta { delta, .. } => Some(delta.reasoning),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(event_reasoning, "think ");
 }
 
 #[tokio::test]
@@ -997,6 +1329,33 @@ async fn slow_streaming_model_call_is_timed_out() {
     assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
 }
 
+#[tokio::test]
+async fn slow_tool_call_is_timed_out_by_remaining_budget() {
+    use std::time::Duration;
+
+    // Regression test: the remaining wall-clock budget was previously only
+    // enforced around model calls, so a hanging tool call could block the run
+    // past its deadline. The tool sleeps far longer (200ms) than the run's
+    // budget (20ms), so the same per-call timeout used for model calls must
+    // interrupt it too.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_tool_call("slow", json!({}))),
+    );
+    harness.register_tool(Arc::new(SlowTool {
+        delay: Duration::from_millis(200),
+    }));
+
+    let config = RunConfig::new("tool-timeout-run").with_timeout_ms(20);
+    let err = harness
+        .invoke(&(), (), config, vec![Message::user("go")])
+        .await
+        .expect_err("a tool call slower than the budget must time out");
+
+    assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
+}
+
 // ── Response caching ──────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -1060,6 +1419,44 @@ async fn response_cache_serves_repeated_request_without_calling_model() {
     );
     // Accounting stays consistent: the hit is still counted as a model call.
     assert_eq!(run2.model_calls, 1);
+}
+
+#[tokio::test]
+async fn multi_turn_request_with_prior_assistant_turn_is_not_cached() {
+    use crate::harness::cache::InMemoryResponseCache;
+
+    // A request whose transcript already contains an assistant turn can never be
+    // re-served identically, so it must bypass the cache entirely: the model is
+    // invoked on every run even for identical multi-turn input.
+    let model = Arc::new(MockModel::with_responses(vec![
+        text_response("a1", 4, 2),
+        text_response("a2", 4, 2),
+    ]));
+    let cache = Arc::new(InMemoryResponseCache::new());
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", model.clone());
+    harness.with_response_cache(cache.clone());
+
+    let convo = vec![
+        Message::user("q1"),
+        Message::assistant("prior answer"),
+        Message::user("q2"),
+    ];
+
+    harness
+        .invoke_default(&(), convo.clone())
+        .await
+        .expect("first run succeeds");
+    harness
+        .invoke_default(&(), convo)
+        .await
+        .expect("second run succeeds");
+
+    assert_eq!(
+        model.call_count(),
+        2,
+        "multi-turn requests bypass the cache, so the model runs each time"
+    );
 }
 
 #[tokio::test]

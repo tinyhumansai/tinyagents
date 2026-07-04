@@ -47,10 +47,12 @@ pub fn estimate_tokens(text: &str) -> u64 {
     if chars == 0 { 0 } else { (chars / 4).max(1) }
 }
 
-/// Estimate the total tokens for a [`Message`] by running [`estimate_tokens`]
-/// over its concatenated text.
+/// Estimate the total tokens for a [`Message`] using the same `chars / 4`
+/// heuristic as [`estimate_tokens`], but counting characters directly over the
+/// message's text blocks rather than allocating the concatenated string first.
 fn message_token_estimate(msg: &Message) -> u64 {
-    estimate_tokens(&msg.text())
+    let chars = msg.char_len() as u64;
+    if chars == 0 { 0 } else { (chars / 4).max(1) }
 }
 
 /// Estimate the total tokens for a slice of messages.
@@ -122,29 +124,37 @@ pub fn trim_messages(messages: &[Message], strategy: &TrimStrategy) -> Vec<Messa
             let (system, non_system) = partition_system(messages);
             let limit = *limit;
 
-            // Try dropping non-system messages from the front one at a time.
-            let mut candidate: Vec<Message> = non_system;
-            while !candidate.is_empty() {
-                let total = slice_token_estimate(&system) + slice_token_estimate(&candidate);
-                if total <= limit {
-                    break;
-                }
-                candidate.remove(0);
+            // Precompute each message's token estimate once. The previous
+            // implementation re-summed the entire slice on every dropped
+            // message and used `remove(0)` (itself O(n)), making trimming
+            // O(n^2). Here we sum once and drop from the front by advancing an
+            // index while subtracting the running total.
+            let sys_tokens: Vec<u64> = system.iter().map(message_token_estimate).collect();
+            let non_sys_tokens: Vec<u64> = non_system.iter().map(message_token_estimate).collect();
+            let sys_total: u64 = sys_tokens.iter().sum();
+
+            // Drop non-system messages from the front until within budget or
+            // exhausted.
+            let mut non_sys_start = 0;
+            let mut non_sys_total: u64 = non_sys_tokens.iter().sum();
+            while non_sys_start < non_system.len() && sys_total + non_sys_total > limit {
+                non_sys_total -= non_sys_tokens[non_sys_start];
+                non_sys_start += 1;
             }
 
-            // If we're still over budget, start dropping system messages from
-            // the front as a last resort.
-            let mut sys_candidate = system;
-            while !sys_candidate.is_empty() {
-                let total = slice_token_estimate(&sys_candidate) + slice_token_estimate(&candidate);
-                if total <= limit {
-                    break;
-                }
-                sys_candidate.remove(0);
+            // Still over budget: drop system messages from the front as a last
+            // resort.
+            let mut sys_start = 0;
+            let mut sys_running = sys_total;
+            while sys_start < system.len() && sys_running + non_sys_total > limit {
+                sys_running -= sys_tokens[sys_start];
+                sys_start += 1;
             }
 
-            let mut result = sys_candidate;
-            result.extend(candidate);
+            let mut result =
+                Vec::with_capacity((system.len() - sys_start) + (non_system.len() - non_sys_start));
+            result.extend_from_slice(&system[sys_start..]);
+            result.extend_from_slice(&non_system[non_sys_start..]);
             result
         }
     }

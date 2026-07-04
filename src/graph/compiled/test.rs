@@ -12,7 +12,7 @@ use crate::harness::ids::ExecutionStatus;
 use crate::harness::retry::RetryPolicy;
 use serde_json::json;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -330,6 +330,133 @@ async fn interrupt_then_resume_reruns_node() {
 }
 
 #[tokio::test]
+async fn resume_emits_restore_not_save_for_the_loaded_checkpoint() {
+    // Resuming loads a checkpoint; that read must surface as CheckpointRestored,
+    // never CheckpointSaved (which would inflate persisted-checkpoint counts).
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let sink = Arc::new(CollectingSink::new());
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("approve", |s, ctx: NodeContext| async move {
+            match ctx.resume {
+                Some(_) => Ok(NodeResult::Update(s + 1)),
+                None => Ok(NodeResult::Interrupt(Interrupt::new("approve", json!({})))),
+            }
+        })
+        .set_entry("approve")
+        .set_finish("approve")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone())
+        .with_event_sink(sink.clone());
+
+    let paused = graph.run_with_thread("t", 0).await.unwrap();
+    let loaded = paused
+        .checkpoint_id
+        .clone()
+        .expect("interrupt persisted a checkpoint");
+
+    // Only inspect events emitted during the resume (the initial run genuinely
+    // saved the interrupt checkpoint).
+    let before = sink.events().len();
+    graph
+        .resume("t", Command::resume(json!(null)))
+        .await
+        .unwrap();
+    let resume_events = sink.events();
+    let resume_events = &resume_events[before..];
+
+    assert!(
+        resume_events.iter().any(|e| matches!(
+            e,
+            GraphEvent::CheckpointRestored { checkpoint_id } if *checkpoint_id == loaded
+        )),
+        "resume must emit CheckpointRestored for the loaded checkpoint"
+    );
+    assert!(
+        !resume_events.iter().any(|e| matches!(
+            e,
+            GraphEvent::CheckpointSaved { checkpoint_id } if *checkpoint_id == loaded
+        )),
+        "loading a checkpoint on resume must not re-emit it as saved"
+    );
+}
+
+#[tokio::test]
+async fn resume_preserves_parent_checkpoint_lineage() {
+    // A run that boundary-checkpoints, interrupts, then resumes to completion
+    // must keep a single connected lineage: the first post-resume checkpoint
+    // chains onto the loaded one instead of orphaning the pre-interrupt
+    // history. Without it, get_state_history stops at the resume point and
+    // prune deletes the ancestors it should protect.
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("start", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s))
+        })
+        .add_node("approve", |s, ctx: NodeContext| async move {
+            match ctx.resume {
+                Some(_) => Ok(NodeResult::Update(s + 1)),
+                None => Ok(NodeResult::Interrupt(Interrupt::new("approve", json!({})))),
+            }
+        })
+        .add_node("done", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s))
+        })
+        .set_entry("start")
+        .add_edge("start", "approve")
+        .add_edge("approve", "done")
+        .set_finish("done")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    let paused = graph.run_with_thread("hitl", 10).await.unwrap();
+    assert!(paused.is_interrupted());
+    let resumed = graph
+        .resume("hitl", Command::resume(json!(null)))
+        .await
+        .unwrap();
+    assert!(!resumed.is_interrupted());
+
+    // Four boundary checkpoints: start, approve(interrupt), approve(resumed),
+    // done — all reachable through the parent lineage from the latest.
+    let history = graph.get_state_history("hitl", None).await.unwrap();
+    assert_eq!(
+        history.len(),
+        4,
+        "full lineage must walk past the resume point; got steps {:?}",
+        history.iter().map(|s| s.metadata.step).collect::<Vec<_>>()
+    );
+    // Connected chain: exactly one root, every parent present.
+    let ids: std::collections::HashSet<&str> = history
+        .iter()
+        .map(|s| s.metadata.checkpoint_id.as_str())
+        .collect();
+    let roots = history
+        .iter()
+        .filter(|s| s.metadata.parent_checkpoint_id.is_none())
+        .count();
+    assert_eq!(roots, 1, "a connected lineage has exactly one root");
+    for s in &history {
+        if let Some(parent) = &s.metadata.parent_checkpoint_id {
+            assert!(
+                ids.contains(parent.as_str()),
+                "parent `{parent}` must be present in the walked history"
+            );
+        }
+    }
+
+    // Prune protects the ancestor chain of the retained window: keeping the
+    // latest still keeps the pre-interrupt checkpoints it depends on.
+    cp.prune("hitl", 1).await.unwrap();
+    assert_eq!(
+        cp.list("hitl").await.unwrap().len(),
+        4,
+        "prune must retain the full ancestor chain across the resume boundary"
+    );
+}
+
+#[tokio::test]
 async fn interrupt_without_checkpointer_errors_instead_of_pausing() {
     let graph = GraphBuilder::<i32, i32>::overwrite()
         .add_node("approve", |_s, _ctx: NodeContext| async move {
@@ -535,6 +662,43 @@ async fn update_state_as_node_sets_successor_pending_nodes() {
             .collect::<Vec<_>>(),
         vec!["b".to_string()]
     );
+}
+
+#[tokio::test]
+async fn update_state_as_command_node_is_rejected() {
+    // A command node routes dynamically, so it has no static successors. Using
+    // it as `as_node` would persist an empty `next_nodes` and silently render
+    // the thread non-resumable; the write must be rejected instead.
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("router", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Command(
+                Command::update(5).with_goto(["target"]),
+            ))
+        })
+        .add_node("target", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .set_entry("router")
+        .mark_command_routing("router")
+        .set_finish("target")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp);
+    graph.run_with_thread("t", 0).await.unwrap();
+
+    let err = graph
+        .update_state("t", 1, Some("router".into()))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Graph(_)), "got {err:?}");
+    assert!(err.to_string().contains("non-resumable"), "{err}");
+
+    // A plain node is still accepted.
+    graph
+        .update_state("t", 1, Some("target".into()))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -880,6 +1044,239 @@ async fn parallel_interrupt_pauses_at_lowest_index_branch() {
 }
 
 #[tokio::test]
+async fn parallel_interrupt_schedules_completed_branch_successors() {
+    // Parallel [a, b]: a routes to successor `x` and completes; b interrupts.
+    // After resume, x (a's successor) must still run — its scheduling used to be
+    // dropped at the interrupt boundary, so x silently never executed.
+    let cp = Arc::new(InMemoryCheckpointer::<Counter>::new());
+    let graph = GraphBuilder::<Counter, i32>::new()
+        .with_parallel(true)
+        .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: i32| {
+            s.value += u;
+            s.log.push(format!("+{u}"));
+            Ok(s)
+        }))
+        .add_node("super", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Command(
+                Command::default().with_goto(["a", "b"]),
+            ))
+        })
+        .add_node("a", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(1))
+        })
+        .add_node("b", |_s: Counter, c: NodeContext| async move {
+            match c.resume {
+                Some(_) => Ok(NodeResult::Update(100)),
+                None => Ok(NodeResult::Interrupt(Interrupt::new("b", json!({})))),
+            }
+        })
+        .add_node("x", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(10))
+        })
+        .set_entry("super")
+        .mark_command_routing("super")
+        .add_edge("a", "x")
+        .set_finish("b")
+        .set_finish("x")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    let paused = graph
+        .run_with_thread(
+            "t",
+            Counter {
+                value: 0,
+                log: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(paused.is_interrupted());
+    assert_eq!(paused.state.value, 1, "branch a committed before the pause");
+
+    let done = graph
+        .resume("t", Command::resume(json!(null)))
+        .await
+        .unwrap();
+    assert!(
+        done.visited.iter().any(|n| n.as_str() == "x"),
+        "a's successor x must run after resume"
+    );
+    // 1 (a) + 100 (b resume) + 10 (x) — every scheduled branch ran once.
+    assert_eq!(done.state.value, 111);
+}
+
+#[tokio::test]
+async fn send_args_survive_interrupt_and_resume() {
+    // A `Send` fanout schedules three workers (args 1, 2, 3); the arg-1 worker
+    // interrupts on its first activation. On resume every pending worker must
+    // still carry its own send arg — before the fix they resumed with `None`.
+    let cp = Arc::new(InMemoryCheckpointer::<Counter>::new());
+    let graph = GraphBuilder::<Counter, i32>::new()
+        .with_parallel(true)
+        .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: i32| {
+            s.value += u;
+            s.log.push(format!("w:{u}"));
+            Ok(s)
+        }))
+        .add_node("dispatch", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Command(Command::send([
+                Send::new("worker", json!(1)),
+                Send::new("worker", json!(2)),
+                Send::new("worker", json!(3)),
+            ])))
+        })
+        .add_node("worker", |_s: Counter, c: NodeContext| async move {
+            let arg = c
+                .send_arg
+                .clone()
+                .expect("worker scheduled via Send must carry its arg")
+                .as_i64()
+                .unwrap() as i32;
+            if arg == 1 && c.resume.is_none() {
+                return Ok(NodeResult::Interrupt(Interrupt::new("worker", json!({}))));
+            }
+            Ok(NodeResult::Update(arg))
+        })
+        .set_entry("dispatch")
+        .mark_command_routing("dispatch")
+        .set_finish("worker")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    let paused = graph
+        .run_with_thread(
+            "fan",
+            Counter {
+                value: 0,
+                log: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(paused.is_interrupted());
+
+    // Resume: the arg-1 worker unblocks and the other two re-run with their
+    // preserved args. With the arg lost, `expect(...)` above would panic.
+    let done = graph
+        .resume("fan", Command::resume(json!(null)))
+        .await
+        .unwrap();
+    assert_eq!(done.state.value, 6, "all three worker args (1+2+3) applied");
+    let mut log = done.state.log.clone();
+    log.sort();
+    assert_eq!(log, vec!["w:1", "w:2", "w:3"]);
+}
+
+#[tokio::test]
+async fn barrier_arrivals_survive_interrupt_and_resume() {
+    // Diamond join: p1 arrives at the barrier before an interrupt; p2 arrives
+    // only after resume. The join must still fire — the p1 arrival has to
+    // survive the checkpoint boundary or the join's precondition is never met.
+    let cp = Arc::new(InMemoryCheckpointer::<Counter>::new());
+    let graph = GraphBuilder::<Counter, i32>::new()
+        .with_parallel(true)
+        .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: i32| {
+            s.value += u;
+            s.log.push(format!("+{u}"));
+            Ok(s)
+        }))
+        .add_node("super", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Command(
+                Command::default().with_goto(["p1", "hold"]),
+            ))
+        })
+        .add_node("p1", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(1))
+        })
+        .add_node("p2", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(2))
+        })
+        // `hold` interrupts first; on resume it routes to p2 (the second
+        // barrier predecessor).
+        .add_node("hold", |_s: Counter, c: NodeContext| async move {
+            match c.resume {
+                Some(_) => Ok(NodeResult::Command(Command::new().with_goto(["p2"]))),
+                None => Ok(NodeResult::Interrupt(Interrupt::new("hold", json!({})))),
+            }
+        })
+        .add_node("join", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(100))
+        })
+        .set_entry("super")
+        .mark_command_routing("super")
+        .mark_command_routing("hold")
+        .add_waiting_edge("p1", "join")
+        .add_waiting_edge("p2", "join")
+        .set_finish("join")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    let paused = graph
+        .run_with_thread(
+            "diamond",
+            Counter {
+                value: 0,
+                log: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(paused.is_interrupted());
+    assert_eq!(
+        paused.state.value, 1,
+        "p1 committed (arrived at the barrier)"
+    );
+
+    let done = graph
+        .resume("diamond", Command::resume(json!(null)))
+        .await
+        .unwrap();
+    assert!(
+        done.visited.iter().any(|n| n.as_str() == "join"),
+        "join must fire once both barrier predecessors have arrived across the resume"
+    );
+    // 1 (p1) + 2 (p2) + 100 (join).
+    assert_eq!(done.state.value, 103);
+}
+
+#[tokio::test]
+async fn reducer_error_at_boundary_transitions_run_to_failed() {
+    // A reducer error raised at the step boundary (after the node ran) must
+    // still fail the run — emit RunFailed / a Failed status — rather than
+    // unwinding and leaving observers to see the run stuck in Running.
+    let sink = Arc::new(CollectingSink::new());
+    let graph = GraphBuilder::<i32, i32>::new()
+        .set_reducer(ClosureStateReducer::new(|_s: i32, u: i32| {
+            if u == 999 {
+                Err(TinyAgentsError::Graph("reducer boom".to_string()))
+            } else {
+                Ok(u)
+            }
+        }))
+        .add_node("boom", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(999))
+        })
+        .set_entry("boom")
+        .set_finish("boom")
+        .compile()
+        .unwrap()
+        .with_event_sink(sink.clone());
+
+    let err = graph.run(0).await.unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Graph(_)), "got {err:?}");
+    assert!(
+        sink.events()
+            .iter()
+            .any(|e| matches!(e, GraphEvent::RunFailed { .. })),
+        "a boundary reducer error must transition the run to Failed (RunFailed emitted)"
+    );
+}
+
+#[tokio::test]
 async fn status_snapshot_reports_run() {
     let graph = adding_graph();
     let run = graph
@@ -950,6 +1347,69 @@ async fn send_fanout_delivers_distinct_args_to_parallel_branches() {
     let mut log = run.state.log.clone();
     log.sort();
     assert_eq!(log, vec!["worker:10", "worker:20", "worker:30"]);
+}
+
+#[tokio::test]
+async fn repeated_send_activations_keep_distinct_commands() {
+    // Regression: two `Send` activations of the *same* node each return a
+    // distinct `Command::goto`. A node-keyed goto map let the second clobber
+    // the first, so both branches routed to the survivor's target (and one
+    // sink was dropped). Keyed per activation, each keeps its own routing.
+    let graph = GraphBuilder::<Counter, i32>::new()
+        .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: i32| {
+            s.value += u;
+            s.log.push(format!("n:{u}"));
+            Ok(s)
+        }))
+        .with_parallel(true)
+        .add_node("dispatch", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Command(Command::send([
+                Send::new("worker", json!(1)),
+                Send::new("worker", json!(2)),
+            ])))
+        })
+        // Each worker routes to a different sink based on its own send arg.
+        .add_node("worker", |_s: Counter, c: NodeContext| async move {
+            let arg = c.send_arg.expect("worker carries a send arg");
+            let target = if arg.as_i64() == Some(1) {
+                "sink_a"
+            } else {
+                "sink_b"
+            };
+            Ok(NodeResult::Command(Command::new().with_goto([target])))
+        })
+        .add_node("sink_a", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(10))
+        })
+        .add_node("sink_b", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(20))
+        })
+        .mark_command_routing("dispatch")
+        .mark_command_routing("worker")
+        .set_entry("dispatch")
+        .set_finish("sink_a")
+        .set_finish("sink_b")
+        .compile()
+        .unwrap();
+
+    let run = graph
+        .run(Counter {
+            value: 0,
+            log: vec![],
+        })
+        .await
+        .unwrap();
+
+    // Both sinks must have run — one per activation's own goto.
+    assert!(
+        run.visited.iter().any(|n| n.as_str() == "sink_a"),
+        "sink_a (worker arg 1's target) must run"
+    );
+    assert!(
+        run.visited.iter().any(|n| n.as_str() == "sink_b"),
+        "sink_b (worker arg 2's target) must run"
+    );
+    assert_eq!(run.state.value, 30, "both sinks contributed (10 + 20)");
 }
 
 #[tokio::test]
@@ -1297,6 +1757,89 @@ async fn max_concurrency_bounds_in_flight_branches() {
     );
     // And concurrency actually happened (a chunk of 2 overlapped).
     assert_eq!(max_seen.load(AtomicOrdering::SeqCst), 2);
+}
+
+/// With `max_concurrency`, the executor uses a rolling `buffered(limit)` window
+/// rather than fixed `join_all` chunks, so a slow branch does not head-of-line
+/// block later branches: a new branch starts as soon as any in-flight one
+/// finishes. A fixed-chunk executor would run the long branch's chunk to
+/// completion before starting the next chunk, so the long branch would overlap
+/// at most its single chunk-mate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn max_concurrency_uses_rolling_window_not_chunks() {
+    // A shared flag marks the long branch as running; short branches count how
+    // many of them start while the long branch is still in flight.
+    let long_running = Arc::new(AtomicBool::new(false));
+    let overlapped_with_long = Arc::new(AtomicUsize::new(0));
+
+    let w_long = long_running.clone();
+    let w_overlap = overlapped_with_long.clone();
+
+    let graph = GraphBuilder::<Counter, i32>::new()
+        .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: i32| {
+            s.value += u;
+            Ok(s)
+        }))
+        .set_defaults(GraphDefaults {
+            parallel: Some(true),
+            max_concurrency: Some(2),
+            ..Default::default()
+        })
+        .add_node("dispatch", |_s: Counter, _c: NodeContext| async move {
+            // One long branch (arg 100) plus three short branches (arg 5).
+            Ok(NodeResult::Command(Command::send([
+                Send::new("worker", json!(100)),
+                Send::new("worker", json!(5)),
+                Send::new("worker", json!(5)),
+                Send::new("worker", json!(5)),
+            ])))
+        })
+        .add_node("worker", move |_s: Counter, c: NodeContext| {
+            let long_running = w_long.clone();
+            let overlapped = w_overlap.clone();
+            async move {
+                let ms = c.send_arg.and_then(|v| v.as_u64()).unwrap_or(0);
+                if ms >= 50 {
+                    // The long branch: flag itself running for its whole life.
+                    long_running.store(true, AtomicOrdering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                    long_running.store(false, AtomicOrdering::SeqCst);
+                } else {
+                    // A short branch: did it get to start while the long branch
+                    // was still running? Only possible with a rolling window.
+                    if long_running.load(AtomicOrdering::SeqCst) {
+                        overlapped.fetch_add(1, AtomicOrdering::SeqCst);
+                    }
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                }
+                Ok(NodeResult::Update(1))
+            }
+        })
+        .mark_command_routing("dispatch")
+        .set_entry("dispatch")
+        .set_finish("worker")
+        .compile()
+        .unwrap();
+
+    let run = graph
+        .run(Counter {
+            value: 0,
+            log: vec![],
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(run.state.value, 4, "all four workers ran");
+    // With a rolling window the two short branches that start after the initial
+    // pair (slot freed as each short one finishes) run while the long branch is
+    // still going. A fixed-chunk executor would finish the long branch's chunk
+    // first, so at most one short branch could overlap it.
+    assert!(
+        overlapped_with_long.load(AtomicOrdering::SeqCst) >= 2,
+        "expected the rolling window to overlap the long branch with >=2 short \
+         branches, saw {}",
+        overlapped_with_long.load(AtomicOrdering::SeqCst)
+    );
 }
 
 /// A per-node default timeout fails the run with [`TinyAgentsError::Timeout`]

@@ -7,7 +7,7 @@
 //! worktrees/sandboxes. TinyAgents does not own any concrete policy; it owns the
 //! interface so parallel agents can be isolated consistently.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -34,84 +34,6 @@ pub struct WorkspaceDescriptor {
     /// How strictly the environment is sandboxed.
     #[serde(default)]
     pub sandbox: SandboxMode,
-}
-
-impl WorkspaceDescriptor {
-    /// Creates a descriptor rooted at `root` with no extra trusted roots.
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-            trusted_roots: Vec::new(),
-            policy_id: String::new(),
-            sandbox: SandboxMode::Inherit,
-        }
-    }
-
-    /// Adds a trusted root the tool may also touch.
-    pub fn with_trusted_root(mut self, root: impl Into<PathBuf>) -> Self {
-        self.trusted_roots.push(root.into());
-        self
-    }
-
-    /// Sets the audit policy identity.
-    pub fn with_policy_id(mut self, id: impl Into<String>) -> Self {
-        self.policy_id = id.into();
-        self
-    }
-
-    /// Sets the sandbox mode.
-    pub fn with_sandbox(mut self, sandbox: SandboxMode) -> Self {
-        self.sandbox = sandbox;
-        self
-    }
-
-    /// Returns `true` when `path` is contained within the root or any trusted
-    /// root.
-    ///
-    /// Comparison is lexical (after normalizing `.`/`..` components) so it does
-    /// not require the path to exist; it is a policy gate, not a canonicalizing
-    /// filesystem call.
-    pub fn allows(&self, path: &Path) -> bool {
-        let candidate = normalize(path);
-        std::iter::once(&self.root)
-            .chain(self.trusted_roots.iter())
-            .any(|root| candidate.starts_with(normalize(root)))
-    }
-
-    /// Fail-closed path gate to call *before* a tool touches `path`: when the
-    /// path is outside every allowed root, emits an
-    /// [`AgentEvent::WorkspaceViolation`][crate::harness::events::AgentEvent::WorkspaceViolation]
-    /// on `events` and returns a [`TinyAgentsError::Validation`] so the caller
-    /// blocks the operation. Returns `Ok(())` when the path is allowed.
-    pub fn enforce(&self, path: &Path, events: &crate::harness::events::EventSink) -> Result<()> {
-        if self.allows(path) {
-            return Ok(());
-        }
-        let rendered = path.display().to_string();
-        events.emit(crate::harness::events::AgentEvent::WorkspaceViolation {
-            path: rendered.clone(),
-        });
-        Err(crate::error::TinyAgentsError::Validation(format!(
-            "path `{rendered}` is outside the allowed workspace roots"
-        )))
-    }
-}
-
-/// Lexically normalizes a path by resolving `.` and `..` components without
-/// touching the filesystem.
-fn normalize(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
 }
 
 /// Prepares and tears down per-agent execution environments.

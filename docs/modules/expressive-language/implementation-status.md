@@ -74,7 +74,12 @@ The registry-backed binding path (`DEFAULT_NODE_KINDS`) accepts `agent`,
 `compile` rejects: duplicate nodes, missing/undefined `start`, unknown
 `next`/`route`/`edge`/`command goto`/`send`/`join` targets, duplicate route
 labels, and mixing static routing with `routes`. Registry binding additionally
-checks model/tool/subgraph/router/reducer references and node kinds.
+checks model/tool/subgraph/router/agent/script/reducer references and node
+kinds. A single shared policy (`CapabilityResolver::classify_reference`) maps
+each node kind to the reference it must resolve, so the compiler blueprint gate
+and both `Resolver` paths cannot drift: `subagent` binds its `agent` reference
+against the registered agents and `repl_agent` binds its `script` reference
+against the registered scripts.
 
 ## Not yet implemented
 

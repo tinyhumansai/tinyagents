@@ -432,6 +432,9 @@ pub struct ModelDelta {
     /// Incremental text content.
     #[serde(default)]
     pub content: String,
+    /// Incremental reasoning/thinking content, kept separate from visible text.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning: String,
     /// Incremental tool-call fragment, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call: Option<ToolDelta>,
@@ -480,8 +483,15 @@ pub struct ProviderError {
 ///
 /// Use [`StreamAccumulator`] (or the [`collect_model_stream`] helper) to fold a
 /// stream of these items back into a [`ModelResponse`].
+/// # Serialization
+///
+/// This enum is **adjacently tagged** (`{"type": …, "content": …}`) rather than
+/// internally tagged. Several variants wrap a non-struct payload
+/// ([`ModelStreamItem::Failed`] wraps a `String`); an internally tagged enum
+/// cannot serialize those (serde errors, or silently corrupts scalar JSON into
+/// `{}`), so adjacent tagging is required for every variant to round-trip.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
+#[serde(rename_all = "snake_case", tag = "type", content = "content")]
 pub enum ModelStreamItem {
     /// The stream has opened; no content has arrived yet.
     Started,

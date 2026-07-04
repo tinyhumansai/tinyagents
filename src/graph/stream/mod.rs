@@ -23,6 +23,14 @@ use std::sync::{Arc, Mutex};
 pub trait GraphEventSink: Send + Sync {
     /// Receives one graph event. Implementations must not block the executor.
     fn emit(&self, event: GraphEvent);
+
+    /// Blocks until every event emitted so far has been durably handled.
+    ///
+    /// Sinks that persist asynchronously (off the executor thread) override this
+    /// so callers can guarantee the durable log has caught up — for example
+    /// before reading a journal back. The executor calls it after a terminal
+    /// run event. The default is a no-op for synchronous/in-memory sinks.
+    fn flush(&self) {}
 }
 
 /// A sink that drops every event.

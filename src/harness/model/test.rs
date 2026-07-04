@@ -610,3 +610,81 @@ fn stream_accumulator_collects_reasoning_side_channel() {
     let response = acc.finish().unwrap();
     assert_eq!(response.text(), "visible answer");
 }
+
+#[test]
+fn finish_preserves_message_usage_from_completed_response() {
+    // A completed response that carries usage only on the message (not the
+    // top-level field) and no streamed UsageDelta. finish must not clobber the
+    // message usage with None; it should promote it to the response too.
+    let mut response = ModelResponse::assistant("hi");
+    response.usage = None;
+    response.message.usage = Some(Usage::new(10, 20));
+
+    let mut acc = StreamAccumulator::new();
+    acc.push(&ModelStreamItem::Started);
+    acc.push(&ModelStreamItem::Completed(response));
+
+    let finished = acc.finish().unwrap();
+    assert_eq!(finished.message.usage, Some(Usage::new(10, 20)));
+    assert_eq!(finished.usage, Some(Usage::new(10, 20)));
+}
+
+#[test]
+fn finish_backfills_usage_from_stream_delta_when_completed_lacks_it() {
+    // No usage anywhere on the completed response, but a UsageDelta arrived. Both
+    // the response and its message pick up the streamed usage.
+    let mut response = ModelResponse::assistant("hi");
+    response.usage = None;
+    response.message.usage = None;
+
+    let mut acc = StreamAccumulator::new();
+    acc.push(&ModelStreamItem::Started);
+    acc.push(&ModelStreamItem::UsageDelta(Usage::new(4, 6)));
+    acc.push(&ModelStreamItem::Completed(response));
+
+    let finished = acc.finish().unwrap();
+    assert_eq!(finished.usage, Some(Usage::new(4, 6)));
+    assert_eq!(finished.message.usage, Some(Usage::new(4, 6)));
+}
+
+/// Round-trips a [`ModelStreamItem`] through JSON and asserts the re-serialized
+/// form is byte-for-byte stable, proving every variant survives serde.
+fn roundtrip_stream_item(item: ModelStreamItem) {
+    let value = serde_json::to_value(&item).expect("serialize ModelStreamItem");
+    let back: ModelStreamItem =
+        serde_json::from_value(value.clone()).expect("deserialize ModelStreamItem");
+    let reserialized = serde_json::to_value(&back).expect("re-serialize ModelStreamItem");
+    assert_eq!(value, reserialized, "round-trip differs for {value}");
+}
+
+#[test]
+fn model_stream_item_roundtrips_every_variant() {
+    roundtrip_stream_item(ModelStreamItem::Started);
+    roundtrip_stream_item(ModelStreamItem::MessageDelta(
+        crate::harness::message::MessageDelta::text("hi"),
+    ));
+    roundtrip_stream_item(ModelStreamItem::ToolCallDelta(
+        crate::harness::tool::ToolDelta {
+            call_id: "call-1".into(),
+            content: "{\"q\":1}".into(),
+        },
+    ));
+    roundtrip_stream_item(ModelStreamItem::UsageDelta(Usage::new(3, 5)));
+    roundtrip_stream_item(ModelStreamItem::Completed(ModelResponse::assistant("done")));
+    // The scalar-carrying variant an internally tagged enum could not encode.
+    roundtrip_stream_item(ModelStreamItem::Failed("boom".to_string()));
+    roundtrip_stream_item(ModelStreamItem::ProviderFailed(ProviderError {
+        provider: "openai".into(),
+        message: "nope".into(),
+        ..ProviderError::default()
+    }));
+}
+
+#[test]
+fn model_stream_item_failed_serializes_without_panicking() {
+    // Under internal tagging this call errored; adjacent tagging encodes the
+    // string payload under `content`.
+    let value = serde_json::to_value(ModelStreamItem::Failed("boom".into())).unwrap();
+    assert_eq!(value["type"], json!("failed"));
+    assert_eq!(value["content"], json!("boom"));
+}

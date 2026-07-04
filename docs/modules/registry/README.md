@@ -12,6 +12,8 @@ server.
 ## Detailed Module Docs
 
 - [Design](design.md)
+  - [Events and persistence](events.md)
+  - [Operations and lifecycle](operations.md)
 - [Model catalog and local snapshots](model-catalog.md)
 
 ## Responsibilities
@@ -73,6 +75,8 @@ Documentation layout:
 docs/modules/registry/
   README.md
   design.md
+  events.md
+  operations.md
   model-catalog.md
   model-catalog.snapshot.json
 ```
@@ -112,9 +116,10 @@ live handles.
 
 ### Component kinds
 
-`ComponentKind` partitions the registry namespace and now has **11** variants.
-Alongside `Model`, `Tool`, `Graph`, `Router`, `Reducer`, `Store`, and `Agent`,
-four kinds cover the runtime's durable roles:
+`ComponentKind` partitions the registry namespace and now has **12** variants.
+Alongside `Model`, `Tool`, `Graph`, `Router`, `Reducer`, `Store`, `Agent`, and
+`Script` (a REPL script a `repl_agent` node may reference), four kinds cover the
+runtime's durable roles:
 
 | Kind | `as_str` |
 | --- | --- |

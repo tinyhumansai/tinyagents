@@ -22,8 +22,8 @@ pub use file::FileCheckpointer;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteCheckpointer;
 pub use types::{
-    Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource, CheckpointTuple,
-    DurabilityMode, PendingWrite,
+    BarrierArrivals, Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource,
+    CheckpointTuple, DurabilityMode, PendingActivation, PendingWrite,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -51,6 +51,42 @@ where
         checkpoint_id: Option<&str>,
     ) -> Result<Option<Checkpoint<State>>>;
 
+    /// Loads a checkpoint for a thread scoped to `namespace`.
+    ///
+    /// Like [`Checkpointer::get`], but only considers checkpoints whose stored
+    /// namespace equals `namespace`. This is what keeps a parent run and the
+    /// subgraphs it embeds — which share a thread id but differ in namespace —
+    /// from loading each other's checkpoints on resume/inspection. With
+    /// `checkpoint_id == None` the latest checkpoint *in that namespace* is
+    /// returned (last-write-wins, consistent with [`Checkpointer::get`]).
+    ///
+    /// Composed from [`Checkpointer::list`] + [`Checkpointer::get`] so every
+    /// backend inherits it; override only for a cheaper scoped query.
+    async fn get_scoped(
+        &self,
+        thread_id: &str,
+        checkpoint_id: Option<&str>,
+        namespace: &[String],
+    ) -> Result<Option<Checkpoint<State>>> {
+        let metas = self.list(thread_id).await?;
+        let target: Option<String> = match checkpoint_id {
+            Some(id) => metas
+                .iter()
+                .rev()
+                .find(|m| m.checkpoint_id == id && m.namespace.as_slice() == namespace)
+                .map(|m| m.checkpoint_id.clone()),
+            None => metas
+                .iter()
+                .rev()
+                .find(|m| m.namespace.as_slice() == namespace)
+                .map(|m| m.checkpoint_id.clone()),
+        };
+        match target {
+            Some(id) => self.get(thread_id, Some(&id)).await,
+            None => Ok(None),
+        }
+    }
+
     /// Lists checkpoint metadata for a thread in insertion order.
     async fn list(&self, thread_id: &str) -> Result<Vec<CheckpointMetadata>>;
 
@@ -62,7 +98,11 @@ where
     /// `config.checkpoint_id` is `None` the latest checkpoint is returned.
     async fn get_tuple(&self, config: CheckpointConfig) -> Result<Option<CheckpointTuple<State>>> {
         let Some(checkpoint) = self
-            .get(&config.thread_id, config.checkpoint_id.as_deref())
+            .get_scoped(
+                &config.thread_id,
+                config.checkpoint_id.as_deref(),
+                &config.namespace,
+            )
             .await?
         else {
             return Ok(None);
@@ -88,6 +128,48 @@ where
             parent_config,
             pending_writes,
         }))
+    }
+
+    /// Returns a thread's checkpoint lineage newest-first, following each
+    /// checkpoint's `parent_checkpoint_id` from the latest checkpoint in
+    /// `namespace`. `limit` caps the number of tuples returned (the most recent
+    /// ones).
+    ///
+    /// The default walks [`Checkpointer::get_tuple`] once per hop, so a backend
+    /// that re-reads the whole thread per lookup (the file/JSONL backend) is
+    /// O(H²) over the lineage. Such backends override this to read the thread
+    /// once and walk the lineage in memory (O(H)). The observable result is
+    /// identical to iterating `get_tuple` by parent pointer.
+    async fn state_history(
+        &self,
+        thread_id: &str,
+        namespace: &[String],
+        limit: Option<usize>,
+    ) -> Result<Vec<CheckpointTuple<State>>> {
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            if let Some(limit) = limit
+                && out.len() >= limit
+            {
+                break;
+            }
+            let config = CheckpointConfig {
+                thread_id: thread_id.to_string(),
+                checkpoint_id: cursor.clone(),
+                namespace: namespace.to_vec(),
+            };
+            let Some(tuple) = self.get_tuple(config).await? else {
+                break;
+            };
+            let parent = tuple.checkpoint.parent_checkpoint_id.clone();
+            out.push(tuple);
+            match parent {
+                Some(parent) => cursor = Some(parent),
+                None => break,
+            }
+        }
+        Ok(out)
     }
 
     // ---- Thread operations -------------------------------------------------
@@ -284,8 +366,12 @@ where
         let Some(list) = map.get(thread_id) else {
             return Ok(None);
         };
+        // Duplicate-id lookup resolves to the *last* written record, matching
+        // the append-only file/sqlite backends (and `get(None)`, which returns
+        // the latest). Pinning one semantic keeps the three backends
+        // interchangeable — see the checkpointer conformance suite.
         let found = match checkpoint_id {
-            Some(id) => list.iter().find(|c| c.checkpoint_id == id),
+            Some(id) => list.iter().rfind(|c| c.checkpoint_id == id),
             None => list.last(),
         };
         Ok(found.cloned())

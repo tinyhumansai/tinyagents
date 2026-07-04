@@ -48,7 +48,7 @@ where
     /// recursion limit of 50. A reducer must be set before [`Self::compile`].
     pub fn new() -> Self {
         Self {
-            graph_id: GraphId::new(format!("graph-{}", crate::graph::compiled::next_seq())),
+            graph_id: GraphId::new(format!("graph-{}", crate::harness::ids::next_seq())),
             name: None,
             nodes: HashMap::new(),
             edges: HashMap::new(),

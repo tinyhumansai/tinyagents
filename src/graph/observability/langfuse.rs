@@ -567,4 +567,4 @@ fn pop<K: std::hash::Hash + Eq>(
 }
 
 #[cfg(test)]
-mod tests;
+mod test;

@@ -177,34 +177,47 @@ where
 {
     async fn put(&self, checkpoint: Checkpoint<State>) -> Result<CheckpointId> {
         let id = CheckpointId::new(checkpoint.checkpoint_id.clone());
-        let meta = checkpoint.to_metadata();
-        let namespace = serde_json::to_string(&checkpoint.namespace)
-            .map_err(|e| sqlite_err("encode namespace", e))?;
-        let next_nodes = serde_json::to_string(&checkpoint.next_nodes)
-            .map_err(|e| sqlite_err("encode next_nodes", e))?;
-        let record =
-            serde_json::to_string(&checkpoint).map_err(|e| sqlite_err("encode record", e))?;
+        // Serialize + the synchronous rusqlite insert (which also blocks on the
+        // connection mutex) is blocking work; run it on the blocking pool so it
+        // never stalls a tokio worker on the step-critical path.
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let meta = checkpoint.to_metadata();
+            let namespace = serde_json::to_string(&checkpoint.namespace)
+                .map_err(|e| sqlite_err("encode namespace", e))?;
+            let next_nodes = serde_json::to_string(&checkpoint.next_nodes)
+                .map_err(|e| sqlite_err("encode next_nodes", e))?;
+            let record =
+                serde_json::to_string(&checkpoint).map_err(|e| sqlite_err("encode record", e))?;
 
-        let conn = self.lock()?;
-        conn.execute(
-            "INSERT INTO checkpoints (
+            let conn = conn.lock().map_err(|_| {
+                TinyAgentsError::Checkpoint(
+                    "sqlite checkpointer: connection lock poisoned".to_string(),
+                )
+            })?;
+            conn.execute(
+                "INSERT INTO checkpoints (
                 thread_id, checkpoint_id, parent_checkpoint_id, run_id,
                 namespace, next_nodes, source, step, has_interrupts, record
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                checkpoint.thread_id,
-                checkpoint.checkpoint_id,
-                checkpoint.parent_checkpoint_id,
-                checkpoint.run_id,
-                namespace,
-                next_nodes,
-                meta.source.as_str(),
-                meta.step as i64,
-                i64::from(meta.has_interrupts),
-                record,
-            ],
-        )
-        .map_err(|e| sqlite_err("insert checkpoint", e))?;
+                params![
+                    checkpoint.thread_id,
+                    checkpoint.checkpoint_id,
+                    checkpoint.parent_checkpoint_id,
+                    checkpoint.run_id,
+                    namespace,
+                    next_nodes,
+                    meta.source.as_str(),
+                    meta.step as i64,
+                    i64::from(meta.has_interrupts),
+                    record,
+                ],
+            )
+            .map_err(|e| sqlite_err("insert checkpoint", e))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| sqlite_err("join blocking put task", e))??;
         Ok(id)
     }
 

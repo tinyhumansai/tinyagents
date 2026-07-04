@@ -102,6 +102,36 @@ impl RetryPolicy {
         attempt + 1 < self.max_attempts
     }
 
+    /// The single retry decision shared by every retry loop in the harness.
+    ///
+    /// Returns `true` only when `error` is transient ([`is_retryable`]) *and*
+    /// the policy still permits another attempt ([`RetryPolicy::should_retry`]).
+    /// Both the agent loop and [`crate::harness::middleware::library::RetryMiddleware`]
+    /// route their per-attempt decision through here so the retry classification
+    /// and attempt-cap logic live in exactly one place and cannot drift apart.
+    ///
+    /// Callers that need to fold in a harness-level ceiling
+    /// ([`RetryPolicy::max_attempts_capped_at`]) should apply
+    /// [`RetryPolicy::with_max_attempts`] first and call this on the capped
+    /// policy.
+    pub fn should_retry_error(&self, attempt: usize, error: &TinyAgentsError) -> bool {
+        is_retryable(error) && self.should_retry(attempt)
+    }
+
+    /// Reconciles this policy's own `max_attempts` with a harness-level
+    /// ceiling expressed as a *retry* count (not counting the first attempt)
+    /// — [`crate::harness::limits::RunLimits::max_retries_per_call`] — and
+    /// returns whichever total-attempt cap is stricter.
+    ///
+    /// Without this, a `RunPolicy` could configure a looser `RetryPolicy`
+    /// than its own `RunLimits`, silently making the "hard" limit
+    /// unenforceable; the harness's agent loop always calls this instead of
+    /// consulting `max_attempts` directly.
+    pub fn max_attempts_capped_at(&self, max_retries_per_call: usize) -> usize {
+        self.max_attempts
+            .min(max_retries_per_call.saturating_add(1))
+    }
+
     /// Computes the deterministic (no-jitter) backoff for the given retry
     /// `attempt`.
     ///
@@ -143,7 +173,8 @@ impl RetryPolicy {
 ///
 /// | Variant | Retryable | Rationale |
 /// |---|---|---|
-/// | `Model` | yes | Transient provider 5xx / rate-limit / network glitch. |
+/// | `Provider` | depends | Classified from [`crate::harness::model::ProviderError::retryable`] — a 429/408/409/5xx is retryable, a 4xx like 401/400 is not. |
+/// | `Model` | yes | No structured detail to classify from (transport/parse failure); transient provider 5xx / rate-limit / network glitch is the common case. |
 /// | `Tool` | yes | Tool execution may have hit a transient dependency. |
 /// | `Validation` | **no** | Caller-side schema or policy error; retrying will not help. |
 /// | `Serialization` | **no** | Malformed data; retrying will not help. |
@@ -152,7 +183,11 @@ impl RetryPolicy {
 /// | `ToolNotFound` / `ModelNotFound` | **no** | Registry errors; not transient. |
 /// | `StructuredOutput` | **no** | Schema mismatch; retrying the same call will likely fail again. |
 pub fn is_retryable(err: &TinyAgentsError) -> bool {
-    matches!(err, TinyAgentsError::Model(_) | TinyAgentsError::Tool(_))
+    match err {
+        TinyAgentsError::Provider(provider_error) => provider_error.retryable,
+        TinyAgentsError::Model(_) | TinyAgentsError::Tool(_) => true,
+        _ => false,
+    }
 }
 
 // ── FallbackPolicy ───────────────────────────────────────────────────────────

@@ -29,9 +29,8 @@ use tinyagents::graph::{CompiledGraph, END, NodeFuture};
 use tinyagents::harness::message::Message;
 use tinyagents::harness::providers::openai::OpenAiModel;
 use tinyagents::harness::runtime::AgentHarness;
-use tinyagents::language::compiler::{
-    BoxedNode, CapabilityResolver, NodeFactory, bind_capabilities, build_graph, compile,
-};
+use tinyagents::language::capability_resolver::{CapabilityResolver, bind_capabilities};
+use tinyagents::language::compiler::{BoxedNode, NodeFactory, build_graph, compile};
 use tinyagents::language::parser::parse_str;
 use tinyagents::language::types::{NodeSpec, Routing};
 use tinyagents::{Command, NodeContext, NodeResult};

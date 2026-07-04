@@ -99,6 +99,24 @@ fn should_retry_boundary_at_max_attempts() {
     assert!(!no_retry.should_retry(0));
 }
 
+// ── RetryPolicy::max_attempts_capped_at ───────────────────────────────────────
+
+#[test]
+fn max_attempts_capped_at_takes_the_stricter_of_the_two_caps() {
+    // A looser `RunLimits::max_retries_per_call` never widens the policy's
+    // own cap.
+    let policy = RetryPolicy::default().with_max_attempts(3);
+    assert_eq!(policy.max_attempts_capped_at(10), 3);
+
+    // A stricter `max_retries_per_call` (a *retry* count, so +1 for the first
+    // attempt) overrides a looser policy.
+    assert_eq!(policy.max_attempts_capped_at(1), 2);
+
+    // Zero retries permitted means exactly one attempt, same as
+    // `max_attempts == 1`.
+    assert_eq!(policy.max_attempts_capped_at(0), 1);
+}
+
 // ── is_retryable per error class ──────────────────────────────────────────────
 
 #[test]
@@ -111,6 +129,41 @@ fn is_retryable_classification() {
 
     let serde_err = serde_json::from_str::<i32>("not-json").unwrap_err();
     assert!(!is_retryable(&TinyAgentsError::Serialization(serde_err)));
+}
+
+// ── TinyAgentsError::Provider classification ──────────────────────────────────
+
+#[test]
+fn provider_error_retryability_is_read_from_the_structured_flag_not_assumed() {
+    use crate::harness::model::ProviderError;
+
+    // Regression test: the unary/streaming provider path used to flatten a
+    // structured `ProviderError` into a plain `Model(String)`, so retry could
+    // not distinguish a retryable 429 from a non-retryable 401 and retried
+    // both. `TinyAgentsError::Provider` preserves the `retryable` flag a real
+    // provider adapter computes from the HTTP status, and `is_retryable` must
+    // consult it instead of assuming every provider failure is transient.
+    let rate_limited = ProviderError {
+        provider: "openai".to_string(),
+        status: Some(429),
+        retryable: true,
+        message: "rate limited".to_string(),
+        ..ProviderError::default()
+    };
+    assert!(is_retryable(&TinyAgentsError::Provider(Box::new(
+        rate_limited
+    ))));
+
+    let unauthorized = ProviderError {
+        provider: "openai".to_string(),
+        status: Some(401),
+        retryable: false,
+        message: "invalid api key".to_string(),
+        ..ProviderError::default()
+    };
+    assert!(!is_retryable(&TinyAgentsError::Provider(Box::new(
+        unauthorized
+    ))));
 }
 
 // ── FallbackPolicy::next_after ────────────────────────────────────────────────
@@ -210,4 +263,21 @@ async fn sleep_backoff_waits_only_when_enabled() {
     sleeping.sleep_backoff(1).await;
     assert_eq!(t1.elapsed(), expected);
     assert!(expected > Duration::ZERO);
+}
+
+#[test]
+fn should_retry_error_combines_classification_and_attempt_cap() {
+    // 1 try + 2 retries: attempts 0 and 1 may retry, attempt 2 may not.
+    let policy = RetryPolicy::default().with_max_attempts(3);
+
+    // Retryable error, attempts left → retry.
+    let retryable = TinyAgentsError::Model("5xx".into());
+    assert!(policy.should_retry_error(0, &retryable));
+    assert!(policy.should_retry_error(1, &retryable));
+    // Retryable error, attempts exhausted → stop.
+    assert!(!policy.should_retry_error(2, &retryable));
+
+    // Non-retryable error is never retried regardless of remaining attempts.
+    let non_retryable = TinyAgentsError::Validation("bad".into());
+    assert!(!policy.should_retry_error(0, &non_retryable));
 }

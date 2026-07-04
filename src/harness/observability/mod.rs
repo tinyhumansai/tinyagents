@@ -19,11 +19,16 @@
 //!   to a JSONL stream).
 //!
 //! Persisting sinks bridge the synchronous [`EventListener::on_event`] hook to
-//! the async journal/store APIs with `futures::executor::block_on` and treat
-//! persistence as best-effort: a backend error never aborts the run.
+//! the async journal/store APIs through a background [`worker::AppendWorker`]:
+//! `on_event` never blocks the run on I/O, persistence is best-effort (a full
+//! bounded queue drops rather than stalls; backend errors are reported, not
+//! propagated), and `flush` blocks until the durable log has caught up.
 
 mod langfuse;
 mod types;
+mod worker;
+
+pub(crate) use worker::{AppendWorker, DEFAULT_DRAIN_CAPACITY};
 
 pub use langfuse::{LangfuseAuth, LangfuseClient, LangfuseTraceConfig};
 // Shared Langfuse payload helpers reused by the graph observability exporter so
@@ -32,7 +37,7 @@ pub(crate) use langfuse::{clean_nulls, iso_ms};
 pub use types::*;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -144,18 +149,30 @@ impl AgentLatencyMetrics {
 // ---------------------------------------------------------------------------
 
 impl InMemoryEventJournal {
-    /// Creates a new, empty in-memory journal.
+    /// Creates a new, empty in-memory journal with the default run-retention
+    /// cap ([`DEFAULT_JOURNAL_MAX_RUNS`]).
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Creates a new, empty in-memory journal that retains at most
+    /// `max_runs` distinct `run_id` streams, evicting the oldest (by first
+    /// append) once exceeded. `0` means unbounded.
+    pub fn with_max_runs(max_runs: usize) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(EventJournalState::default())),
+            max_runs,
+        }
+    }
+
     /// Returns the number of observations stored for `run_id`.
     pub fn len(&self, run_id: &str) -> usize {
-        self.runs
+        self.state
             .lock()
             .expect("InMemoryEventJournal lock poisoned")
+            .streams
             .get(run_id)
-            .map(|v| v.len())
+            .map(|s| s.entries.len())
             .unwrap_or(0)
     }
 
@@ -163,30 +180,93 @@ impl InMemoryEventJournal {
     pub fn is_empty(&self, run_id: &str) -> bool {
         self.len(run_id) == 0
     }
+
+    /// Returns the number of distinct `run_id` streams currently retained.
+    pub fn run_count(&self) -> usize {
+        self.state
+            .lock()
+            .expect("InMemoryEventJournal lock poisoned")
+            .streams
+            .len()
+    }
 }
 
 #[async_trait]
 impl HarnessEventJournal for InMemoryEventJournal {
     async fn append(&self, obs: AgentObservation) -> Result<u64> {
-        let mut runs = self
-            .runs
+        let mut state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryEventJournal", e))?;
-        let entries = runs.entry(obs.run_id.as_str().to_string()).or_default();
-        let offset = entries.len() as u64;
-        entries.push(obs);
+        let run_id = obs.run_id.as_str().to_string();
+        if !state.streams.contains_key(&run_id) {
+            state.order.push_back(run_id.clone());
+            // Evict the oldest run(s) once the cap is exceeded so a
+            // long-lived process journaling many runs doesn't grow this
+            // map without bound. `max_runs == 0` disables the cap.
+            if self.max_runs > 0 {
+                while state.order.len() > self.max_runs {
+                    let Some(oldest) = state.order.pop_front() else {
+                        break;
+                    };
+                    if let Some(stream) = state.streams.remove(&oldest) {
+                        // Remember where this run's numbering left off so a
+                        // later append for the same run_id resumes from
+                        // there instead of restarting at offset 0 — which
+                        // would make `read_from` silently skip entries for a
+                        // consumer resuming from a previously saved offset.
+                        let next_offset = stream.base_offset + stream.entries.len() as u64;
+                        state.evicted.insert(oldest.clone(), next_offset);
+                        state.evicted_order.push_back(oldest);
+                        while state.evicted_order.len() > self.max_runs {
+                            let Some(stale) = state.evicted_order.pop_front() else {
+                                break;
+                            };
+                            state.evicted.remove(&stale);
+                        }
+                    }
+                }
+            }
+        }
+        let base_offset = state.evicted.remove(&run_id).unwrap_or(0);
+        let stream = state.streams.entry(run_id).or_insert_with(|| EventStream {
+            base_offset,
+            entries: Vec::new(),
+        });
+        let offset = stream.base_offset + stream.entries.len() as u64;
+        stream.entries.push(obs);
         Ok(offset)
     }
 
     async fn read_from(&self, run_id: &str, offset: u64) -> Result<Vec<AgentObservation>> {
-        let runs = self
-            .runs
+        let state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryEventJournal", e))?;
-        let Some(entries) = runs.get(run_id) else {
-            return Ok(Vec::new());
-        };
-        Ok(entries.iter().skip(offset as usize).cloned().collect())
+        match state.streams.get(run_id) {
+            Some(stream) => {
+                if offset < stream.base_offset {
+                    return Err(crate::error::TinyAgentsError::Validation(format!(
+                        "run `{run_id}` requested offset {offset} but entries before \
+                         {} were evicted to bound memory; the caller's saved offset is stale",
+                        stream.base_offset
+                    )));
+                }
+                let skip = (offset - stream.base_offset) as usize;
+                Ok(stream.entries.iter().skip(skip).cloned().collect())
+            }
+            None => {
+                if let Some(&next_offset) = state.evicted.get(run_id)
+                    && offset < next_offset
+                {
+                    return Err(crate::error::TinyAgentsError::Validation(format!(
+                        "run `{run_id}` was evicted to bound memory; the caller's \
+                         saved offset {offset} is stale"
+                    )));
+                }
+                Ok(Vec::new())
+            }
+        }
     }
 }
 
@@ -228,17 +308,39 @@ impl<A: AppendStore + 'static> HarnessEventJournal for StoreEventJournal<A> {
 // InMemoryStatusStore
 // ---------------------------------------------------------------------------
 
+/// Returns `true` for statuses that are still in flight and must never be
+/// evicted to make room for new runs.
+fn is_active_status(status: &HarnessRunStatus) -> bool {
+    use crate::harness::ids::ExecutionStatus;
+    matches!(
+        status.status,
+        ExecutionStatus::Pending | ExecutionStatus::Running | ExecutionStatus::Interrupted
+    )
+}
+
 impl InMemoryStatusStore {
-    /// Creates a new, empty in-memory status store.
+    /// Creates a new, empty in-memory status store with the default
+    /// run-retention cap ([`DEFAULT_STATUS_STORE_MAX_RUNS`]).
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Creates a new, empty in-memory status store that retains at most
+    /// `max_runs` distinct runs, evicting the oldest terminal run once
+    /// exceeded. `0` means unbounded.
+    pub fn with_max_runs(max_runs: usize) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(StatusStoreState::default())),
+            max_runs,
+        }
+    }
+
     /// Returns the number of distinct runs with a recorded status.
     pub fn len(&self) -> usize {
-        self.statuses
+        self.state
             .lock()
             .expect("InMemoryStatusStore lock poisoned")
+            .statuses
             .len()
     }
 
@@ -251,28 +353,57 @@ impl InMemoryStatusStore {
 #[async_trait]
 impl HarnessStatusStore for InMemoryStatusStore {
     async fn put_status(&self, status: HarnessRunStatus) -> Result<()> {
-        let mut statuses = self
-            .statuses
+        let mut state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryStatusStore", e))?;
-        statuses.insert(status.run_id.as_str().to_string(), status);
+        let run_id = status.run_id.as_str().to_string();
+        if !state.statuses.contains_key(&run_id) {
+            state.order.push_back(run_id.clone());
+        }
+        state.statuses.insert(run_id, status);
+
+        // Evict the oldest terminal runs once the cap is exceeded so a
+        // supervisor tracking many short-lived runs doesn't grow this map
+        // without bound. Active runs are never evicted; if every retained
+        // run is still active we simply exceed the cap rather than drop
+        // in-flight state. `max_runs == 0` disables the cap.
+        if self.max_runs > 0 && state.statuses.len() > self.max_runs {
+            let mut requeue = Vec::new();
+            while state.statuses.len() > self.max_runs {
+                let Some(candidate) = state.order.pop_front() else {
+                    break;
+                };
+                match state.statuses.get(&candidate) {
+                    Some(s) if is_active_status(s) => requeue.push(candidate),
+                    Some(_) => {
+                        state.statuses.remove(&candidate);
+                    }
+                    None => {}
+                }
+            }
+            for id in requeue.into_iter().rev() {
+                state.order.push_front(id);
+            }
+        }
         Ok(())
     }
 
     async fn get_status(&self, run_id: &str) -> Result<Option<HarnessRunStatus>> {
-        let statuses = self
-            .statuses
+        let state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryStatusStore", e))?;
-        Ok(statuses.get(run_id).cloned())
+        Ok(state.statuses.get(run_id).cloned())
     }
 
     async fn list_by_thread(&self, thread_id: &str) -> Result<Vec<HarnessRunStatus>> {
-        let statuses = self
-            .statuses
+        let state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryStatusStore", e))?;
-        Ok(statuses
+        Ok(state
+            .statuses
             .values()
             .filter(|s| {
                 s.thread_id
@@ -284,11 +415,12 @@ impl HarnessStatusStore for InMemoryStatusStore {
     }
 
     async fn list_by_root(&self, root_run_id: &str) -> Result<Vec<HarnessRunStatus>> {
-        let statuses = self
-            .statuses
+        let state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryStatusStore", e))?;
-        Ok(statuses
+        Ok(state
+            .statuses
             .values()
             .filter(|s| s.root_run_id.as_str() == root_run_id)
             .cloned()
@@ -296,21 +428,14 @@ impl HarnessStatusStore for InMemoryStatusStore {
     }
 
     async fn list_active(&self) -> Result<Vec<HarnessRunStatus>> {
-        use crate::harness::ids::ExecutionStatus;
-        let statuses = self
-            .statuses
+        let state = self
+            .state
             .lock()
             .map_err(|e| poisoned("InMemoryStatusStore", e))?;
-        Ok(statuses
+        Ok(state
+            .statuses
             .values()
-            .filter(|s| {
-                matches!(
-                    s.status,
-                    ExecutionStatus::Pending
-                        | ExecutionStatus::Running
-                        | ExecutionStatus::Interrupted
-                )
-            })
+            .filter(|s| is_active_status(s))
             .cloned()
             .collect())
     }
@@ -384,16 +509,21 @@ impl RedactingSink {
 
 impl EventListener for RedactingSink {
     fn on_event(&self, record: &EventRecord) {
-        // Serialize the event, mask secrets in every string field, and rebuild
-        // it. On any (de)serialization failure forward the original unchanged
-        // so observability is never silently dropped.
-        let Ok(mut value) = serde_json::to_value(&record.event) else {
+        // Fast path: with no secrets configured there is nothing to redact, so
+        // forward the original record unchanged.
+        if self.secrets.is_empty() {
             self.inner.on_event(record);
+            return;
+        }
+        // Serialize the event, mask secrets in every string field, and rebuild
+        // it. This is a security boundary, so it must fail closed: if we cannot
+        // serialize, redact, and rebuild the event, we drop it rather than
+        // forward a record that may still contain unredacted secrets.
+        let Ok(mut value) = serde_json::to_value(&record.event) else {
             return;
         };
         redact_value(&mut value, &self.secrets, &self.mask);
         let Ok(event) = serde_json::from_value::<AgentEvent>(value) else {
-            self.inner.on_event(record);
             return;
         };
         let redacted = EventRecord {
@@ -439,11 +569,19 @@ impl JournalSink {
     /// lineage. `root_run_id` defaults to `run_id` for a top-level run; use
     /// [`Self::with_lineage`] to set a parent and a different root.
     pub fn new(journal: Arc<dyn HarnessEventJournal>, run_id: RunId) -> Self {
+        let worker = Arc::new(AppendWorker::spawn(
+            "journal-sink",
+            DEFAULT_DRAIN_CAPACITY,
+            move |obs: AgentObservation| {
+                let journal = Arc::clone(&journal);
+                async move { journal.append(obs).await.map(|_| ()) }
+            },
+        ));
         Self {
             root_run_id: run_id.clone(),
             run_id,
             parent_run_id: None,
-            journal,
+            worker,
         }
     }
 
@@ -452,6 +590,15 @@ impl JournalSink {
         self.parent_run_id = parent_run_id;
         self.root_run_id = root_run_id;
         self
+    }
+
+    /// Blocks until every observation submitted so far has been persisted.
+    ///
+    /// Persistence is otherwise asynchronous and best-effort; call this before
+    /// reading the journal back or shutting down to guarantee the durable log
+    /// has caught up with the events emitted so far.
+    pub fn flush(&self) {
+        self.worker.flush();
     }
 }
 
@@ -463,8 +610,8 @@ impl EventListener for JournalSink {
             self.parent_run_id.clone(),
             self.root_run_id.clone(),
         );
-        // Best-effort durable append; never abort the run on a journal error.
-        let _ = futures::executor::block_on(self.journal.append(obs));
+        // Hand off to the background drain; never block the run on I/O.
+        self.worker.submit(obs);
     }
 }
 
@@ -478,10 +625,26 @@ impl JsonlSink {
     ///
     /// [`EventRecord`]: crate::harness::events::EventRecord
     pub fn new(store: JsonlAppendStore, stream: impl Into<String>) -> Self {
-        Self {
-            store,
-            stream: stream.into(),
-        }
+        let stream = stream.into();
+        let worker = Arc::new(AppendWorker::spawn(
+            "jsonl-sink",
+            DEFAULT_DRAIN_CAPACITY,
+            move |value: serde_json::Value| {
+                let store = store.clone();
+                let stream = stream.clone();
+                async move { store.append(&stream, value).await.map(|_| ()) }
+            },
+        ));
+        Self { worker }
+    }
+
+    /// Blocks until every record submitted so far has been appended.
+    ///
+    /// Persistence is otherwise asynchronous and best-effort; call this before
+    /// reading the stream back or shutting down to guarantee the durable log has
+    /// caught up with the events emitted so far.
+    pub fn flush(&self) {
+        self.worker.flush();
     }
 }
 
@@ -490,8 +653,8 @@ impl EventListener for JsonlSink {
         let Ok(value) = serde_json::to_value(record) else {
             return;
         };
-        // Best-effort durable append; never abort the run on a store error.
-        let _ = futures::executor::block_on(self.store.append(&self.stream, value));
+        // Hand off to the background drain; never block the run on I/O.
+        self.worker.submit(value);
     }
 }
 

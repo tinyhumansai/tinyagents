@@ -53,10 +53,13 @@
 //!
 //! ## Provider features
 //!
-//! The default build is offline and deterministic ([`harness::providers::MockModel`]).
 //! Hosted and local providers (OpenAI plus the OpenAI-compatible endpoints for
 //! Anthropic, Ollama, DeepSeek, Groq, xAI, OpenRouter, Together, and Mistral)
-//! live behind the `openai` Cargo feature.
+//! are compiled in unconditionally alongside the offline, deterministic
+//! [`harness::providers::MockModel`]. Two Cargo features gate optional,
+//! heavier dependencies instead: `sqlite` (embedded SQLite checkpointer,
+//! [`graph::checkpoint::SqliteCheckpointer`]) and `repl` (embedded Rhai engine
+//! powering the `.ragsh` session runtime, [`repl::session`]).
 //!
 //! ## Crate-root re-exports
 //!
@@ -76,18 +79,19 @@ pub use error::{Result, TinyAgentsError};
 
 // --- Registry: named capability catalog (.rag/.ragsh binding by name) ---
 pub use registry::{
-    CapabilityRegistry, ComponentId, ComponentKind, ComponentMetadata, DiagnosticSeverity,
-    RegistryDiagnostic, RegistrySnapshot,
+    AliasBinding, CapabilityRegistry, ComponentId, ComponentKind, ComponentMetadata,
+    DiagnosticSeverity, ModelCapabilities, ModelCatalog, ModelCatalogEntry, ModelCatalogSnapshot,
+    ModelCatalogSource, ModelPricing, RegistryDiagnostic, RegistrySnapshot,
 };
 
 // --- Language: registry → blueprint binding façade ---
 // The strict, registry-backed entry points the REPL and orchestrators use to
 // turn `.rag`/`.ragsh` source into validated blueprints. `compile_source` runs
 // parse -> compile -> registry-bind in one call.
-pub use language::compiler::{
-    CapabilityResolver, bind_capabilities, bind_capabilities_with_registry, compile,
-    compile_source, compile_with_provenance,
+pub use language::capability_resolver::{
+    CapabilityResolver, bind_capabilities, bind_capabilities_with_registry,
 };
+pub use language::compiler::{compile, compile_source, compile_with_provenance};
 // `Resolver` is the registry-backed binding gate: it resolves every reference in
 // a `.rag` plan (file-backed or model-generated) against the registry, producing
 // spanned diagnostics for unknown/disallowed capabilities. `resolve_source` is
@@ -146,12 +150,13 @@ pub use harness::observability::{LangfuseAuth, LangfuseClient, LangfuseTraceConf
 #[cfg(feature = "sqlite")]
 pub use graph::SqliteCheckpointer;
 pub use graph::{
-    Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource, CheckpointTuple,
-    Checkpointer, ChildRun, ChildRunSink, ClosureReducer, ClosureStateReducer, Command,
-    CompiledGraph, DurabilityMode, END, FileCheckpointer, ForkId, GraphBuilder, GraphDefaults,
-    GraphEvent, GraphExecution, GraphInput, GraphRunStatus, InMemoryCheckpointer, Interrupt,
-    NodeContext, NodeResult, RecursionFrame, RecursionPolicy, RecursionStack, Reducer,
-    ResumeTarget, Route, RouteTarget, RunTree, START, StateReducer, StateSnapshot,
+    BarrierArrivals, Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource,
+    CheckpointTuple, Checkpointer, ChildRun, ChildRunSink, ClosureReducer, ClosureStateReducer,
+    Command, CompiledGraph, DurabilityMode, END, FileCheckpointer, ForkId, GraphBuilder,
+    GraphDefaults, GraphEvent, GraphExecution, GraphInput, GraphRunStatus, InMemoryCheckpointer,
+    Interrupt, NodeContext, NodeResult, PendingActivation, RecursionFrame, RecursionPolicy,
+    RecursionStack, Reducer, ResumeTarget, Route, RouteTarget, RunTree, START, StateReducer,
+    StateSnapshot,
 };
 
 // --- Graph: sub-agent nodes (delegate a graph step to a registered agent) ---

@@ -22,6 +22,7 @@ use crate::error::Result;
 use crate::graph::status::GraphRunStatus;
 use crate::graph::stream::{GraphEvent, GraphEventSink};
 use crate::harness::ids::{CheckpointId, EventId, GraphId, NodeId, RunId, ThreadId};
+use crate::harness::observability::AppendWorker;
 use crate::harness::store::AppendStore;
 
 // ---------------------------------------------------------------------------
@@ -337,16 +338,19 @@ pub struct InMemoryGraphStatusStore {
 /// The sink is configured with the emitting run's lineage and checkpoint
 /// coordinates; each received event is stamped with a monotonically increasing
 /// `offset`, the latest observed `step`, and the configured `namespace`. The
-/// async append is bridged synchronously with `futures::executor::block_on`,
-/// and append errors are swallowed so a failing journal never aborts the run.
+/// observation is then handed to a background [`AppendWorker`] that persists it
+/// off the executor thread (best-effort — a full bounded queue drops rather
+/// than stalling the run, and append errors are reported, not propagated).
+/// [`crate::graph::stream::GraphEventSink::flush`] blocks until the durable log
+/// has caught up; the executor calls it after the terminal run event.
 ///
 /// An optional `inner` sink lets the journal sink also forward each event to a
 /// live transport (for example a [`crate::graph::stream::CollectingSink`]) so a
 /// single configured sink can both persist and broadcast.
 #[derive(Clone)]
 pub struct JournalGraphSink {
-    /// The journal observations are appended to.
-    pub(crate) journal: Arc<dyn GraphEventJournal>,
+    /// Background drain that persists observations without blocking the run.
+    pub(crate) worker: Arc<AppendWorker<GraphObservation>>,
     /// Optional downstream sink that also receives every event.
     pub(crate) inner: Option<Arc<dyn GraphEventSink>>,
     /// The run that owns events delivered to this sink.

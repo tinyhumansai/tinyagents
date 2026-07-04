@@ -19,6 +19,7 @@
 //! `mod.rs`; tests live in `test.rs`. Every public item is re-exported through
 //! `crate::harness::middleware` so callers import from one place.
 
+use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -204,9 +205,14 @@ pub struct BudgetSpend {
     pub cost: crate::harness::cost::CostTotals,
     /// Whether a warning has already been emitted (warn-once).
     pub warned: bool,
-    /// Input tokens reserved by the most recent preflight, awaiting
-    /// reconciliation against the provider-reported usage in `after_model`.
-    pub last_reserved_input: u64,
+    /// Sum of input tokens preflight-reserved by calls that have not yet
+    /// reconciled in `after_model`. Shared trackers (handed to concurrent
+    /// sub-agent runs) can have more than one outstanding reservation at
+    /// once, so this is a running total, not a single call's estimate;
+    /// each in-flight call's own reservation is tracked separately by its
+    /// [`BudgetMiddleware`] instance and released from this total when it
+    /// reconciles (or is abandoned).
+    pub reserved_input_total: u64,
 }
 
 /// Around-nothing lifecycle middleware that enforces a token/money
@@ -233,6 +239,11 @@ pub struct BudgetMiddleware {
     pub(crate) limits: BudgetLimits,
     pub(crate) tracker: BudgetTracker,
     pub(crate) pricing: std::collections::HashMap<String, crate::registry::catalog::ModelPricing>,
+    /// This run's own outstanding preflight reservation (input tokens),
+    /// awaiting reconciliation in `after_model`. Local to this middleware
+    /// instance (one per run) so concurrent runs sharing the same
+    /// [`BudgetTracker`] never clobber each other's reservation.
+    pub(crate) pending_reservation: std::sync::Mutex<u64>,
 }
 
 // ── ToolPolicyMiddleware ──────────────────────────────────────────────────────
@@ -454,6 +465,11 @@ pub enum TraceBoundary {
     End,
 }
 
+/// Default cap on the number of [`PhaseTrace`] entries a [`TracingMiddleware`]
+/// retains before evicting the oldest. Long-running agent loops otherwise grow
+/// this recorder without bound.
+pub const DEFAULT_TRACE_RECORD_CAP: usize = 1024;
+
 /// Lifecycle middleware that records structured begin/end traces and per-phase
 /// counts for an entire run.
 ///
@@ -464,10 +480,17 @@ pub enum TraceBoundary {
 /// giving tests and dashboards a structured timeline without parsing the event
 /// stream. (The surrounding [`MiddlewareStack`][crate::harness::middleware::MiddlewareStack]
 /// also emits `MiddlewareStarted`/`MiddlewareCompleted` events around each hook.)
+///
+/// The recorder is a bounded ring buffer (default cap
+/// [`DEFAULT_TRACE_RECORD_CAP`], configurable via
+/// [`TracingMiddleware::with_max_records`]): once full, the oldest trace is
+/// dropped to make room for the newest, so an unbounded run cannot grow this
+/// middleware's memory footprint forever.
 pub struct TracingMiddleware {
     pub(crate) label: &'static str,
-    pub(crate) records: Mutex<Vec<PhaseTrace>>,
+    pub(crate) records: Mutex<VecDeque<PhaseTrace>>,
     pub(crate) counts: Mutex<TraceCounts>,
+    pub(crate) max_records: usize,
 }
 
 /// Per-phase begin counts captured by [`TracingMiddleware`].

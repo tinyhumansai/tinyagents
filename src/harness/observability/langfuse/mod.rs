@@ -4,66 +4,17 @@
 //! send directly to a self-hosted Langfuse instance with public/secret keys, or
 //! to the TinyHumans backend proxy with a bearer token.
 
-use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::events::AgentEvent;
+use crate::harness::ids::now_ms;
 use crate::harness::observability::AgentObservation;
 use crate::harness::usage::Usage;
 
-/// Authentication mode for [`LangfuseClient`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LangfuseAuth {
-    /// Send `Authorization: Basic base64(public_key:secret_key)`.
-    Basic {
-        /// Langfuse project public key.
-        public_key: String,
-        /// Langfuse project secret key.
-        secret_key: String,
-    },
-    /// Send `Authorization: Bearer <token>`.
-    ///
-    /// Use this when targeting the TinyHumans backend proxy at
-    /// `/telemetry/langfuse/ingestion`; the backend injects Langfuse Basic Auth.
-    Bearer {
-        /// Backend access token.
-        token: String,
-    },
-}
+mod types;
 
-/// Configuration for a Langfuse trace export.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-pub struct LangfuseTraceConfig {
-    /// Stable Langfuse trace id. Defaults to the first observation's root run id.
-    pub trace_id: Option<String>,
-    /// Human-readable trace name.
-    pub name: Option<String>,
-    /// End-user id to filter by in Langfuse.
-    pub user_id: Option<String>,
-    /// Session/thread id to group related traces.
-    pub session_id: Option<String>,
-    /// Langfuse environment name.
-    pub environment: Option<String>,
-    /// Release identifier.
-    pub release: Option<String>,
-    /// Version identifier.
-    pub version: Option<String>,
-    /// Tags attached to the trace.
-    #[serde(default)]
-    pub tags: Vec<String>,
-    /// Extra trace metadata.
-    #[serde(default)]
-    pub metadata: Value,
-}
-
-/// Async Langfuse ingestion client.
-#[derive(Clone, Debug)]
-pub struct LangfuseClient {
-    endpoint: String,
-    auth: LangfuseAuth,
-    client: reqwest::Client,
-}
+pub use types::{LangfuseAuth, LangfuseClient, LangfuseTraceConfig};
 
 impl LangfuseClient {
     /// Creates a client from a base URL and auth mode.
@@ -227,6 +178,19 @@ impl LangfuseClient {
                 "Langfuse ingestion returned {status}: {parsed}"
             )));
         }
+        // A `207 Multi-Status` reports per-item outcomes: some events may have
+        // been rejected while the request itself "succeeded". Surface those
+        // partial failures instead of swallowing them and reporting success.
+        if status.as_u16() == 207
+            && let Some(errors) = parsed.get("errors").and_then(Value::as_array)
+            && !errors.is_empty()
+        {
+            return Err(TinyAgentsError::Model(format!(
+                "Langfuse ingestion partially failed ({} rejected): {}",
+                errors.len(),
+                json!(errors)
+            )));
+        }
         Ok(parsed)
     }
 }
@@ -307,12 +271,17 @@ fn trace_metadata(trace: &LangfuseTraceConfig, observations: &[AgentObservation]
 
 fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
     let timestamp = iso_ms(obs.ts_ms);
+    // Attach only run lineage, offset, and the event *kind* — not the full event
+    // payload. The event's meaningful fields (input/output/usage/name) are
+    // already lifted into the observation `body`; embedding the whole event here
+    // duplicated every payload, roughly doubling batch bytes and growing
+    // O(turns^2) as a run accumulates, which can trip the ~3.5MB batch cap.
     let metadata = json!({
         "run_id": obs.run_id.as_str(),
         "root_run_id": obs.root_run_id.as_str(),
         "parent_run_id": obs.parent_run_id.as_ref().map(|id| id.as_str()),
         "offset": obs.offset,
-        "event": obs.event,
+        "event_kind": obs.event.kind(),
     });
     match &obs.event {
         AgentEvent::ModelCompleted {
@@ -344,7 +313,10 @@ fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
         } => json!({
             "id": obs.event_id.as_str(),
             "timestamp": timestamp,
-            "type": "tool-create",
+            // A tool call is modelled as a span. `tool-create` is not a valid
+            // Langfuse ingestion observation type — older/self-hosted Langfuse
+            // rejects it, silently dropping every tool observation.
+            "type": "span-create",
             "body": clean_nulls(json!({
                 "id": call_id.as_str(),
                 "traceId": trace_id,
@@ -412,14 +384,6 @@ pub(crate) fn iso_ms(ms: u64) -> String {
     format_unix_iso(secs, millis)
 }
 
-fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 fn format_unix_iso(secs: u64, millis: u32) -> String {
     // Howard Hinnant civil-date conversion for Unix days, dependency-free.
     let days = (secs / 86_400) as i64;
@@ -446,159 +410,4 @@ fn civil_from_days(days: i64) -> (i32, u32, u32) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::harness::events::AgentEvent;
-    use crate::harness::ids::{CallId, EventId, RunId};
-
-    fn obs(offset: u64, event: AgentEvent) -> AgentObservation {
-        AgentObservation {
-            event_id: EventId::new(format!("evt-{offset}")),
-            run_id: RunId::new("run-1"),
-            parent_run_id: None,
-            root_run_id: RunId::new("root-1"),
-            offset,
-            ts_ms: 1_704_067_200_000 + offset,
-            event,
-        }
-    }
-
-    #[test]
-    fn normalizes_langfuse_endpoints() {
-        let client = LangfuseClient::proxy("https://api.example.test", "token").unwrap();
-        assert_eq!(
-            client.endpoint(),
-            "https://api.example.test/telemetry/langfuse/ingestion"
-        );
-        let client = LangfuseClient::proxy(
-            "https://api.example.test/telemetry/langfuse/ingestion",
-            "token",
-        )
-        .unwrap();
-        assert_eq!(
-            client.endpoint(),
-            "https://api.example.test/telemetry/langfuse/ingestion"
-        );
-    }
-
-    #[test]
-    fn builds_trace_and_generation_batch() {
-        let client =
-            LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t")
-                .unwrap();
-        let batch = client
-            .build_ingestion_batch(
-                LangfuseTraceConfig {
-                    user_id: Some("user-1".to_string()),
-                    session_id: Some("thread-1".to_string()),
-                    ..Default::default()
-                },
-                &[
-                    obs(
-                        0,
-                        AgentEvent::RunStarted {
-                            run_id: RunId::new("run-1"),
-                            thread_id: None,
-                        },
-                    ),
-                    obs(
-                        1,
-                        AgentEvent::ModelCompleted {
-                            call_id: CallId::new("model-call"),
-                            usage: Some(Usage {
-                                input_tokens: 3,
-                                output_tokens: 4,
-                                total_tokens: 7,
-                                ..Default::default()
-                            }),
-                            input: None,
-                            output: None,
-                        },
-                    ),
-                ],
-            )
-            .unwrap();
-
-        let events = batch["batch"].as_array().unwrap();
-        assert_eq!(events[0]["type"], "trace-create");
-        assert_eq!(events[0]["body"]["id"], "root-1");
-        assert_eq!(events[0]["body"]["userId"], "user-1");
-        // Trace metadata is defaulted from run lineage even without a caller value.
-        assert_eq!(events[0]["body"]["metadata"]["root_run_id"], "root-1");
-        assert_eq!(events[0]["body"]["metadata"]["run_id"], "run-1");
-        assert_eq!(events[2]["type"], "generation-create");
-        assert_eq!(events[2]["body"]["id"], "model-call");
-        assert_eq!(events[2]["body"]["usage"]["input"], 3);
-        // Payload-free generation: no input/output body fields.
-        assert!(events[2]["body"].get("input").is_none());
-        assert!(events[2]["body"].get("output").is_none());
-    }
-
-    #[test]
-    fn populates_generation_and_tool_io_when_captured() {
-        let client =
-            LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t")
-                .unwrap();
-        let batch = client
-            .build_ingestion_batch(
-                LangfuseTraceConfig::default(),
-                &[
-                    obs(
-                        0,
-                        AgentEvent::ModelCompleted {
-                            call_id: CallId::new("model-call"),
-                            usage: None,
-                            input: Some(json!([{ "role": "user", "content": "hi" }])),
-                            output: Some(json!({ "content": "hello there" })),
-                        },
-                    ),
-                    obs(
-                        1,
-                        AgentEvent::ToolCompleted {
-                            call_id: CallId::new("tool-call"),
-                            tool_name: "lookup".to_string(),
-                            input: Some(json!({ "query": "weather" })),
-                            output: Some(json!("sunny")),
-                        },
-                    ),
-                ],
-            )
-            .unwrap();
-
-        let events = batch["batch"].as_array().unwrap();
-        assert_eq!(events[1]["type"], "generation-create");
-        assert_eq!(events[1]["body"]["input"][0]["content"], "hi");
-        assert_eq!(events[1]["body"]["output"]["content"], "hello there");
-        assert_eq!(events[2]["type"], "tool-create");
-        assert_eq!(events[2]["body"]["input"]["query"], "weather");
-        assert_eq!(events[2]["body"]["output"], "sunny");
-    }
-
-    #[test]
-    fn merges_caller_trace_metadata_over_defaults() {
-        let client =
-            LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t")
-                .unwrap();
-        let batch = client
-            .build_ingestion_batch(
-                LangfuseTraceConfig {
-                    metadata: json!({ "deployment": "prod", "root_run_id": "override" }),
-                    ..Default::default()
-                },
-                &[obs(
-                    0,
-                    AgentEvent::RunStarted {
-                        run_id: RunId::new("run-1"),
-                        thread_id: None,
-                    },
-                )],
-            )
-            .unwrap();
-
-        let meta = &batch["batch"].as_array().unwrap()[0]["body"]["metadata"];
-        assert_eq!(meta["deployment"], "prod");
-        // Caller keys win on collision with the defaulted lineage.
-        assert_eq!(meta["root_run_id"], "override");
-        assert_eq!(meta["run_id"], "run-1");
-    }
-}
+mod test;

@@ -67,6 +67,7 @@ consumer owns the run cancellation token.
 Streaming adapters must merge chunks deterministically:
 
 - text chunks preserve order
+- reasoning/thinking chunks preserve order on a side channel
 - content block indexes are respected
 - tool-call chunks are correlated by id or index
 - cumulative usage is converted into deltas or clearly marked cumulative

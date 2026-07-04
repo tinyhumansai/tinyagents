@@ -75,6 +75,26 @@ impl Message {
             Message::Tool(m) => concat_text(&m.content),
         }
     }
+
+    /// Returns the total number of Unicode scalar values across all text content
+    /// blocks, without allocating the concatenated string.
+    ///
+    /// Equivalent to `self.text().chars().count()` but avoids the intermediate
+    /// `String` allocation, which matters on hot paths such as token estimation
+    /// over a whole transcript.
+    pub fn char_len(&self) -> usize {
+        let content = match self {
+            Message::System(m) => &m.content,
+            Message::User(m) => &m.content,
+            Message::Assistant(m) => &m.content,
+            Message::Tool(m) => &m.content,
+        };
+        content
+            .iter()
+            .filter_map(ContentBlock::as_text)
+            .map(|t| t.chars().count())
+            .sum()
+    }
 }
 
 #[cfg(test)]

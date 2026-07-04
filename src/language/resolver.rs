@@ -31,11 +31,12 @@
 //! call, so model-generated source is validated on exactly the same path as a
 //! checked-in `.rag` file.
 
-use std::collections::HashSet;
-
 use crate::error::{Result, TinyAgentsError};
 use crate::language::ast::{ChannelDecl, GraphDecl, NodeDecl, Program};
-use crate::language::compiler::{CapabilityResolver, DEFAULT_NODE_KINDS, compile};
+use crate::language::capability_resolver::{
+    CapabilityResolver, DEFAULT_NODE_KINDS, ReferenceClass,
+};
+use crate::language::compiler::compile;
 use crate::language::diagnostic::Diagnostic;
 use crate::language::parser::parse_str;
 use crate::language::source::SourceFile;
@@ -49,6 +50,7 @@ const CODE_UNKNOWN_TOOL: &str = "E-rag-unknown-tool";
 const CODE_UNKNOWN_SUBGRAPH: &str = "E-rag-unknown-subgraph";
 const CODE_UNKNOWN_ROUTER: &str = "E-rag-unknown-router";
 const CODE_UNKNOWN_AGENT: &str = "E-rag-unknown-agent";
+const CODE_UNKNOWN_SCRIPT: &str = "E-rag-unknown-script";
 const CODE_UNKNOWN_REDUCER: &str = "E-rag-unknown-reducer";
 const CODE_INVALID_NODE_KIND: &str = "E-rag-invalid-node-kind";
 
@@ -62,42 +64,30 @@ const CODE_INVALID_NODE_KIND: &str = "E-rag-invalid-node-kind";
 /// plan; it only reports references that fall outside the allowlists.
 #[derive(Clone, Debug)]
 pub struct Resolver {
-    /// The overlapping model/tool/subgraph/router/reducer/node-kind allowlists,
-    /// reused from the compiler's [`CapabilityResolver`] so the two share one
-    /// policy.
+    /// The overlapping model/tool/subgraph/router/reducer/agent/script/node-kind
+    /// allowlists, reused from the compiler's [`CapabilityResolver`] so every
+    /// binding gate shares one policy.
     caps: CapabilityResolver,
-    /// Registered agent names (and aliases) a `subagent` node may reference.
-    agents: HashSet<String>,
 }
 
 impl Resolver {
     /// Builds a resolver from a live [`CapabilityRegistry`].
     ///
-    /// Every registered model, tool, graph blueprint, router, reducer, and agent
-    /// name — including aliases — populates the corresponding allowlist, and the
-    /// node-kind allowlist is seeded with [`DEFAULT_NODE_KINDS`]. The resolver
-    /// therefore validates `.rag` source against exactly what Rust has
-    /// registered.
+    /// Every registered model, tool, graph blueprint, router, reducer, agent,
+    /// and script name — including aliases — populates the corresponding
+    /// allowlist, and the node-kind allowlist is seeded with
+    /// [`DEFAULT_NODE_KINDS`]. The resolver therefore validates `.rag` source
+    /// against exactly what Rust has registered.
     pub fn from_registry<State: Send + Sync>(registry: &CapabilityRegistry<State>) -> Self {
-        use crate::registry::ComponentKind;
-        let agents = registry
-            .names_including_aliases(ComponentKind::Agent)
-            .into_iter()
-            .collect();
         Self {
             caps: CapabilityResolver::from_registry(registry),
-            agents,
         }
     }
 
-    /// Builds a resolver from an existing [`CapabilityResolver`] allowlist, with
-    /// no extra agent names. Node-kind validation follows the supplied
-    /// resolver's configuration.
+    /// Builds a resolver from an existing [`CapabilityResolver`] allowlist.
+    /// Node-kind validation follows the supplied resolver's configuration.
     pub fn from_capabilities(caps: CapabilityResolver) -> Self {
-        Self {
-            caps,
-            agents: HashSet::new(),
-        }
+        Self { caps }
     }
 
     /// Returns the underlying capability allowlist.
@@ -107,13 +97,13 @@ impl Resolver {
 
     /// Allows an additional agent name. Returns `self` for chaining.
     pub fn allow_agent(mut self, name: impl Into<String>) -> Self {
-        self.agents.insert(name.into());
+        self.caps = self.caps.allow_agent(name);
         self
     }
 
     /// Returns true if `name` is a registered/allowed agent.
     pub fn agent_allowed(&self, name: &str) -> bool {
-        self.agents.contains(name)
+        self.caps.agent_allowed(name)
     }
 
     /// Resolves every reference in `program` against the allowlists, returning a
@@ -158,60 +148,27 @@ impl Resolver {
             // falls through to a model check, which is the compiler default.
         }
 
-        // 2. The kind-specific primary reference.
-        match kind {
-            "subgraph" | "graph" => {
-                if let Some(target) = node.graph.as_deref().or(node.model.as_deref()) {
-                    self.check_ref(
-                        self.caps.subgraph_allowed(target),
-                        &node.name,
-                        "subgraph",
-                        target,
-                        node.span,
-                        CODE_UNKNOWN_SUBGRAPH,
-                        out,
-                    );
-                }
-            }
-            "router" => {
-                if let Some(target) = node.model.as_deref() {
-                    self.check_ref(
-                        self.caps.router_allowed(target),
-                        &node.name,
-                        "router",
-                        target,
-                        node.span,
-                        CODE_UNKNOWN_ROUTER,
-                        out,
-                    );
-                }
-            }
-            "subagent" => {
-                if let Some(target) = node.agent.as_deref() {
-                    self.check_ref(
-                        self.agent_allowed(target),
-                        &node.name,
-                        "agent",
-                        target,
-                        node.span,
-                        CODE_UNKNOWN_AGENT,
-                        out,
-                    );
-                }
-            }
-            _ => {
-                if let Some(target) = node.model.as_deref() {
-                    self.check_ref(
-                        self.caps.model_allowed(target),
-                        &node.name,
-                        "model",
-                        target,
-                        node.span,
-                        CODE_UNKNOWN_MODEL,
-                        out,
-                    );
-                }
-            }
+        // 2. The kind-specific primary reference, routed through the one shared
+        //    classification policy so this path cannot drift from the blueprint
+        //    gates.
+        let subgraph_target = node.graph.as_deref().or(node.model.as_deref());
+        if let Some(reference) = CapabilityResolver::classify_reference(
+            kind,
+            node.model.as_deref(),
+            subgraph_target,
+            node.agent.as_deref(),
+            node.script.as_deref(),
+        ) {
+            self.check_ref(
+                self.caps
+                    .reference_allowed(reference.class, reference.target),
+                &node.name,
+                reference.class.word(),
+                reference.target,
+                node.span,
+                code_for(reference.class),
+                out,
+            );
         }
 
         // 3. Every referenced tool must be registered.
@@ -314,35 +271,22 @@ impl Resolver {
                     node.name, node.kind
                 )));
             }
-            match node.kind.as_str() {
-                "subgraph" | "graph" => {
-                    if let Some(target) = node.subgraph.as_deref().or(node.model.as_deref())
-                        && !self.caps.subgraph_allowed(target)
-                    {
-                        return Err(unregistered("subgraph", &node.name, target));
-                    }
-                }
-                "router" => {
-                    if let Some(target) = node.model.as_deref()
-                        && !self.caps.router_allowed(target)
-                    {
-                        return Err(unregistered("router", &node.name, target));
-                    }
-                }
-                "subagent" => {
-                    if let Some(target) = node.agent.as_deref()
-                        && !self.agent_allowed(target)
-                    {
-                        return Err(unregistered("agent", &node.name, target));
-                    }
-                }
-                _ => {
-                    if let Some(target) = node.model.as_deref()
-                        && !self.caps.model_allowed(target)
-                    {
-                        return Err(unregistered("model", &node.name, target));
-                    }
-                }
+            let subgraph_target = node.subgraph.as_deref().or(node.model.as_deref());
+            if let Some(reference) = CapabilityResolver::classify_reference(
+                &node.kind,
+                node.model.as_deref(),
+                subgraph_target,
+                node.agent.as_deref(),
+                node.script.as_deref(),
+            ) && !self
+                .caps
+                .reference_allowed(reference.class, reference.target)
+            {
+                return Err(unregistered(
+                    reference.class.word(),
+                    &node.name,
+                    reference.target,
+                ));
             }
             for tool in &node.tools {
                 if !self.caps.tool_allowed(tool) {
@@ -383,6 +327,17 @@ fn fold_diagnostic(diagnostic: Diagnostic, source: Option<&SourceFile>) -> TinyA
 
 /// Builds the span-less "unknown {what}" [`TinyAgentsError::Capability`] used by
 /// [`Resolver::resolve_blueprint`].
+/// Maps a shared [`ReferenceClass`] to its stable spanned-diagnostic code.
+fn code_for(class: ReferenceClass) -> &'static str {
+    match class {
+        ReferenceClass::Model => CODE_UNKNOWN_MODEL,
+        ReferenceClass::Subgraph => CODE_UNKNOWN_SUBGRAPH,
+        ReferenceClass::Router => CODE_UNKNOWN_ROUTER,
+        ReferenceClass::Agent => CODE_UNKNOWN_AGENT,
+        ReferenceClass::Script => CODE_UNKNOWN_SCRIPT,
+    }
+}
+
 fn unregistered(what: &str, node: &str, target: &str) -> TinyAgentsError {
     TinyAgentsError::Capability(format!(
         "node `{node}` references unknown {what} `{target}`"

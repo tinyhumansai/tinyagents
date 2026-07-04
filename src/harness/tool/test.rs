@@ -205,6 +205,34 @@ fn schema_validation_rejects_missing_required_fields() {
 }
 
 #[test]
+fn schema_validation_rejects_missing_required_without_properties() {
+    // A schema may declare `required` without listing `properties`. The
+    // required check must still fail closed rather than silently accept a call
+    // that omits the required field.
+    let schema = ToolSchema::new(
+        "lookup",
+        "looks up a user",
+        json!({
+            "type": "object",
+            "required": ["user_id"]
+        }),
+    );
+
+    let missing = ToolCall::new("c-1", "lookup", json!({}));
+    let err = schema.validate_call(&missing).expect_err("missing field");
+    assert!(err.to_string().contains("user_id"));
+
+    // A non-object argument for a required-bearing schema also fails closed.
+    let not_object = ToolCall::new("c-2", "lookup", json!("nope"));
+    schema
+        .validate_call(&not_object)
+        .expect_err("non-object arguments");
+
+    let present = ToolCall::new("c-3", "lookup", json!({ "user_id": "u-1" }));
+    schema.validate_call(&present).expect("valid call");
+}
+
+#[test]
 fn schema_validation_rejects_wrong_types_and_extra_fields() {
     let schema = ToolSchema::new(
         "lookup",

@@ -49,9 +49,15 @@ impl Add for Usage {
 
 impl AddAssign for Usage {
     fn add_assign(&mut self, rhs: Usage) {
+        // `total_tokens` is only meaningful per-record via `effective_total()`
+        // (it falls back to `input + output` when the provider omitted it, in
+        // which case the stored `total_tokens` is a real `0`, not "unknown").
+        // Summing the raw fields would silently drop that record's
+        // contribution, so combine the effective totals instead.
+        let combined_total = self.effective_total() + rhs.effective_total();
         self.input_tokens += rhs.input_tokens;
         self.output_tokens += rhs.output_tokens;
-        self.total_tokens += rhs.total_tokens;
+        self.total_tokens = combined_total;
         self.cache_read_tokens += rhs.cache_read_tokens;
         self.cache_creation_tokens += rhs.cache_creation_tokens;
         self.reasoning_tokens += rhs.reasoning_tokens;

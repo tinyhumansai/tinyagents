@@ -139,8 +139,9 @@ fn component_metadata_and_event_kinds_are_stable_serializable_contracts() {
     let id = ComponentId::new("researcher");
     assert_eq!(id.as_str(), "researcher");
     assert_eq!(id.to_string(), "researcher");
-    assert_eq!(ComponentKind::ALL.len(), 11);
+    assert_eq!(ComponentKind::ALL.len(), 12);
     assert_eq!(ComponentKind::Agent.as_str(), "agent");
+    assert_eq!(ComponentKind::Script.as_str(), "script");
     assert_eq!(ComponentKind::TaskStore.as_str(), "task_store");
     assert_eq!(ComponentKind::Tool.to_string(), "tool");
 
@@ -434,6 +435,7 @@ async fn fanout_redaction_journal_and_jsonl_sinks_forward_best_effort_events() {
     let journal_sink = JournalSink::new(journal.clone(), RunId::new("child-run"))
         .with_lineage(Some(RunId::new("parent-run")), RunId::new("root-run"));
     journal_sink.on_event(&secret_record);
+    journal_sink.flush();
     let observations = journal.read_from("child-run", 0).await.unwrap();
     assert_eq!(observations.len(), 1);
     assert_eq!(
@@ -452,6 +454,7 @@ async fn fanout_redaction_journal_and_jsonl_sinks_forward_best_effort_events() {
     let jsonl_store = JsonlAppendStore::new(root.clone());
     let jsonl_sink = JsonlSink::new(jsonl_store.clone(), "events");
     jsonl_sink.on_event(&secret_record);
+    jsonl_sink.flush();
     let rows = jsonl_store.read_from("events", 0).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].0, 0);

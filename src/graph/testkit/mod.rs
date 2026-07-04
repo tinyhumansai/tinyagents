@@ -266,7 +266,7 @@ where
                     graph_id: GraphId::new(format!("agent:{agent}")),
                     run_id: RunId::new(format!(
                         "subagent-fake-{}",
-                        crate::graph::compiled::next_seq()
+                        crate::harness::ids::next_seq()
                     )),
                     root_run_id,
                     usage,

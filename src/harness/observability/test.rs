@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use crate::harness::events::{AgentEvent, EventListener, EventRecord, HarnessRunStatus, LimitKind};
-use crate::harness::ids::{CallId, ComponentId, EventId, RunId, ThreadId};
+use crate::harness::ids::{CallId, ComponentId, EventId, ExecutionStatus, RunId, ThreadId};
+use crate::harness::observability::AppendWorker;
 use crate::harness::observability::{
     AgentLatencyMetrics, AgentObservation, FanOutSink, HarnessEventJournal, HarnessStatusStore,
     InMemoryEventJournal, InMemoryStatusStore, JournalSink, RedactingSink, StoreEventJournal,
@@ -300,6 +301,9 @@ async fn journal_sink_persists_observations() {
         event: AgentEvent::StreamClosed,
     });
 
+    // Persistence is asynchronous; block until the durable log catches up.
+    sink.flush();
+
     let stored = journal.read_from("run-sink", 0).await.unwrap();
     assert_eq!(stored.len(), 2);
     assert_eq!(stored[0].event.kind(), "run.started");
@@ -307,6 +311,50 @@ async fn journal_sink_persists_observations() {
     assert_eq!(stored[1].event.kind(), "stream.closed");
     assert_eq!(stored[1].run_id, RunId::new("run-sink"));
     assert_eq!(stored[1].root_run_id, RunId::new("run-sink"));
+}
+
+#[tokio::test]
+async fn append_worker_flush_persists_all_submissions_in_order() {
+    use std::sync::Mutex;
+
+    let seen: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let worker = AppendWorker::spawn("test", 8, move |n: u64| {
+        let sink = Arc::clone(&sink);
+        async move {
+            sink.lock().unwrap().push(n);
+            Ok(())
+        }
+    });
+
+    for n in 0..8 {
+        worker.submit(n);
+    }
+    // Before flush, persistence may still be in flight; after flush every
+    // submission is durably recorded, in submit order.
+    worker.flush();
+    assert_eq!(*seen.lock().unwrap(), (0..8).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn append_worker_drops_and_counts_when_queue_is_full() {
+    // A slow backend cannot keep up with a burst; the bounded queue drops the
+    // overflow rather than blocking the caller, and the drops are counted (not
+    // silently discarded).
+    let worker = AppendWorker::spawn("test-slow", 1, move |_n: u64| async move {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        Ok(())
+    });
+
+    for n in 0..50 {
+        worker.submit(n);
+    }
+    worker.flush();
+    assert!(
+        worker.dropped() > 0,
+        "a saturated bounded queue must drop and count overflow, got {}",
+        worker.dropped()
+    );
 }
 
 /// Collects forwarded records for assertions.
@@ -390,6 +438,34 @@ fn redacting_sink_custom_mask_and_passthrough() {
 }
 
 #[test]
+fn redacting_sink_empty_secrets_forwards_unchanged() {
+    // With no secrets configured the sink takes the fast path and forwards the
+    // original record untouched.
+    let collector = Arc::new(Collector::new());
+    let sink = RedactingSink::new(collector.clone(), Vec::new());
+
+    sink.on_event(&EventRecord {
+        id: EventId::new("evt-0"),
+        offset: 7,
+        event: AgentEvent::RunFailed {
+            run_id: RunId::new("run-r"),
+            error: "nothing to redact here".to_string(),
+        },
+    });
+
+    let events = collector.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, EventId::new("evt-0"));
+    assert_eq!(events[0].offset, 7);
+    match &events[0].event {
+        AgentEvent::RunFailed { error, .. } => {
+            assert_eq!(error, "nothing to redact here");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
 fn fan_out_sink_reaches_all_listeners() {
     let a = Arc::new(Collector::new());
     let b = Arc::new(Collector::new());
@@ -411,4 +487,119 @@ fn fan_out_sink_reaches_all_listeners() {
     assert_eq!(b.events().len(), 1);
     assert_eq!(c.events().len(), 1);
     assert_eq!(a.events()[0].event.kind(), "state.update");
+}
+
+#[tokio::test]
+async fn in_memory_journal_evicts_oldest_run_once_max_runs_exceeded() {
+    // Regression test: without a cap, a long-lived process journaling many
+    // runs grows the `run_id -> Vec` map without bound. With a cap of 2, the
+    // third distinct run must evict the oldest ("run-0").
+    let journal = InMemoryEventJournal::with_max_runs(2);
+
+    journal
+        .append(obs("run-0", 0, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+    journal
+        .append(obs("run-1", 0, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+    assert_eq!(journal.run_count(), 2);
+
+    journal
+        .append(obs("run-2", 0, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+
+    assert_eq!(journal.run_count(), 2, "cap must not be exceeded");
+    assert!(journal.is_empty("run-0"), "oldest run must be evicted");
+    assert!(!journal.is_empty("run-1"));
+    assert!(!journal.is_empty("run-2"));
+}
+
+#[tokio::test]
+async fn evicted_run_resuming_append_does_not_reset_offset_or_lose_reads() {
+    // Regression test: a run's stream can be evicted (FIFO, once max_runs is
+    // exceeded) while it is still actively appending. If the evicted run
+    // later appends again, the new stream must NOT restart numbering at 0 —
+    // otherwise a consumer that saved a durable offset from before eviction
+    // would have `read_from` silently skip entries instead of erroring.
+    let journal = InMemoryEventJournal::with_max_runs(2);
+
+    // run-0 appends twice before being evicted by run-1 and run-2.
+    journal
+        .append(obs("run-0", 0, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+    journal
+        .append(obs("run-0", 1, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+    journal
+        .append(obs("run-1", 0, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+    journal
+        .append(obs("run-2", 0, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+    assert!(journal.is_empty("run-0"), "run-0 must have been evicted");
+
+    // run-0 resumes appending after eviction. The offset must continue from
+    // where it left off (2), not restart at 0.
+    let offset = journal
+        .append(obs("run-0", 2, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+    assert_eq!(
+        offset, 2,
+        "offset must continue from the evicted stream's length, not reset to 0"
+    );
+
+    // A consumer that saved offset 2 (from before eviction) must not have its
+    // new post-eviction entry silently skipped: it must see exactly the new
+    // entry.
+    let resumed = journal.read_from("run-0", 2).await.unwrap();
+    assert_eq!(resumed.len(), 1, "post-eviction entry must not be dropped");
+
+    // A consumer whose saved offset falls within the evicted range must get
+    // a clear error rather than silently-truncated (or wrongly-offset) data.
+    let stale = journal.read_from("run-0", 0).await;
+    assert!(
+        stale.is_err(),
+        "reading a stale, evicted offset must fail closed, not silently skip"
+    );
+}
+
+#[tokio::test]
+async fn status_store_evicts_oldest_terminal_run_but_never_active_ones() {
+    // Regression test: without a cap, a supervisor tracking many short-lived
+    // runs grows this map without bound. With a cap of 2: inserting a
+    // terminal run then an active one, then a third run, must evict the
+    // oldest *terminal* run rather than the active one.
+    let store = InMemoryStatusStore::with_max_runs(2);
+
+    let mut terminal = HarnessRunStatus::new(RunId::new("run-a"), ComponentId::new("agent"));
+    terminal.status = ExecutionStatus::Completed;
+    store.put_status(terminal).await.unwrap();
+
+    // Default status is Pending (active).
+    let active = HarnessRunStatus::new(RunId::new("run-b"), ComponentId::new("agent"));
+    store.put_status(active).await.unwrap();
+    assert_eq!(store.len(), 2);
+
+    let mut run_c = HarnessRunStatus::new(RunId::new("run-c"), ComponentId::new("agent"));
+    run_c.status = ExecutionStatus::Completed;
+    store.put_status(run_c).await.unwrap();
+
+    assert_eq!(store.len(), 2, "cap must not be exceeded");
+    assert!(
+        store.get_status("run-a").await.unwrap().is_none(),
+        "oldest terminal run must be evicted"
+    );
+    assert!(
+        store.get_status("run-b").await.unwrap().is_some(),
+        "active run must never be evicted"
+    );
+    assert!(store.get_status("run-c").await.unwrap().is_some());
 }

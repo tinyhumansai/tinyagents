@@ -57,7 +57,6 @@ graph review_flow_v2 {
   }
   node work {
     kind tool_executor
-    next END
   }
   node audit {
     kind model

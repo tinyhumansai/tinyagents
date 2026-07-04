@@ -24,13 +24,12 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Mutex;
 
 use super::types::{ThreadGoal, ThreadGoalStatus};
 use crate::error::{Result, TinyAgentsError};
-use crate::harness::ids::next_seq;
+use crate::harness::ids::{next_seq, now_ms};
 use crate::harness::store::Store;
 
 /// The [`Store`] namespace holding one [`ThreadGoal`] per thread.
@@ -44,14 +43,6 @@ fn thread_lock(thread_id: &str) -> Arc<Mutex<()>> {
     let map = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut guard = map.lock().expect("goal lock map poisoned");
     guard.entry(thread_id.to_string()).or_default().clone()
-}
-
-/// Current unix time in milliseconds. Dependency-free (no `chrono`).
-pub(crate) fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// Hex-encodes the thread id into a [`Store`]-safe key. Required because

@@ -15,6 +15,7 @@
 //! All public items are re-exported through [`super`] so callers import from
 //! `crate::harness::middleware` directly.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -484,11 +485,16 @@ pub struct MessageTrimMiddleware {
 /// [`ConcatSummarizer`][crate::harness::summarization::ConcatSummarizer] is used
 /// by default; supply any [`Summarizer`] via
 /// [`ContextCompressionMiddleware::with_summarizer`].
+/// Default cap on the number of [`SummaryRecord`]s a
+/// [`ContextCompressionMiddleware`] retains before evicting the oldest.
+pub const DEFAULT_COMPRESSION_RECORD_CAP: usize = 1024;
+
 pub struct ContextCompressionMiddleware {
     pub(crate) label: &'static str,
     pub(crate) policy: SummarizationPolicy,
     pub(crate) summarizer: Box<dyn Summarizer>,
-    pub(crate) records: Mutex<Vec<SummaryRecord>>,
+    pub(crate) records: Mutex<VecDeque<SummaryRecord>>,
+    pub(crate) max_records: usize,
 }
 
 // ── MicrocompactMiddleware ────────────────────────────────────────────────────
@@ -540,10 +546,15 @@ pub struct MicrocompactMiddleware {
 /// [`CacheLayoutEvent`] (retrievable via
 /// [`PromptCacheGuardMiddleware::layout_events`]) so KV-cache regressions are
 /// observable. This demonstrates provider prompt/KV-cache prefix protection.
+/// Default cap on the number of [`CacheLayoutEvent`]s a
+/// [`PromptCacheGuardMiddleware`] retains before evicting the oldest.
+pub const DEFAULT_CACHE_GUARD_EVENT_CAP: usize = 1024;
+
 pub struct PromptCacheGuardMiddleware {
     pub(crate) label: &'static str,
     pub(crate) previous: Mutex<Option<crate::harness::cache::PromptCacheLayout>>,
-    pub(crate) events: Mutex<Vec<CacheLayoutEvent>>,
+    pub(crate) events: Mutex<VecDeque<CacheLayoutEvent>>,
+    pub(crate) max_events: usize,
 }
 
 // ── UsageAccountingMiddleware ─────────────────────────────────────────────────

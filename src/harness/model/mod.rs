@@ -27,6 +27,32 @@ use crate::harness::usage::Usage;
 
 pub use types::*;
 
+impl std::fmt::Display for ProviderError {
+    /// Renders the same human-readable shape real provider adapters used to
+    /// build by hand before flattening it into a plain
+    /// [`crate::error::TinyAgentsError::Model`] string. Preserving this as a
+    /// `Display` impl lets [`crate::error::TinyAgentsError::Provider`] keep
+    /// the identical wording while also keeping the structured fields
+    /// (`status`, `code`, `retryable`) intact for callers — like
+    /// [`crate::harness::retry::is_retryable`] — that need to reason about
+    /// the failure rather than just print it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} returned{}{}: {}",
+            self.provider,
+            self.status
+                .map(|status| format!(" HTTP {status}"))
+                .unwrap_or_default(),
+            self.code
+                .as_deref()
+                .map(|code| format!(" ({code})"))
+                .unwrap_or_default(),
+            self.message
+        )
+    }
+}
+
 impl ResponseFormat {
     /// Constructs a [`ResponseFormat::JsonSchema`] format.
     pub fn json_schema(name: impl Into<String>, schema: Value) -> Self {
@@ -673,10 +699,13 @@ impl StreamAccumulator {
         }
 
         if let Some(mut response) = self.completed {
-            if response.usage.is_none() {
-                response.usage = self.usage;
-                response.message.usage = self.usage;
-            }
+            // Reconcile the response and message usage with any streamed
+            // `UsageDelta`, preferring an already-present value and never
+            // overwriting a known usage with `None` (which previously clobbered a
+            // message-level usage the completed response carried).
+            let merged = response.usage.or(response.message.usage).or(self.usage);
+            response.usage = merged;
+            response.message.usage = merged;
             return Ok(response);
         }
 

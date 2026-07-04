@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 fn last_value_overwrites() {
     let c = LastValue;
     assert_eq!(c.merge(None, json!(1)).unwrap(), json!(1));
-    assert_eq!(c.merge(Some(&json!(1)), json!(2)).unwrap(), json!(2));
+    assert_eq!(c.merge(Some(json!(1)), json!(2)).unwrap(), json!(2));
     assert!(!c.allows_concurrent());
 }
 
@@ -23,8 +23,8 @@ fn last_value_overwrites() {
 fn topic_appends_scalars_and_arrays() {
     let c = Topic;
     let v = c.merge(None, json!("a")).unwrap();
-    let v = c.merge(Some(&v), json!("b")).unwrap();
-    let v = c.merge(Some(&v), json!(["c", "d"])).unwrap();
+    let v = c.merge(Some(v), json!("b")).unwrap();
+    let v = c.merge(Some(v), json!(["c", "d"])).unwrap();
     assert_eq!(v, json!(["a", "b", "c", "d"]));
     assert!(c.allows_concurrent());
 }
@@ -33,12 +33,12 @@ fn topic_appends_scalars_and_arrays() {
 fn delta_accumulates_numbers() {
     let c = Delta;
     let v = c.merge(None, json!(2)).unwrap();
-    let v = c.merge(Some(&v), json!(3)).unwrap();
+    let v = c.merge(Some(v), json!(3)).unwrap();
     assert_eq!(v, json!(5));
     // integer + float promotes to float
-    let v = c.merge(Some(&v), json!(0.5)).unwrap();
+    let v = c.merge(Some(v), json!(0.5)).unwrap();
     assert_eq!(v, json!(5.5));
-    assert!(c.merge(Some(&json!(1)), json!("x")).is_err());
+    assert!(c.merge(Some(json!(1)), json!("x")).is_err());
 }
 
 #[test]
@@ -46,11 +46,11 @@ fn messages_merge_by_id() {
     let c = Messages;
     let v = c.merge(None, json!([{"id": "1", "text": "hi"}])).unwrap();
     let v = c
-        .merge(Some(&v), json!([{"id": "2", "text": "yo"}]))
+        .merge(Some(v), json!([{"id": "2", "text": "yo"}]))
         .unwrap();
     // upsert existing id 1
     let v = c
-        .merge(Some(&v), json!({"id": "1", "text": "hello"}))
+        .merge(Some(v), json!({"id": "1", "text": "hello"}))
         .unwrap();
     assert_eq!(
         v,
@@ -60,9 +60,47 @@ fn messages_merge_by_id() {
 }
 
 #[test]
+fn messages_merge_dedup_map_preserves_order_and_appends_unkeyed() {
+    // Exercise the id->index map path: a single batch that upserts an existing
+    // id, appends a new id, and appends an unkeyed message, then a follow-up
+    // upsert of the id introduced by that batch. Existing order is preserved and
+    // dedup is by id only.
+    let c = Messages;
+    let v = c
+        .merge(
+            None,
+            json!([{"id": "a", "text": "1"}, {"id": "b", "text": "2"}]),
+        )
+        .unwrap();
+    let v = c
+        .merge(
+            Some(v),
+            json!([
+                {"id": "a", "text": "1-updated"},
+                {"id": "c", "text": "3"},
+                {"text": "no-id"},
+            ]),
+        )
+        .unwrap();
+    // Upserting an id first seen in the previous batch must land on that message.
+    let v = c
+        .merge(Some(v), json!({"id": "c", "text": "3-updated"}))
+        .unwrap();
+    assert_eq!(
+        v,
+        json!([
+            {"id": "a", "text": "1-updated"},
+            {"id": "b", "text": "2"},
+            {"id": "c", "text": "3-updated"},
+            {"text": "no-id"},
+        ])
+    );
+}
+
+#[test]
 fn ephemeral_overwrites_and_is_marked() {
     let c = Ephemeral;
-    assert_eq!(c.merge(Some(&json!(1)), json!(2)).unwrap(), json!(2));
+    assert_eq!(c.merge(Some(json!(1)), json!(2)).unwrap(), json!(2));
     assert!(c.is_ephemeral());
     assert!(!c.allows_concurrent());
 }
@@ -80,8 +118,8 @@ fn binary_aggregate_folds_with_closure() {
         Ok(json!(a.as_i64().unwrap() * b.as_i64().unwrap()))
     });
     let v = c.merge(None, json!(2)).unwrap();
-    let v = c.merge(Some(&v), json!(3)).unwrap();
-    let v = c.merge(Some(&v), json!(4)).unwrap();
+    let v = c.merge(Some(v), json!(3)).unwrap();
+    let v = c.merge(Some(v), json!(4)).unwrap();
     assert_eq!(v, json!(24));
     assert!(c.allows_concurrent());
 }
@@ -95,8 +133,8 @@ fn binary_aggregate_from_reducer() {
             Ok(if b.as_f64() > a.as_f64() { b } else { a })
         }));
     let v = c.merge(None, json!(3)).unwrap();
-    let v = c.merge(Some(&v), json!(7)).unwrap();
-    let v = c.merge(Some(&v), json!(1)).unwrap();
+    let v = c.merge(Some(v), json!(7)).unwrap();
+    let v = c.merge(Some(v), json!(1)).unwrap();
     assert_eq!(v, json!(7));
 }
 
@@ -105,7 +143,7 @@ fn count_barrier_readiness() {
     let c = Barrier::new(2);
     let v = c.merge(None, json!("a")).unwrap();
     assert!(!c.is_ready(Some(&v)));
-    let v = c.merge(Some(&v), json!("b")).unwrap();
+    let v = c.merge(Some(v), json!("b")).unwrap();
     assert!(c.is_ready(Some(&v)));
 }
 
@@ -114,7 +152,7 @@ fn named_barrier_readiness() {
     let c = NamedBarrier::new(["left", "right"]);
     let v = c.merge(None, json!({"left": 1})).unwrap();
     assert!(!c.is_ready(Some(&v)));
-    let v = c.merge(Some(&v), json!({"right": 2})).unwrap();
+    let v = c.merge(Some(v), json!({"right": 2})).unwrap();
     assert!(c.is_ready(Some(&v)));
     assert!(c.allows_concurrent());
 }
@@ -146,6 +184,38 @@ fn channel_set_unknown_channel_errors() {
         set.apply_update("nope", json!(1)),
         Err(TinyAgentsError::Graph(_))
     ));
+}
+
+#[test]
+fn apply_update_accumulates_barrier_by_moving_current() {
+    // Exercises the owned-`current` merge path through `apply_update`: repeated
+    // writes to a barrier fold into the same accumulated array without cloning,
+    // and readiness reflects the accumulated arrivals.
+    let mut set = ChannelSet::new().with_channel("join", Barrier::new(3));
+    set.apply_update("join", json!("a")).unwrap();
+    set.apply_update("join", json!("b")).unwrap();
+    assert!(!set.is_ready("join").unwrap());
+    set.apply_update("join", json!("c")).unwrap();
+    assert!(set.is_ready("join").unwrap());
+    assert_eq!(set.get("join"), Some(&json!(["a", "b", "c"])));
+}
+
+#[test]
+fn apply_update_rejected_write_clears_channel_value() {
+    // A registered channel whose merge rejects the write leaves the channel
+    // unset (the current value was moved into the failed merge). The unknown-
+    // channel guard, by contrast, runs before any state is touched.
+    let mut set = ChannelSet::new().with_channel("n", Delta);
+    set.apply_update("n", json!(5)).unwrap();
+    assert_eq!(set.get("n"), Some(&json!(5)));
+
+    // Non-numeric write is rejected by Delta's merge; prior value is dropped.
+    assert!(set.apply_update("n", json!("not-a-number")).is_err());
+    assert_eq!(
+        set.get("n"),
+        None,
+        "rejected write leaves the channel unset"
+    );
 }
 
 // --- ChannelState graph round-trips ---

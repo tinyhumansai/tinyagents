@@ -9,12 +9,14 @@
 //! is what [`map_reduce`] provides, independent of the graph executor.
 //!
 //! Results are always returned in **input order** even though items complete out
-//! of order, because the concurrency is driven by
-//! [`buffered`](futures::stream::StreamExt::buffered), which preserves order.
+//! of order: concurrency is driven by
+//! [`buffer_unordered`](futures::stream::StreamExt::buffer_unordered), which
+//! yields items as they finish, and each future carries its input index so the
+//! completed results are re-sorted into input-order slots before being returned.
 
 mod types;
 
-pub use types::*;
+pub use types::{FailurePolicy, ItemOutcome, ParallelOptions, ParallelOutcome};
 
 use futures::stream::StreamExt;
 use std::future::Future;
@@ -78,7 +80,12 @@ where
     .buffer_unordered(concurrency);
 
     let mut slots: Vec<Option<std::result::Result<T, String>>> = (0..total).map(|_| None).collect();
-    let mut fail_fast_error: Option<TinyAgentsError> = None;
+    // Under FailFast we return the first failure in *input* order, not the first
+    // to complete (items finish out of order under `buffer_unordered`). Track the
+    // lowest-index error seen; once every earlier item has also resolved, no
+    // smaller-index error can still appear, so that error is final and we can
+    // drop the stream to cancel the remaining in-flight work.
+    let mut fail_fast_error: Option<(usize, TinyAgentsError)> = None;
 
     // The collection loop, wrapped so it can be raced against an overall timeout
     // and a cancellation token without duplicating the drain logic.
@@ -88,8 +95,20 @@ where
                 Ok(value) => slots[index] = Some(Ok(value)),
                 Err(err) => {
                     if options.failure_policy == FailurePolicy::FailFast {
-                        fail_fast_error = Some(err);
-                        break; // dropping the stream cancels remaining work
+                        // Mark this index resolved so the "all earlier items
+                        // done" check below can see it.
+                        slots[index] = Some(Err(String::new()));
+                        if fail_fast_error
+                            .as_ref()
+                            .is_none_or(|(seen, _)| index < *seen)
+                        {
+                            fail_fast_error = Some((index, err));
+                        }
+                        let min_index = fail_fast_error.as_ref().map(|(i, _)| *i).unwrap_or(index);
+                        if slots[..min_index].iter().all(Option::is_some) {
+                            break; // dropping the stream cancels remaining work
+                        }
+                        continue;
                     }
                     slots[index] = Some(Err(err.to_string()));
                 }
@@ -125,7 +144,7 @@ where
         None => raced.await?,
     }
 
-    if let Some(err) = fail_fast_error {
+    if let Some((_, err)) = fail_fast_error {
         return Err(err);
     }
 

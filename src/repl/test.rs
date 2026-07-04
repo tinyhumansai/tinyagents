@@ -240,6 +240,47 @@ fn error_on_unterminated_quoted_string() {
 }
 
 #[test]
+fn parse_errors_report_real_positions_not_0_0() {
+    // `parse_command` always parses one line, so `line` is always 1; `column`
+    // must point at the offending token rather than always reporting (0, 0).
+    match parse_command("frobnicate something").unwrap_err() {
+        TinyAgentsError::Parse { line, column, .. } => {
+            assert_eq!(line, 1);
+            assert_eq!(column, 1, "unknown verb starts at column 1");
+        }
+        other => panic!("expected Parse error, got {other:?}"),
+    }
+
+    match parse_command("run my_graph").unwrap_err() {
+        TinyAgentsError::Parse { line, column, .. } => {
+            assert_eq!(line, 1);
+            // "run my_graph" is 12 chars; the missing second argument is
+            // reported at the end of input, not column 0.
+            assert_eq!(column, 13);
+        }
+        other => panic!("expected Parse error, got {other:?}"),
+    }
+
+    match parse_command("call my_cap not-valid-json").unwrap_err() {
+        TinyAgentsError::Parse { line, column, .. } => {
+            assert_eq!(line, 1);
+            // "not-valid-json" starts right after "call my_cap ".
+            assert_eq!(column, "call my_cap ".chars().count() + 1);
+        }
+        other => panic!("expected Parse error, got {other:?}"),
+    }
+
+    match parse_command(r#"load "unclosed"#).unwrap_err() {
+        TinyAgentsError::Parse { line, column, .. } => {
+            assert_eq!(line, 1);
+            // The unterminated string starts right after "load ".
+            assert_eq!(column, "load ".chars().count() + 1);
+        }
+        other => panic!("expected Parse error, got {other:?}"),
+    }
+}
+
+#[test]
 fn quoted_string_escape_sequences() {
     let cmd = parse_command(r#"set msg "hello \"world\"\nnewline""#).unwrap();
     if let ReplCommand::Set { value, .. } = cmd {

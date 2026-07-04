@@ -31,6 +31,25 @@ fn text_concatenates_and_ignores_non_text() {
 }
 
 #[test]
+fn char_len_matches_text_char_count_including_multibyte() {
+    // Mixed text blocks with multi-byte scalar values; non-text blocks ignored.
+    let msg = Message::User(UserMessage {
+        content: vec![
+            ContentBlock::Text("héllo".into()),
+            ContentBlock::Json(json!({"k": "v"})),
+            ContentBlock::Text("🌍!".into()),
+        ],
+    });
+    // char_len counts Unicode scalar values, matching text().chars().count()
+    // without allocating the joined string.
+    assert_eq!(msg.char_len(), msg.text().chars().count());
+    assert_eq!(
+        msg.char_len(),
+        "héllo".chars().count() + "🌍!".chars().count()
+    );
+}
+
+#[test]
 fn assistant_holds_tool_calls_and_usage() {
     let msg = Message::Assistant(AssistantMessage {
         id: Some("m-1".into()),

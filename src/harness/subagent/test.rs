@@ -22,7 +22,7 @@ use crate::harness::providers::MockModel;
 use crate::harness::runtime::{AgentHarness, RunPolicy};
 use crate::harness::subagent::{SubAgent, SubAgentSession, SubAgentTool};
 use crate::harness::testkit::ScriptedModel;
-use crate::harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
+use crate::harness::tool::{Tool, ToolCall, ToolExecutionContext, ToolResult, ToolSchema};
 use crate::harness::usage::Usage;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -212,6 +212,44 @@ async fn tool_path_enforces_depth_limit() {
         .await
         .expect("tool reports depth limit as a parent-visible tool result");
     assert!(result.is_error());
+    assert!(
+        result.content.contains("recursion depth limit")
+            && result.content.contains("delegated-agent limit signal"),
+        "unexpected depth limit message: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn call_with_context_enforces_depth_limit_as_a_tool_result() {
+    // Regression test: `SubAgentTool::call_with_context` used to propagate a
+    // `child_config` depth-limit rejection raw via `?`, bypassing the
+    // limit-to-tool-error conversion `call` already applies and aborting the
+    // whole parent run instead of surfacing a tool-error the model can react
+    // to. This exercises the `call_with_context` path directly (the one the
+    // agent loop actually uses), not `call`.
+    let subagent = Arc::new(SubAgent::new(
+        "deep",
+        "a deep agent",
+        Arc::new(child_harness_with_max_depth("ok", 1)),
+    ));
+    let tool = SubAgentTool::new(subagent);
+
+    // Caller (parent) depth 1 -> child depth 2 -> exceeds the cap of 1.
+    let parent_ctx: RunContext<()> = RunContext::new(RunConfig::new("parent").with_depth(1), ());
+    let context = ToolExecutionContext::from_run_context(&parent_ctx);
+
+    let result = tool
+        .call_with_context(
+            &(),
+            ToolCall::new("c1", "deep", json!({ "input": "too deep" })),
+            context,
+        )
+        .await
+        .expect("depth limit is converted into a parent-visible tool result, not a fatal error");
+
+    assert!(result.is_error());
+    assert_eq!(result.call_id, "c1");
     assert!(
         result.content.contains("recursion depth limit")
             && result.content.contains("delegated-agent limit signal"),

@@ -36,13 +36,6 @@ use crate::harness::model::{ModelRequest, ModelResponse};
 
 // ── Deterministic hash ────────────────────────────────────────────────────────
 
-/// Computes a deterministic SHA-256 digest over `data` and returns it as a
-/// 64-character lowercase hex string.
-fn sha256_hex(data: &[u8]) -> String {
-    let digest = Sha256::digest(data);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 /// Computes a deterministic FNV-1a 64-bit hash over `data` and returns it as
 /// a 16-character lowercase hex string.
 ///
@@ -101,35 +94,92 @@ fn canonical_value(v: Value) -> Value {
 pub fn cache_key(request: &ModelRequest) -> String {
     let value = serde_json::to_value(request).unwrap_or(Value::Null);
     let canonical = canonical_value(value);
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
-    sha256_hex(&bytes)
+    // Stream the canonical JSON directly into the digest instead of allocating
+    // an intermediate `Vec<u8>`: `Sha256` implements `std::io::Write`.
+    let mut hasher = Sha256::new();
+    if serde_json::to_writer(&mut hasher, &canonical).is_err() {
+        // Serialization of an already-materialized `Value` does not fail in
+        // practice; fall back to hashing empty data for a stable result.
+        hasher = Sha256::new();
+    }
+    let digest = hasher.finalize();
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 // ── InMemoryResponseCache ─────────────────────────────────────────────────────
 
 impl InMemoryResponseCache {
-    /// Creates a new, empty in-memory response cache.
+    /// Default LRU capacity when constructed via [`new`](Self::new) or
+    /// [`Default`].
+    pub const DEFAULT_CAPACITY: usize = 1024;
+
+    /// Creates a new, empty in-memory response cache bounded by
+    /// [`DEFAULT_CAPACITY`](Self::DEFAULT_CAPACITY) entries.
     pub fn new() -> Self {
-        Self::default()
+        Self::with_capacity(Self::DEFAULT_CAPACITY)
+    }
+
+    /// Creates a new, empty in-memory response cache retaining at most
+    /// `capacity` entries (least-recently-used evicted first). A `capacity` of
+    /// zero is treated as `1` so the cache always retains the last write.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(LruResponseMap {
+                data: std::collections::HashMap::new(),
+                order: std::collections::VecDeque::new(),
+                capacity: capacity.max(1),
+            })),
+        }
+    }
+}
+
+impl Default for InMemoryResponseCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LruResponseMap {
+    /// Moves `key` to the most-recently-used end of the order queue.
+    fn touch(&mut self, key: &str) {
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            let k = self.order.remove(pos).expect("position is valid");
+            self.order.push_back(k);
+        }
     }
 }
 
 #[async_trait]
 impl ResponseCache for InMemoryResponseCache {
     async fn get(&self, key: &str) -> Result<Option<ModelResponse>> {
-        let data = self
-            .data
+        let mut inner = self
+            .inner
             .lock()
             .map_err(|e| TinyAgentsError::Validation(format!("cache lock poisoned: {e}")))?;
-        Ok(data.get(key).cloned())
+        let hit = inner.data.get(key).cloned();
+        if hit.is_some() {
+            inner.touch(key);
+        }
+        Ok(hit)
     }
 
     async fn put(&self, key: &str, value: ModelResponse) -> Result<()> {
-        let mut data = self
-            .data
+        let mut inner = self
+            .inner
             .lock()
             .map_err(|e| TinyAgentsError::Validation(format!("cache lock poisoned: {e}")))?;
-        data.insert(key.to_string(), value);
+        if inner.data.insert(key.to_string(), value).is_some() {
+            // Existing key: refresh its recency without changing the length.
+            inner.touch(key);
+        } else {
+            inner.order.push_back(key.to_string());
+            // Evict least-recently-used entries until within capacity.
+            while inner.order.len() > inner.capacity {
+                if let Some(evicted) = inner.order.pop_front() {
+                    inner.data.remove(&evicted);
+                }
+            }
+        }
         Ok(())
     }
 }

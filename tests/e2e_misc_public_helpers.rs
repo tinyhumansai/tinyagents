@@ -175,6 +175,8 @@ async fn graph_reducers_streams_observability_and_status_helpers_work() {
     journal_sink.emit(GraphEvent::CheckpointSaved {
         checkpoint_id: CheckpointId::new("cp-3"),
     });
+    // Persistence is asynchronous; block until the durable log catches up.
+    journal_sink.flush();
     assert_eq!(journal.len("run-g"), 2);
     let observations = journal.read_from("run-g", 0).await.unwrap();
     assert_eq!(observations[0].step, 3);
@@ -328,10 +330,8 @@ fn tool_schema_limits_ids_and_repl_contracts_cover_public_helpers() {
         .with_max_tool_calls(1)
         .with_max_wall_clock_ms(Some(1))
         .with_max_retries_per_call(3)
-        .with_max_concurrency(Some(2))
         .with_max_depth(9);
     assert_eq!(limits.max_retries_per_call, 3);
-    assert_eq!(limits.max_concurrency, Some(2));
     assert_eq!(limits.max_depth, 9);
     let mut tracker = LimitTracker::new(limits);
     assert_eq!(tracker.model_calls(), 0);

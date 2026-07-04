@@ -72,6 +72,19 @@ pub(super) struct CellBuffers {
     answer: Arc<Mutex<Option<String>>>,
     host_error: Arc<Mutex<Option<TinyAgentsError>>>,
     vars_snapshot: Arc<Mutex<BTreeMap<String, String>>>,
+    /// The wall-clock instant the current cell's [`ReplPolicy::timeout`]
+    /// expires at, if the policy configures one. Set at the start of
+    /// [`ReplSession::eval_cell`] and read by every host capability call (via
+    /// [`builtins::bridge_block_on`]) and the engine's `on_progress` hook, so
+    /// the deadline is enforced fail-closed both for pure script loops and for
+    /// in-flight model/tool/agent/graph calls.
+    deadline: Arc<Mutex<Option<Instant>>>,
+    /// The current cell's [`ReplPolicy::max_output_bytes`] budget, armed at
+    /// the start of every [`ReplSession::eval_cell`] call and enforced
+    /// fail-closed inside [`CellBuffers::push_stdout_line`] itself, so a
+    /// print-heavy runaway script cannot buffer unbounded output before the
+    /// end-of-cell check in `eval_cell` ever runs.
+    max_output_bytes: Arc<Mutex<Option<usize>>>,
 }
 
 /// The persistent variable namespace of a session.
@@ -159,6 +172,24 @@ impl Default for ReplVariables {
 /// stateless session with [`ReplSession::new`]; supply registries, a custom
 /// policy, or a run context with [`ReplSession::builder`]-style `with_*`
 /// methods.
+///
+/// # Not to be confused with `repl::ReplSession`
+///
+/// This crate has two distinct types named `ReplSession`:
+///
+/// - **This type** (`repl::session::ReplSession`, feature `repl` only) — the
+///   Rhai-backed scripting session described above; also reachable as
+///   `crate::ReplSession` (the crate-root re-export) when the `repl` feature
+///   is enabled.
+/// - [`crate::repl::ReplSession`] (always available, no feature required) —
+///   the line-oriented command skeleton (verbs like `set`/`get`/`run`/`call`
+///   parsed from a single line). It is *not* re-exported at the crate root
+///   under this feature, so `crate::ReplSession` only ever means this
+///   scripting session once `repl` is enabled.
+///
+/// The two are unrelated types serving different layers of the `.ragsh`
+/// design; always check which module path (`crate::repl::session::ReplSession`
+/// vs. `crate::repl::ReplSession`) you imported from.
 pub struct ReplSession<State = (), Ctx = ()>
 where
     State: Send + Sync,
@@ -195,6 +226,10 @@ where
     engine: Engine,
     /// Shared buffers the engine's built-ins write into.
     buffers: CellBuffers,
+    /// Number of cells evaluated so far this session, enforced fail-closed
+    /// against [`ReplPolicy::max_iterations`]. Each `eval_cell` call is one
+    /// CodeAct-style iteration of a model-driven session.
+    iterations: usize,
 }
 
 impl<State: Send + Sync + Default + 'static> ReplSession<State, ()> {
@@ -248,6 +283,7 @@ impl<State: Send + Sync + Default + 'static, Ctx> ReplSession<State, Ctx> {
             drafts: Arc::new(Mutex::new(BTreeMap::new())),
             engine: Engine::new(),
             buffers,
+            iterations: 0,
         };
         session.rebuild_engine();
         session
@@ -302,9 +338,9 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
     /// Returns a shared handle to the application state capability calls are
     /// invoked against.
     ///
-    /// The CodeAct driver ([`crate::repl::codeact`]) needs this to invoke the
-    /// session's driver model through the same state the in-cell capability
-    /// functions use, without exposing the private field.
+    /// A CodeAct-style driver loop needs this to invoke the session's driver
+    /// model through the same state the in-cell capability functions use,
+    /// without exposing the private field.
     pub fn app_state(&self) -> Arc<State> {
         self.state.clone()
     }
@@ -332,12 +368,26 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
     ///
     /// * [`TinyAgentsError::LimitExceeded`] — the script exceeds
     ///   [`ReplPolicy::max_script_bytes`], the output exceeds
-    ///   [`ReplPolicy::max_output_bytes`], or the script exceeds the engine
-    ///   operation limit (fail-closed runaway protection).
+    ///   [`ReplPolicy::max_output_bytes`], the engine operation limit
+    ///   (fail-closed runaway protection), or the session has already
+    ///   evaluated [`ReplPolicy::max_iterations`] cells.
+    /// * [`TinyAgentsError::Timeout`] — the cell's wall-clock deadline
+    ///   ([`ReplPolicy::timeout`]) elapsed, either mid-script or during a
+    ///   model/tool/agent/graph call.
     /// * [`TinyAgentsError::Validation`] — the script failed to compile or
     ///   raised a runtime error.
     pub fn eval_cell(&mut self, script: &str) -> Result<ReplResult> {
         let start = Instant::now();
+
+        // Each call is one CodeAct-style iteration of a model-driven session;
+        // enforce the cap fail-closed before doing any other work.
+        if self.iterations >= self.policy.max_iterations {
+            return Err(TinyAgentsError::LimitExceeded(format!(
+                "ragsh session has evaluated {} cells, reaching the max_iterations limit of {}",
+                self.iterations, self.policy.max_iterations
+            )));
+        }
+        self.iterations += 1;
 
         if script.len() > self.policy.max_script_bytes {
             return Err(TinyAgentsError::LimitExceeded(format!(
@@ -347,16 +397,27 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
             )));
         }
 
-        // Reset per-cell shared buffers.
+        // Reset per-cell shared buffers and arm the wall-clock deadline (if
+        // the policy configures one) before any script or host-capability
+        // work begins. `on_progress` (see `builtins::build_engine`) enforces
+        // it for pure script execution; `bridge_block_on` enforces it around
+        // every model/tool/agent/graph call so a hanging host call cannot
+        // block the session forever either.
         self.buffers.reset();
+        self.buffers
+            .arm_deadline(self.policy.timeout.map(|d| start + d));
+        self.buffers.arm_output_limit(self.policy.max_output_bytes);
 
-        let before = self.variables.snapshot();
-        // Expose the pre-cell namespace to `show_vars()`.
+        // Snapshot the pre-cell namespace once and move it into the shared
+        // `vars_snapshot` (read by `show_vars()` during the cell). The diff below
+        // reads this same baseline back rather than keeping a second full copy,
+        // so a cell pays one baseline snapshot instead of a snapshot *plus* a
+        // full O(namespace-bytes) clone.
         *self
             .buffers
             .vars_snapshot
             .lock()
-            .expect("vars_snapshot poisoned") = before.clone();
+            .expect("vars_snapshot poisoned") = self.variables.snapshot();
 
         // Disjoint field borrows: the engine is read-only while the scope is
         // mutated in place, so top-level `let` bindings persist into the scope.
@@ -369,7 +430,17 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
         self.variables.restore_reserved();
 
         let value_dynamic = match eval {
-            Ok(value) => value,
+            Ok(value) => {
+                // The script may have completed "successfully" from Rhai's
+                // point of view even though a host-side fail-closed check
+                // (e.g. push_stdout_line's max_output_bytes enforcement)
+                // stashed an error — `on_print`/`on_debug` cannot themselves
+                // fail a script, so this is the only place that catches it.
+                if let Some(host_err) = self.buffers.take_host_error() {
+                    return Err(host_err);
+                }
+                value
+            }
             Err(err) => {
                 // A fallible capability function stashes its precise crate error
                 // here; prefer it over the generic Rhai runtime wrapper so the
@@ -402,7 +473,16 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
         }
 
         let after = self.variables.snapshot();
-        let variables_changed = diff_changed(&before, &after);
+        // Diff against the baseline stored in `vars_snapshot` instead of a
+        // separately retained `before` map, avoiding a redundant full copy.
+        let variables_changed = {
+            let before = self
+                .buffers
+                .vars_snapshot
+                .lock()
+                .expect("vars_snapshot poisoned");
+            diff_changed(&before, &after)
+        };
 
         Ok(ReplResult {
             stdout,
@@ -421,6 +501,32 @@ impl CellBuffers {
         self.calls.lock().expect("calls poisoned").clear();
         *self.answer.lock().expect("answer poisoned") = None;
         *self.host_error.lock().expect("host_error poisoned") = None;
+        *self.deadline.lock().expect("deadline poisoned") = None;
+        *self
+            .max_output_bytes
+            .lock()
+            .expect("max_output_bytes poisoned") = None;
+    }
+
+    /// Arms the per-cell wall-clock deadline, replacing any previous one.
+    fn arm_deadline(&self, deadline: Option<Instant>) {
+        *self.deadline.lock().expect("deadline poisoned") = deadline;
+    }
+
+    /// Arms the per-cell output-byte budget, replacing any previous one.
+    /// Read by [`CellBuffers::push_stdout_line`] on every captured line.
+    fn arm_output_limit(&self, max_bytes: usize) {
+        *self
+            .max_output_bytes
+            .lock()
+            .expect("max_output_bytes poisoned") = Some(max_bytes);
+    }
+
+    /// Returns the current cell's wall-clock deadline, if the policy
+    /// configured a timeout. Read by every host capability call and the
+    /// engine's `on_progress` hook (see [`builtins::bridge_block_on`]).
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        *self.deadline.lock().expect("deadline poisoned")
     }
 
     fn stdout(&self) -> String {
@@ -446,11 +552,42 @@ impl CellBuffers {
         self.calls.lock().expect("calls poisoned").push(record);
     }
 
-    /// Appends a line to the captured stdout buffer.
+    /// Appends a line to the captured stdout buffer, enforcing the armed
+    /// [`ReplPolicy::max_output_bytes`] budget fail-closed: once appending
+    /// would exceed the budget, the line is dropped (not buffered) and a
+    /// [`TinyAgentsError::LimitExceeded`] is stashed for `eval_cell` to
+    /// surface, instead of growing the buffer without bound for the rest of
+    /// the cell.
     pub(super) fn push_stdout_line(&self, line: &str) {
+        let limit = *self
+            .max_output_bytes
+            .lock()
+            .expect("max_output_bytes poisoned");
         let mut out = self.stdout.lock().expect("stdout poisoned");
+        if let Some(limit) = limit {
+            let projected = out.len() + line.len() + 1;
+            if projected > limit {
+                drop(out);
+                self.set_host_error(TinyAgentsError::LimitExceeded(format!(
+                    "ragsh cell produced more than {limit} bytes of output, exceeding the max_output_bytes limit"
+                )));
+                return;
+            }
+        }
         out.push_str(line);
         out.push('\n');
+    }
+
+    /// Returns whether a host error is currently stashed, without consuming
+    /// it. Used by the engine's `on_progress` hook to abort a script promptly
+    /// once [`push_stdout_line`](Self::push_stdout_line) has flagged the
+    /// output budget as exceeded, rather than letting the script keep running
+    /// until it happens to yield control back naturally.
+    pub(super) fn host_error_pending(&self) -> bool {
+        self.host_error
+            .lock()
+            .expect("host_error poisoned")
+            .is_some()
     }
 
     /// Sets the session's final answer.
@@ -480,6 +617,15 @@ fn map_rhai_error(err: EvalAltResult) -> TinyAgentsError {
         EvalAltResult::ErrorTooManyOperations(pos) => TinyAgentsError::LimitExceeded(format!(
             "ragsh cell exceeded the operation limit (max_operations) at {pos}"
         )),
+        // The engine's `on_progress` hook (see `builtins::build_engine`)
+        // terminates the script with this exact sentinel value once the
+        // per-cell `ReplPolicy::timeout` deadline elapses.
+        EvalAltResult::ErrorTerminated(token, pos)
+            if token.clone().into_string().ok().as_deref()
+                == Some(builtins::DEADLINE_EXCEEDED_TOKEN) =>
+        {
+            TinyAgentsError::Timeout(format!("{} at {pos}", builtins::DEADLINE_EXCEEDED_TOKEN))
+        }
         other => TinyAgentsError::Validation(format!("ragsh evaluation error: {other}")),
     }
 }

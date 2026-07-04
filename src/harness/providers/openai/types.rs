@@ -35,9 +35,15 @@ pub struct ChatCompletionRequest {
     /// Nucleus sampling probability mass. Omitted when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
-    /// Maximum number of output tokens. Omitted when unset.
+    /// Maximum number of output tokens. Omitted when unset. Used for classic
+    /// Chat Completions models; the o-series uses `max_completion_tokens`
+    /// instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Maximum number of output tokens for reasoning (o-series) models, which
+    /// reject `max_tokens`. Omitted when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
     /// Stop sequences that terminate generation. Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stop: Vec<String>,
@@ -97,6 +103,13 @@ pub struct ChunkDeltaWire {
     /// Incremental text fragment, when present.
     #[serde(default)]
     pub content: Option<String>,
+    /// Incremental reasoning/thinking fragment used by some OpenAI-compatible
+    /// providers (for example DeepSeek-compatible streams).
+    #[serde(default)]
+    pub reasoning_content: Option<Value>,
+    /// Alternate reasoning/thinking fragment key used by some gateways.
+    #[serde(default)]
+    pub reasoning: Option<Value>,
     /// Incremental tool-call fragments, correlated by `index`.
     #[serde(default)]
     pub tool_calls: Vec<ToolCallChunkWire>,
@@ -106,8 +119,12 @@ pub struct ChunkDeltaWire {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ToolCallChunkWire {
     /// Stable slot index used to correlate fragments across chunks.
+    ///
+    /// `None` when the provider omits `index` entirely (some OpenAI-compatible
+    /// backends do); fragments are then correlated by id/name instead of all
+    /// collapsing onto slot 0.
     #[serde(default)]
-    pub index: u32,
+    pub index: Option<u32>,
     /// Provider-assigned call id, sent on the first fragment for the slot.
     #[serde(default)]
     pub id: Option<String>,
@@ -127,15 +144,52 @@ pub struct FunctionChunkWire {
     pub arguments: Option<String>,
 }
 
+/// The `content` of a [`ChatMessageWire`].
+///
+/// OpenAI accepts either a plain string (the common case) or an array of typed
+/// content parts (needed to attach images alongside text). Serialized untagged
+/// so a text-only message keeps its historical plain-string wire shape.
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub enum MessageContentWire {
+    /// Plain-string content.
+    Text(String),
+    /// Multi-part content (text and/or image parts).
+    Parts(Vec<ContentPartWire>),
+}
+
+/// One typed content part inside a multi-part [`MessageContentWire::Parts`].
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPartWire {
+    /// A text fragment.
+    Text {
+        /// The text content.
+        text: String,
+    },
+    /// An image reference, by URL or data URI.
+    ImageUrl {
+        /// The `image_url` object.
+        image_url: ImageUrlWire,
+    },
+}
+
+/// The `image_url` payload of a [`ContentPartWire::ImageUrl`].
+#[derive(Clone, Debug, Serialize)]
+pub struct ImageUrlWire {
+    /// URL or data URI of the image.
+    pub url: String,
+}
+
 /// A single message in the request `messages` array.
 #[derive(Clone, Debug, Serialize)]
 pub struct ChatMessageWire {
     /// Role: `system`, `user`, `assistant`, or `tool`.
     pub role: String,
-    /// Textual content. `None` (serialized as absent) for assistant messages
-    /// that only carry tool calls.
+    /// Message content: a plain string or typed content parts. `None`
+    /// (serialized as absent) for assistant messages that only carry tool calls.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<MessageContentWire>,
     /// Tool calls requested by an assistant message. Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallWire>,
@@ -225,6 +279,13 @@ pub struct ResponseMessageWire {
     /// Textual content, when present.
     #[serde(default)]
     pub content: Option<String>,
+    /// Reasoning/thinking content on non-streaming responses, when a compatible
+    /// provider exposes it. Kept off visible assistant text by the translator.
+    #[serde(default)]
+    pub reasoning_content: Option<Value>,
+    /// Alternate reasoning/thinking field used by some gateways.
+    #[serde(default)]
+    pub reasoning: Option<Value>,
     /// Tool calls requested by the model.
     #[serde(default)]
     pub tool_calls: Vec<ToolCallWire>,
@@ -245,6 +306,9 @@ pub struct UsageWire {
     /// Optional input-token breakdown (carries cached tokens).
     #[serde(default)]
     pub prompt_tokens_details: Option<PromptTokensDetailsWire>,
+    /// Optional completion-token breakdown (carries reasoning tokens).
+    #[serde(default)]
+    pub completion_tokens_details: Option<CompletionTokensDetailsWire>,
 }
 
 /// The `prompt_tokens_details` breakdown of a [`UsageWire`].
@@ -253,6 +317,14 @@ pub struct PromptTokensDetailsWire {
     /// Input tokens served from OpenAI's prompt cache.
     #[serde(default)]
     pub cached_tokens: u64,
+}
+
+/// The `completion_tokens_details` breakdown of a [`UsageWire`].
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct CompletionTokensDetailsWire {
+    /// Output tokens spent on hidden reasoning/thinking.
+    #[serde(default)]
+    pub reasoning_tokens: u64,
 }
 
 // ---------------------------------------------------------------------------

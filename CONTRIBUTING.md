@@ -20,6 +20,31 @@ The bundled example should also run:
 cargo run --example basic_graph
 ```
 
+To build with the optional embedded SQLite checkpointer or the `.ragsh` Rhai
+session runtime, enable the relevant feature:
+
+```sh
+cargo test --features sqlite
+cargo test --features repl
+```
+
+### Wiki Submodule
+
+The published GitHub wiki lives in `wiki/`, checked out as a git submodule
+pointing at the `tinyhumansai/tinyagents.wiki` repository. It is not part of
+the crate build and is not covered by this project's Markdown line-length or
+review rules. Clone with submodules to pull it down:
+
+```sh
+git clone --recurse-submodules https://github.com/tinyhumansai/tinyagents.git
+# or, in an existing checkout:
+git submodule update --init wiki
+```
+
+Do not edit `wiki/` content as part of an unrelated code or docs change; wiki
+edits should be their own commit (or made directly on the wiki) so the
+submodule pointer update stays easy to review in isolation.
+
 ## Project Philosophy
 
 TinyAgents should make agent systems explicit and inspectable. Prefer:

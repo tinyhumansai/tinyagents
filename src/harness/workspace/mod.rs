@@ -9,6 +9,7 @@
 //! Application-specific worktree/sandbox providers implement
 //! [`WorkspaceIsolation`] themselves.
 
+mod policy;
 mod types;
 
 pub use types::*;

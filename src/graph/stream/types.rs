@@ -114,6 +114,11 @@ pub enum GraphEvent {
         /// Persisted checkpoint id.
         checkpoint_id: CheckpointId,
     },
+    /// A checkpoint was loaded to resume/replay a run (a read, not a write).
+    CheckpointRestored {
+        /// The checkpoint id that was loaded.
+        checkpoint_id: CheckpointId,
+    },
     /// A node emitted an interrupt and the run paused.
     InterruptEmitted {
         /// The emitted interrupt.
@@ -177,6 +182,7 @@ impl GraphEvent {
             GraphEvent::StateUpdated { .. } => "state.updated",
             GraphEvent::RouteSelected { .. } => "route.selected",
             GraphEvent::CheckpointSaved { .. } => "checkpoint.saved",
+            GraphEvent::CheckpointRestored { .. } => "checkpoint.restored",
             GraphEvent::InterruptEmitted { .. } => "interrupt.emitted",
             GraphEvent::SubgraphStarted { .. } => "subgraph.started",
             GraphEvent::SubgraphCompleted { .. } => "subgraph.completed",

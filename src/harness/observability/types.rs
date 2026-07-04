@@ -11,7 +11,7 @@
 //! implementations, sink logic, and tests live in the sibling `mod.rs` and
 //! `test.rs` files.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -19,8 +19,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::harness::events::{AgentEvent, EventListener, HarnessRunStatus};
-use crate::harness::ids::{CallId, EventId, RunId};
-use crate::harness::store::{AppendStore, JsonlAppendStore};
+use crate::harness::ids::{CallId, EventId, RunId, now_ms};
+use crate::harness::store::AppendStore;
+
+use super::worker::AppendWorker;
 
 // ---------------------------------------------------------------------------
 // AgentObservation
@@ -193,14 +195,63 @@ pub trait HarnessEventJournal: Send + Sync {
     }
 }
 
+/// Default number of distinct `run_id` streams an [`InMemoryEventJournal`]
+/// retains before evicting the oldest (by insertion order) to bound memory.
+pub const DEFAULT_JOURNAL_MAX_RUNS: usize = 10_000;
+
+/// A single run's retained observations, plus the offset its first retained
+/// entry corresponds to.
+///
+/// `base_offset` is normally `0`, but once a run's stream has previously been
+/// evicted and then receives another append, the new stream must continue
+/// numbering offsets from where the evicted one left off rather than
+/// restarting at `0` — otherwise a consumer resuming from a durable offset
+/// would have entries silently skipped (see [`EventJournalState::evicted`]).
+#[derive(Debug, Default)]
+pub(crate) struct EventStream {
+    pub(crate) base_offset: u64,
+    pub(crate) entries: Vec<AgentObservation>,
+}
+
+/// Inner state for [`InMemoryEventJournal`]: the per-run observation streams
+/// plus insertion order so the oldest run can be evicted once `max_runs` is
+/// exceeded.
+#[derive(Debug, Default)]
+pub(crate) struct EventJournalState {
+    pub(crate) streams: HashMap<String, EventStream>,
+    /// Oldest-first insertion order of run ids, used for FIFO eviction.
+    pub(crate) order: VecDeque<String>,
+    /// Next offset to resume from for runs whose stream was evicted, so a
+    /// later append for the same `run_id` continues numbering instead of
+    /// restarting at `0` (which would corrupt any durable offset a consumer
+    /// has already saved). Bounded the same way `streams` is: entries are
+    /// dropped oldest-first once `evicted_order` exceeds `max_runs`.
+    pub(crate) evicted: HashMap<String, u64>,
+    pub(crate) evicted_order: VecDeque<String>,
+}
+
 /// In-memory [`HarnessEventJournal`] backed by a per-run `Vec`.
 ///
 /// Cheaply clonable through an inner [`Arc`]; clones share the same streams.
 /// There is no durability — entries are lost when the last clone drops.
-#[derive(Clone, Debug, Default)]
+///
+/// Retains at most [`InMemoryEventJournal::max_runs`] distinct `run_id`
+/// streams (default [`DEFAULT_JOURNAL_MAX_RUNS`]); once exceeded, the oldest
+/// run (by first-append order) is evicted wholesale to keep memory bounded
+/// across long-lived processes that journal many runs.
+#[derive(Clone, Debug)]
 pub struct InMemoryEventJournal {
-    /// `run_id → ordered observations`.
-    pub(crate) runs: Arc<Mutex<HashMap<String, Vec<AgentObservation>>>>,
+    pub(crate) state: Arc<Mutex<EventJournalState>>,
+    pub(crate) max_runs: usize,
+}
+
+impl Default for InMemoryEventJournal {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(EventJournalState::default())),
+            max_runs: DEFAULT_JOURNAL_MAX_RUNS,
+        }
+    }
 }
 
 /// [`HarnessEventJournal`] backed by any [`AppendStore`].
@@ -255,13 +306,42 @@ pub trait HarnessStatusStore: Send + Sync {
     }
 }
 
+/// Default number of distinct runs an [`InMemoryStatusStore`] retains before
+/// evicting terminal runs (oldest first) to bound memory.
+pub const DEFAULT_STATUS_STORE_MAX_RUNS: usize = 10_000;
+
+/// Inner state for [`InMemoryStatusStore`]: the `run_id → status` map plus
+/// insertion order so terminal runs can be evicted oldest-first once
+/// `max_runs` is exceeded.
+#[derive(Debug, Default)]
+pub(crate) struct StatusStoreState {
+    pub(crate) statuses: HashMap<String, HarnessRunStatus>,
+    /// Oldest-first insertion order of run ids, used for eviction.
+    pub(crate) order: VecDeque<String>,
+}
+
 /// In-memory [`HarnessStatusStore`] backed by a `run_id → status` map.
 ///
 /// Cheaply clonable through an inner [`Arc`]; clones share the same map.
-#[derive(Clone, Debug, Default)]
+///
+/// Retains at most [`InMemoryStatusStore::max_runs`] distinct runs (default
+/// [`DEFAULT_STATUS_STORE_MAX_RUNS`]). Once exceeded, the oldest **terminal**
+/// runs (anything not `Pending`/`Running`/`Interrupted`) are evicted first so
+/// an in-flight run's status is never dropped out from under it; active runs
+/// are only evicted once no terminal run remains to make room.
+#[derive(Clone, Debug)]
 pub struct InMemoryStatusStore {
-    /// `run_id → latest status`.
-    pub(crate) statuses: Arc<Mutex<HashMap<String, HarnessRunStatus>>>,
+    pub(crate) state: Arc<Mutex<StatusStoreState>>,
+    pub(crate) max_runs: usize,
+}
+
+impl Default for InMemoryStatusStore {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(StatusStoreState::default())),
+            max_runs: DEFAULT_STATUS_STORE_MAX_RUNS,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -300,43 +380,37 @@ pub struct RedactingSink {
 /// a [`HarnessEventJournal`].
 ///
 /// The sink is configured with the emitting run's lineage; each received
-/// [`EventRecord`] is wrapped into an [`AgentObservation`] and appended. The
-/// async append is bridged synchronously with `futures::executor::block_on`,
-/// and append errors are swallowed so a failing journal never aborts the run.
+/// [`EventRecord`] is wrapped into an [`AgentObservation`] and handed to a
+/// background [`AppendWorker`] that persists it off the emitting thread. The
+/// append is best-effort: see [`AppendWorker`] for the backpressure/drop and
+/// error policy, and use [`JournalSink::flush`] to block until the durable log
+/// has caught up.
 ///
 /// [`EventRecord`]: crate::harness::events::EventRecord
 #[derive(Clone)]
 pub struct JournalSink {
-    /// The journal observations are appended to.
-    pub(crate) journal: Arc<dyn HarnessEventJournal>,
     /// The run that owns events delivered to this sink.
     pub(crate) run_id: RunId,
     /// Parent run id stamped onto every observation.
     pub(crate) parent_run_id: Option<RunId>,
     /// Root run id stamped onto every observation.
     pub(crate) root_run_id: RunId,
+    /// Background drain that persists observations without blocking the run.
+    pub(crate) worker: Arc<AppendWorker<AgentObservation>>,
 }
 
 /// An [`EventListener`] that appends each [`EventRecord`] as a JSON line into a
-/// [`JsonlAppendStore`] stream.
+/// [`JsonlAppendStore`](crate::harness::store::JsonlAppendStore) stream.
 ///
 /// This is the lightweight durable sink: it persists the live record (id,
-/// offset, event) under a fixed stream name. The async append is bridged
-/// synchronously and errors are swallowed (best-effort).
+/// offset, event) under a fixed stream name. Each record is handed to a
+/// background [`AppendWorker`] that appends it off the emitting thread
+/// (best-effort — see [`AppendWorker`] for the drop/error policy). Use
+/// [`JsonlSink::flush`] to block until the durable log has caught up.
 ///
 /// [`EventRecord`]: crate::harness::events::EventRecord
 #[derive(Clone, Debug)]
 pub struct JsonlSink {
-    /// The JSONL append store records are written to.
-    pub(crate) store: JsonlAppendStore,
-    /// The stream name appended records land in.
-    pub(crate) stream: String,
-}
-
-/// Returns the current time in Unix-epoch milliseconds, saturating at `0`.
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    /// Background drain that appends records without blocking the run.
+    pub(crate) worker: Arc<AppendWorker<serde_json::Value>>,
 }

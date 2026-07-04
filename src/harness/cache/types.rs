@@ -18,7 +18,7 @@
 //!
 //! All public types in this module are re-exported through [`super`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -47,9 +47,26 @@ pub trait ResponseCache: Send + Sync {
 ///
 /// Intended for unit tests and short-lived local runs. Contains no durable
 /// storage: all entries are lost when the value is dropped.
-#[derive(Clone, Debug, Default)]
+///
+/// Entries are bounded by an LRU eviction policy (default
+/// [`InMemoryResponseCache::DEFAULT_CAPACITY`]) so a long-lived cache attached
+/// to a busy harness cannot grow without limit. Reads and writes move a key to
+/// the most-recently-used end; once the map is full the least-recently-used key
+/// is evicted on insert.
+#[derive(Clone, Debug)]
 pub struct InMemoryResponseCache {
-    pub(crate) data: Arc<Mutex<HashMap<String, ModelResponse>>>,
+    pub(crate) inner: Arc<Mutex<LruResponseMap>>,
+}
+
+/// LRU-ordered map backing [`InMemoryResponseCache`].
+#[derive(Debug)]
+pub(crate) struct LruResponseMap {
+    /// Cached responses keyed by cache key.
+    pub(crate) data: HashMap<String, ModelResponse>,
+    /// Keys in least- to most-recently-used order.
+    pub(crate) order: VecDeque<String>,
+    /// Maximum number of entries retained before LRU eviction.
+    pub(crate) capacity: usize,
 }
 
 // ── PromptCacheLayout ─────────────────────────────────────────────────────────

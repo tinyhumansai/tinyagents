@@ -1,3 +1,3 @@
 [submodule "wiki"]
 	path = wiki
-	url = git@github.com:tinyhumansai/tinyagents.wiki.git
+	url = https://github.com/tinyhumansai/tinyagents.wiki.git

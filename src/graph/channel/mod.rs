@@ -43,7 +43,7 @@ pub use types::{
     LastValue, Messages, NamedBarrier, Topic, Untracked,
 };
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -58,7 +58,7 @@ impl Channel for LastValue {
         "last_value"
     }
 
-    fn merge(&self, _current: Option<&Value>, incoming: Value) -> Result<Value> {
+    fn merge(&self, _current: Option<Value>, incoming: Value) -> Result<Value> {
         Ok(incoming)
     }
 
@@ -72,10 +72,11 @@ impl Channel for Topic {
         "topic"
     }
 
-    fn merge(&self, current: Option<&Value>, incoming: Value) -> Result<Value> {
+    fn merge(&self, current: Option<Value>, incoming: Value) -> Result<Value> {
+        // Reuse the existing array in place instead of cloning it per merge.
         let mut list = match current {
-            Some(Value::Array(items)) => items.clone(),
-            Some(other) => vec![other.clone()],
+            Some(Value::Array(items)) => items,
+            Some(other) => vec![other],
             None => Vec::new(),
         };
         match incoming {
@@ -99,7 +100,7 @@ impl Channel for Delta {
         "delta"
     }
 
-    fn merge(&self, current: Option<&Value>, incoming: Value) -> Result<Value> {
+    fn merge(&self, current: Option<Value>, incoming: Value) -> Result<Value> {
         let add_err =
             || TinyAgentsError::Graph("Delta channel only accepts numeric writes".to_string());
         let incoming_num = incoming.as_f64().ok_or_else(add_err)?;
@@ -130,9 +131,10 @@ impl Channel for Messages {
         "messages"
     }
 
-    fn merge(&self, current: Option<&Value>, incoming: Value) -> Result<Value> {
+    fn merge(&self, current: Option<Value>, incoming: Value) -> Result<Value> {
+        // Reuse the existing array in place instead of cloning it per merge.
         let mut list = match current {
-            Some(Value::Array(items)) => items.clone(),
+            Some(Value::Array(items)) => items,
             Some(_) => {
                 return Err(TinyAgentsError::Graph(
                     "Messages channel value must be a JSON array".to_string(),
@@ -144,13 +146,32 @@ impl Channel for Messages {
             Value::Array(items) => items,
             other => vec![other],
         };
+        // Build an id -> index map over the existing list once (O(existing)) so
+        // each incoming message is an O(1) lookup instead of a linear scan.
+        // Previously this dedup was O(existing x incoming), which bit at a few
+        // thousand messages.
+        let mut index: HashMap<String, usize> = list
+            .iter()
+            .enumerate()
+            .filter_map(|(i, existing)| {
+                existing
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| (id.to_string(), i))
+            })
+            .collect();
         for msg in incoming {
-            let id = msg.get("id").and_then(Value::as_str).map(str::to_string);
-            match id.and_then(|id| {
-                list.iter_mut()
-                    .find(|existing| existing.get("id").and_then(Value::as_str) == Some(&id))
-            }) {
-                Some(existing) => *existing = msg,
+            match msg.get("id").and_then(Value::as_str).map(str::to_string) {
+                // Keyed message: replace the same id in place, or append and
+                // remember its position for later incoming writes.
+                Some(id) => match index.get(&id) {
+                    Some(&i) => list[i] = msg,
+                    None => {
+                        index.insert(id, list.len());
+                        list.push(msg);
+                    }
+                },
+                // Unkeyed message: always appended (unchanged behavior).
                 None => list.push(msg),
             }
         }
@@ -171,7 +192,7 @@ impl Channel for Ephemeral {
         "ephemeral"
     }
 
-    fn merge(&self, _current: Option<&Value>, incoming: Value) -> Result<Value> {
+    fn merge(&self, _current: Option<Value>, incoming: Value) -> Result<Value> {
         Ok(incoming)
     }
 
@@ -189,7 +210,7 @@ impl Channel for Untracked {
         "untracked"
     }
 
-    fn merge(&self, _current: Option<&Value>, incoming: Value) -> Result<Value> {
+    fn merge(&self, _current: Option<Value>, incoming: Value) -> Result<Value> {
         Ok(incoming)
     }
 
@@ -214,10 +235,11 @@ impl Channel for Barrier {
         "barrier"
     }
 
-    fn merge(&self, current: Option<&Value>, incoming: Value) -> Result<Value> {
+    fn merge(&self, current: Option<Value>, incoming: Value) -> Result<Value> {
+        // Reuse the accumulated array in place instead of cloning it per merge.
         let mut list = match current {
-            Some(Value::Array(items)) => items.clone(),
-            Some(other) => vec![other.clone()],
+            Some(Value::Array(items)) => items,
+            Some(other) => vec![other],
             None => Vec::new(),
         };
         match incoming {
@@ -257,9 +279,10 @@ impl Channel for NamedBarrier {
         "named_barrier"
     }
 
-    fn merge(&self, current: Option<&Value>, incoming: Value) -> Result<Value> {
+    fn merge(&self, current: Option<Value>, incoming: Value) -> Result<Value> {
+        // Reuse the accumulated object in place instead of cloning it per merge.
         let mut map = match current {
-            Some(Value::Object(map)) => map.clone(),
+            Some(Value::Object(map)) => map,
             Some(_) => {
                 return Err(TinyAgentsError::Graph(
                     "NamedBarrier channel value must be a JSON object".to_string(),
@@ -320,9 +343,9 @@ impl Channel for BinaryAggregate {
         "binary_aggregate"
     }
 
-    fn merge(&self, current: Option<&Value>, incoming: Value) -> Result<Value> {
+    fn merge(&self, current: Option<Value>, incoming: Value) -> Result<Value> {
         match current {
-            Some(current) => (self.fold)(current.clone(), incoming),
+            Some(current) => (self.fold)(current, incoming),
             None => Ok(incoming),
         }
     }
@@ -385,9 +408,24 @@ impl ChannelSet {
 
     /// Folds `value` into the channel `name` via its merge rule. Errors with
     /// [`TinyAgentsError::Graph`] if `name` is not a registered channel.
+    ///
+    /// The unknown-channel check runs *before* any state is touched. If a
+    /// registered channel's [`Channel::merge`] rejects the write (e.g. a
+    /// [`Delta`] receiving a non-numeric value), the channel's prior value is
+    /// dropped — a rejected write leaves the channel unset. This matches the
+    /// executor's reducer contract, where a merge error discards the whole
+    /// [`ChannelState`] for that step regardless.
     pub fn apply_update(&mut self, name: &str, value: Value) -> Result<()> {
-        let channel = self.channel(name)?;
-        let merged = channel.merge(self.values.get(name), value)?;
+        // Field-level borrows (channels immutable, values mutable) so the
+        // current value can be *moved* into `merge` — accumulating channels then
+        // fold in place rather than cloning the whole accumulated value.
+        let channel = self
+            .channels
+            .get(name)
+            .map(AsRef::as_ref)
+            .ok_or_else(|| TinyAgentsError::Graph(format!("unknown channel `{name}`")))?;
+        let current = self.values.remove(name);
+        let merged = channel.merge(current, value)?;
         self.values.insert(name.to_string(), merged);
         Ok(())
     }

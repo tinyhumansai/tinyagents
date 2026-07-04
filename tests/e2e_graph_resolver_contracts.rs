@@ -8,7 +8,7 @@ use tinyagents::graph::{Command, GraphBuilder, GraphDefaults, NodeResult, Route,
 use tinyagents::harness::ids::GraphId;
 use tinyagents::harness::providers::MockModel;
 use tinyagents::harness::testkit::FakeTool;
-use tinyagents::language::compiler::CapabilityResolver;
+use tinyagents::language::capability_resolver::CapabilityResolver;
 use tinyagents::language::resolver::{Resolver, resolve_source};
 use tinyagents::language::{Blueprint, ChannelSpec, EdgeSpec, Literal, NodeSpec, Routing, parser};
 use tinyagents::registry::{CapabilityRegistry, ComponentKind};

@@ -49,15 +49,10 @@ impl RunLimits {
         self
     }
 
-    /// Sets the per-call retry cap.
+    /// Sets the per-call retry cap (a retry *count*, not counting the first
+    /// attempt). See [`RunLimits::max_retries_per_call`].
     pub fn with_max_retries_per_call(mut self, n: usize) -> Self {
         self.max_retries_per_call = n;
-        self
-    }
-
-    /// Sets the concurrency cap. `None` removes the limit.
-    pub fn with_max_concurrency(mut self, n: Option<usize>) -> Self {
-        self.max_concurrency = n;
         self
     }
 
@@ -189,6 +184,21 @@ impl LimitTracker {
     /// Returns a reference to the active [`RunLimits`] policy.
     pub fn limits(&self) -> &RunLimits {
         &self.limits
+    }
+
+    /// Overrides the model-call and tool-call caps in place, preserving
+    /// already-recorded counts and the wall-clock start time.
+    ///
+    /// A `RunContext` derives its tracker's initial limits from its
+    /// `RunConfig`, which always carries a concrete default. That can
+    /// silently disagree with a harness-wide `RunPolicy` configured with a
+    /// different cap, so the *reported* limit (the policy's) and the limit
+    /// that actually trips (the tracker's) diverge. The agent loop calls this
+    /// once per run to reconcile the two into a single enforced source of
+    /// truth before the loop begins.
+    pub fn sync_call_limits(&mut self, max_model_calls: usize, max_tool_calls: usize) {
+        self.limits.max_model_calls = max_model_calls;
+        self.limits.max_tool_calls = max_tool_calls;
     }
 }
 

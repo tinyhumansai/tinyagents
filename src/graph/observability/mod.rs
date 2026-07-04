@@ -34,8 +34,12 @@
 //! methods; both are opt-in and default off so existing runs are unchanged.
 //!
 //! The journaling sink bridges the synchronous [`GraphEventSink::emit`] hook to
-//! the async journal API with `futures::executor::block_on` and treats
-//! persistence as best-effort: a backend error never aborts the run.
+//! the async journal API through a background drain (an
+//! [`AppendWorker`](crate::harness::observability)): `emit` never blocks the
+//! executor on I/O and persistence is best-effort (a full bounded queue drops
+//! rather than stalls; backend errors are reported, not propagated). The
+//! executor calls [`GraphEventSink::flush`] after the terminal run event so a
+//! caller reading the journal right after the run returns sees a complete log.
 
 mod langfuse;
 mod types;
@@ -53,7 +57,8 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::graph::status::GraphRunStatus;
 use crate::graph::stream::{GraphEvent, GraphEventSink};
-use crate::harness::ids::{CheckpointId, EventId, GraphId, NodeId, RunId, ThreadId};
+use crate::harness::ids::{CheckpointId, EventId, GraphId, NodeId, RunId, ThreadId, now_ms};
+use crate::harness::observability::{AppendWorker, DEFAULT_DRAIN_CAPACITY};
 use crate::harness::store::AppendStore;
 
 // ---------------------------------------------------------------------------
@@ -378,8 +383,16 @@ impl JournalGraphSink {
     /// builder methods to set a parent, root, thread, namespace, or downstream
     /// sink.
     pub fn new(journal: Arc<dyn GraphEventJournal>, run_id: RunId, graph_id: GraphId) -> Self {
+        let worker = Arc::new(AppendWorker::spawn(
+            "graph-journal-sink",
+            DEFAULT_DRAIN_CAPACITY,
+            move |obs: GraphObservation| {
+                let journal = Arc::clone(&journal);
+                async move { journal.append(obs).await.map(|_| ()) }
+            },
+        ));
         Self {
-            journal,
+            worker,
             inner: None,
             root_run_id: run_id.clone(),
             run_id,
@@ -454,10 +467,17 @@ impl JournalGraphSink {
 impl GraphEventSink for JournalGraphSink {
     fn emit(&self, event: GraphEvent) {
         let obs = self.observe(&event);
-        // Best-effort durable append; never abort the run on a journal error.
-        let _ = futures::executor::block_on(self.journal.append(obs));
+        // Hand off to the background drain; never block the executor on I/O.
+        self.worker.submit(obs);
         if let Some(inner) = &self.inner {
             inner.emit(event);
+        }
+    }
+
+    fn flush(&self) {
+        self.worker.flush();
+        if let Some(inner) = &self.inner {
+            inner.flush();
         }
     }
 }
@@ -497,14 +517,6 @@ fn duration_ms(start: SystemTime, end: SystemTime) -> Option<u64> {
     end.duration_since(start)
         .ok()
         .map(|duration| duration.as_millis() as u64)
-}
-
-/// Returns the current time in Unix-epoch milliseconds, saturating at `0`.
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// Builds a uniform poisoned-lock validation error for the in-memory backends.

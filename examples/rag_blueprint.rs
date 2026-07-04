@@ -12,7 +12,8 @@
 //! ```
 
 use tinyagents::Result;
-use tinyagents::language::compiler::{CapabilityResolver, bind_capabilities, compile};
+use tinyagents::language::capability_resolver::{CapabilityResolver, bind_capabilities};
+use tinyagents::language::compiler::compile;
 use tinyagents::language::parser::parse_str;
 use tinyagents::language::types::Routing;
 

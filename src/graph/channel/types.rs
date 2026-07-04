@@ -48,7 +48,12 @@ pub trait Channel: Send + Sync {
 
     /// Folds `incoming` into the channel's `current` value, returning the new
     /// value. `current` is `None` the first time the channel is written.
-    fn merge(&self, current: Option<&Value>, incoming: Value) -> Result<Value>;
+    ///
+    /// Takes `current` **by value** so accumulating channels (topics, barriers,
+    /// message logs) can reuse the existing backing `Vec`/`Map` in place instead
+    /// of cloning the entire accumulated value on every merge, which was
+    /// O(existing) allocation per write.
+    fn merge(&self, current: Option<Value>, incoming: Value) -> Result<Value>;
 
     /// Whether more than one concurrent branch may write this channel within a
     /// single superstep. Aggregates (append/fold/accumulate/barrier) return

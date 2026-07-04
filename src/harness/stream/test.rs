@@ -137,3 +137,32 @@ fn sink_peek_does_not_consume() {
     assert_eq!(sink.drain().len(), 2);
     assert!(sink.is_empty());
 }
+
+/// Round-trips a [`StreamChunk`] through JSON and asserts it deserializes back
+/// to an equal value, proving every variant survives serde (including the
+/// scalar `Value` payloads an internally tagged enum could not encode).
+fn roundtrip_chunk(chunk: StreamChunk) {
+    let value = serde_json::to_value(&chunk).expect("serialize StreamChunk");
+    let back: StreamChunk = serde_json::from_value(value).expect("deserialize StreamChunk");
+    assert_eq!(chunk, back);
+}
+
+#[test]
+fn stream_chunk_roundtrips_every_variant() {
+    // Scalar / null / array Values are exactly what internal tagging corrupted.
+    roundtrip_chunk(StreamChunk::Values(json!(null)));
+    roundtrip_chunk(StreamChunk::Values(json!(42)));
+    roundtrip_chunk(StreamChunk::Values(json!({ "state": 1 })));
+    roundtrip_chunk(StreamChunk::Updates(json!([1, 2, 3])));
+    roundtrip_chunk(StreamChunk::Message(MessageDelta::text("hi")));
+    roundtrip_chunk(StreamChunk::Debug("trace".into()));
+    roundtrip_chunk(StreamChunk::Interrupt(json!({ "kind": "approval" })));
+    roundtrip_chunk(StreamChunk::Custom(json!(true)));
+}
+
+#[test]
+fn stream_chunk_null_values_does_not_corrupt_to_empty_object() {
+    let value = serde_json::to_value(StreamChunk::Values(json!(null))).unwrap();
+    assert_eq!(value["type"], json!("values"));
+    assert_eq!(value["content"], json!(null));
+}

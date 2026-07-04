@@ -2,7 +2,7 @@
 
 Date: 2026-06-29
 
-This audit reviewed the current RustAgents codebase for correctness gaps,
+This audit reviewed the current TinyAgents codebase for correctness gaps,
 security issues, implementation weaknesses, and spec-contract mismatches. No
 code changes were made as part of the audit.
 

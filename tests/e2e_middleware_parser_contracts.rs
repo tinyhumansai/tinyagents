@@ -156,6 +156,7 @@ async fn middleware_stack_runs_lifecycle_hooks_and_builtin_guards() {
     let mut delta = ModelDelta {
         call_id: "model-1".into(),
         content: "piece".into(),
+        reasoning: String::new(),
         tool_call: None,
     };
     stack

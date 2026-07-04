@@ -260,20 +260,27 @@ fn validate_schema_value(schema: &Value, value: &Value, path: &str) -> Result<()
         validate_type_spec(type_spec, value, path)?;
     }
 
+    // Enforce `required` independently of `properties`. A schema may declare
+    // required fields without listing per-field property schemas; nesting this
+    // check under `properties` would let such schemas fail open, silently
+    // accepting calls that omit required arguments.
+    if let Some(required) = schema.get("required").and_then(Value::as_array) {
+        let object = value.as_object().ok_or_else(|| {
+            TinyAgentsError::Validation(format!("{path} must be an object with declared fields"))
+        })?;
+        for field in required.iter().filter_map(Value::as_str) {
+            if !object.contains_key(field) {
+                return Err(TinyAgentsError::Validation(format!(
+                    "{path}.{field} is required"
+                )));
+            }
+        }
+    }
+
     if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
         let object = value.as_object().ok_or_else(|| {
             TinyAgentsError::Validation(format!("{path} must be an object with declared fields"))
         })?;
-
-        if let Some(required) = schema.get("required").and_then(Value::as_array) {
-            for field in required.iter().filter_map(Value::as_str) {
-                if !object.contains_key(field) {
-                    return Err(TinyAgentsError::Validation(format!(
-                        "{path}.{field} is required"
-                    )));
-                }
-            }
-        }
 
         if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
             for field in object.keys() {

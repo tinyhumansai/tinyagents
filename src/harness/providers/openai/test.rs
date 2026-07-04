@@ -255,7 +255,8 @@ fn parses_openai_response_with_content_tool_call_and_usage() {
             "prompt_tokens": 42,
             "completion_tokens": 8,
             "total_tokens": 50,
-            "prompt_tokens_details": { "cached_tokens": 30 }
+            "prompt_tokens_details": { "cached_tokens": 30 },
+            "completion_tokens_details": { "reasoning_tokens": 6 }
         }
     });
 
@@ -281,6 +282,7 @@ fn parses_openai_response_with_content_tool_call_and_usage() {
     assert_eq!(usage.output_tokens, 8);
     assert_eq!(usage.total_tokens, 50);
     assert_eq!(usage.cache_read_tokens, 30);
+    assert_eq!(usage.reasoning_tokens, 6);
 
     // Raw JSON preserved verbatim.
     assert_eq!(response.raw, Some(body));
@@ -345,10 +347,113 @@ fn parses_text_only_response_without_usage_details() {
 }
 
 #[test]
+fn total_tokens_falls_back_to_prompt_plus_completion_when_omitted() {
+    // Some OpenAI-compatible backends omit `total_tokens` entirely; it must
+    // not silently deserialize to a misleading `0` when prompt/completion
+    // tokens were clearly reported.
+    let body = json!({
+        "id": "chatcmpl-omit",
+        "choices": [
+            {
+                "message": { "role": "assistant", "content": "Hi!" },
+                "finish_reason": "stop"
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 5,
+            "completion_tokens": 2
+        }
+    });
+
+    let response = parse_response(body).unwrap();
+    let usage = response.usage.unwrap();
+    assert_eq!(usage.input_tokens, 5);
+    assert_eq!(usage.output_tokens, 2);
+    assert_eq!(usage.total_tokens, 7);
+}
+
+#[test]
+fn parses_empty_tool_arguments_as_empty_object() {
+    // Some compat backends send an empty arguments string for a zero-argument
+    // tool call; it must map to `{}`, not fail as malformed JSON.
+    let body = json!({
+        "id": "chatcmpl-noargs",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-empty",
+                            "type": "function",
+                            "function": { "name": "ping", "arguments": "" }
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }
+        ]
+    });
+
+    let response = parse_response(body).unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "ping");
+    assert_eq!(calls[0].arguments, json!({}));
+}
+
+#[tokio::test]
+async fn sse_stream_empty_tool_arguments_reconstruct_as_empty_object() {
+    // A streamed tool call whose only arguments fragment is empty. The merged
+    // call must carry `{}` rather than fail terminally.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-x\",\"function\":{\"name\":\"ping\",\"arguments\":\"\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "ping");
+    assert_eq!(calls[0].arguments, json!({}));
+}
+
+#[test]
 fn parse_response_errors_on_empty_choices() {
     let body = json!({ "id": "x", "choices": [] });
     let err = parse_response(body).unwrap_err();
     assert!(matches!(err, TinyAgentsError::Model(_)));
+}
+
+#[test]
+fn parse_error_body_classifies_retryability_by_http_status() {
+    // Regression test: retry used to see every provider failure flattened
+    // into `TinyAgentsError::Model(String)`, so it could not distinguish a
+    // retryable 429 from a non-retryable 401 and retried both. The status
+    // code alone must fully determine `ProviderError::retryable`.
+    let m = model();
+
+    let unauthorized = m.parse_error_body(
+        401,
+        r#"{"error":{"message":"Incorrect API key provided","type":"invalid_request_error","code":"invalid_api_key"}}"#,
+    );
+    assert_eq!(unauthorized.status, Some(401));
+    assert!(!unauthorized.retryable, "401 must not be retryable");
+
+    let rate_limited = m.parse_error_body(
+        429,
+        r#"{"error":{"message":"Rate limit reached","type":"requests","code":"rate_limit_exceeded"}}"#,
+    );
+    assert_eq!(rate_limited.status, Some(429));
+    assert!(rate_limited.retryable, "429 must be retryable");
+
+    let server_error = m.parse_error_body(500, r#"{"error":{"message":"internal error"}}"#);
+    assert!(server_error.retryable, "5xx must be retryable");
 }
 
 #[test]
@@ -443,7 +548,7 @@ async fn sse_stream_parses_text_tool_calls_and_usage() {
 
     let state = SseState {
         bytes: Box::pin(bytes),
-        buf: String::new(),
+        buf: Vec::new(),
         pending: std::collections::VecDeque::new(),
         acc: OpenAiStreamAcc::default(),
         provider: "openai".to_string(),
@@ -500,6 +605,47 @@ async fn sse_stream_parses_text_tool_calls_and_usage() {
 }
 
 #[tokio::test]
+async fn sse_stream_preserves_reasoning_content_as_side_channel() {
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think \"}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"reasoning\":\"carefully\"}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n"
+            .to_vec(),
+        b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":7,\"total_tokens\":12,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+
+    let reasoning: String = items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta.reasoning.clone()),
+            _ => None,
+        })
+        .collect();
+    let text: String = items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning, "think carefully");
+    assert_eq!(text, "answer");
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    assert_eq!(merged.reasoning(), "think carefully");
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "answer");
+    let usage = response.usage.unwrap();
+    assert_eq!(usage.reasoning_tokens, 4);
+}
+
+#[tokio::test]
 async fn sse_stream_invalid_tool_argument_json_fails_terminally() {
     use futures::StreamExt;
 
@@ -512,7 +658,7 @@ async fn sse_stream_invalid_tool_argument_json_fails_terminally() {
 
     let state = SseState {
         bytes: Box::pin(bytes),
-        buf: String::new(),
+        buf: Vec::new(),
         pending: std::collections::VecDeque::new(),
         acc: OpenAiStreamAcc::default(),
         provider: "openai".to_string(),
@@ -543,6 +689,313 @@ async fn sse_stream_invalid_tool_argument_json_fails_terminally() {
         .finish()
         .expect_err("provider failure must reach accumulator");
     assert!(err.to_string().contains("invalid_tool_arguments"));
+}
+
+/// Drives an SSE byte stream through the parser and returns every item.
+async fn collect_sse(raw: Vec<Vec<u8>>) -> Vec<ModelStreamItem> {
+    use futures::StreamExt;
+
+    let bytes = futures::stream::iter(raw.into_iter().map(Ok::<Vec<u8>, TinyAgentsError>));
+    let state = SseState {
+        bytes: Box::pin(bytes),
+        buf: Vec::new(),
+        pending: std::collections::VecDeque::new(),
+        acc: OpenAiStreamAcc::default(),
+        provider: "openai".to_string(),
+        model: "gpt-4.1-mini".to_string(),
+        started: false,
+        finished: false,
+        terminal_emitted: false,
+    };
+    futures::stream::unfold(state, sse_next).collect().await
+}
+
+#[tokio::test]
+async fn sse_stream_reassembles_multibyte_char_split_across_chunks() {
+    // A 4-byte emoji in the content payload, split down the middle across two
+    // network chunks. A lossy per-chunk decode would corrupt it into U+FFFD
+    // replacement characters; the byte buffer must reassemble it first.
+    let line = "data: {\"choices\":[{\"delta\":{\"content\":\"hi😀\"}}]}\n\n";
+    let bytes = line.as_bytes();
+    let split = line.find('😀').unwrap() + 2; // inside the 4-byte sequence
+    let raw: Vec<Vec<u8>> = vec![
+        bytes[..split].to_vec(),
+        bytes[split..].to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "hi😀");
+}
+
+#[tokio::test]
+async fn sse_stream_processes_many_lines_in_one_chunk() {
+    // A single network chunk carrying several complete `data:` lines exercises
+    // the batched multi-line drain: every line is parsed in order and the buffer
+    // is consumed exactly once. Each line contributes one content fragment.
+    let mut chunk = Vec::new();
+    for frag in ["a", "b", "c", "d", "e"] {
+        chunk.extend_from_slice(
+            format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{frag}\"}}}}]}}\n\n")
+                .as_bytes(),
+        );
+    }
+    let raw: Vec<Vec<u8>> = vec![chunk, b"data: [DONE]\n\n".to_vec()];
+
+    let items = collect_sse(raw).await;
+
+    let text: String = items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "abcde", "all five lines in one chunk parsed in order");
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    assert_eq!(merged.finish().unwrap().text(), "abcde");
+}
+
+#[tokio::test]
+async fn sse_stream_drains_final_line_without_trailing_newline() {
+    // The provider ends the stream with a final `data:` event that has no
+    // trailing newline and no `[DONE]` sentinel. The leftover buffer must be
+    // drained at EOF so the last fragment is not dropped.
+    let raw: Vec<Vec<u8>> =
+        vec![b"data: {\"choices\":[{\"delta\":{\"content\":\"tail\"}}]}".to_vec()];
+
+    let items = collect_sse(raw).await;
+
+    assert!(matches!(items.last(), Some(ModelStreamItem::Completed(_))));
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "tail");
+}
+
+#[tokio::test]
+async fn sse_stream_surfaces_mid_stream_error_payload() {
+    // The provider streams a text delta, then an `{"error": ...}` payload
+    // instead of a chunk. It must surface as a terminal ProviderFailed rather
+    // than be swallowed as an empty chunk.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n".to_vec(),
+        b"data: {\"error\":{\"message\":\"upstream exploded\",\"code\":\"server_error\"}}\n\n"
+            .to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+
+    let failed = items
+        .iter()
+        .find_map(|item| match item {
+            ModelStreamItem::ProviderFailed(error) => Some(error),
+            _ => None,
+        })
+        .expect("mid-stream error should emit ProviderFailed");
+    assert_eq!(failed.code.as_deref(), Some("server_error"));
+    assert!(failed.message.contains("upstream exploded"));
+    // No terminal Completed is emitted after the failure.
+    assert!(matches!(
+        items.last(),
+        Some(ModelStreamItem::ProviderFailed(_))
+    ));
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let err = merged
+        .finish()
+        .expect_err("stream error must reach accumulator");
+    assert!(err.to_string().contains("upstream exploded"));
+}
+
+#[tokio::test]
+async fn sse_stream_correlates_indexless_parallel_tool_calls_by_id() {
+    // A compat backend that omits `index` entirely and interleaves two parallel
+    // tool calls, correlating fragments only by `id`. Without id-based slotting
+    // both would collapse onto slot 0; the streamed delta ids must also match the
+    // final reconstructed call ids.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call-a\",\"function\":{\"name\":\"alpha\",\"arguments\":\"{\\\"x\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call-b\",\"function\":{\"name\":\"beta\",\"arguments\":\"{\\\"y\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call-a\",\"function\":{\"arguments\":\"1}\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call-b\",\"function\":{\"arguments\":\"2}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+
+    // Every streamed tool-call delta id must be a real call id, never a slot-0
+    // collapse.
+    let delta_ids: Vec<String> = items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::ToolCallDelta(delta) => Some(delta.call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(delta_ids.contains(&"call-a".to_string()));
+    assert!(delta_ids.contains(&"call-b".to_string()));
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "parallel calls must not collapse: {calls:?}"
+    );
+    assert_eq!(calls[0].id, "call-a");
+    assert_eq!(calls[0].name, "alpha");
+    assert_eq!(calls[0].arguments, json!({ "x": 1 }));
+    assert_eq!(calls[1].id, "call-b");
+    assert_eq!(calls[1].name, "beta");
+    assert_eq!(calls[1].arguments, json!({ "y": 2 }));
+}
+
+#[tokio::test]
+async fn sse_stream_indexless_fallback_ids_match_between_delta_and_final() {
+    // No `index` and no `id` at all (arguments-only continuation on the same
+    // slot). The synthetic fallback id streamed in the delta must equal the id on
+    // the final reconstructed call.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"solo\",\"arguments\":\"{\\\"n\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"7}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+
+    let delta_id = items
+        .iter()
+        .find_map(|item| match item {
+            ModelStreamItem::ToolCallDelta(delta) => Some(delta.call_id.clone()),
+            _ => None,
+        })
+        .expect("a tool-call delta is emitted");
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, delta_id, "delta id must match final call id");
+    assert_eq!(calls[0].name, "solo");
+    assert_eq!(calls[0].arguments, json!({ "n": 7 }));
+}
+
+#[test]
+fn user_image_blocks_render_as_content_parts() {
+    use crate::harness::message::{ContentBlock, ImageRef, UserMessage};
+
+    let request = ModelRequest::new(vec![Message::User(UserMessage {
+        content: vec![
+            ContentBlock::Text("What is in this image?".to_string()),
+            ContentBlock::Image(ImageRef {
+                url: "https://example.test/cat.png".to_string(),
+                mime_type: Some("image/png".to_string()),
+            }),
+        ],
+    })]);
+
+    let value = serde_json::to_value(model().translate_request(&request).unwrap()).unwrap();
+    let content = &value["messages"][0]["content"];
+
+    // Content is an array of parts, not a dropped/plain string.
+    assert!(content.is_array(), "expected content parts, got {content}");
+    assert_eq!(content[0]["type"], json!("text"));
+    assert_eq!(content[0]["text"], json!("What is in this image?"));
+    assert_eq!(content[1]["type"], json!("image_url"));
+    assert_eq!(
+        content[1]["image_url"]["url"],
+        json!("https://example.test/cat.png")
+    );
+}
+
+#[test]
+fn text_only_user_message_stays_a_plain_string() {
+    // The common text-only case keeps its historical plain-string wire shape.
+    let request = ModelRequest::new(vec![Message::user("hi")]);
+    let value = serde_json::to_value(model().translate_request(&request).unwrap()).unwrap();
+    assert_eq!(value["messages"][0]["content"], json!("hi"));
+}
+
+#[test]
+fn provider_extension_block_fails_closed_instead_of_dropping() {
+    use crate::harness::message::{ContentBlock, UserMessage};
+
+    let request = ModelRequest::new(vec![Message::User(UserMessage {
+        content: vec![ContentBlock::ProviderExtension(json!({ "opaque": true }))],
+    })]);
+
+    let error = model().translate_request(&request).unwrap_err();
+    assert!(matches!(error, TinyAgentsError::Validation(_)));
+    assert!(error.to_string().contains("provider-extension"));
+}
+
+#[test]
+fn routes_max_tokens_to_max_completion_tokens_for_o_series() {
+    // o-series reasoning models reject `max_tokens` and require
+    // `max_completion_tokens`.
+    let request = ModelRequest::new(vec![Message::user("hi")]).with_max_tokens(128);
+    let model = OpenAiModel::new("k").with_model("o3-mini");
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+
+    assert!(value.get("max_tokens").is_none());
+    assert_eq!(value["max_completion_tokens"], json!(128));
+}
+
+#[test]
+fn keeps_max_tokens_for_classic_models() {
+    let request = ModelRequest::new(vec![Message::user("hi")]).with_max_tokens(128);
+    let value = serde_json::to_value(model().translate_request(&request).unwrap()).unwrap();
+
+    assert_eq!(value["max_tokens"], json!(128));
+    assert!(value.get("max_completion_tokens").is_none());
+}
+
+#[test]
+fn request_timeout_prefers_explicit_override() {
+    // An explicit per-request timeout wins for both unary and streaming calls.
+    assert_eq!(
+        request_timeout(Some(1_500), false),
+        Some(Duration::from_millis(1_500))
+    );
+    assert_eq!(
+        request_timeout(Some(1_500), true),
+        Some(Duration::from_millis(1_500))
+    );
+}
+
+#[test]
+fn request_timeout_defaults_by_call_kind() {
+    // Unary calls fall back to a sane overall default; streaming calls get no
+    // overall cap so a long stream is not truncated.
+    assert_eq!(
+        request_timeout(None, false),
+        Some(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS))
+    );
+    assert_eq!(request_timeout(None, true), None);
 }
 
 #[test]

@@ -195,6 +195,87 @@ async fn emits_started_and_completed_events() {
 }
 
 #[tokio::test]
+async fn failing_hook_still_emits_balanced_completed_event() {
+    // A hook that returns `Err` must still close its `MiddlewareStarted` with a
+    // matching `MiddlewareCompleted`, so downstream observers never see a
+    // dangling, unbalanced `Started`.
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(FailingMiddleware));
+
+    let recorder = Arc::new(RecordingListener::new());
+    let mut c = ctx();
+    c.events.subscribe(recorder.clone());
+
+    let mut request = ModelRequest::default();
+    let result = stack.run_before_model(&mut c, &(), &mut request).await;
+    assert!(matches!(result, Err(TinyAgentsError::Middleware(_))));
+
+    let brackets: Vec<AgentEvent> = recorder
+        .events()
+        .into_iter()
+        .map(|r| r.event)
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::MiddlewareStarted { .. } | AgentEvent::MiddlewareCompleted { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        brackets,
+        vec![
+            AgentEvent::MiddlewareStarted {
+                name: "failing".to_string()
+            },
+            AgentEvent::MiddlewareCompleted {
+                name: "failing".to_string()
+            },
+        ],
+        "a failing hook must emit a balanced Started/Completed pair"
+    );
+}
+
+#[tokio::test]
+async fn on_model_delta_hook_emits_no_bracketing_events() {
+    // The per-delta hook runs on the streaming hot path, so it must NOT emit
+    // `MiddlewareStarted`/`MiddlewareCompleted` events the way the other stack
+    // runners do — those two events per middleware per token dominated the
+    // stream loop for no observability value.
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(LoggingMiddleware::new()));
+
+    let recorder = Arc::new(RecordingListener::new());
+    let mut c = ctx();
+    c.events.subscribe(recorder.clone());
+
+    let mut delta = ModelDelta {
+        call_id: "call-1".to_string(),
+        content: "tok".to_string(),
+        reasoning: String::new(),
+        tool_call: None,
+    };
+    stack
+        .run_on_model_delta(&mut c, &(), &mut delta)
+        .await
+        .unwrap();
+
+    let bracketing = recorder
+        .events()
+        .into_iter()
+        .filter(|r| {
+            matches!(
+                r.event,
+                AgentEvent::MiddlewareStarted { .. } | AgentEvent::MiddlewareCompleted { .. }
+            )
+        })
+        .count();
+    assert_eq!(
+        bracketing, 0,
+        "the delta hook must not bracket middleware with events"
+    );
+}
+
+#[tokio::test]
 async fn message_trim_middleware_shrinks_request() {
     let mw = MessageTrimMiddleware::new(TrimStrategy::KeepLast(1));
     let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
@@ -314,6 +395,92 @@ async fn context_compression_compresses_at_or_above_threshold() {
     assert_eq!(compressed.len(), 1);
     assert!(compressed[0].0 > 0);
     assert!(compressed[0].1 > 0);
+}
+
+#[tokio::test]
+async fn context_compression_records_are_bounded_by_max_records() {
+    // A long-running loop that compresses repeatedly must not grow the
+    // recorder without bound; cap it and confirm eviction happens.
+    let policy = SummarizationPolicy {
+        keep_last: 1,
+        ..SummarizationPolicy::default()
+    }
+    .with_context_window(100)
+    .with_threshold_fraction(0.5);
+    let mw = Arc::new(ContextCompressionMiddleware::new(policy).with_max_records(2));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw.clone());
+
+    let big = "a".repeat(200);
+    let mut c = ctx();
+    for _ in 0..10 {
+        let mut request = ModelRequest {
+            messages: vec![
+                user(&format!("{big}-1")),
+                user(&format!("{big}-2")),
+                user(&format!("{big}-3")),
+            ],
+            ..Default::default()
+        };
+        stack
+            .run_before_model(&mut c, &(), &mut request)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(mw.records().len(), 2);
+}
+
+#[tokio::test]
+async fn context_compression_keeps_system_prompt_before_summary() {
+    // A leading system prompt carries persistent instructions and anchors the
+    // cacheable prefix; the summary of elided older turns must be inserted
+    // *after* it, never at position 0.
+    let policy = SummarizationPolicy {
+        keep_last: 1,
+        ..SummarizationPolicy::default()
+    }
+    .with_context_window(100)
+    .with_threshold_fraction(0.5);
+    let mw = Arc::new(ContextCompressionMiddleware::new(policy));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw.clone());
+
+    let mut c = ctx();
+    let big = "a".repeat(200);
+    let system_prompt = "You are a helpful assistant. Always follow these rules.";
+    let mut request = ModelRequest {
+        messages: vec![
+            Message::system(system_prompt),
+            user(&format!("{big}-1")),
+            user(&format!("{big}-2")),
+            user(&format!("{big}-3")),
+        ],
+        ..Default::default()
+    };
+    stack
+        .run_before_model(&mut c, &(), &mut request)
+        .await
+        .unwrap();
+
+    // Result is [real system prompt, summary, kept recent turn].
+    assert_eq!(request.messages.len(), 3);
+    assert!(matches!(request.messages[0], Message::System(_)));
+    assert_eq!(
+        request.messages[0].text(),
+        system_prompt,
+        "the real system prompt must stay at position 0"
+    );
+    assert!(
+        matches!(request.messages[1], Message::System(_)),
+        "the summary follows the system prompt"
+    );
+    assert_ne!(
+        request.messages[1].text(),
+        system_prompt,
+        "position 1 is the summary, not a duplicated system prompt"
+    );
+    assert_eq!(request.messages[2].text(), format!("{big}-3"));
 }
 
 #[tokio::test]
@@ -552,6 +719,26 @@ async fn prompt_cache_guard_detects_prefix_change() {
     assert!(events[0].changed_prefix);
     assert_eq!(events[0].segment_ids_before, vec!["sys".to_string()]);
     assert_eq!(events[0].segment_ids_after, vec!["sys2".to_string()]);
+}
+
+#[tokio::test]
+async fn prompt_cache_guard_events_are_bounded_by_max_events() {
+    let mw = Arc::new(PromptCacheGuardMiddleware::new().with_max_events(2));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw.clone());
+
+    let mut c = ctx();
+    // Each call after the first changes the stable prefix, producing an
+    // event; run far more iterations than the cap and confirm eviction.
+    for i in 0..10 {
+        let mut req = ModelRequest {
+            cache_segments: vec![segment(&format!("sys{i}"), SegmentRole::System, true)],
+            ..Default::default()
+        };
+        stack.run_before_model(&mut c, &(), &mut req).await.unwrap();
+    }
+
+    assert_eq!(mw.layout_events().len(), 2);
 }
 
 // ── wrap middleware: model ────────────────────────────────────────────────────

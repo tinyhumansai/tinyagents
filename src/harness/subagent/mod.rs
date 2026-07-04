@@ -149,10 +149,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
         max_turn_output_tokens: Option<u32>,
     ) -> Result<RunConfig> {
         let max_depth = self.harness.policy().limits.max_depth;
-        let child_depth = parent_depth + 1;
-        if child_depth > max_depth {
-            return Err(TinyAgentsError::SubAgentDepth(max_depth));
-        }
+        let child_depth = RunConfig::checked_child_depth(parent_depth, max_depth)?;
         let child_run_id = format!("{}-d{child_depth}", self.name);
         let mut config = RunConfig::new(child_run_id.clone())
             .with_depth(child_depth)
@@ -333,10 +330,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgentSession<State, Ctx> {
     /// cap exactly as [`SubAgent::invoke`] does.
     fn child_config(&self) -> Result<RunConfig> {
         let max_depth = self.subagent.harness.policy().limits.max_depth;
-        let child_depth = self.parent_depth + 1;
-        if child_depth > max_depth {
-            return Err(TinyAgentsError::SubAgentDepth(max_depth));
-        }
+        let child_depth = RunConfig::checked_child_depth(self.parent_depth, max_depth)?;
         Ok(RunConfig::new(format!(
             "{}-t{}-d{child_depth}",
             self.subagent.name, self.turn
@@ -557,11 +551,26 @@ where
     ) -> Result<ToolResult> {
         let input = Self::extract_input(&call.arguments);
         let call_id = call.id;
-        let config = self.subagent.child_config(
+        // Route a depth-limit rejection through the same limit-to-tool-error
+        // conversion as a failure from `run_child` below, rather than letting
+        // it propagate raw and abort the whole parent run: a sub-agent that
+        // is simply too deep is a delegated-agent limit signal the parent
+        // orchestrator should see as a tool result, not a fatal error.
+        let config = match self.subagent.child_config(
             context.depth,
             context.thread_id.as_ref(),
             context.max_turn_output_tokens,
-        )?;
+        ) {
+            Ok(config) => config,
+            Err(error) => {
+                if let Some(result) =
+                    Self::limit_result_for_parent(call_id, &self.tool_name, &error)
+                {
+                    return Ok(result);
+                }
+                return Err(error);
+            }
+        };
         let ctx = RunContext::new(config, Ctx::default()).with_events(context.events);
         let run = match self.subagent.run_child(state, ctx, input).await {
             Ok(run) => run,

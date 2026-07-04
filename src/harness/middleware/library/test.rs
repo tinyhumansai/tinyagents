@@ -114,6 +114,50 @@ async fn retry_middleware_retries_then_succeeds() {
     assert_eq!(scheduled, 2);
 }
 
+#[tokio::test(start_paused = true)]
+async fn retry_middleware_sleeps_the_documented_backoff_schedule() {
+    // Regression test: the middleware used to compute the backoff from the
+    // *post-increment* attempt number, so the first retry's sleep skipped
+    // `initial_backoff_ms` entirely and the whole exponential schedule was
+    // shifted one step higher than `RetryPolicy::backoff_for_attempt`
+    // documents. With `initial_backoff_ms = 100`, `multiplier = 2.0`, no
+    // jitter: attempt 0 -> 100ms, attempt 1 -> 200ms.
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_model_middleware(Arc::new(RetryMiddleware::new(
+        RetryPolicy::default()
+            .with_max_attempts(3)
+            .with_initial_backoff_ms(100)
+            .with_multiplier(2.0)
+            .with_jitter(false)
+            .with_backoff_sleep(true),
+    )));
+
+    let timestamps = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = timestamps.clone();
+    let base = FakeModelBase::new(move |_n, _req| {
+        recorded.lock().unwrap().push(tokio::time::Instant::now());
+        Err(TinyAgentsError::Model("transient".to_string()))
+    });
+
+    stack
+        .run_wrapped_model(&mut ctx, &(), ModelRequest::default(), &base)
+        .await
+        .expect_err("all 3 attempts fail");
+
+    let timestamps = timestamps.lock().unwrap().clone();
+    assert_eq!(timestamps.len(), 3, "expected exactly max_attempts calls");
+    let gaps: Vec<Duration> = timestamps
+        .windows(2)
+        .map(|w| w[1].duration_since(w[0]))
+        .collect();
+    assert_eq!(
+        gaps,
+        vec![Duration::from_millis(100), Duration::from_millis(200)],
+        "backoff schedule does not match RetryPolicy::backoff_for_attempt"
+    );
+}
+
 #[tokio::test]
 async fn retry_middleware_does_not_retry_non_retryable() {
     let (mut ctx, _recorder) = ctx_with_recorder();
@@ -214,6 +258,32 @@ async fn model_fallback_switches_model_on_error() {
             ("backup-a".to_string(), "backup-b".to_string()),
         ]
     );
+}
+
+#[tokio::test]
+async fn model_fallback_does_not_switch_on_non_retryable() {
+    let (mut ctx, recorder) = ctx_with_recorder();
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_model_middleware(Arc::new(ModelFallbackMiddleware::new([
+        "backup-a", "backup-b",
+    ])));
+
+    // A non-retryable error (validation) will fail identically on every model,
+    // so the middleware must not burn quota switching backends.
+    let base =
+        FakeModelBase::new(|_n, _req| Err(TinyAgentsError::Validation("bad input".to_string())));
+    let err = stack
+        .run_wrapped_model(&mut ctx, &(), ModelRequest::default(), &base)
+        .await
+        .expect_err("validation errors are not retryable");
+    assert!(matches!(err, TinyAgentsError::Validation(_)));
+    // Only the primary call happens; no fallback attempts.
+    assert_eq!(base.calls(), 1);
+    let selections = events(&recorder)
+        .into_iter()
+        .filter(|e| matches!(e, AgentEvent::FallbackSelected { .. }))
+        .count();
+    assert_eq!(selections, 0);
 }
 
 #[tokio::test]
@@ -597,6 +667,161 @@ async fn budget_preflight_reserves_and_reconciles() {
     assert!(evs.iter().any(
         |e| matches!(e, AgentEvent::BudgetReconciled { actual_input_tokens, .. } if *actual_input_tokens == 1)
     ));
+}
+
+#[tokio::test]
+async fn reservation_is_released_even_when_response_carries_no_usage() {
+    // A call whose response never reports `usage` (provider error, dropped
+    // stream, etc.) must still release its preflight reservation in
+    // `after_model` — otherwise the reservation leaks forever and
+    // permanently starves later calls on this (or a shared) tracker.
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let mw = BudgetMiddleware::new(BudgetLimits {
+        max_input_tokens: Some(5),
+        ..BudgetLimits::default()
+    });
+    let tracker = mw.tracker();
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    let mut req = ModelRequest::new(vec![Message::user("hi")]);
+    stack
+        .run_before_model(&mut ctx, &(), &mut req)
+        .await
+        .expect("small call fits the reservation");
+    assert!(tracker.snapshot().reserved_input_total > 0);
+
+    let mut resp = ModelResponse::assistant("ok"); // usage: None
+    stack
+        .run_after_model(&mut ctx, &(), &mut resp)
+        .await
+        .unwrap();
+    assert_eq!(tracker.snapshot().reserved_input_total, 0);
+}
+
+#[tokio::test]
+async fn reservation_is_released_when_model_call_errors() {
+    // A model call that ultimately errors (retries/fallback exhausted, hard
+    // provider error, timeout, ...) never reaches `after_model` — the wrap
+    // onion returns `Err` and the harness propagates it with `?` before the
+    // lifecycle `after_model` hook runs. The reservation `before_model` added
+    // must still be released (via `on_error`), or it leaks forever and
+    // permanently starves every later call on a shared tracker.
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let mw = BudgetMiddleware::new(BudgetLimits {
+        max_input_tokens: Some(5),
+        ..BudgetLimits::default()
+    });
+    let tracker = mw.tracker();
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(mw));
+
+    let mut req = ModelRequest::new(vec![Message::user("hi")]);
+    stack
+        .run_before_model(&mut ctx, &(), &mut req)
+        .await
+        .expect("small call fits the reservation");
+    assert!(tracker.snapshot().reserved_input_total > 0);
+
+    // Simulate the model call failing before `after_model` ever runs: the
+    // harness surfaces the failure to every middleware via `on_error`
+    // instead.
+    let error = TinyAgentsError::Model("provider down".to_string());
+    stack.run_on_error(&mut ctx, &error).await.unwrap();
+
+    assert_eq!(tracker.snapshot().reserved_input_total, 0);
+
+    // The tracker must have recovered: a fresh call reserving the same
+    // amount should not be rejected as if capacity were still consumed.
+    let mut req2 = ModelRequest::new(vec![Message::user("hi")]);
+    stack
+        .run_before_model(&mut ctx, &(), &mut req2)
+        .await
+        .expect("reservation was released so a new call fits the budget again");
+}
+
+#[test]
+fn poisoned_tracker_stays_fail_closed() {
+    // A poisoned mutex still holds a valid last-written spend value; a
+    // `snapshot()` that defaulted to zero on poison would make every
+    // subsequent budget check see an empty budget and admit calls forever
+    // (fail-open). Recovering the poisoned guard must keep the previously
+    // accumulated spend intact.
+    use crate::harness::cost::CostTotals;
+    use crate::harness::usage::Usage;
+
+    let tracker = BudgetTracker::new();
+    tracker.record(Usage::new(100, 100), CostTotals::default());
+    assert!(!tracker.inner.is_poisoned());
+
+    let poison_tracker = tracker.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = poison_tracker.inner.lock().unwrap();
+        panic!("simulated panic while holding the tracker lock");
+    })
+    .join();
+    assert!(tracker.inner.is_poisoned());
+
+    // The accumulated spend from before the panic must still be visible,
+    // not silently reset to zero.
+    let spend = tracker.snapshot();
+    assert_eq!(spend.usage.usage.input_tokens, 100);
+    assert_eq!(spend.usage.usage.output_tokens, 100);
+
+    let limits = BudgetLimits {
+        max_total_tokens: Some(200),
+        ..BudgetLimits::default()
+    };
+    assert!(limits.exceeded_reason(&spend).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn shared_tracker_reservation_is_atomic_under_concurrency() {
+    // N concurrent "runs" (their own `BudgetMiddleware`, sharing one
+    // `BudgetTracker` — the documented sub-agent pattern) all reserve the
+    // same input-token estimate at once. A racy check-then-act preflight
+    // would let every one of them observe spare capacity and reserve past
+    // it; an atomic check-and-reserve admits only as many as the budget
+    // actually allows.
+    use crate::harness::middleware::Middleware;
+
+    let tracker = BudgetTracker::new();
+    let per_call_tokens = 10u64; // "x" * 40 chars / 4 == 10 estimated tokens.
+    let concurrent_capacity = 4u64;
+    let attempts = 10usize;
+    let limits = BudgetLimits {
+        max_input_tokens: Some(per_call_tokens * concurrent_capacity),
+        ..BudgetLimits::default()
+    };
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(attempts));
+    let mut handles = Vec::new();
+    for _ in 0..attempts {
+        let mw = BudgetMiddleware::new(limits).with_tracker(tracker.clone());
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            let mut ctx: RunContext = RunContext::new(RunConfig::new("test-run"), ());
+            let mut request = ModelRequest::new(vec![Message::user("x".repeat(40))]);
+            barrier.wait().await;
+            mw.before_model(&mut ctx, &(), &mut request).await
+        }));
+    }
+
+    let mut ok_count = 0usize;
+    for handle in handles {
+        if handle.await.unwrap().is_ok() {
+            ok_count += 1;
+        }
+    }
+
+    // Exactly the number of reservations the budget can hold succeed; the
+    // rest are rejected before dispatch. A racy implementation would let
+    // more than `concurrent_capacity` through.
+    assert_eq!(ok_count, concurrent_capacity as usize);
+    assert_eq!(
+        tracker.snapshot().reserved_input_total,
+        per_call_tokens * concurrent_capacity
+    );
 }
 
 // ── ToolAllowlistMiddleware ─────────────────────────────────────────────────
@@ -1019,4 +1244,36 @@ async fn tracing_records_phase_boundaries_and_counts() {
     assert_eq!(records.first().unwrap().boundary, TraceBoundary::Begin);
     assert_eq!(records.last().unwrap().phase, "agent");
     assert_eq!(records.last().unwrap().boundary, TraceBoundary::End);
+}
+
+#[tokio::test]
+async fn tracing_records_are_bounded_by_max_records() {
+    let (mut ctx, _recorder) = ctx_with_recorder();
+    let tracing = Arc::new(TracingMiddleware::new().with_max_records(3));
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(tracing.clone());
+
+    // Each `before_agent`/`after_agent` pair pushes 2 records; run enough
+    // iterations to far exceed the cap of 3 and confirm memory stays bounded
+    // rather than growing without limit.
+    for _ in 0..50 {
+        stack.run_before_agent(&mut ctx, &()).await.unwrap();
+        let mut run = crate::harness::middleware::AgentRun::new();
+        stack
+            .run_after_agent(&mut ctx, &(), &mut run)
+            .await
+            .unwrap();
+    }
+
+    let records = tracing.records();
+    assert_eq!(records.len(), 3);
+    // The oldest entries were evicted; only the most recent boundary pair
+    // (plus one) survives.
+    assert_eq!(records.last().unwrap().phase, "agent");
+    assert_eq!(records.last().unwrap().boundary, TraceBoundary::End);
+
+    // Counts are unaffected by the record cap — they track unboundedly by
+    // design (a single `usize` per phase, not a growing collection).
+    let counts = tracing.counts();
+    assert_eq!(counts.agent, 50);
 }

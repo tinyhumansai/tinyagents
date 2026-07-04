@@ -21,6 +21,21 @@ fn descriptor_allows_paths_under_root_and_trusted_roots() {
     assert_eq!(ws.policy_id, "run-1");
 }
 
+#[test]
+fn relative_root_rejects_leading_parent_sibling_escape() {
+    // Relative root: a candidate that walks up past the root and re-descends
+    // into a same-named sibling must be rejected, not admitted by a leading
+    // `..` collapsing back onto the root name.
+    let ws = WorkspaceDescriptor::new("ws");
+
+    assert!(ws.allows(Path::new("ws/src/main.rs")));
+    // `ws/../../ws/secret` resolves outside the anchored `ws` root.
+    assert!(!ws.allows(Path::new("ws/../../ws/secret")));
+    // A bare leading `..` escape is rejected.
+    assert!(!ws.allows(Path::new("../ws/secret")));
+    assert!(!ws.allows(Path::new("../evil")));
+}
+
 #[tokio::test]
 async fn shared_root_workspace_prepares_and_cleans_up() {
     let provider = SharedRootWorkspace::new("/work").with_sandbox(SandboxMode::Disabled);
