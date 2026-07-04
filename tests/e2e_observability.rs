@@ -270,9 +270,11 @@ async fn harness_run_with_capture_exports_generation_and_tool_io() {
         "all done"
     );
 
+    // Tool observations are exported as `span-create` (a valid Langfuse
+    // ingestion type); `tool-create` is rejected by older/self-hosted Langfuse.
     let tool = events
         .iter()
-        .find(|e| e["type"] == "tool-create")
+        .find(|e| e["type"] == "span-create")
         .expect("a tool observation");
     assert_eq!(tool["body"]["input"]["q"], "weather");
     assert_eq!(tool["body"]["output"], "tool-output");
