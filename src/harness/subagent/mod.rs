@@ -150,12 +150,15 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
     ) -> Result<RunConfig> {
         let max_depth = self.harness.policy().limits.max_depth;
         let child_depth = RunConfig::checked_child_depth(parent_depth, max_depth)?;
-        let child_run_id = format!("{}-d{child_depth}", self.name);
+        // Suffix a process-unique sequence so each invocation gets its own run
+        // id: a bare `{name}-d{depth}` was reused across invocations, which
+        // interleaved journals and status stores keyed by run id. The prefix
+        // stays stable and readable for log grepping.
+        let child_run_id = format!("{}-d{child_depth}-{}", self.name, next_seq());
         let mut config = RunConfig::new(child_run_id.clone())
             .with_depth(child_depth)
             .with_max_depth(max_depth);
-        config.thread_id =
-            thread_id.map(|parent| child_thread_id(parent, &child_run_id, next_seq()));
+        config.thread_id = thread_id.map(|parent| child_thread_id(parent, &child_run_id));
         config.max_turn_output_tokens = max_turn_output_tokens;
         Ok(config)
     }
@@ -258,11 +261,11 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
     }
 }
 
-fn child_thread_id(parent: &ThreadId, child_run_id: &str, sequence: u64) -> ThreadId {
-    ThreadId::new(format!(
-        "{}-subagent-{child_run_id}-{sequence}",
-        parent.as_str()
-    ))
+/// Derives an isolated child thread id from the parent thread and the child's
+/// run id. The run id already carries a process-unique sequence, so the thread
+/// id inherits its uniqueness.
+fn child_thread_id(parent: &ThreadId, child_run_id: &str) -> ThreadId {
+    ThreadId::new(format!("{}-subagent-{child_run_id}", parent.as_str()))
 }
 
 impl<State: Send + Sync, Ctx: Send + Sync> SubAgentSession<State, Ctx> {
@@ -331,9 +334,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgentSession<State, Ctx> {
     fn child_config(&self) -> Result<RunConfig> {
         let max_depth = self.subagent.harness.policy().limits.max_depth;
         let child_depth = RunConfig::checked_child_depth(self.parent_depth, max_depth)?;
+        // As in `SubAgent::child_config`, suffix a process-unique sequence so
+        // two sessions reusing the same sub-agent never share run ids for the
+        // same turn number.
         Ok(RunConfig::new(format!(
-            "{}-t{}-d{child_depth}",
-            self.subagent.name, self.turn
+            "{}-t{}-d{child_depth}-{}",
+            self.subagent.name,
+            self.turn,
+            next_seq()
         ))
         .with_depth(child_depth)
         .with_max_depth(max_depth))

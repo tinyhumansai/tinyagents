@@ -408,6 +408,93 @@ async fn invoke_in_parent_derives_unique_child_thread_ids() {
     }
 }
 
+/// Each invocation must mint a unique child run id (readable
+/// `{name}-d{depth}-{seq}`): a reused `{name}-d{depth}` interleaved journals
+/// and status stores keyed by run id across invocations.
+#[tokio::test]
+async fn repeated_invocations_mint_unique_child_run_ids() {
+    let subagent = SubAgent::new(
+        "observed",
+        "an observed agent",
+        Arc::new(child_harness("done")),
+    );
+
+    let sink = EventSink::new();
+    let recorder = Arc::new(RecordingListener::new());
+    sink.subscribe(recorder.clone());
+
+    subagent
+        .invoke_with_events(&(), (), 0, "first", &sink)
+        .await
+        .expect("first child run succeeds");
+    subagent
+        .invoke_with_events(&(), (), 0, "second", &sink)
+        .await
+        .expect("second child run succeeds");
+
+    let run_ids: Vec<String> = recorder
+        .events()
+        .into_iter()
+        .filter_map(|record| match record.event {
+            AgentEvent::RunStarted { run_id, .. } => Some(run_id.to_string()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(run_ids.len(), 2);
+    assert_ne!(
+        run_ids[0], run_ids[1],
+        "each invocation must get its own run id"
+    );
+    for run_id in run_ids {
+        assert!(
+            run_id.starts_with("observed-d1-"),
+            "run id keeps the readable name/depth prefix: {run_id}"
+        );
+    }
+}
+
+/// Two sessions reusing the same sub-agent must not share run ids for the same
+/// turn number.
+#[tokio::test]
+async fn parallel_sessions_mint_unique_run_ids_per_turn() {
+    let subagent = Arc::new(SubAgent::new(
+        "sess",
+        "a session agent",
+        Arc::new(child_harness("done")),
+    ));
+
+    let mut run_ids = Vec::new();
+    for _ in 0..2 {
+        let sink = EventSink::new();
+        let recorder = Arc::new(RecordingListener::new());
+        sink.subscribe(recorder.clone());
+        let mut session = SubAgentSession::new(subagent.clone()).with_events(sink);
+        session
+            .send(&(), (), vec![Message::user("hello")])
+            .await
+            .expect("send succeeds");
+        run_ids.extend(
+            recorder
+                .events()
+                .into_iter()
+                .filter_map(|record| match record.event {
+                    AgentEvent::RunStarted { run_id, .. } => Some(run_id.to_string()),
+                    _ => None,
+                }),
+        );
+    }
+
+    assert_eq!(run_ids.len(), 2);
+    assert_ne!(
+        run_ids[0], run_ids[1],
+        "turn 0 of two sessions must not share a run id"
+    );
+    for run_id in run_ids {
+        assert!(run_id.starts_with("sess-t0-d1-"), "run id: {run_id}");
+    }
+}
+
 #[tokio::test]
 async fn session_reuses_subagent_and_carries_context_across_sends() {
     // A scripted child model that records every request it receives, so we can
