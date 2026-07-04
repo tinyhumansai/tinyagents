@@ -190,16 +190,25 @@ pub(crate) type AppendEntry = (u64, Value);
 ///
 /// # Concurrency
 /// Operations use blocking [`std::fs`] (no async-fs dependency is pulled in for
-/// this local backend). Each call opens the file, performs its read or append,
-/// and closes it; appends are done with `OpenOptions::append`, which is atomic
-/// per line on POSIX for small writes, but no advisory lock is held. For
-/// high-concurrency writers, funnel appends through a single writer task or
-/// prefer a future server backend. The blocking calls are short-lived; callers
-/// inside an async runtime accept that they briefly block the worker thread.
-#[derive(Clone, Debug)]
+/// this local backend), but `append` runs that I/O on a blocking thread
+/// (`spawn_blocking`) when a tokio runtime is present so it never stalls an
+/// async worker. Appends use `OpenOptions::append`, which is atomic per line on
+/// POSIX for small writes, but no advisory lock is held. To avoid re-parsing the
+/// whole file on every append, each store instance caches the next offset per
+/// stream (see [`Self::offsets`]); this assumes a single writing process per
+/// directory. For multiple concurrent writers, funnel appends through one store
+/// instance (its offset guard serialises them) or prefer a server backend.
+#[derive(Clone, Debug, Default)]
 pub struct JsonlAppendStore {
     /// The root directory under which `<stream>.jsonl` files live.
     pub(crate) root_dir: PathBuf,
+    /// Per-stream cache of the *next* offset to write, so an append does not
+    /// have to re-read and re-parse the whole file to learn its length (which
+    /// made appends O(n²) per stream). Initialised lazily from disk on the
+    /// first append for a stream and incremented in memory thereafter; the
+    /// guard is held across the write so concurrent appends to the same store
+    /// instance stay correctly ordered. Clones share the same cache.
+    pub(crate) offsets: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 // ── StoreRegistry ────────────────────────────────────────────────────────────

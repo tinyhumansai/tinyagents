@@ -37,6 +37,10 @@ pub use types::*;
 
 use crate::error::{Result, TinyAgentsError};
 
+/// Process-wide counter making [`FileStore`] temp-file names unique so
+/// concurrent atomic writes to the same key never collide on their scratch file.
+static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 // ── InMemoryStore ─────────────────────────────────────────────────────────────
 
 impl InMemoryStore {
@@ -164,8 +168,25 @@ impl Store for FileStore {
             .map_err(|e| TinyAgentsError::Validation(format!("store mkdir error: {e}")))?;
         let path = dir.join(format!("{key}.json"));
         let bytes = serde_json::to_vec_pretty(&value)?;
-        fs::write(&path, &bytes)
+        // Write to a uniquely named temp file in the same directory, then rename
+        // over the destination. Rename is atomic on POSIX/Windows for same-dir
+        // paths, so a reader never observes a partially written file and a crash
+        // mid-write leaves the previous value intact (as the type docs promise).
+        let tmp = dir.join(format!(
+            "{key}.json.tmp.{}.{}",
+            std::process::id(),
+            TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::write(&tmp, &bytes)
             .map_err(|e| TinyAgentsError::Validation(format!("store write error: {e}")))?;
+        if let Err(e) = fs::rename(&tmp, &path) {
+            // Best-effort cleanup of the temp file so a failed rename does not
+            // leak partial files into the namespace directory.
+            let _ = fs::remove_file(&tmp);
+            return Err(TinyAgentsError::Validation(format!(
+                "store rename error: {e}"
+            )));
+        }
         Ok(())
     }
 
@@ -259,6 +280,7 @@ impl JsonlAppendStore {
     pub fn new(root_dir: impl Into<std::path::PathBuf>) -> Self {
         Self {
             root_dir: root_dir.into(),
+            offsets: Default::default(),
         }
     }
 
@@ -291,26 +313,58 @@ impl JsonlAppendStore {
 impl AppendStore for JsonlAppendStore {
     async fn append(&self, stream: &str, value: Value) -> Result<u64> {
         let path = self.stream_path(stream)?;
-        fs::create_dir_all(&self.root_dir)
-            .map_err(|e| TinyAgentsError::Validation(format!("append store mkdir error: {e}")))?;
-        // The offset is the count of existing lines; re-read to stay correct
-        // across separate store instances on the same directory.
-        let offset = Self::read_records(&path)?.len() as u64;
-        let record = StoreRecord {
-            offset,
-            value,
-            created_at_ms: now_ms(),
+        let root_dir = self.root_dir.clone();
+        let offsets = Arc::clone(&self.offsets);
+        let stream = stream.to_string();
+
+        // The append is pure blocking file I/O. Run it off the async runtime so
+        // it never stalls a tokio worker (`spawn_blocking` when a runtime is
+        // present, inline otherwise — e.g. a synchronous sink draining outside a
+        // runtime). The offset cache means we only read the file once per stream
+        // instead of re-parsing the whole file on every append (previously
+        // O(n²) per stream).
+        let work = move || -> Result<u64> {
+            fs::create_dir_all(&root_dir).map_err(|e| {
+                TinyAgentsError::Validation(format!("append store mkdir error: {e}"))
+            })?;
+            // Hold the offset guard across the write so concurrent appends to the
+            // same store instance get distinct, ordered offsets.
+            let mut cache = offsets.lock().map_err(|e| {
+                TinyAgentsError::Validation(format!("append store lock poisoned: {e}"))
+            })?;
+            let offset = match cache.get(&stream) {
+                Some(&next) => next,
+                // First append for this stream in this instance: learn the length
+                // from disk once, then track it in memory.
+                None => Self::read_records(&path)?.len() as u64,
+            };
+            let record = StoreRecord {
+                offset,
+                value,
+                created_at_ms: now_ms(),
+            };
+            let mut line = serde_json::to_string(&record)?;
+            line.push('\n');
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| {
+                    TinyAgentsError::Validation(format!("append store open error: {e}"))
+                })?;
+            std::io::Write::write_all(&mut file, line.as_bytes()).map_err(|e| {
+                TinyAgentsError::Validation(format!("append store write error: {e}"))
+            })?;
+            cache.insert(stream, offset + 1);
+            Ok(offset)
         };
-        let mut line = serde_json::to_string(&record)?;
-        line.push('\n');
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| TinyAgentsError::Validation(format!("append store open error: {e}")))?;
-        std::io::Write::write_all(&mut file, line.as_bytes())
-            .map_err(|e| TinyAgentsError::Validation(format!("append store write error: {e}")))?;
-        Ok(offset)
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle.spawn_blocking(work).await.map_err(|e| {
+                TinyAgentsError::Validation(format!("append store task error: {e}"))
+            })?,
+            Err(_) => work(),
+        }
     }
 
     async fn read_from(&self, stream: &str, offset: u64) -> Result<Vec<(u64, Value)>> {

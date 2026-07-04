@@ -302,6 +302,61 @@ async fn jsonl_round_trips_across_two_store_instances() {
 }
 
 #[tokio::test]
+async fn jsonl_append_offsets_stay_correct_under_many_appends() {
+    // Exercise the cached-offset path: after the first append learns the length
+    // from disk, later appends must keep incrementing without re-reading, and
+    // every record must be readable back in order.
+    let dir = TempDir::new("jsonl-many");
+    let store = JsonlAppendStore::new(&dir.0);
+
+    for n in 0..50u64 {
+        let offset = store.append("evts", json!({ "n": n })).await.unwrap();
+        assert_eq!(offset, n, "append offsets must be dense and monotonic");
+    }
+    assert_eq!(store.len("evts").await.unwrap(), 50);
+
+    let all = store.read_from("evts", 0).await.unwrap();
+    assert_eq!(all.len(), 50);
+    for (i, (offset, value)) in all.iter().enumerate() {
+        assert_eq!(*offset, i as u64);
+        assert_eq!(value, &json!({ "n": i as u64 }));
+    }
+}
+
+#[tokio::test]
+async fn file_store_put_is_atomic_and_leaves_no_temp_files() {
+    let dir = TempDir::new("atomic");
+    let store = FileStore::new(&dir.0);
+
+    // Overwrite the same key repeatedly; the final read must be a complete,
+    // well-formed value and no scratch (`.tmp`) files may be left behind.
+    for n in 0..5 {
+        store
+            .put(
+                "ns",
+                "key",
+                json!({ "value": n, "payload": "x".repeat(1024) }),
+            )
+            .await
+            .unwrap();
+    }
+
+    let got = store.get("ns", "key").await.unwrap().unwrap();
+    assert_eq!(got["value"], json!(4));
+    assert_eq!(store.list("ns").await.unwrap(), vec!["key".to_string()]);
+
+    let leftover: Vec<_> = std::fs::read_dir(dir.0.join("ns"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".tmp"))
+        .collect();
+    assert!(
+        leftover.is_empty(),
+        "atomic put must not leave temp files: {leftover:?}"
+    );
+}
+
+#[tokio::test]
 async fn jsonl_rejects_unsafe_stream_names() {
     let dir = TempDir::new("jsonl-sanitize");
     let store = JsonlAppendStore::new(&dir.0);
