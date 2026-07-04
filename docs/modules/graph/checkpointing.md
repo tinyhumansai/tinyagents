@@ -225,10 +225,14 @@ so every backend inherits them:
 
 - `delete_by_run(thread_id, run_id)` — deletes the checkpoints stamped with a
   run id (composed from `list` + `delete_checkpoints`), returning the count.
+- `get_thread(thread_id)` — bulk-reads every full checkpoint record for a
+  thread in listing order. The default is composed from `list` + `get` (one
+  lookup per id); all three bundled backends override it with a single-pass
+  read (map clone / one file parse / one indexed range query).
 - `copy_thread(source, target)` — deep-copies every checkpoint into a new thread
   id, preserving each record's `checkpoint_id` and `parent_checkpoint_id` so the
-  lineage spine stays walkable for time-travel/resume (composed from `list` +
-  `get` + `put`).
+  lineage spine stays walkable for time-travel/resume (composed from
+  `get_thread` + `put`, so the source thread is read once).
 - `prune(thread_id, keep_last)` — retains the most recent `keep_last`
   checkpoints **plus the full `parent_checkpoint_id` ancestor chain of every
   retained checkpoint**, then deletes the rest. Protecting the entire ancestor
@@ -237,8 +241,9 @@ so every backend inherits them:
   be orphaned from the state it needs. `keep_last == 0` is clamped to `1` so the
   latest checkpoint always survives.
 
-`InMemoryCheckpointer` implements only the three storage primitives; it inherits
-`delete_by_run`, `copy_thread`, and `prune` from the trait defaults.
+`InMemoryCheckpointer` implements the three storage primitives (plus a
+single-pass `get_thread`); it inherits `delete_by_run`, `copy_thread`, and
+`prune` from the trait defaults.
 
 ### State inspection & time travel
 

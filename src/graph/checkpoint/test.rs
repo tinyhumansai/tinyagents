@@ -269,6 +269,25 @@ async fn copy_thread_preserves_lineage() {
 }
 
 #[tokio::test]
+async fn get_thread_returns_full_records_in_listing_order() {
+    let cp = InMemoryCheckpointer::<i32>::new();
+    cp.put(checkpoint("t", "c1", None, 1)).await.unwrap();
+    cp.put(checkpoint("t", "c2", Some("c1"), 2)).await.unwrap();
+    cp.put(checkpoint("t", "c3", Some("c2"), 3)).await.unwrap();
+
+    let records = cp.get_thread("t").await.unwrap();
+    assert_eq!(records.len(), 3);
+    // Full checkpoints (state included), in insertion order.
+    let ids: Vec<&str> = records.iter().map(|c| c.checkpoint_id.as_str()).collect();
+    assert_eq!(ids, vec!["c1", "c2", "c3"]);
+    assert_eq!(records[2].state, 3);
+    assert_eq!(records[2].parent_checkpoint_id.as_deref(), Some("c2"));
+
+    // Unknown threads read as empty.
+    assert!(cp.get_thread("missing").await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn prune_keeps_window_and_full_ancestor_chain() {
     let cp = InMemoryCheckpointer::<i32>::new();
     // Linear lineage c1 <- c2 <- c3 <- c4 <- c5.
@@ -475,6 +494,20 @@ mod file_backend {
         assert_eq!(tip.thread_id, "dst");
         assert_eq!(tip.state, 3);
     }
+
+    #[tokio::test]
+    async fn get_thread_reads_the_file_once_in_order() {
+        let tmp = TempDir::new("get-thread");
+        let cp = FileCheckpointer::<i32>::new(tmp.path());
+        cp.put(checkpoint("t", "c1", None, 1)).await.unwrap();
+        cp.put(checkpoint("t", "c2", Some("c1"), 2)).await.unwrap();
+
+        let records = cp.get_thread("t").await.unwrap();
+        let ids: Vec<&str> = records.iter().map(|c| c.checkpoint_id.as_str()).collect();
+        assert_eq!(ids, vec!["c1", "c2"]);
+        assert_eq!(records[1].state, 2);
+        assert!(cp.get_thread("missing").await.unwrap().is_empty());
+    }
 }
 
 // ---- SQLite-backed checkpointer (feature = "sqlite") ----------------------
@@ -638,5 +671,18 @@ mod sqlite_backend {
         let tip = cp.get("dst", None).await.unwrap().unwrap();
         assert_eq!(tip.thread_id, "dst");
         assert_eq!(tip.state, 3);
+    }
+
+    #[tokio::test]
+    async fn get_thread_reads_rows_once_in_order() {
+        let cp = SqliteCheckpointer::<i32>::in_memory().unwrap();
+        cp.put(checkpoint("t", "c1", None, 1)).await.unwrap();
+        cp.put(checkpoint("t", "c2", Some("c1"), 2)).await.unwrap();
+
+        let records = cp.get_thread("t").await.unwrap();
+        let ids: Vec<&str> = records.iter().map(|c| c.checkpoint_id.as_str()).collect();
+        assert_eq!(ids, vec!["c1", "c2"]);
+        assert_eq!(records[1].state, 2);
+        assert!(cp.get_thread("missing").await.unwrap().is_empty());
     }
 }

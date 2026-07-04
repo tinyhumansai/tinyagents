@@ -292,6 +292,25 @@ where
         Ok(out)
     }
 
+    async fn get_thread(&self, thread_id: &str) -> Result<Vec<Checkpoint<State>>> {
+        // Single-pass bulk read: one indexed range query over the thread's
+        // rows in insertion order, instead of the default's one point query
+        // per listed id.
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT record FROM checkpoints WHERE thread_id = ?1 ORDER BY seq ASC")
+            .map_err(|e| sqlite_err("prepare get_thread", e))?;
+        let rows = stmt
+            .query_map(params![thread_id], |row| row.get::<_, String>(0))
+            .map_err(|e| sqlite_err("query get_thread", e))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let json = row.map_err(|e| sqlite_err("read record row", e))?;
+            out.push(serde_json::from_str(&json).map_err(|e| sqlite_err("decode record", e))?);
+        }
+        Ok(out)
+    }
+
     async fn list_threads(&self) -> Result<Vec<String>> {
         let conn = self.lock()?;
         let mut stmt = conn
