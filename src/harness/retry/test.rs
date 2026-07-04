@@ -264,3 +264,20 @@ async fn sleep_backoff_waits_only_when_enabled() {
     assert_eq!(t1.elapsed(), expected);
     assert!(expected > Duration::ZERO);
 }
+
+#[test]
+fn should_retry_error_combines_classification_and_attempt_cap() {
+    // 1 try + 2 retries: attempts 0 and 1 may retry, attempt 2 may not.
+    let policy = RetryPolicy::default().with_max_attempts(3);
+
+    // Retryable error, attempts left → retry.
+    let retryable = TinyAgentsError::Model("5xx".into());
+    assert!(policy.should_retry_error(0, &retryable));
+    assert!(policy.should_retry_error(1, &retryable));
+    // Retryable error, attempts exhausted → stop.
+    assert!(!policy.should_retry_error(2, &retryable));
+
+    // Non-retryable error is never retried regardless of remaining attempts.
+    let non_retryable = TinyAgentsError::Validation("bad".into());
+    assert!(!policy.should_retry_error(0, &non_retryable));
+}

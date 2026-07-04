@@ -93,7 +93,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> ModelMiddleware<State, Ctx> for Retry
             match next.run(ctx, state, request.clone()).await {
                 Ok(outcome) => return Ok(outcome),
                 Err(error) => {
-                    if is_retryable(&error) && self.policy.should_retry(attempt) {
+                    if self.policy.should_retry_error(attempt, &error) {
                         // Compute the backoff from the *pre-increment* attempt
                         // number: `attempt == 0` is the first retry and must
                         // sleep `initial_backoff_ms`
@@ -190,6 +190,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> ModelMiddleware<State, Ctx> for Model
             Err(mut last_error) => {
                 let mut current = request.model.clone().unwrap_or_default();
                 for fallback in &self.fallbacks {
+                    // Only a *transient* failure justifies trying another model:
+                    // a non-retryable error (auth/validation/schema) will fail
+                    // the same way on every backend, so switching burns quota
+                    // and latency for nothing. Classification is shared with the
+                    // rest of the harness via `is_retryable`.
+                    if !is_retryable(&last_error) {
+                        break;
+                    }
                     ctx.emit(AgentEvent::FallbackSelected {
                         from: current.clone(),
                         to: fallback.clone(),

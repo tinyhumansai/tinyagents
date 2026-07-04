@@ -102,6 +102,22 @@ impl RetryPolicy {
         attempt + 1 < self.max_attempts
     }
 
+    /// The single retry decision shared by every retry loop in the harness.
+    ///
+    /// Returns `true` only when `error` is transient ([`is_retryable`]) *and*
+    /// the policy still permits another attempt ([`RetryPolicy::should_retry`]).
+    /// Both the agent loop and [`crate::harness::middleware::library::RetryMiddleware`]
+    /// route their per-attempt decision through here so the retry classification
+    /// and attempt-cap logic live in exactly one place and cannot drift apart.
+    ///
+    /// Callers that need to fold in a harness-level ceiling
+    /// ([`RetryPolicy::max_attempts_capped_at`]) should apply
+    /// [`RetryPolicy::with_max_attempts`] first and call this on the capped
+    /// policy.
+    pub fn should_retry_error(&self, attempt: usize, error: &TinyAgentsError) -> bool {
+        is_retryable(error) && self.should_retry(attempt)
+    }
+
     /// Reconciles this policy's own `max_attempts` with a harness-level
     /// ceiling expressed as a *retry* count (not counting the first attempt)
     /// — [`crate::harness::limits::RunLimits::max_retries_per_call`] — and

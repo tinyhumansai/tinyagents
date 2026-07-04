@@ -82,7 +82,6 @@ use crate::harness::model::{
     ChatModel, ModelDelta, ModelRequest, ModelResolutionSource, ModelResponse, ModelStreamItem,
     ResolvedModel, ResolvedModelBinding, ResponseFormat, StreamAccumulator, ToolChoice,
 };
-use crate::harness::retry::is_retryable;
 use crate::harness::runtime::{AgentHarness, UnknownToolPolicy};
 use crate::harness::structured::{StructuredExtractor, StructuredStrategy};
 use crate::harness::tool::{Tool, ToolCall, ToolSchema};
@@ -803,7 +802,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// Invokes a model with retry and fallback (no caching).
     ///
     /// Retries are governed by [`RunPolicy::retry`][crate::harness::runtime::RunPolicy]
-    /// and apply only to retryable errors (see [`is_retryable`]); each scheduled
+    /// and apply only to retryable errors (see
+    /// [`is_retryable`][crate::harness::retry::is_retryable]); each scheduled
     /// retry emits [`AgentEvent::RetryScheduled`]. When retries are exhausted
     /// (or the error is non-retryable) and a [`crate::harness::retry::FallbackPolicy`]
     /// is configured, the next model in the chain is tried. The computed backoff
@@ -865,7 +865,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                             .policy
                             .retry
                             .max_attempts_capped_at(self.policy.limits.max_retries_per_call);
-                        if is_retryable(&error) && attempt + 1 < max_attempts {
+                        // Route the retry decision through the shared
+                        // `RetryPolicy::should_retry_error` engine (same
+                        // classification + attempt-cap logic RetryMiddleware
+                        // uses), applying the harness ceiling by capping a
+                        // cloned policy first so the two sites cannot drift.
+                        let capped = self.policy.retry.clone().with_max_attempts(max_attempts);
+                        if capped.should_retry_error(attempt, &error) {
                             // Compute the backoff from the *pre-increment*
                             // attempt number: `attempt == 0` is the first
                             // retry and must sleep `initial_backoff_ms`

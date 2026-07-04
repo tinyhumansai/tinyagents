@@ -261,6 +261,32 @@ async fn model_fallback_switches_model_on_error() {
 }
 
 #[tokio::test]
+async fn model_fallback_does_not_switch_on_non_retryable() {
+    let (mut ctx, recorder) = ctx_with_recorder();
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_model_middleware(Arc::new(ModelFallbackMiddleware::new([
+        "backup-a", "backup-b",
+    ])));
+
+    // A non-retryable error (validation) will fail identically on every model,
+    // so the middleware must not burn quota switching backends.
+    let base =
+        FakeModelBase::new(|_n, _req| Err(TinyAgentsError::Validation("bad input".to_string())));
+    let err = stack
+        .run_wrapped_model(&mut ctx, &(), ModelRequest::default(), &base)
+        .await
+        .expect_err("validation errors are not retryable");
+    assert!(matches!(err, TinyAgentsError::Validation(_)));
+    // Only the primary call happens; no fallback attempts.
+    assert_eq!(base.calls(), 1);
+    let selections = events(&recorder)
+        .into_iter()
+        .filter(|e| matches!(e, AgentEvent::FallbackSelected { .. }))
+        .count();
+    assert_eq!(selections, 0);
+}
+
+#[tokio::test]
 async fn model_fallback_returns_last_error_when_all_fail() {
     let (mut ctx, _recorder) = ctx_with_recorder();
     let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
