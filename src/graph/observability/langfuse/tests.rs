@@ -244,6 +244,98 @@ fn health_telemetry_rides_on_trace_metadata() {
 }
 
 #[test]
+fn node_spans_carry_langgraph_agent_graph_view_keys() {
+    let batch = exporter()
+        .build_ingestion_batch(LangfuseTraceConfig::default(), &sample_run())
+        .unwrap();
+    let events = batch["batch"].as_array().unwrap();
+
+    // Node spans carry both Agent-Graph-view keys: the node id and superstep.
+    let node_a = find(events, "span-create", "root-1:node:a:1").expect("node a span");
+    assert_eq!(node_a["body"]["metadata"]["langgraph_node"], "a");
+    assert_eq!(node_a["body"]["metadata"]["langgraph_step"], 1);
+    let node_b = find(events, "span-create", "root-1:node:b:1").expect("node b span");
+    assert_eq!(node_b["body"]["metadata"]["langgraph_node"], "b");
+    assert_eq!(node_b["body"]["metadata"]["langgraph_step"], 1);
+
+    // Step spans carry the superstep index but no node id.
+    let step = find(events, "span-create", "root-1:step:1").expect("step span");
+    assert_eq!(step["body"]["metadata"]["langgraph_step"], 1);
+    assert!(step["body"]["metadata"].get("langgraph_node").is_none());
+
+    // Existing coordinate keys are preserved alongside the new ones.
+    assert_eq!(node_a["body"]["metadata"]["run_id"], "run-1");
+    assert_eq!(node_a["body"]["metadata"]["graph_id"], "demo-graph");
+}
+
+#[test]
+fn subgraph_spans_carry_langgraph_step() {
+    let sub = NodeId::new("sub");
+    let ns = vec!["sub".to_string()];
+    let observations = vec![
+        obs(
+            0,
+            2,
+            1_000,
+            GraphEvent::SubgraphStarted {
+                node: sub.clone(),
+                namespace: ns.clone(),
+            },
+        ),
+        obs(
+            1,
+            2,
+            1_050,
+            GraphEvent::SubgraphCompleted {
+                node: sub.clone(),
+                namespace: ns.clone(),
+            },
+        ),
+    ];
+    let batch = exporter()
+        .build_ingestion_batch(LangfuseTraceConfig::default(), &observations)
+        .unwrap();
+    let events = batch["batch"].as_array().unwrap();
+    let span = find(events, "span-create", "root-1:subgraph:sub").expect("subgraph span");
+    assert_eq!(span["body"]["metadata"]["langgraph_step"], 2);
+    assert!(span["body"]["metadata"].get("langgraph_node").is_none());
+}
+
+#[test]
+fn host_span_metadata_injector_merges_and_wins_on_collision() {
+    let exporter = exporter().with_span_metadata_fn(|obs| {
+        let mut extra = serde_json::Map::new();
+        extra.insert("flow_id".to_string(), json!("flow-42"));
+        // Host keys win over built-ins on collision.
+        extra.insert("graph_id".to_string(), json!("host-override"));
+        // Prove the injector sees the observation it decorates.
+        extra.insert("seen_step".to_string(), json!(obs.step));
+        Some(extra)
+    });
+    let batch = exporter
+        .build_ingestion_batch(LangfuseTraceConfig::default(), &sample_run())
+        .unwrap();
+    let events = batch["batch"].as_array().unwrap();
+
+    let node_a = find(events, "span-create", "root-1:node:a:1").expect("node a span");
+    assert_eq!(node_a["body"]["metadata"]["flow_id"], "flow-42");
+    assert_eq!(node_a["body"]["metadata"]["graph_id"], "host-override");
+    assert_eq!(node_a["body"]["metadata"]["seen_step"], 1);
+    // Built-in Agent-Graph-view keys survive the merge.
+    assert_eq!(node_a["body"]["metadata"]["langgraph_node"], "a");
+
+    let step = find(events, "span-create", "root-1:step:1").expect("step span");
+    assert_eq!(step["body"]["metadata"]["flow_id"], "flow-42");
+
+    // Point events (e.g. run.failed) are untouched by the injector.
+    let failed = events
+        .iter()
+        .find(|e| e["body"]["name"] == "run.failed")
+        .expect("run.failed event");
+    assert!(failed["body"]["metadata"].get("flow_id").is_none());
+}
+
+#[test]
 fn open_node_span_has_start_but_no_end() {
     let a = NodeId::new("a");
     let observations = vec![

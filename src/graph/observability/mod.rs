@@ -40,7 +40,7 @@
 mod langfuse;
 mod types;
 
-pub use langfuse::GraphLangfuseExporter;
+pub use langfuse::{GraphLangfuseExporter, SpanMetadataFn};
 pub use types::*;
 
 use std::collections::{HashMap, VecDeque};

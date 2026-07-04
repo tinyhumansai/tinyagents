@@ -25,8 +25,9 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::error::{Result, TinyAgentsError};
 use crate::graph::observability::{GraphHealthSummary, GraphObservation};
@@ -39,26 +40,60 @@ use crate::harness::observability::{LangfuseClient, LangfuseTraceConfig, clean_n
 /// arrival order and pair with their terminals FIFO.
 type StartQueue = VecDeque<(usize, u64)>;
 
+/// A host-supplied hook that contributes extra metadata to every span the
+/// exporter emits. Called with the span's coordinate observation; returning
+/// `None` (or an empty map) contributes nothing. Host keys are merged **over**
+/// the exporter's built-in coordinate keys, so a host can also override them.
+pub type SpanMetadataFn = dyn Fn(&GraphObservation) -> Option<Map<String, Value>> + Send + Sync;
+
 /// Async Langfuse exporter for durable graph observations.
 ///
 /// Wraps a shared [`LangfuseClient`] for transport (auth, endpoint
 /// normalization, `207 Multi-Status` handling) and adds graph-aware payload
 /// construction on top.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct GraphLangfuseExporter {
     client: LangfuseClient,
+    /// Optional host metadata injector, merged into every span's metadata.
+    span_metadata_fn: Option<Arc<SpanMetadataFn>>,
+}
+
+impl std::fmt::Debug for GraphLangfuseExporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GraphLangfuseExporter")
+            .field("client", &self.client)
+            .field(
+                "span_metadata_fn",
+                &self.span_metadata_fn.as_ref().map(|_| "Fn(..)"),
+            )
+            .finish()
+    }
 }
 
 impl GraphLangfuseExporter {
     /// Wraps an existing [`LangfuseClient`] as a graph exporter.
     pub fn new(client: LangfuseClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            span_metadata_fn: None,
+        }
     }
 
     /// Builds an exporter from the same environment variables as
     /// [`LangfuseClient::from_env`].
     pub fn from_env() -> Result<Self> {
         Ok(Self::new(LangfuseClient::from_env()?))
+    }
+
+    /// Installs a host metadata injector: `f` is called once per emitted span
+    /// with the span's coordinate observation, and any returned keys are merged
+    /// into that span's metadata (host keys win on collision). Default: none.
+    pub fn with_span_metadata_fn(
+        mut self,
+        f: impl Fn(&GraphObservation) -> Option<Map<String, Value>> + Send + Sync + 'static,
+    ) -> Self {
+        self.span_metadata_fn = Some(Arc::new(f));
+        self
     }
 
     /// Returns the underlying transport client.
@@ -97,7 +132,13 @@ impl GraphLangfuseExporter {
         batch.push(trace_create(&trace_id, &trace_ts, &trace, first, &health));
 
         let mut consumed = vec![false; observations.len()];
-        push_span_events(&trace_id, observations, &mut consumed, &mut batch);
+        push_span_events(
+            &trace_id,
+            observations,
+            &mut consumed,
+            &mut batch,
+            self.span_metadata_fn.as_deref(),
+        );
         push_point_events(&trace_id, observations, &consumed, &mut batch);
 
         Ok(json!({ "batch": batch }))
@@ -187,6 +228,7 @@ fn push_span_events(
     observations: &[GraphObservation],
     consumed: &mut [bool],
     batch: &mut Vec<Value>,
+    injector: Option<&SpanMetadataFn>,
 ) {
     // Pending starts keyed by their span identity, each holding (index, ts).
     let mut step_starts: HashMap<usize, StartQueue> = HashMap::new();
@@ -212,6 +254,7 @@ fn push_span_events(
                         Some(obs.ts_ms),
                         obs,
                         &observations[start_idx],
+                        injector,
                     ));
                 }
             }
@@ -233,6 +276,7 @@ fn push_span_events(
                         Some(obs.ts_ms),
                         None,
                         obs,
+                        injector,
                     ));
                 }
             }
@@ -247,6 +291,7 @@ fn push_span_events(
                         Some(obs.ts_ms),
                         Some(error.as_str()),
                         obs,
+                        injector,
                     ));
                 }
             }
@@ -269,6 +314,7 @@ fn push_span_events(
                         start_ts,
                         Some(obs.ts_ms),
                         obs,
+                        injector,
                     ));
                 }
             }
@@ -280,7 +326,9 @@ fn push_span_events(
     for (step, mut queue) in step_starts {
         while let Some((start_idx, start_ts)) = queue.pop_front() {
             let obs = &observations[start_idx];
-            batch.push(step_span(trace_id, step, start_ts, None, obs, obs));
+            batch.push(step_span(
+                trace_id, step, start_ts, None, obs, obs, injector,
+            ));
         }
     }
     for ((node, step), mut queue) in node_starts {
@@ -293,6 +341,7 @@ fn push_span_events(
                 None,
                 None,
                 &observations[start_idx],
+                injector,
             ));
         }
     }
@@ -305,6 +354,7 @@ fn push_span_events(
                 start_ts,
                 None,
                 &observations[start_idx],
+                injector,
             ));
         }
     }
@@ -342,13 +392,14 @@ fn push_point_events(
                 "startTime": ts,
                 "level": level,
                 "statusMessage": status,
-                "metadata": span_metadata(obs),
+                "metadata": span_metadata(obs, None, None, None),
             })),
         }));
     }
 }
 
 /// Builds a `span-create` for a superstep, parented directly to the trace.
+#[allow(clippy::too_many_arguments)]
 fn step_span(
     trace_id: &str,
     step: usize,
@@ -356,7 +407,9 @@ fn step_span(
     end_ts: Option<u64>,
     terminal: &GraphObservation,
     start: &GraphObservation,
+    injector: Option<&SpanMetadataFn>,
 ) -> Value {
+    let metadata = span_metadata(start, None, Some(step), injector);
     span_event(
         trace_id,
         &format!("{trace_id}:step:{step}"),
@@ -366,11 +419,15 @@ fn step_span(
         end_ts,
         None,
         terminal,
-        start,
+        metadata,
     )
 }
 
 /// Builds a `span-create` for a node handler, parented to its superstep span.
+///
+/// Node spans carry the Langfuse **Agent Graph view** keys `langgraph_node`
+/// (the node id) and `langgraph_step` (the superstep index) in metadata, so
+/// Langfuse can lay the trace out as a graph.
 #[allow(clippy::too_many_arguments)]
 fn node_span(
     trace_id: &str,
@@ -380,7 +437,9 @@ fn node_span(
     end_ts: Option<u64>,
     error: Option<&str>,
     terminal: &GraphObservation,
+    injector: Option<&SpanMetadataFn>,
 ) -> Value {
+    let metadata = span_metadata(terminal, Some(node.as_str()), Some(step), injector);
     span_event(
         trace_id,
         &format!("{trace_id}:node:{}:{step}", node.as_str()),
@@ -390,7 +449,7 @@ fn node_span(
         end_ts,
         error,
         terminal,
-        terminal,
+        metadata,
     )
 }
 
@@ -402,7 +461,9 @@ fn subgraph_span(
     start_ts: u64,
     end_ts: Option<u64>,
     terminal: &GraphObservation,
+    injector: Option<&SpanMetadataFn>,
 ) -> Value {
+    let metadata = span_metadata(terminal, None, Some(terminal.step), injector);
     span_event(
         trace_id,
         &format!("{trace_id}:subgraph:{}", namespace.join("/")),
@@ -412,13 +473,13 @@ fn subgraph_span(
         end_ts,
         None,
         terminal,
-        terminal,
+        metadata,
     )
 }
 
 /// Shared `span-create` builder. `error` promotes the span to `ERROR` level.
-/// The batch item id comes from the terminal observation so it is unique; span
-/// coordinate metadata comes from the start observation.
+/// The batch item id comes from the terminal observation so it is unique; the
+/// caller supplies the fully-built span `metadata`.
 #[allow(clippy::too_many_arguments)]
 fn span_event(
     trace_id: &str,
@@ -429,7 +490,7 @@ fn span_event(
     end_ts: Option<u64>,
     error: Option<&str>,
     terminal: &GraphObservation,
-    coords: &GraphObservation,
+    metadata: Value,
 ) -> Value {
     let start_iso = iso_ms(start_ts);
     let end_iso = end_ts.map(iso_ms);
@@ -450,14 +511,22 @@ fn span_event(
             "endTime": end_iso,
             "level": level,
             "statusMessage": status,
-            "metadata": span_metadata(coords),
+            "metadata": metadata,
         })),
     })
 }
 
-/// Extracts the correlation coordinates every span/event carries in metadata.
-fn span_metadata(obs: &GraphObservation) -> Value {
-    json!({
+/// Extracts the correlation coordinates every span/event carries in metadata,
+/// stamping the Langfuse Agent-Graph-view keys (`langgraph_node`,
+/// `langgraph_step`) when the caller supplies them and merging any
+/// host-injected keys last (host keys win on collision).
+fn span_metadata(
+    obs: &GraphObservation,
+    langgraph_node: Option<&str>,
+    langgraph_step: Option<usize>,
+    injector: Option<&SpanMetadataFn>,
+) -> Value {
+    let mut metadata = json!({
         "run_id": obs.run_id.as_str(),
         "root_run_id": obs.root_run_id.as_str(),
         "parent_run_id": obs.parent_run_id.as_ref().map(|id| id.as_str()),
@@ -467,7 +536,21 @@ fn span_metadata(obs: &GraphObservation) -> Value {
         "step": obs.step,
         "offset": obs.offset,
         "event": obs.event,
-    })
+    });
+    if let Value::Object(map) = &mut metadata {
+        if let Some(node) = langgraph_node {
+            map.insert("langgraph_node".to_string(), json!(node));
+        }
+        if let Some(step) = langgraph_step {
+            map.insert("langgraph_step".to_string(), json!(step));
+        }
+        if let Some(extra) = injector.and_then(|f| f(obs)) {
+            for (k, v) in extra {
+                map.insert(k, v);
+            }
+        }
+    }
+    metadata
 }
 
 /// Pops the FIFO-oldest pending start for `key`, cleaning up empty queues.
