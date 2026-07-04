@@ -458,6 +458,50 @@ fn duplicate_route_label_is_a_compile_error() {
     assert!(err.to_string().contains("duplicate route label"), "{err}");
 }
 
+#[test]
+fn duplicate_channel_is_a_compile_error() {
+    let src = "graph g { start a channel messages append channel messages messages node a { } }";
+    let err = compile(&parse_str(src).unwrap()).unwrap_err();
+    assert!(err.to_string().contains("duplicate channel"), "{err}");
+}
+
+#[test]
+fn duplicate_graph_id_is_a_compile_error() {
+    let src = "graph g { start a node a { } } graph g { start b node b { } }";
+    let err = compile(&parse_str(src).unwrap()).unwrap_err();
+    assert!(err.to_string().contains("duplicate graph"), "{err}");
+}
+
+#[test]
+fn next_and_command_goto_conflict_is_a_compile_error() {
+    let src = "graph g { start a node a { next b command { goto c } } node b { } node c { } }";
+    let err = compile(&parse_str(src).unwrap()).unwrap_err();
+    assert!(
+        err.to_string().contains("conflicting routing sources"),
+        "{err}"
+    );
+}
+
+#[test]
+fn command_goto_and_edge_conflict_is_a_compile_error() {
+    let src = "graph g { start a node a { command { goto b } } node b { } a -> b }";
+    let err = compile(&parse_str(src).unwrap()).unwrap_err();
+    assert!(
+        err.to_string().contains("conflicting routing sources"),
+        "{err}"
+    );
+}
+
+#[test]
+fn multiple_top_level_edges_from_same_source_is_a_compile_error() {
+    let src = "graph g { start a node a { } node b { } node c { } a -> b a -> c }";
+    let err = compile(&parse_str(src).unwrap()).unwrap_err();
+    assert!(
+        err.to_string().contains("multiple top-level edges"),
+        "{err}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Extended grammar (H2): channels+policy, command, send/join, subgraph,
 // subagent, repl_agent, interrupt, io shape, checkpoint/interrupt policy.

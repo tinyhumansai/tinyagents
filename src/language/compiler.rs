@@ -54,6 +54,15 @@ use crate::registry::CapabilityRegistry;
 ///
 /// All failures are reported as [`TinyAgentsError::Compile`].
 pub fn compile(program: &Program) -> Result<Vec<Blueprint>> {
+    let mut graph_ids: HashSet<&str> = HashSet::new();
+    for graph in &program.graphs {
+        if !graph_ids.insert(graph.name.as_str()) {
+            return Err(TinyAgentsError::Compile(format!(
+                "duplicate graph `{}`",
+                graph.name
+            )));
+        }
+    }
     program.graphs.iter().map(compile_graph).collect()
 }
 
@@ -73,6 +82,17 @@ fn compile_graph(graph: &crate::language::types::GraphDecl) -> Result<Blueprint>
 
     // A target is valid if it is a known node or the virtual `END`.
     let target_ok = |target: &str| target == END || node_names.contains(target);
+
+    // Reject duplicate channel declarations up front.
+    let mut channel_names: HashSet<&str> = HashSet::new();
+    for channel in &graph.channels {
+        if !channel_names.insert(channel.name.as_str()) {
+            return Err(compile_err(format!(
+                "duplicate channel `{}` in graph `{}`",
+                channel.name, graph.name
+            )));
+        }
+    }
 
     // 2. Start node must be declared and defined.
     let start = graph
@@ -111,17 +131,61 @@ fn compile_graph(graph: &crate::language::types::GraphDecl) -> Result<Blueprint>
     let nodes_with_static_edge: HashSet<&str> =
         graph.edges.iter().map(|e| e.from.as_str()).collect();
 
+    // Reject contradictory multiple top-level edges from the same source: only
+    // one static successor can ever be routed to, so a second edge from the
+    // same node is silent data loss (the first edge wins, the rest are dead
+    // weight in `blueprint.edges`) rather than a legitimate multi-successor.
+    for name in &nodes_with_static_edge {
+        let targets: Vec<&str> = graph
+            .edges
+            .iter()
+            .filter(|e| e.from == *name)
+            .map(|e| e.to.as_str())
+            .collect();
+        if targets.len() > 1 {
+            return Err(compile_err(format!(
+                "node `{name}` has multiple top-level edges ({}); a node may declare at most one outgoing edge",
+                targets.join(", ")
+            )));
+        }
+    }
+
     // 4. Validate and lower each node.
     let mut nodes = Vec::new();
     for node in &graph.nodes {
         let has_routes = !node.routes.is_empty();
         let has_next = node.next.is_some();
         let has_static_edge = nodes_with_static_edge.contains(node.name.as_str());
+        let has_command_goto = node.command.as_ref().is_some_and(|c| c.goto.is_some());
 
         if has_routes && (has_next || has_static_edge) {
             return Err(compile_err(format!(
                 "node `{}` mixes static routing (`next`/edge) with command routing (`routes`); use one or the other",
                 node.name
+            )));
+        }
+
+        // A node may declare at most one of `routes`, `next`, `command { goto
+        // … }`, or a top-level edge as its routing source. Silently resolving
+        // by precedence hides a real authoring mistake (e.g. a model-authored
+        // revision that adds a `command.goto` without removing the old
+        // `next`), so any additional combination is a compile error.
+        let routing_sources = [
+            (has_routes, "routes"),
+            (has_next, "`next`"),
+            (has_command_goto, "`command { goto … }`"),
+            (has_static_edge, "a top-level edge"),
+        ];
+        let active: Vec<&str> = routing_sources
+            .iter()
+            .filter(|(present, _)| *present)
+            .map(|(_, label)| *label)
+            .collect();
+        if active.len() > 1 {
+            return Err(compile_err(format!(
+                "node `{}` declares conflicting routing sources ({}); use exactly one",
+                node.name,
+                active.join(", ")
             )));
         }
 
