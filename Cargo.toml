@@ -11,6 +11,12 @@ categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
 async-trait = "0.1"
+# Cheap, reference-counted byte buffers. Used only on the *internal* SSE
+# byte-stream seam (`harness::providers::openai::sse::SseState`) so each
+# network chunk from `reqwest::Response::bytes_stream` is forwarded without a
+# per-chunk `Vec<u8>` copy. Already in the dependency tree via `reqwest`;
+# `bytes` never appears in the public API.
+bytes = "1"
 # Runtime-agnostic future combinators (`join_all` for concurrent supersteps) and
 # the `Stream`/`StreamExt` traits backing the real streaming pipeline
 # (`harness::model::ModelStream`).

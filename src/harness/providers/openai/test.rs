@@ -544,7 +544,10 @@ async fn sse_stream_parses_text_tool_calls_and_usage() {
         b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3,\"total_tokens\":8}}\n\n".to_vec(),
         b"data: [DONE]\n\n".to_vec(),
     ];
-    let bytes = futures::stream::iter(raw.into_iter().map(Ok::<Vec<u8>, TinyAgentsError>));
+    let bytes = futures::stream::iter(
+        raw.into_iter()
+            .map(|v| Ok::<bytes::Bytes, TinyAgentsError>(bytes::Bytes::from(v))),
+    );
 
     let state = SseState {
         bytes: Box::pin(bytes),
@@ -654,7 +657,10 @@ async fn sse_stream_invalid_tool_argument_json_fails_terminally() {
         b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
         b"data: [DONE]\n\n".to_vec(),
     ];
-    let bytes = futures::stream::iter(raw.into_iter().map(Ok::<Vec<u8>, TinyAgentsError>));
+    let bytes = futures::stream::iter(
+        raw.into_iter()
+            .map(|v| Ok::<bytes::Bytes, TinyAgentsError>(bytes::Bytes::from(v))),
+    );
 
     let state = SseState {
         bytes: Box::pin(bytes),
@@ -695,7 +701,10 @@ async fn sse_stream_invalid_tool_argument_json_fails_terminally() {
 async fn collect_sse(raw: Vec<Vec<u8>>) -> Vec<ModelStreamItem> {
     use futures::StreamExt;
 
-    let bytes = futures::stream::iter(raw.into_iter().map(Ok::<Vec<u8>, TinyAgentsError>));
+    let bytes = futures::stream::iter(
+        raw.into_iter()
+            .map(|v| Ok::<bytes::Bytes, TinyAgentsError>(bytes::Bytes::from(v))),
+    );
     let state = SseState {
         bytes: Box::pin(bytes),
         buf: Vec::new(),
