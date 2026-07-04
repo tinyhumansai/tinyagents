@@ -518,6 +518,60 @@ async fn in_memory_journal_evicts_oldest_run_once_max_runs_exceeded() {
 }
 
 #[tokio::test]
+async fn evicted_run_resuming_append_does_not_reset_offset_or_lose_reads() {
+    // Regression test: a run's stream can be evicted (FIFO, once max_runs is
+    // exceeded) while it is still actively appending. If the evicted run
+    // later appends again, the new stream must NOT restart numbering at 0 —
+    // otherwise a consumer that saved a durable offset from before eviction
+    // would have `read_from` silently skip entries instead of erroring.
+    let journal = InMemoryEventJournal::with_max_runs(2);
+
+    // run-0 appends twice before being evicted by run-1 and run-2.
+    journal
+        .append(obs("run-0", 0, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+    journal
+        .append(obs("run-0", 1, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+    journal
+        .append(obs("run-1", 0, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+    journal
+        .append(obs("run-2", 0, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+    assert!(journal.is_empty("run-0"), "run-0 must have been evicted");
+
+    // run-0 resumes appending after eviction. The offset must continue from
+    // where it left off (2), not restart at 0.
+    let offset = journal
+        .append(obs("run-0", 2, AgentEvent::StateUpdate))
+        .await
+        .unwrap();
+    assert_eq!(
+        offset, 2,
+        "offset must continue from the evicted stream's length, not reset to 0"
+    );
+
+    // A consumer that saved offset 2 (from before eviction) must not have its
+    // new post-eviction entry silently skipped: it must see exactly the new
+    // entry.
+    let resumed = journal.read_from("run-0", 2).await.unwrap();
+    assert_eq!(resumed.len(), 1, "post-eviction entry must not be dropped");
+
+    // A consumer whose saved offset falls within the evicted range must get
+    // a clear error rather than silently-truncated (or wrongly-offset) data.
+    let stale = journal.read_from("run-0", 0).await;
+    assert!(
+        stale.is_err(),
+        "reading a stale, evicted offset must fail closed, not silently skip"
+    );
+}
+
+#[tokio::test]
 async fn status_store_evicts_oldest_terminal_run_but_never_active_ones() {
     // Regression test: without a cap, a supervisor tracking many short-lived
     // runs grows this map without bound. With a cap of 2: inserting a

@@ -172,7 +172,7 @@ impl InMemoryEventJournal {
             .expect("InMemoryEventJournal lock poisoned")
             .streams
             .get(run_id)
-            .map(|v| v.len())
+            .map(|s| s.entries.len())
             .unwrap_or(0)
     }
 
@@ -206,17 +206,35 @@ impl HarnessEventJournal for InMemoryEventJournal {
             // map without bound. `max_runs == 0` disables the cap.
             if self.max_runs > 0 {
                 while state.order.len() > self.max_runs {
-                    if let Some(oldest) = state.order.pop_front() {
-                        state.streams.remove(&oldest);
-                    } else {
+                    let Some(oldest) = state.order.pop_front() else {
                         break;
+                    };
+                    if let Some(stream) = state.streams.remove(&oldest) {
+                        // Remember where this run's numbering left off so a
+                        // later append for the same run_id resumes from
+                        // there instead of restarting at offset 0 — which
+                        // would make `read_from` silently skip entries for a
+                        // consumer resuming from a previously saved offset.
+                        let next_offset = stream.base_offset + stream.entries.len() as u64;
+                        state.evicted.insert(oldest.clone(), next_offset);
+                        state.evicted_order.push_back(oldest);
+                        while state.evicted_order.len() > self.max_runs {
+                            let Some(stale) = state.evicted_order.pop_front() else {
+                                break;
+                            };
+                            state.evicted.remove(&stale);
+                        }
                     }
                 }
             }
         }
-        let entries = state.streams.entry(run_id).or_default();
-        let offset = entries.len() as u64;
-        entries.push(obs);
+        let base_offset = state.evicted.remove(&run_id).unwrap_or(0);
+        let stream = state.streams.entry(run_id).or_insert_with(|| EventStream {
+            base_offset,
+            entries: Vec::new(),
+        });
+        let offset = stream.base_offset + stream.entries.len() as u64;
+        stream.entries.push(obs);
         Ok(offset)
     }
 
@@ -225,10 +243,30 @@ impl HarnessEventJournal for InMemoryEventJournal {
             .state
             .lock()
             .map_err(|e| poisoned("InMemoryEventJournal", e))?;
-        let Some(entries) = state.streams.get(run_id) else {
-            return Ok(Vec::new());
-        };
-        Ok(entries.iter().skip(offset as usize).cloned().collect())
+        match state.streams.get(run_id) {
+            Some(stream) => {
+                if offset < stream.base_offset {
+                    return Err(crate::error::TinyAgentsError::Validation(format!(
+                        "run `{run_id}` requested offset {offset} but entries before \
+                         {} were evicted to bound memory; the caller's saved offset is stale",
+                        stream.base_offset
+                    )));
+                }
+                let skip = (offset - stream.base_offset) as usize;
+                Ok(stream.entries.iter().skip(skip).cloned().collect())
+            }
+            None => {
+                if let Some(&next_offset) = state.evicted.get(run_id)
+                    && offset < next_offset
+                {
+                    return Err(crate::error::TinyAgentsError::Validation(format!(
+                        "run `{run_id}` was evicted to bound memory; the caller's \
+                         saved offset {offset} is stale"
+                    )));
+                }
+                Ok(Vec::new())
+            }
+        }
     }
 }
 

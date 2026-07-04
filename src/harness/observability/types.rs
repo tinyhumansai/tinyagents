@@ -199,14 +199,35 @@ pub trait HarnessEventJournal: Send + Sync {
 /// retains before evicting the oldest (by insertion order) to bound memory.
 pub const DEFAULT_JOURNAL_MAX_RUNS: usize = 10_000;
 
+/// A single run's retained observations, plus the offset its first retained
+/// entry corresponds to.
+///
+/// `base_offset` is normally `0`, but once a run's stream has previously been
+/// evicted and then receives another append, the new stream must continue
+/// numbering offsets from where the evicted one left off rather than
+/// restarting at `0` — otherwise a consumer resuming from a durable offset
+/// would have entries silently skipped (see [`EventJournalState::evicted`]).
+#[derive(Debug, Default)]
+pub(crate) struct EventStream {
+    pub(crate) base_offset: u64,
+    pub(crate) entries: Vec<AgentObservation>,
+}
+
 /// Inner state for [`InMemoryEventJournal`]: the per-run observation streams
 /// plus insertion order so the oldest run can be evicted once `max_runs` is
 /// exceeded.
 #[derive(Debug, Default)]
 pub(crate) struct EventJournalState {
-    pub(crate) streams: HashMap<String, Vec<AgentObservation>>,
+    pub(crate) streams: HashMap<String, EventStream>,
     /// Oldest-first insertion order of run ids, used for FIFO eviction.
     pub(crate) order: VecDeque<String>,
+    /// Next offset to resume from for runs whose stream was evicted, so a
+    /// later append for the same `run_id` continues numbering instead of
+    /// restarting at `0` (which would corrupt any durable offset a consumer
+    /// has already saved). Bounded the same way `streams` is: entries are
+    /// dropped oldest-first once `evicted_order` exceeds `max_runs`.
+    pub(crate) evicted: HashMap<String, u64>,
+    pub(crate) evicted_order: VecDeque<String>,
 }
 
 /// In-memory [`HarnessEventJournal`] backed by a per-run `Vec`.
