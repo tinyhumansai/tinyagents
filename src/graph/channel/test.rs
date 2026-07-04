@@ -60,6 +60,44 @@ fn messages_merge_by_id() {
 }
 
 #[test]
+fn messages_merge_dedup_map_preserves_order_and_appends_unkeyed() {
+    // Exercise the id->index map path: a single batch that upserts an existing
+    // id, appends a new id, and appends an unkeyed message, then a follow-up
+    // upsert of the id introduced by that batch. Existing order is preserved and
+    // dedup is by id only.
+    let c = Messages;
+    let v = c
+        .merge(
+            None,
+            json!([{"id": "a", "text": "1"}, {"id": "b", "text": "2"}]),
+        )
+        .unwrap();
+    let v = c
+        .merge(
+            Some(&v),
+            json!([
+                {"id": "a", "text": "1-updated"},
+                {"id": "c", "text": "3"},
+                {"text": "no-id"},
+            ]),
+        )
+        .unwrap();
+    // Upserting an id first seen in the previous batch must land on that message.
+    let v = c
+        .merge(Some(&v), json!({"id": "c", "text": "3-updated"}))
+        .unwrap();
+    assert_eq!(
+        v,
+        json!([
+            {"id": "a", "text": "1-updated"},
+            {"id": "b", "text": "2"},
+            {"id": "c", "text": "3-updated"},
+            {"text": "no-id"},
+        ])
+    );
+}
+
+#[test]
 fn ephemeral_overwrites_and_is_marked() {
     let c = Ephemeral;
     assert_eq!(c.merge(Some(&json!(1)), json!(2)).unwrap(), json!(2));

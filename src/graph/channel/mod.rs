@@ -43,7 +43,7 @@ pub use types::{
     LastValue, Messages, NamedBarrier, Topic, Untracked,
 };
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -144,13 +144,32 @@ impl Channel for Messages {
             Value::Array(items) => items,
             other => vec![other],
         };
+        // Build an id -> index map over the existing list once (O(existing)) so
+        // each incoming message is an O(1) lookup instead of a linear scan.
+        // Previously this dedup was O(existing x incoming), which bit at a few
+        // thousand messages.
+        let mut index: HashMap<String, usize> = list
+            .iter()
+            .enumerate()
+            .filter_map(|(i, existing)| {
+                existing
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| (id.to_string(), i))
+            })
+            .collect();
         for msg in incoming {
-            let id = msg.get("id").and_then(Value::as_str).map(str::to_string);
-            match id.and_then(|id| {
-                list.iter_mut()
-                    .find(|existing| existing.get("id").and_then(Value::as_str) == Some(&id))
-            }) {
-                Some(existing) => *existing = msg,
+            match msg.get("id").and_then(Value::as_str).map(str::to_string) {
+                // Keyed message: replace the same id in place, or append and
+                // remember its position for later incoming writes.
+                Some(id) => match index.get(&id) {
+                    Some(&i) => list[i] = msg,
+                    None => {
+                        index.insert(id, list.len());
+                        list.push(msg);
+                    }
+                },
+                // Unkeyed message: always appended (unchanged behavior).
                 None => list.push(msg),
             }
         }
