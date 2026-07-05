@@ -38,6 +38,8 @@ pub mod subagent;
 pub mod summarization;
 pub mod testkit;
 pub mod tool;
+#[cfg(feature = "tools")]
+pub mod tools;
 pub mod usage;
 pub mod workspace;
 
