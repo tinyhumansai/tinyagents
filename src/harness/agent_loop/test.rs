@@ -15,7 +15,7 @@ use serde_json::json;
 use super::AgentStreamItem;
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::context::{RunConfig, RunContext};
-use crate::harness::events::AgentEvent;
+use crate::harness::events::{AgentEvent, EventSink};
 use crate::harness::limits::RunLimits;
 use crate::harness::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
 use crate::harness::middleware::{
@@ -2063,6 +2063,24 @@ async fn invoke_stream_in_context_preserves_caller_context() {
         }
         other => panic!("expected Completed terminal, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn invoke_stream_in_context_unsubscribes_channel_listener() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("hello there")));
+    let events = EventSink::new();
+    let ctx = RunContext::new(RunConfig::new("shared-events-run"), ()).with_events(events.clone());
+
+    assert_eq!(events.listener_count(), 0);
+    let items: Vec<AgentStreamItem> = harness
+        .invoke_stream_in_context(&(), ctx, vec![Message::user("hi")])
+        .collect()
+        .await;
+    let (_events, terminal) = collect_stream(items).await;
+
+    assert!(matches!(terminal, AgentStreamItem::Completed(_)));
+    assert_eq!(events.listener_count(), 0);
 }
 
 #[tokio::test]
