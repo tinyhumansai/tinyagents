@@ -325,7 +325,15 @@ impl RlmInterpreter for RhaiInterpreter {
 - final_answer("...")                             // end the task with this answer
 - print(x)                                        // observe a value in the next turn
 Errors raised by capabilities can be caught with try/catch. The last
-expression of a cell is echoed back to you as its value."#
+expression of a cell is echoed back to you as its value.
+
+Rhai syntax notes (Rhai is NOT JavaScript or Rust):
+- There are NO tuples: return an array `[a, b]` or an object map `#{ k: v }`.
+- Object maps are written `#{ name: value }` and indexed with `m.name` or `m["name"]`.
+- Sub-arrays: `arr.extract(0..5)`; also `arr.len()`, `arr.push(x)`, `arr.filter(|x| ...)`,
+  `arr.map(|x| ...)`; loops: `for x in arr { ... }` and `for i in 0..n { ... }`.
+- Strings concatenate with `+`; convert with `x.to_string()`; interpolate with `` `${x}` ``.
+- `let` declares a mutable variable; statements end with `;`."#
             .to_string()
     }
 

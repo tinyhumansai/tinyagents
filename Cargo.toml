@@ -84,3 +84,12 @@ futures = "0.3"
 # The OpenAI provider is always compiled, so these build with a plain
 # `cargo build --examples`; they only need a network call + `OPENAI_API_KEY`
 # at run time.
+
+# --- RLM examples (need the `rlm` feature) ---
+[[example]]
+name = "rlm_rhai"
+required-features = ["rlm"]
+
+[[example]]
+name = "rlm_python"
+required-features = ["rlm"]

@@ -147,6 +147,11 @@ impl<State: Send + Sync + 'static> RlmRunner<State> {
         ];
         let mut steps: Vec<RlmStep> = Vec::new();
         let mut driver_calls = 0usize;
+        // Set after a reply with no code fence: the driver gets one nudge to
+        // produce a cell before its prose is accepted as the answer. Models
+        // occasionally emit raw, unfenced code; without the nudge that code
+        // would be mistaken for a final answer.
+        let mut nudged = false;
 
         let outcome = loop {
             if steps.len() >= self.config.policy.max_cells {
@@ -161,9 +166,11 @@ impl<State: Send + Sync + 'static> RlmRunner<State> {
                 };
             }
 
+            // `driver_model` is a *registry* name; the resolved ChatModel
+            // already knows its provider model id, so the request leaves
+            // `model` unset rather than leaking the registry name upstream.
             let request = ModelRequest {
                 messages: messages.clone(),
-                model: Some(self.driver_model.clone()),
                 ..Default::default()
             };
             driver_calls += 1;
@@ -172,7 +179,17 @@ impl<State: Send + Sync + 'static> RlmRunner<State> {
             messages.push(Message::Assistant(response.message));
 
             let Some(code) = extract_code_cell(&reply_text) else {
-                // No code cell: the driver answered in prose.
+                if !nudged {
+                    nudged = true;
+                    messages.push(Message::user(
+                        "Your reply contained no fenced code block, so nothing was executed. \
+                         Reply with exactly one fenced code block, or — if you are done — call \
+                         final_answer(...) from code. If you truly have nothing to run, repeat \
+                         your final answer in plain prose.",
+                    ));
+                    continue;
+                }
+                // Two fence-less replies in a row: accept the prose answer.
                 break RlmOutcome {
                     answer: Some(reply_text.trim().to_string()),
                     stop_reason: RlmStopReason::ModelAnswered,
@@ -183,6 +200,7 @@ impl<State: Send + Sync + 'static> RlmRunner<State> {
                     agent_calls: 0,
                 };
             };
+            nudged = false;
 
             let cell = self.session.eval(&code).await?;
             let answered = cell.final_answer.clone();

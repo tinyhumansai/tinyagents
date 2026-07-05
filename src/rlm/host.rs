@@ -266,9 +266,10 @@ impl<State: Send + Sync + 'static> RlmHost<State> {
             messages.push(Message::system(system));
         }
         messages.push(Message::user(prompt));
+        // `model_name` is the registry name, not a provider model id; the
+        // resolved ChatModel carries its own provider configuration.
         let request = ModelRequest {
             messages,
-            model: Some(model_name.clone()),
             ..Default::default()
         };
         let start = Instant::now();
@@ -293,6 +294,9 @@ impl<State: Send + Sync + 'static> RlmHost<State> {
             tool_name.clone(),
             arguments.clone(),
         );
+        // Validate against the tool's schema up front so the script gets a
+        // precise, catchable error instead of tool-dependent behavior.
+        tool.schema().validate_call(&call)?;
         let start = Instant::now();
         let result = tool.call(&self.state, call).await?;
         self.record(RlmCallRecord {

@@ -19,10 +19,11 @@ use super::types::{RlmPolicy, RlmTemplate, TemplateSpec};
 use crate::error::{Result, TinyAgentsError};
 
 /// Shared preamble describing the cell loop contract.
-const LOOP_CONTRACT: &str = r#"You are operating a sandboxed code notebook. Each of your replies must contain
-exactly one fenced code block (```{{language}} ... ```). The host executes it and
-shows you the captured output, the cell's value, and any error; variables
-persist between cells. Keep cells small and observe intermediate results
+const LOOP_CONTRACT: &str = r#"You are operating a sandboxed code notebook. Every reply MUST contain exactly
+one fenced code block, opened with ```{{language}} and closed with ``` — code
+outside a fence is never executed. The host executes the block and shows you
+the captured output, the cell's value, and any error; variables persist
+between cells. Keep cells small and observe intermediate results
 instead of writing one giant script. When you have the answer, call
 final_answer("...") from code. Never fabricate outputs you have not observed.
 

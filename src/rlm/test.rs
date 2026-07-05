@@ -273,8 +273,10 @@ async fn runner_loops_until_final_answer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn runner_accepts_prose_as_the_answer() {
-    let registry = registry_with_mock(vec!["The answer is 4."]);
+async fn runner_nudges_once_then_accepts_prose_as_the_answer() {
+    // A fence-less reply first earns a nudge (it may be unfenced code, not an
+    // answer); only a second fence-less reply is accepted as prose.
+    let registry = registry_with_mock(vec!["The answer is 4.", "The answer is 4."]);
     let config = RlmConfig {
         driver_model: Some("mock".to_string()),
         ..RlmConfig::default()
@@ -284,7 +286,30 @@ async fn runner_accepts_prose_as_the_answer() {
     let outcome = runner.run("what is 2+2?").await.expect("run");
     assert_eq!(outcome.answer.as_deref(), Some("The answer is 4."));
     assert_eq!(outcome.stop_reason, RlmStopReason::ModelAnswered);
+    assert_eq!(outcome.driver_calls, 2);
     assert!(outcome.steps.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runner_recovers_a_cell_after_a_nudge() {
+    // Unfenced code first (would previously have been mistaken for an
+    // answer), fenced after the nudge, then a final answer.
+    let registry = registry_with_mock(vec![
+        "let x = 6 * 7; x",
+        "```rhai\nlet x = 6 * 7;\nx\n```",
+        "```rhai\nfinal_answer(\"42\")\n```",
+    ]);
+    let config = RlmConfig {
+        driver_model: Some("mock".to_string()),
+        ..RlmConfig::default()
+    };
+    let mut runner =
+        RlmRunner::from_config(config, registry, Arc::new(())).expect("build runner");
+    let outcome = runner.run("multiply 6 by 7").await.expect("run");
+    assert_eq!(outcome.answer.as_deref(), Some("42"));
+    assert_eq!(outcome.stop_reason, RlmStopReason::Answered);
+    assert_eq!(outcome.steps.len(), 2);
+    assert_eq!(outcome.driver_calls, 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
