@@ -105,11 +105,12 @@ impl SchemaCleanr {
             ));
         }
 
-        if let Some(Value::String(schema_type)) = obj.get("type") {
-            if schema_type == "object" && !obj.contains_key("properties") {
-                // Valid but often rejected by providers; callers can decide how
-                // strict they want to be after validation succeeds.
-            }
+        if let Some(Value::String(schema_type)) = obj.get("type")
+            && schema_type == "object"
+            && !obj.contains_key("properties")
+        {
+            // Valid but often rejected by providers; callers can decide how
+            // strict they want to be after validation succeeds.
         }
 
         Ok(())
@@ -221,13 +222,13 @@ impl SchemaCleanr {
             return Self::preserve_meta(obj, Value::Object(Map::new()));
         }
 
-        if let Some(def_name) = Self::parse_local_ref(ref_value) {
-            if let Some(definition) = defs.get(def_name.as_str()) {
-                ref_stack.insert(ref_value.to_string());
-                let cleaned = Self::clean_with_defs(definition.clone(), defs, strategy, ref_stack);
-                ref_stack.remove(ref_value);
-                return Self::preserve_meta(obj, cleaned);
-            }
+        if let Some(def_name) = Self::parse_local_ref(ref_value)
+            && let Some(definition) = defs.get(def_name.as_str())
+        {
+            ref_stack.insert(ref_value.to_string());
+            let cleaned = Self::clean_with_defs(definition.clone(), defs, strategy, ref_stack);
+            ref_stack.remove(ref_value);
+            return Self::preserve_meta(obj, cleaned);
         }
 
         Self::preserve_meta(obj, Value::Object(Map::new()))
@@ -309,15 +310,16 @@ impl SchemaCleanr {
             if let Some(Value::Null) = obj.get("const") {
                 return true;
             }
-            if let Some(Value::Array(arr)) = obj.get("enum") {
-                if arr.len() == 1 && matches!(arr[0], Value::Null) {
-                    return true;
-                }
+            if let Some(Value::Array(arr)) = obj.get("enum")
+                && arr.len() == 1
+                && matches!(arr[0], Value::Null)
+            {
+                return true;
             }
-            if let Some(Value::String(schema_type)) = obj.get("type") {
-                if schema_type == "null" {
-                    return true;
-                }
+            if let Some(Value::String(schema_type)) = obj.get("type")
+                && schema_type == "null"
+            {
+                return true;
             }
         }
         false
