@@ -44,6 +44,10 @@ enum ContextPatternMatch {
 /// Hosts should prefer authoritative provider/catalog metadata when available
 /// and use this only when a raw model id needs a conservative pre-dispatch
 /// budget.
+///
+/// Order matters: lookup returns the first matching entry, so more-specific
+/// substrings such as `gpt-4.1` and `gpt-4-turbo` must stay before broader
+/// patterns such as `gpt-4` that would otherwise shadow them.
 const MODEL_CONTEXT_PATTERNS: &[(&str, ContextPatternMatch, u64)] = &[
     ("claude-haiku-4.5", ContextPatternMatch::Substring, 200_000),
     ("claude-haiku-4", ContextPatternMatch::Substring, 200_000),
