@@ -262,8 +262,7 @@ async fn runner_loops_until_final_answer() {
         driver_model: Some("mock".to_string()),
         ..RlmConfig::default()
     };
-    let mut runner =
-        RlmRunner::from_config(config, registry, Arc::new(())).expect("build runner");
+    let mut runner = RlmRunner::from_config(config, registry, Arc::new(())).expect("build runner");
     let outcome = runner.run("multiply 6 by 7").await.expect("run");
     assert_eq!(outcome.answer.as_deref(), Some("the answer is 42"));
     assert_eq!(outcome.stop_reason, RlmStopReason::Answered);
@@ -281,8 +280,7 @@ async fn runner_nudges_once_then_accepts_prose_as_the_answer() {
         driver_model: Some("mock".to_string()),
         ..RlmConfig::default()
     };
-    let mut runner =
-        RlmRunner::from_config(config, registry, Arc::new(())).expect("build runner");
+    let mut runner = RlmRunner::from_config(config, registry, Arc::new(())).expect("build runner");
     let outcome = runner.run("what is 2+2?").await.expect("run");
     assert_eq!(outcome.answer.as_deref(), Some("The answer is 4."));
     assert_eq!(outcome.stop_reason, RlmStopReason::ModelAnswered);
@@ -303,8 +301,7 @@ async fn runner_recovers_a_cell_after_a_nudge() {
         driver_model: Some("mock".to_string()),
         ..RlmConfig::default()
     };
-    let mut runner =
-        RlmRunner::from_config(config, registry, Arc::new(())).expect("build runner");
+    let mut runner = RlmRunner::from_config(config, registry, Arc::new(())).expect("build runner");
     let outcome = runner.run("multiply 6 by 7").await.expect("run");
     assert_eq!(outcome.answer.as_deref(), Some("42"));
     assert_eq!(outcome.stop_reason, RlmStopReason::Answered);
@@ -325,8 +322,7 @@ async fn runner_stops_at_the_cell_budget() {
         },
         ..RlmConfig::default()
     };
-    let mut runner =
-        RlmRunner::from_config(config, registry, Arc::new(())).expect("build runner");
+    let mut runner = RlmRunner::from_config(config, registry, Arc::new(())).expect("build runner");
     let outcome = runner.run("loop forever").await.expect("run");
     assert_eq!(outcome.answer, None);
     assert_eq!(outcome.stop_reason, RlmStopReason::CellBudgetExhausted);

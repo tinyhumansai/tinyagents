@@ -56,10 +56,14 @@
 //! Hosted and local providers (OpenAI plus the OpenAI-compatible endpoints for
 //! Anthropic, Ollama, DeepSeek, Groq, xAI, OpenRouter, Together, and Mistral)
 //! are compiled in unconditionally alongside the offline, deterministic
-//! [`harness::providers::MockModel`]. Two Cargo features gate optional,
+//! [`harness::providers::MockModel`]. Three Cargo features gate optional,
 //! heavier dependencies instead: `sqlite` (embedded SQLite checkpointer,
-//! [`graph::checkpoint::SqliteCheckpointer`]) and `repl` (embedded Rhai engine
-//! powering the `.ragsh` session runtime, [`repl::session`]).
+//! [`graph::checkpoint::SqliteCheckpointer`]), `repl` (embedded Rhai engine
+//! powering the `.ragsh` session runtime, [`repl::session`]), and `rlm` (the
+//! recursive-language-model runtime: a driver model writes code cells run in
+//! a sandboxed interpreter — embedded Rhai or an external Python/JavaScript
+//! process — whose only host surface is capability calls back into the
+//! registry).
 //!
 //! ## Crate-root re-exports
 //!

@@ -189,10 +189,7 @@ impl<State: Send + Sync + 'static> RlmHost<State> {
     pub(super) fn end_cell(&self) -> (Vec<RlmCallRecord>, Option<String>) {
         let mut cell = self.cell.lock().expect("cell buffers poisoned");
         cell.deadline = None;
-        (
-            std::mem::take(&mut cell.calls),
-            cell.final_answer.take(),
-        )
+        (std::mem::take(&mut cell.calls), cell.final_answer.take())
     }
 
     fn record(&self, record: RlmCallRecord) {
@@ -369,9 +366,7 @@ impl<State: Send + Sync + 'static> RlmHostApi for RlmHost<State> {
                 system,
             } => self.handle_llm(model, prompt, system).await,
             HostCall::Tool { tool, arguments } => self.handle_tool(tool, arguments).await,
-            HostCall::Agent { agent, input, data } => {
-                self.handle_agent(agent, input, data).await
-            }
+            HostCall::Agent { agent, input, data } => self.handle_agent(agent, input, data).await,
             HostCall::FinalAnswer { answer } => {
                 let mut cell = self.cell.lock().expect("cell buffers poisoned");
                 cell.final_answer = Some(answer);

@@ -11,13 +11,13 @@
 use std::sync::Arc;
 
 use serde_json::json;
+use tinyagents::harness::message::Message;
+use tinyagents::harness::runtime::AgentHarness;
 use tinyagents::harness::testkit::{FakeTool, ScriptedModel};
 use tinyagents::registry::CapabilityRegistry;
 use tinyagents::rlm::{
     InterpreterSpec, RlmConfig, RlmHost, RlmPolicy, RlmRunner, RlmSession, RlmStopReason,
 };
-use tinyagents::harness::message::Message;
-use tinyagents::harness::runtime::AgentHarness;
 use tinyagents::{HarnessSubAgent, SubAgent};
 
 fn registry_with_doubles(replies: Vec<&str>) -> Arc<CapabilityRegistry<()>> {
@@ -31,10 +31,7 @@ fn registry_with_doubles(replies: Vec<&str>) -> Arc<CapabilityRegistry<()>> {
     Arc::new(registry)
 }
 
-fn session_for(
-    spec: &InterpreterSpec,
-    registry: Arc<CapabilityRegistry<()>>,
-) -> RlmSession<()> {
+fn session_for(spec: &InterpreterSpec, registry: Arc<CapabilityRegistry<()>>) -> RlmSession<()> {
     let host = Arc::new(
         RlmHost::new(registry, Arc::new(()))
             .with_policy(RlmPolicy::default())

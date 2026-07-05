@@ -230,7 +230,11 @@ impl ExternalInterpreter {
     /// A CPython child (`binary` defaults to `python3`).
     pub fn python(binary: Option<&str>, extra_args: Vec<String>) -> Self {
         let mut args = extra_args;
-        args.extend(["-u".to_string(), "-c".to_string(), PYTHON_PRELUDE.to_string()]);
+        args.extend([
+            "-u".to_string(),
+            "-c".to_string(),
+            PYTHON_PRELUDE.to_string(),
+        ]);
         Self {
             language: "python".to_string(),
             binary: binary.unwrap_or("python3").to_string(),
@@ -461,20 +465,20 @@ statement of a cell is an expression, its value is echoed back to you."#
             };
             match frame.get("op").and_then(Value::as_str) {
                 Some("call") => {
-                    let call: HostCall =
-                        match serde_json::from_value(frame.get("call").cloned().unwrap_or_default())
-                        {
-                            Ok(call) => call,
-                            Err(err) => {
-                                self.send_frame(json!({
-                                    "op": "call_result",
-                                    "ok": false,
-                                    "error": format!("malformed capability call: {err}"),
-                                }))
-                                .await?;
-                                continue;
-                            }
-                        };
+                    let call: HostCall = match serde_json::from_value(
+                        frame.get("call").cloned().unwrap_or_default(),
+                    ) {
+                        Ok(call) => call,
+                        Err(err) => {
+                            self.send_frame(json!({
+                                "op": "call_result",
+                                "ok": false,
+                                "error": format!("malformed capability call: {err}"),
+                            }))
+                            .await?;
+                            continue;
+                        }
+                    };
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     let outcome = tokio::time::timeout(remaining, host.handle(call)).await;
                     match outcome {

@@ -141,11 +141,7 @@ pub(crate) fn json_to_dynamic(value: &Value) -> Dynamic {
 
 /// Builds the sandboxed engine for one cell, registering the capability
 /// closures against `host` and the shared cell buffers.
-fn build_engine(
-    host: Arc<dyn RlmHostApi>,
-    cell: SharedCellState,
-    max_operations: u64,
-) -> Engine {
+fn build_engine(host: Arc<dyn RlmHostApi>, cell: SharedCellState, max_operations: u64) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_operations(max_operations);
 
@@ -212,11 +208,7 @@ fn build_engine(
     engine.register_fn(
         "llm",
         move |params: Map| -> std::result::Result<String, Box<EvalAltResult>> {
-            let get = |key: &str| {
-                params
-                    .get(key)
-                    .and_then(|d| d.clone().into_string().ok())
-            };
+            let get = |key: &str| params.get(key).and_then(|d| d.clone().into_string().ok());
             let prompt = get("prompt").ok_or_else(|| {
                 Box::new(EvalAltResult::ErrorRuntime(
                     Dynamic::from("llm: missing `prompt`".to_string()),
