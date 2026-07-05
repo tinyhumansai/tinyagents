@@ -230,6 +230,242 @@ async fn list_tool_honors_created_window_and_kind() {
 }
 
 #[tokio::test]
+async fn spawn_tool_preserves_every_task_kind_input_and_timeout() {
+    let store: Arc<dyn TaskStore> = Arc::new(InMemoryTaskStore::new());
+    let spawn = OrchestrationTool::new(OrchestrationToolKind::Spawn, store);
+
+    let cases = [
+        ("graph", "planner", "graph", "graph_id"),
+        ("sub_agent", "writer", "sub_agent", "agent"),
+        ("tool", "search", "tool", "tool"),
+        (
+            "external_process",
+            "sandboxed-worker",
+            "external_process",
+            "label",
+        ),
+    ];
+
+    for (idx, (kind, target, serialized_kind, target_field)) in cases.into_iter().enumerate() {
+        let result = spawn
+            .call(
+                &(),
+                ToolCall::new(
+                    format!("spawn-{idx}"),
+                    "orchestrate_spawn",
+                    json!({
+                        "kind": kind,
+                        "target": target,
+                        "input": { "topic": target },
+                        "timeout_ms": 250
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        let raw = result.raw.unwrap();
+        assert_eq!(raw["status"], "pending");
+        assert_eq!(raw["spec"]["kind"]["type"], serialized_kind);
+        assert_eq!(raw["spec"]["kind"][target_field], target);
+        assert_eq!(raw["spec"]["input"]["topic"], target);
+        assert_eq!(raw["spec"]["timeout_ms"], 250);
+    }
+}
+
+#[tokio::test]
+async fn await_cancel_kill_timeout_and_yield_tools_return_control_records() {
+    let store: Arc<dyn TaskStore> = Arc::new(InMemoryTaskStore::new());
+    let task_a = TaskId::new("task-a");
+    let task_b = TaskId::new("task-b");
+    let task_c = TaskId::new("task-c");
+    store.insert(graph_spec(task_a.as_str())).unwrap();
+    store.insert(graph_spec(task_b.as_str())).unwrap();
+    store.insert(graph_spec(task_c.as_str())).unwrap();
+
+    let timeout = OrchestrationTool::new(OrchestrationToolKind::Timeout, store.clone());
+    let awaited = OrchestrationTool::new(OrchestrationToolKind::Await, store.clone());
+    let cancel = OrchestrationTool::new(OrchestrationToolKind::Cancel, store.clone());
+    let kill = OrchestrationTool::new(OrchestrationToolKind::Kill, store.clone());
+    let yield_interrupt = OrchestrationTool::new(OrchestrationToolKind::YieldInterrupt, store);
+
+    let timed = timeout
+        .call(
+            &(),
+            ToolCall::new(
+                "timeout",
+                "orchestrate_timeout",
+                json!({ "task_id": task_a.as_str(), "timeout_ms": 500 }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(timed.raw.as_ref().unwrap()["spec"]["timeout_ms"], 500);
+
+    let records = awaited
+        .call(
+            &(),
+            ToolCall::new(
+                "await",
+                "orchestrate_await",
+                json!({
+                    "task_ids": [task_a.as_str(), task_b.as_str()],
+                    "timeout_ms": 50,
+                    "mode": "all"
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(records.raw.unwrap().as_array().unwrap().len(), 2);
+
+    let cancelled = cancel
+        .call(
+            &(),
+            ToolCall::new(
+                "cancel",
+                "orchestrate_cancel",
+                json!({ "task_id": task_b.as_str() }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cancelled.raw.as_ref().unwrap()["status"],
+        "cancel_requested"
+    );
+    assert_eq!(
+        cancelled.raw.as_ref().unwrap()["message"],
+        "cancellation requested"
+    );
+
+    let killed = kill
+        .call(
+            &(),
+            ToolCall::new(
+                "kill",
+                "orchestrate_kill",
+                json!({ "task_id": task_c.as_str() }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(killed.raw.as_ref().unwrap()["status"], "abandoned");
+
+    let yielded = yield_interrupt
+        .call(
+            &(),
+            ToolCall::new(
+                "yield",
+                "orchestrate_yield",
+                json!({
+                    "message": "need human input",
+                    "resume_schema": { "type": "object" }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        yielded.raw.as_ref().unwrap()["status"],
+        "interrupt_requested"
+    );
+    assert_eq!(yielded.raw.as_ref().unwrap()["message"], "need human input");
+}
+
+#[tokio::test]
+async fn race_tool_reports_completed_winner_and_cancels_live_losers() {
+    let store: Arc<dyn TaskStore> = Arc::new(InMemoryTaskStore::new());
+    let winner = TaskId::new("winner");
+    let loser = TaskId::new("loser");
+    let terminal_loser = TaskId::new("terminal-loser");
+    store.insert(graph_spec(winner.as_str())).unwrap();
+    store.insert(graph_spec(loser.as_str())).unwrap();
+    store.insert(graph_spec(terminal_loser.as_str())).unwrap();
+    store.mark_running(&winner).unwrap();
+    store.mark_running(&loser).unwrap();
+    store.mark_running(&terminal_loser).unwrap();
+    store
+        .complete(&winner, OrchestrationTaskResult::text("done"))
+        .unwrap();
+    store
+        .fail(&terminal_loser, "already failed".to_string())
+        .unwrap();
+
+    let race = OrchestrationTool::new(OrchestrationToolKind::Race, store.clone());
+    let result = race
+        .call(
+            &(),
+            ToolCall::new(
+                "race",
+                "orchestrate_race",
+                json!({
+                    "task_ids": [loser.as_str(), winner.as_str(), terminal_loser.as_str()],
+                    "cancel_losers": true
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    let raw = result.raw.unwrap();
+    assert_eq!(raw["winner"]["spec"]["task_id"], winner.as_str());
+    assert_eq!(
+        store.get(&loser).unwrap().status,
+        OrchestrationTaskStatus::CancelRequested
+    );
+    assert_eq!(
+        store.get(&terminal_loser).unwrap().status,
+        OrchestrationTaskStatus::Failed
+    );
+}
+
+#[tokio::test]
+async fn orchestration_tool_validation_rejects_bad_model_arguments() {
+    let store: Arc<dyn TaskStore> = Arc::new(InMemoryTaskStore::new());
+    let spawn = OrchestrationTool::new(OrchestrationToolKind::Spawn, store.clone());
+    let awaited = OrchestrationTool::new(OrchestrationToolKind::Await, store.clone());
+    let timeout = OrchestrationTool::new(OrchestrationToolKind::Timeout, store);
+
+    let err = spawn
+        .call(
+            &(),
+            ToolCall::new(
+                "bad-spawn",
+                "orchestrate_spawn",
+                json!({ "kind": "unknown", "target": "x" }),
+            ),
+        )
+        .await
+        .expect_err("schema rejects unsupported task kind enum");
+    assert!(err.to_string().contains("kind"));
+
+    let err = awaited
+        .call(
+            &(),
+            ToolCall::new(
+                "empty-await",
+                "orchestrate_await",
+                json!({ "task_ids": [] }),
+            ),
+        )
+        .await
+        .expect_err("empty task list is rejected");
+    assert!(err.to_string().contains("at least one task id"));
+
+    let err = timeout
+        .call(
+            &(),
+            ToolCall::new(
+                "bad-timeout",
+                "orchestrate_timeout",
+                json!({ "task_id": "task-a", "timeout_ms": "soon" }),
+            ),
+        )
+        .await
+        .expect_err("schema rejects wrong timeout type");
+    assert!(err.to_string().contains("timeout_ms"));
+}
+
+#[tokio::test]
 async fn steer_tool_delivers_command_through_steering_registry() {
     use crate::harness::steering::{SteeringCommand, SteeringHandle};
 
@@ -286,6 +522,94 @@ async fn steer_tool_reports_not_delivered_without_registered_handle() {
         .await
         .unwrap();
     assert_eq!(result.raw.as_ref().unwrap()["accepted"], false);
+}
+
+#[tokio::test]
+async fn steer_tool_delivers_inject_message_and_metadata_payloads() {
+    use crate::harness::steering::{SteeringCommand, SteeringHandle};
+
+    let store: Arc<dyn TaskStore> = Arc::new(InMemoryTaskStore::new());
+    let steering = SteeringRegistry::new();
+    let task_id = TaskId::new("child-payloads");
+    store.insert(graph_spec(task_id.as_str())).unwrap();
+    store.mark_running(&task_id).unwrap();
+    let handle = SteeringHandle::allow_all();
+    steering.register(task_id.clone(), handle.clone());
+    let steer =
+        OrchestrationTool::new(OrchestrationToolKind::Steer, store.clone()).with_steering(steering);
+
+    steer
+        .call(
+            &(),
+            ToolCall::new(
+                "inject",
+                "orchestrate_steer",
+                json!({
+                    "task_id": task_id.as_str(),
+                    "command": "inject_message",
+                    "payload": { "content": "new user hint" }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    steer
+        .call(
+            &(),
+            ToolCall::new(
+                "metadata",
+                "orchestrate_steer",
+                json!({
+                    "task_id": task_id.as_str(),
+                    "command": "set_metadata",
+                    "payload": { "priority": "high" }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let drained = handle.drain();
+    assert!(matches!(
+        &drained[0],
+        SteeringCommand::InjectMessage(message) if message.text() == "new user hint"
+    ));
+    assert!(matches!(
+        &drained[1],
+        SteeringCommand::SetMetadata { metadata } if metadata["priority"] == "high"
+    ));
+}
+
+#[tokio::test]
+async fn steer_tool_accepts_terminal_task_but_does_not_deliver() {
+    use crate::harness::steering::SteeringHandle;
+
+    let store: Arc<dyn TaskStore> = Arc::new(InMemoryTaskStore::new());
+    let steering = SteeringRegistry::new();
+    let task_id = TaskId::new("child-done");
+    store.insert(graph_spec(task_id.as_str())).unwrap();
+    store
+        .complete(&task_id, OrchestrationTaskResult::text("done"))
+        .unwrap();
+    let handle = SteeringHandle::allow_all();
+    steering.register(task_id.clone(), handle.clone());
+
+    let steer =
+        OrchestrationTool::new(OrchestrationToolKind::Steer, store.clone()).with_steering(steering);
+    let result = steer
+        .call(
+            &(),
+            ToolCall::new(
+                "terminal-steer",
+                "orchestrate_steer",
+                json!({ "task_id": task_id.as_str(), "command": "cancel" }),
+            ),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.raw.as_ref().unwrap()["accepted"], false);
+    assert!(handle.drain().is_empty());
 }
 
 #[tokio::test]
