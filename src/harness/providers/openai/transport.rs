@@ -469,13 +469,16 @@ impl OpenAiModel {
         code: Option<String>,
         raw: Option<Value>,
     ) -> ProviderError {
-        let retryable = status.is_some_and(|s| s == 408 || s == 409 || s == 429 || s >= 500);
+        let message = message.into();
+        let retryable =
+            crate::harness::retry::classify_provider_failure(status, code.as_deref(), &message)
+                .is_retryable();
         ProviderError {
             provider: self.provider.clone(),
             model: Some(self.model.clone()),
             status,
             code,
-            message: message.into(),
+            message,
             retryable,
             raw,
         }
