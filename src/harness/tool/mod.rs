@@ -10,6 +10,7 @@
 //! See [`types`] for definitions. This module provides constructors and the
 //! [`ToolRegistry`] logic for registering and looking up tools by name.
 
+mod schema;
 mod types;
 
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use serde_json::Value;
 
 use crate::error::{Result, TinyAgentsError};
 
+pub use schema::*;
 pub use types::*;
 
 impl ToolSchema {
@@ -364,5 +366,7 @@ fn json_value_kind(value: &Value) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod schema_test;
 #[cfg(test)]
 mod test;
