@@ -82,6 +82,29 @@ impl EventSink {
         inner.listeners.push(listener);
     }
 
+    /// Removes a previously subscribed listener.
+    ///
+    /// This is primarily used by one-shot stream adapters that subscribe a
+    /// transient listener to a long-lived shared sink. Returns `true` when the
+    /// listener was present.
+    pub fn unsubscribe(&self, listener: &Arc<dyn EventListener>) -> bool {
+        let mut inner = self.inner.lock().expect("EventSink lock poisoned");
+        let before = inner.listeners.len();
+        inner
+            .listeners
+            .retain(|candidate| !Arc::ptr_eq(candidate, listener));
+        inner.listeners.len() != before
+    }
+
+    #[cfg(test)]
+    pub(crate) fn listener_count(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("EventSink lock poisoned")
+            .listeners
+            .len()
+    }
+
     /// Emits an event, assigning a monotonic [`EventId`] and offset, then
     /// notifying all registered listeners in insertion order.
     ///
