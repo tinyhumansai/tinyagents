@@ -64,6 +64,12 @@ pub struct CompiledGraph<State, Update> {
     pub(crate) max_concurrency: Option<usize>,
     /// Default per-node handler timeout (`None` = no timeout).
     pub(crate) node_timeout: Option<std::time::Duration>,
+    /// Optional whole-run wall-clock deadline (`None` = no deadline). Checked at
+    /// every super-step boundary: when the elapsed run time reaches it the run
+    /// stops *between* super-steps with a [`TinyAgentsError::Timeout`], leaving
+    /// the last committed boundary checkpoint intact and resumable. Configured
+    /// via [`CompiledGraph::with_run_deadline`](crate::graph::CompiledGraph::with_run_deadline).
+    pub(crate) run_deadline: Option<std::time::Duration>,
     /// When checkpoints are persisted relative to execution (default
     /// [`DurabilityMode::Sync`]).
     pub(crate) durability: DurabilityMode,
@@ -115,6 +121,7 @@ impl<State, Update> Clone for CompiledGraph<State, Update> {
             parallel: self.parallel,
             max_concurrency: self.max_concurrency,
             node_timeout: self.node_timeout,
+            run_deadline: self.run_deadline,
             durability: self.durability,
             node_retry: self.node_retry.clone(),
         }

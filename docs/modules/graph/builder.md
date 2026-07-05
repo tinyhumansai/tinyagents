@@ -43,6 +43,15 @@ parallel superstep (the active set runs in chunks of at most `n`).
 `with_node_timeout(d)` fails the run with `TinyAgentsError::Timeout` if any node
 handler does not resolve within `d`.
 
+`CompiledGraph::with_run_deadline(d)` bounds the *whole run* by a wall-clock
+`d`, checked at every super-step boundary: when the elapsed run time first
+reaches `d` the run stops *between* super-steps with `TinyAgentsError::Timeout`,
+leaving the last committed boundary checkpoint intact and resumable. Prefer this
+over wrapping `run` in an external `tokio::time::timeout`, which aborts
+mid-super-step and cannot leave a clean checkpoint. It bounds scheduling, not a
+single in-flight node — pair it with `with_node_timeout` to also bound
+individual handlers.
+
 Compile-time options:
 
 ```rust

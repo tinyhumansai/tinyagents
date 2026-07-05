@@ -277,6 +277,7 @@ impl<State, Update> CompiledGraph<State, Update> {
             parallel,
             max_concurrency,
             node_timeout,
+            run_deadline: None,
             durability: crate::graph::checkpoint::DurabilityMode::default(),
             node_retry: None,
         }
@@ -349,6 +350,26 @@ impl<State, Update> CompiledGraph<State, Update> {
     /// default) the first node error aborts the run immediately.
     pub fn with_node_retry(mut self, policy: crate::harness::retry::RetryPolicy) -> Self {
         self.node_retry = Some(policy);
+        self
+    }
+
+    /// Bounds the whole run by a wall-clock `deadline`, checked at every
+    /// super-step boundary.
+    ///
+    /// Unlike wrapping [`run`](Self::run) in an external
+    /// [`tokio::time::timeout`] — which aborts mid-super-step and cannot leave a
+    /// clean checkpoint — this stops the run *between* super-steps: when the
+    /// elapsed run time first reaches `deadline`, the run fails with
+    /// [`TinyAgentsError::Timeout`] and (on a checkpointed thread) the last
+    /// committed boundary checkpoint stays intact, so the run can be resumed or
+    /// inspected rather than lost.
+    ///
+    /// The deadline bounds *scheduling*, not a single in-flight node: a
+    /// long-running node still runs to completion within its super-step (bound
+    /// it independently with a per-node timeout). `None` (the default) imposes
+    /// no deadline.
+    pub fn with_run_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.run_deadline = Some(deadline);
         self
     }
 

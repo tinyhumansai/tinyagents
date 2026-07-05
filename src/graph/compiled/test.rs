@@ -1861,6 +1861,103 @@ async fn node_timeout_fails_slow_handler() {
     assert!(matches!(err, TinyAgentsError::Timeout(_)));
 }
 
+// ── Whole-run wall-clock deadline ────────────────────────────────────────────
+
+/// A per-run deadline stops the run *between* super-steps once the elapsed run
+/// time reaches it, surfacing [`TinyAgentsError::Timeout`].
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_deadline_stops_between_supersteps() {
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("a", |s: i32, _c: NodeContext| async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            Ok(NodeResult::Update(s + 1))
+        })
+        .add_node("b", |s: i32, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .set_entry("a")
+        .add_edge("a", "b")
+        .set_finish("b")
+        .compile()
+        .unwrap()
+        .with_run_deadline(Duration::from_millis(20));
+
+    // The first boundary (elapsed ~0) admits node `a`; the next boundary
+    // (elapsed ~40ms ≥ 20ms) trips the deadline before `b` ever runs.
+    let err = graph.run(0).await.unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
+}
+
+/// A run that finishes within its deadline is unaffected — no false trip.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_deadline_allows_a_run_that_finishes_in_time() {
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("a", |s: i32, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .add_node("b", |s: i32, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .set_entry("a")
+        .add_edge("a", "b")
+        .set_finish("b")
+        .compile()
+        .unwrap()
+        .with_run_deadline(Duration::from_secs(30));
+
+    let run = graph.run(0).await.unwrap();
+    assert_eq!(run.state, 2);
+}
+
+/// On a checkpointed thread, a deadline trip leaves the last committed boundary
+/// checkpoint intact — so the run can be resumed to completion rather than lost
+/// (the durability win over an external `tokio::time::timeout`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_deadline_leaves_last_checkpoint_resumable() {
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let topology = || {
+        GraphBuilder::<i32, i32>::overwrite()
+            .add_node("a", |s: i32, _c: NodeContext| async move {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                Ok(NodeResult::Update(s + 1))
+            })
+            .add_node("b", |s: i32, _c: NodeContext| async move {
+                Ok(NodeResult::Update(s + 1))
+            })
+            .add_node("c", |s: i32, _c: NodeContext| async move {
+                Ok(NodeResult::Update(s + 1))
+            })
+            .set_entry("a")
+            .add_edge("a", "b")
+            .add_edge("b", "c")
+            .set_finish("c")
+            .compile()
+            .unwrap()
+    };
+
+    // Trips after `a`'s boundary (state=1, next=[b]) but before `b` runs.
+    let deadlined = topology()
+        .with_checkpointer(cp.clone())
+        .with_run_deadline(Duration::from_millis(20));
+    let err = deadlined.run_with_thread("t", 0).await.unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
+
+    // The boundary checkpoint from the completed super-step survived intact.
+    let list = cp.list("t").await.unwrap();
+    assert!(
+        !list.is_empty(),
+        "the pre-deadline boundary checkpoint is intact"
+    );
+
+    // Resuming (no deadline) continues from that checkpoint to completion.
+    let resumed = topology().with_checkpointer(cp.clone());
+    let run = resumed
+        .resume("t", Command::resume(json!(null)))
+        .await
+        .unwrap();
+    assert_eq!(run.state, 3, "resume ran the remaining super-steps b and c");
+}
+
 // ── Network resilience: node retry + resumable failures ──────────────────────
 
 /// A single-node graph whose handler fails (with a retryable model error) the
