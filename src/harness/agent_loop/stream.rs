@@ -113,6 +113,22 @@ impl<State: Send + Sync, Ctx: Send + Sync + 'static> AgentHarness<State, Ctx> {
         input: Vec<Message>,
     ) -> impl futures::Stream<Item = AgentStreamItem> + 'a {
         let ctx = RunContext::new(config, ctx_data);
+        self.invoke_stream_in_context(state, ctx, input)
+    }
+
+    /// Runs the agent loop while streaming every emitted event to the caller,
+    /// using a caller-supplied [`RunContext`].
+    ///
+    /// This is the context-preserving counterpart of
+    /// [`AgentHarness::invoke_stream`]. Use it when the caller has already
+    /// attached cancellation, events, stores, workspace metadata, or steering to
+    /// the run context and still wants caller-consumable stream items.
+    pub fn invoke_stream_in_context<'a>(
+        &'a self,
+        state: &'a State,
+        ctx: RunContext<Ctx>,
+        input: Vec<Message>,
+    ) -> impl futures::Stream<Item = AgentStreamItem> + 'a {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         // Subscribe before driving so no event (starting with `RunStarted`) is
         // missed. The listener rides the run's `EventSink`, which sub-agents

@@ -2031,6 +2031,41 @@ async fn invoke_stream_yields_events_then_completed() {
 }
 
 #[tokio::test]
+async fn invoke_stream_in_context_preserves_caller_context() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("hello there")));
+    let ctx = RunContext::new(
+        RunConfig::new("caller-run").with_thread("caller-thread"),
+        (),
+    );
+
+    let items: Vec<AgentStreamItem> = harness
+        .invoke_stream_in_context(&(), ctx, vec![Message::user("hi")])
+        .collect()
+        .await;
+    let (events, terminal) = collect_stream(items).await;
+
+    let started = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::RunStarted { run_id, thread_id } => Some((run_id, thread_id)),
+            _ => None,
+        })
+        .expect("RunStarted event");
+    assert_eq!(started.0.as_str(), "caller-run");
+    assert_eq!(
+        started.1.as_ref().map(|thread| thread.as_str()),
+        Some("caller-thread")
+    );
+    match terminal {
+        AgentStreamItem::Completed(run) => {
+            assert_eq!(run.text().as_deref(), Some("hello there"));
+        }
+        other => panic!("expected Completed terminal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn invoke_stream_surfaces_tool_lifecycle() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model(
