@@ -62,6 +62,12 @@ default = []
 sqlite = ["dep:rusqlite"]
 # Embedded Rhai-backed `.ragsh` REPL session runtime (`repl::session`).
 repl = ["dep:rhai"]
+# Recursive-language-model runtime (`rlm`): a driver model writes code cells
+# executed in a sandboxed interpreter (embedded Rhai, or an external Python /
+# JavaScript process) whose only host surface is capability calls back into
+# the registry (`llm`, `tool`, `agent`). `tokio/process` + `tokio/io-util`
+# drive the external interpreter subprocesses.
+rlm = ["dep:rhai", "tokio/process", "tokio/io-util"]
 # Builtin generic tools (`harness::tools`) kept out of the default dependency
 # graph so host applications can choose whether they want these implementations.
 tools = ["dep:chrono", "dep:chrono-tz"]
