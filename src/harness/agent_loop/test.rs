@@ -2083,6 +2083,17 @@ async fn invoke_stream_in_context_unsubscribes_channel_listener() {
     assert_eq!(events.listener_count(), 0);
 }
 
+#[test]
+fn invoke_stream_in_context_stream_is_send() {
+    fn assert_send<T: Send>(_value: T) {}
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("hello there")));
+    let ctx = RunContext::new(RunConfig::new("send-stream-run"), ());
+
+    assert_send(harness.invoke_stream_in_context(&(), ctx, vec![Message::user("hi")]));
+}
+
 #[tokio::test]
 async fn invoke_stream_surfaces_tool_lifecycle() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
