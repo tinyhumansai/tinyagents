@@ -52,12 +52,19 @@ rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 # by the `repl` feature to keep the default build light.
 rhai = { version = "1", features = ["sync"], optional = true }
 
+# Optional builtin tool family for deterministic time/date helpers.
+chrono = { version = "0.4", optional = true }
+chrono-tz = { version = "0.10", optional = true }
+
 [features]
 default = []
 # Embedded SQLite-backed checkpointer (`graph::checkpoint::SqliteCheckpointer`).
 sqlite = ["dep:rusqlite"]
 # Embedded Rhai-backed `.ragsh` REPL session runtime (`repl::session`).
 repl = ["dep:rhai"]
+# Builtin generic tools (`harness::tools`) kept out of the default dependency
+# graph so host applications can choose whether they want these implementations.
+tools = ["dep:chrono", "dep:chrono-tz"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
