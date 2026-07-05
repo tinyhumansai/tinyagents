@@ -56,10 +56,14 @@
 //! Hosted and local providers (OpenAI plus the OpenAI-compatible endpoints for
 //! Anthropic, Ollama, DeepSeek, Groq, xAI, OpenRouter, Together, and Mistral)
 //! are compiled in unconditionally alongside the offline, deterministic
-//! [`harness::providers::MockModel`]. Two Cargo features gate optional,
+//! [`harness::providers::MockModel`]. Three Cargo features gate optional,
 //! heavier dependencies instead: `sqlite` (embedded SQLite checkpointer,
-//! [`graph::checkpoint::SqliteCheckpointer`]) and `repl` (embedded Rhai engine
-//! powering the `.ragsh` session runtime, [`repl::session`]).
+//! [`graph::checkpoint::SqliteCheckpointer`]), `repl` (embedded Rhai engine
+//! powering the `.ragsh` session runtime, [`repl::session`]), and `rlm` (the
+//! recursive-language-model runtime: a driver model writes code cells run in
+//! a sandboxed interpreter — embedded Rhai or an external Python/JavaScript
+//! process — whose only host surface is capability calls back into the
+//! registry).
 //!
 //! ## Crate-root re-exports
 //!
@@ -73,6 +77,8 @@ pub mod harness;
 pub mod language;
 pub mod registry;
 pub mod repl;
+#[cfg(feature = "rlm")]
+pub mod rlm;
 
 // --- Error: the crate-wide error type and `Result` alias ---
 pub use error::{Result, TinyAgentsError};
@@ -244,4 +250,16 @@ pub use graph::testkit::{
 pub use repl::session::{
     LanguageCompiler, ReplCallKind, ReplCallRecord, ReplCancelFlag, ReplCapabilities, ReplPolicy,
     ReplResult, ReplSession, ReplValue, ReplVariables,
+};
+
+// --- RLM runtime (feature = "rlm") ---
+// The recursive-language-model surface: a driver model writes code cells that
+// run in a sandboxed interpreter (embedded Rhai or an external Python/Node
+// process) whose only host surface is capability calls (`llm`, `tool`,
+// `agent`) back into the registry. Config-driven end to end (`RlmConfig`).
+#[cfg(feature = "rlm")]
+pub use rlm::{
+    CellOutcome, HostCall, InterpreterSpec, RlmCallKind, RlmCallRecord, RlmCancelFlag, RlmConfig,
+    RlmHost, RlmHostApi, RlmInterpreter, RlmOutcome, RlmPolicy, RlmRunner, RlmSession, RlmStep,
+    RlmStopReason, RlmTemplate, TemplateSpec,
 };
