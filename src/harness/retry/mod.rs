@@ -30,6 +30,217 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::error::TinyAgentsError;
+use crate::harness::model::ProviderError;
+
+// ── Provider failure classification ─────────────────────────────────────────
+
+fn parse_status_at(text: &str, start: usize) -> Option<u16> {
+    let digits: String = text
+        .get(start..)?
+        .trim_start()
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    if digits.len() == 3 {
+        digits.parse().ok()
+    } else {
+        None
+    }
+}
+
+fn find_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .to_ascii_lowercase()
+        .find(&needle.to_ascii_lowercase())
+}
+
+/// Extracts an HTTP status from structured provider error text.
+///
+/// Recognized positions are provider envelopes like `API error (404): ...`,
+/// explicit `HTTP 404`, `status: 404` / `status 404`, or a status code at the
+/// beginning of the message. Free-text digit runs such as latency values or
+/// model ids are ignored.
+pub fn structured_http_status(message: &str) -> Option<u16> {
+    let trimmed = message.trim_start();
+    if let Some(status) = parse_status_at(trimmed, 0) {
+        return Some(status);
+    }
+
+    for (idx, _) in message.match_indices('(') {
+        if let Some(status) = parse_status_at(message, idx + 1) {
+            return Some(status);
+        }
+    }
+
+    for marker in ["http ", "status:", "status "] {
+        if let Some(idx) = find_case_insensitive(message, marker)
+            && let Some(status) = parse_status_at(message, idx + marker.len())
+        {
+            return Some(status);
+        }
+    }
+
+    None
+}
+
+fn is_retryable_status(status: u16) -> bool {
+    matches!(status, 408 | 409 | 429) || status >= 500
+}
+
+fn is_upstream_unhealthy_status(status: u16) -> bool {
+    matches!(status, 408 | 409) || status >= 500
+}
+
+fn text_indicates_rate_limit(lower: &str) -> bool {
+    lower.contains("429")
+        && (lower.contains("too many") || lower.contains("rate") || lower.contains("limit"))
+}
+
+fn text_indicates_upstream_unhealthy(lower: &str) -> bool {
+    lower.contains("no healthy upstream")
+        || lower.contains("upstream unavailable")
+        || lower.contains("service unavailable")
+        || lower.contains("408 request timeout")
+        || lower.contains("409 conflict")
+        || lower.contains("500 internal server error")
+        || lower.contains("502 bad gateway")
+        || lower.contains("503 service unavailable")
+        || lower.contains("504 gateway timeout")
+}
+
+fn text_indicates_non_retryable(lower: &str) -> bool {
+    let auth_failure_hints = [
+        "invalid api key",
+        "incorrect api key",
+        "missing api key",
+        "api key not set",
+        "authentication failed",
+        "auth failed",
+        "unauthorized",
+        "forbidden",
+        "permission denied",
+        "access denied",
+        "invalid token",
+    ];
+    if auth_failure_hints.iter().any(|hint| lower.contains(hint)) {
+        return true;
+    }
+
+    lower.contains("model")
+        && (lower.contains("not found")
+            || lower.contains("unknown")
+            || lower.contains("unsupported")
+            || lower.contains("does not exist")
+            || lower.contains("invalid"))
+}
+
+fn text_indicates_non_retryable_rate_limit(lower: &str) -> bool {
+    let business_hints = [
+        "plan does not include",
+        "doesn't include",
+        "not include",
+        "insufficient balance",
+        "insufficient_balance",
+        "insufficient quota",
+        "insufficient_quota",
+        "quota exhausted",
+        "out of credits",
+        "no available package",
+        "package not active",
+        "purchase package",
+        "model not available for your plan",
+    ];
+    if business_hints.iter().any(|hint| lower.contains(hint)) {
+        return true;
+    }
+
+    lower.split(|ch: char| !ch.is_ascii_digit()).any(|token| {
+        token
+            .parse::<u16>()
+            .is_ok_and(|code| matches!(code, 1113 | 1311))
+    })
+}
+
+/// Classifies a normalized provider failure from generic HTTP status, provider
+/// error code/type, and message details.
+///
+/// Host applications may layer their own account, billing, or product-specific
+/// terminal rules before or after this helper. TinyAgents only classifies
+/// provider-neutral retry behavior.
+pub fn classify_provider_failure(
+    status: Option<u16>,
+    code: Option<&str>,
+    message: &str,
+) -> ProviderFailureClass {
+    let status = status.or_else(|| structured_http_status(message));
+    let lower = match code {
+        Some(code) if !code.trim().is_empty() => format!("{message} {code}").to_ascii_lowercase(),
+        _ => message.to_ascii_lowercase(),
+    };
+
+    if status == Some(429) || text_indicates_rate_limit(&lower) {
+        if text_indicates_non_retryable_rate_limit(&lower) {
+            return ProviderFailureClass::NonRetryableRateLimit;
+        }
+        return ProviderFailureClass::RateLimited;
+    }
+
+    if let Some(status) = status {
+        if is_upstream_unhealthy_status(status) {
+            return ProviderFailureClass::UpstreamUnhealthy;
+        }
+        if (400..500).contains(&status) && !is_retryable_status(status) {
+            return ProviderFailureClass::NonRetryable;
+        }
+    }
+
+    if text_indicates_upstream_unhealthy(&lower) {
+        return ProviderFailureClass::UpstreamUnhealthy;
+    }
+    if text_indicates_non_retryable(&lower) {
+        return ProviderFailureClass::NonRetryable;
+    }
+
+    ProviderFailureClass::Retryable
+}
+
+/// Classifies a normalized [`ProviderError`].
+pub fn classify_provider_error(error: &ProviderError) -> ProviderFailureClass {
+    classify_provider_failure(error.status, error.code.as_deref(), &error.message)
+}
+
+/// Computes the retryability flag for a normalized [`ProviderError`].
+pub fn provider_error_is_retryable(error: &ProviderError) -> bool {
+    classify_provider_error(error).is_retryable()
+}
+
+/// Parses a `Retry-After` / `retry_after` value from provider error text into
+/// milliseconds. Integer and fractional seconds are accepted.
+pub fn parse_retry_after_ms(message: &str) -> Option<u64> {
+    let lower = message.to_ascii_lowercase();
+    for prefix in &[
+        "retry-after:",
+        "retry_after:",
+        "retry-after ",
+        "retry_after ",
+    ] {
+        if let Some(pos) = lower.find(prefix) {
+            let after = &message[pos + prefix.len()..];
+            let number: String = after
+                .trim_start()
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+                .collect();
+            if let Ok(seconds) = number.parse::<f64>()
+                && seconds.is_finite()
+                && seconds >= 0.0
+            {
+                return u64::try_from(Duration::from_secs_f64(seconds).as_millis()).ok();
+            }
+        }
+    }
+    None
+}
 
 // ── RetryPolicy ──────────────────────────────────────────────────────────────
 

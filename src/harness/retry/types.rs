@@ -118,3 +118,43 @@ pub(crate) struct RateLimiterState {
     /// Last time the bucket was refilled.
     pub(crate) last_refill: std::time::Instant,
 }
+
+/// Provider-failure class used for retry, fallback, and telemetry decisions.
+///
+/// The class is intentionally provider-neutral: callers can layer product,
+/// billing, or account-specific rules on top, while TinyAgents supplies the
+/// generic HTTP/status/error-message behavior shared by hosted model adapters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderFailureClass {
+    /// A transient upstream failure such as timeout, rate limit, or 5xx.
+    Retryable,
+    /// A permanent caller/account/model error such as 400/401/403/404.
+    NonRetryable,
+    /// A generic 429 rate limit where retrying after backoff may succeed.
+    RateLimited,
+    /// A 429 carrying quota, balance, plan, or package exhaustion detail.
+    NonRetryableRateLimit,
+    /// A provider-side outage/capacity failure such as 408/409/5xx.
+    UpstreamUnhealthy,
+}
+
+impl ProviderFailureClass {
+    /// Whether retrying the same request may succeed.
+    pub fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::Retryable | Self::RateLimited | Self::UpstreamUnhealthy
+        )
+    }
+
+    /// Stable reason label suitable for logs and telemetry dimensions.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Retryable => "retryable",
+            Self::NonRetryable => "non_retryable",
+            Self::RateLimited => "rate_limited",
+            Self::NonRetryableRateLimit => "rate_limited_non_retryable",
+            Self::UpstreamUnhealthy => "upstream_unhealthy",
+        }
+    }
+}

@@ -5,7 +5,10 @@
 
 use std::time::{Duration, Instant};
 
-use super::{FallbackPolicy, RateLimiter, RetryPolicy, is_retryable};
+use super::{
+    FallbackPolicy, ProviderFailureClass, RateLimiter, RetryPolicy, classify_provider_error,
+    classify_provider_failure, is_retryable, parse_retry_after_ms, structured_http_status,
+};
 use crate::error::TinyAgentsError;
 
 #[test]
@@ -164,6 +167,143 @@ fn provider_error_retryability_is_read_from_the_structured_flag_not_assumed() {
     assert!(!is_retryable(&TinyAgentsError::Provider(Box::new(
         unauthorized
     ))));
+}
+
+#[test]
+fn structured_http_status_uses_only_anchored_positions() {
+    assert_eq!(
+        structured_http_status("custom_openai API error (403 Forbidden): nope"),
+        Some(403)
+    );
+    assert_eq!(structured_http_status("HTTP 404 Not Found"), Some(404));
+    assert_eq!(structured_http_status("status: 401"), Some(401));
+    assert_eq!(structured_http_status("408 Request Timeout"), Some(408));
+
+    assert_eq!(
+        structured_http_status("upstream took 450ms to respond, retrying"),
+        None
+    );
+    assert_eq!(
+        structured_http_status("gpt-4-0409 returned an empty completion"),
+        None
+    );
+    assert_eq!(
+        structured_http_status("received 412 partial bytes before reset"),
+        None
+    );
+}
+
+#[test]
+fn provider_failure_classifies_generic_http_statuses() {
+    assert_eq!(
+        classify_provider_failure(Some(401), None, "invalid api key"),
+        ProviderFailureClass::NonRetryable
+    );
+    assert_eq!(
+        classify_provider_failure(Some(404), None, "model not found"),
+        ProviderFailureClass::NonRetryable
+    );
+    assert_eq!(
+        classify_provider_failure(Some(429), None, "too many requests"),
+        ProviderFailureClass::RateLimited
+    );
+    assert_eq!(
+        classify_provider_failure(Some(408), None, "request timeout"),
+        ProviderFailureClass::UpstreamUnhealthy
+    );
+    assert_eq!(
+        classify_provider_failure(Some(502), None, "bad gateway"),
+        ProviderFailureClass::UpstreamUnhealthy
+    );
+}
+
+#[test]
+fn provider_failure_classifies_message_hints_without_status() {
+    assert_eq!(
+        classify_provider_failure(None, None, "authentication failed"),
+        ProviderFailureClass::NonRetryable
+    );
+    assert_eq!(
+        classify_provider_failure(None, None, "model glm-4.7 is unsupported"),
+        ProviderFailureClass::NonRetryable
+    );
+    assert_eq!(
+        classify_provider_failure(None, None, "no healthy upstream available"),
+        ProviderFailureClass::UpstreamUnhealthy
+    );
+    assert_eq!(
+        classify_provider_failure(None, None, "429 Too Many Requests: rate limit exceeded"),
+        ProviderFailureClass::RateLimited
+    );
+}
+
+#[test]
+fn provider_failure_classifies_non_retryable_rate_limits() {
+    assert_eq!(
+        classify_provider_failure(
+            Some(429),
+            Some("1311"),
+            "the current account plan does not include glm-5"
+        ),
+        ProviderFailureClass::NonRetryableRateLimit
+    );
+    assert_eq!(
+        classify_provider_failure(Some(429), None, "insufficient balance"),
+        ProviderFailureClass::NonRetryableRateLimit
+    );
+}
+
+#[test]
+fn provider_failure_class_controls_retryability_and_reason_labels() {
+    assert!(ProviderFailureClass::RateLimited.is_retryable());
+    assert!(ProviderFailureClass::UpstreamUnhealthy.is_retryable());
+    assert!(!ProviderFailureClass::NonRetryable.is_retryable());
+    assert!(!ProviderFailureClass::NonRetryableRateLimit.is_retryable());
+
+    assert_eq!(ProviderFailureClass::Retryable.reason(), "retryable");
+    assert_eq!(ProviderFailureClass::NonRetryable.reason(), "non_retryable");
+    assert_eq!(ProviderFailureClass::RateLimited.reason(), "rate_limited");
+    assert_eq!(
+        ProviderFailureClass::NonRetryableRateLimit.reason(),
+        "rate_limited_non_retryable"
+    );
+    assert_eq!(
+        ProviderFailureClass::UpstreamUnhealthy.reason(),
+        "upstream_unhealthy"
+    );
+}
+
+#[test]
+fn classify_provider_error_reads_structured_error_fields() {
+    use crate::harness::model::ProviderError;
+
+    let provider_error = ProviderError {
+        provider: "openai".to_string(),
+        model: Some("gpt-4o".to_string()),
+        status: Some(429),
+        code: Some("insufficient_quota".to_string()),
+        message: "insufficient quota".to_string(),
+        ..ProviderError::default()
+    };
+
+    assert_eq!(
+        classify_provider_error(&provider_error),
+        ProviderFailureClass::NonRetryableRateLimit
+    );
+}
+
+#[test]
+fn retry_after_parser_accepts_integer_float_and_space_separators() {
+    assert_eq!(
+        parse_retry_after_ms("429 Too Many Requests, Retry-After: 5"),
+        Some(5_000)
+    );
+    assert_eq!(
+        parse_retry_after_ms("Rate limited. retry_after: 2.5 seconds"),
+        Some(2_500)
+    );
+    assert_eq!(parse_retry_after_ms("Retry-After 7"), Some(7_000));
+    assert_eq!(parse_retry_after_ms("500 Internal Server Error"), None);
 }
 
 // ── FallbackPolicy::next_after ────────────────────────────────────────────────

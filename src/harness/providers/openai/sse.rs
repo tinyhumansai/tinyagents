@@ -291,12 +291,15 @@ impl SseState {
             .or_else(|| error.get("type"))
             .and_then(Value::as_str)
             .map(str::to_string);
+        let retryable =
+            crate::harness::retry::classify_provider_failure(None, code.as_deref(), &message)
+                .is_retryable();
         ProviderError {
             provider: self.provider.clone(),
             model: Some(self.model.clone()),
             code,
             message,
-            retryable: false,
+            retryable,
             raw: Some(error.clone()),
             ..ProviderError::default()
         }
