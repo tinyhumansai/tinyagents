@@ -27,6 +27,78 @@ use crate::harness::usage::Usage;
 
 pub use types::*;
 
+/// How a context-window pattern is matched against a model id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContextPatternMatch {
+    /// Pattern may appear anywhere in the lowercased model id.
+    Substring,
+    /// Pattern must be a complete segment delimited by common provider/id
+    /// separators. This avoids false positives for short model ids such as
+    /// `o1` and `o3`.
+    Segment,
+}
+
+/// Generic context-window hints for common provider model families.
+///
+/// These are deliberately provider-neutral fallbacks, not a pricing catalog.
+/// Hosts should prefer authoritative provider/catalog metadata when available
+/// and use this only when a raw model id needs a conservative pre-dispatch
+/// budget.
+const MODEL_CONTEXT_PATTERNS: &[(&str, ContextPatternMatch, u64)] = &[
+    ("claude-haiku-4.5", ContextPatternMatch::Substring, 200_000),
+    ("claude-haiku-4", ContextPatternMatch::Substring, 200_000),
+    ("claude-haiku", ContextPatternMatch::Substring, 200_000),
+    ("claude-sonnet-4", ContextPatternMatch::Substring, 200_000),
+    ("claude-opus-4", ContextPatternMatch::Substring, 200_000),
+    ("claude-3-5-sonnet", ContextPatternMatch::Substring, 200_000),
+    ("claude-3-5-haiku", ContextPatternMatch::Substring, 200_000),
+    ("claude-3-opus", ContextPatternMatch::Substring, 200_000),
+    ("gpt-4.1", ContextPatternMatch::Substring, 1_047_576),
+    ("gpt-4o", ContextPatternMatch::Substring, 128_000),
+    ("gpt-4-turbo", ContextPatternMatch::Substring, 128_000),
+    ("gpt-4", ContextPatternMatch::Substring, 128_000),
+    ("gpt-3.5", ContextPatternMatch::Substring, 16_385),
+    ("o1", ContextPatternMatch::Segment, 200_000),
+    ("o3", ContextPatternMatch::Segment, 200_000),
+    ("deepseek", ContextPatternMatch::Substring, 128_000),
+    ("gemma3", ContextPatternMatch::Substring, 8_192),
+    ("gemma", ContextPatternMatch::Substring, 8_192),
+    ("llama-3", ContextPatternMatch::Substring, 128_000),
+    ("llama3", ContextPatternMatch::Substring, 128_000),
+];
+
+fn matches_context_pattern(lower: &str, pattern: &str, mode: ContextPatternMatch) -> bool {
+    match mode {
+        ContextPatternMatch::Substring => lower.contains(pattern),
+        ContextPatternMatch::Segment => {
+            let model_name = lower.rsplit(['/', ':']).next().unwrap_or(lower);
+            model_name
+                .split(['-', '_', '.'])
+                .next()
+                .is_some_and(|segment| segment == pattern)
+        }
+    }
+}
+
+/// Returns a generic context-window hint for a raw provider model id.
+///
+/// Returns `None` for unknown ids rather than guessing. Hosts with product tier
+/// aliases, local runtime profiles, or authoritative provider catalogs should
+/// check those first and use this helper as a last generic fallback.
+pub fn context_window_for_model_id(model: &str) -> Option<u64> {
+    let normalized = model.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let lower = normalized.to_ascii_lowercase();
+    MODEL_CONTEXT_PATTERNS
+        .iter()
+        .find_map(|(pattern, mode, window)| {
+            matches_context_pattern(&lower, pattern, *mode).then_some(*window)
+        })
+}
+
 impl std::fmt::Display for ProviderError {
     /// Renders the same human-readable shape real provider adapters used to
     /// build by hand before flattening it into a plain

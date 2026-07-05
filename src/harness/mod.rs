@@ -47,7 +47,7 @@ pub use message::{ContentBlock, Message};
 pub use model::{
     CapabilitySet, Modalities, ModelProfile, ModelRequest, ModelResponse, ModelStatus, ModelStream,
     ModelStreamItem, ProviderError, ResponseFormat, StreamAccumulator, ToolChoice,
-    collect_model_stream,
+    collect_model_stream, context_window_for_model_id,
 };
 pub use no_progress::{
     DEFAULT_IDENTICAL_HALT_THRESHOLD, NoProgress, NoProgressTracker, ToolAttempt,

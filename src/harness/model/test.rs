@@ -101,6 +101,43 @@ fn lifecycle_helpers_gate_retired_and_deprecated_models() {
 }
 
 #[test]
+fn context_window_patterns_cover_common_provider_families() {
+    assert_eq!(context_window_for_model_id("gpt-4.1"), Some(1_047_576));
+    assert_eq!(
+        context_window_for_model_id("openai/gpt-4o-mini"),
+        Some(128_000)
+    );
+    assert_eq!(
+        context_window_for_model_id("github_copilot/claude-haiku-4.5"),
+        Some(200_000)
+    );
+    assert_eq!(context_window_for_model_id("deepseek-chat"), Some(128_000));
+    assert_eq!(context_window_for_model_id("gemma3:4b"), Some(8_192));
+    assert_eq!(context_window_for_model_id("llama3:8b"), Some(128_000));
+    assert_eq!(context_window_for_model_id("totally-unknown-model"), None);
+    assert_eq!(context_window_for_model_id("   "), None);
+}
+
+#[test]
+fn o1_o3_context_patterns_require_segment_boundaries() {
+    assert_eq!(context_window_for_model_id("o1"), Some(200_000));
+    assert_eq!(context_window_for_model_id("o1-mini"), Some(200_000));
+    assert_eq!(context_window_for_model_id("o3-mini"), Some(200_000));
+    assert_eq!(
+        context_window_for_model_id("openai/o1-preview"),
+        Some(200_000)
+    );
+
+    assert_eq!(context_window_for_model_id("solo1-7b"), None);
+    assert_eq!(context_window_for_model_id("proto3-chat"), None);
+    assert_eq!(context_window_for_model_id("octo3thing"), None);
+    assert_eq!(
+        context_window_for_model_id("ollama/mistral-for-o1-benchmark"),
+        None
+    );
+}
+
+#[test]
 fn cacheable_prefix_ids_in_order() {
     let req = ModelRequest::new(vec![]).with_cache_segments(vec![
         PromptSegment {
