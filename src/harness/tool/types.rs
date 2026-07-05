@@ -19,6 +19,7 @@ use crate::Result;
 use crate::harness::context::RunContext;
 use crate::harness::events::EventSink;
 use crate::harness::ids::{RunId, ThreadId};
+use crate::harness::tool::{context_detail_from_args, humanize_tool_name};
 
 /// The model-visible syntax a tool declaration prefers.
 ///
@@ -200,12 +201,49 @@ pub struct ToolSideEffects {
     pub payment: bool,
 }
 
+/// How the harness should bound a single tool invocation in wall-clock time.
+///
+/// Most tools should inherit the run's global tool timeout. Long-running
+/// scripting or build tools can opt out with [`ToolTimeout::Unbounded`] when the
+/// caller did not supply a deadline, and can return [`ToolTimeout::Millis`] for
+/// an explicit per-call budget.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "mode", content = "timeout_ms")]
+pub enum ToolTimeout {
+    /// Use the run/global timeout policy.
+    #[default]
+    Inherit,
+    /// Run without a harness-imposed wall-clock deadline.
+    Unbounded,
+    /// Enforce this exact deadline in milliseconds.
+    Millis(u64),
+}
+
+/// Human-facing presentation metadata for a tool invocation.
+///
+/// This metadata is never sent to the model as part of [`ToolSchema`]. It is
+/// intended for timelines, audit logs, and application UIs that need compact
+/// labels such as `Read(src/lib.rs)` instead of raw machine names.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolDisplay {
+    /// Short verb phrase or title-cased label shown for the call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional static detail. Dynamic details usually come from call args via
+    /// [`Tool::display_detail`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// Runtime requirements a tool declares for safe execution.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolRuntime {
     /// Suggested per-call wall-clock timeout in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Invocation timeout behavior when a simple numeric timeout is not enough.
+    #[serde(default, skip_serializing_if = "ToolTimeout::is_inherit")]
+    pub timeout: ToolTimeout,
     /// Maximum automatic retries permitted for this tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
@@ -261,6 +299,9 @@ pub struct ToolPolicy {
     pub runtime: ToolRuntime,
     /// Declared access requirements.
     pub access: ToolAccess,
+    /// Human-facing presentation metadata.
+    #[serde(default, skip_serializing_if = "ToolDisplay::is_empty")]
+    pub display: ToolDisplay,
 }
 
 /// An incremental progress update emitted while a tool runs (streaming).
@@ -295,6 +336,44 @@ pub trait Tool<State: Send + Sync>: Send + Sync {
     /// [`ToolPolicyMiddleware`][crate::harness::middleware::ToolPolicyMiddleware].
     fn policy(&self) -> ToolPolicy {
         ToolPolicy::default()
+    }
+
+    /// Returns the human-facing label for this specific call.
+    ///
+    /// The default prefers [`ToolPolicy::display`] and otherwise derives a
+    /// compact title-cased label from [`Self::name`]. Applications can use this
+    /// for timelines and audit logs without exposing presentation text to model
+    /// tool declarations.
+    fn display_label(&self, _call: &ToolCall) -> Option<String> {
+        self.policy()
+            .display
+            .label
+            .or_else(|| Some(humanize_tool_name(self.name())))
+    }
+
+    /// Returns the human-facing detail for this specific call.
+    ///
+    /// The default prefers a static [`ToolPolicy::display`] detail and
+    /// otherwise extracts the most relevant common argument from the call.
+    fn display_detail(&self, call: &ToolCall) -> Option<String> {
+        self.policy()
+            .display
+            .detail
+            .or_else(|| context_detail_from_args(&call.arguments))
+    }
+
+    /// Returns the invocation timeout behavior for this specific call.
+    ///
+    /// The default reads [`ToolPolicy::runtime`]. Static `timeout_ms` values are
+    /// promoted to [`ToolTimeout::Millis`] for callers that consume the richer
+    /// timeout vocabulary; tools with argument-dependent deadlines can override
+    /// this method.
+    fn timeout_policy(&self, _call: &ToolCall) -> ToolTimeout {
+        let runtime = self.policy().runtime;
+        match (runtime.timeout, runtime.timeout_ms) {
+            (ToolTimeout::Inherit, Some(timeout_ms)) => ToolTimeout::Millis(timeout_ms),
+            (timeout, _) => timeout,
+        }
     }
 
     /// Executes the tool against application state and a validated call.

@@ -6,7 +6,7 @@
 
 use super::*;
 use async_trait::async_trait;
-use serde_json::json;
+use serde_json::{Value, json};
 
 struct EchoTool;
 
@@ -35,6 +35,37 @@ impl Tool<()> for EchoTool {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         Ok(ToolResult::text(call.id, "echo", text))
+    }
+}
+
+struct PolicyTool {
+    policy: ToolPolicy,
+}
+
+#[async_trait]
+impl Tool<()> for PolicyTool {
+    fn name(&self) -> &str {
+        "mcp_file-read"
+    }
+
+    fn description(&self) -> &str {
+        "reads files"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            self.name(),
+            self.description(),
+            json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        )
+    }
+
+    fn policy(&self) -> ToolPolicy {
+        self.policy.clone()
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> crate::Result<ToolResult> {
+        Ok(ToolResult::text(call.id, self.name(), "ok"))
     }
 }
 
@@ -91,6 +122,104 @@ fn registry_exposes_policy_snapshot() {
     let policies = registry.policies();
     assert!(policies.contains_key("echo"));
     assert!(!policies["echo"].classified);
+}
+
+#[test]
+fn default_display_label_humanizes_tool_name() {
+    let tool = PolicyTool {
+        policy: ToolPolicy::read_only(),
+    };
+    let call = ToolCall::new("c-1", tool.name(), json!({}));
+
+    assert_eq!(tool.display_label(&call).as_deref(), Some("File Read"));
+    assert_eq!(
+        humanize_tool_name("gmail_read_message"),
+        "Gmail Read Message"
+    );
+    assert_eq!(
+        humanize_tool_name("composio_gmail_send_email"),
+        "Gmail Send Email"
+    );
+    assert_eq!(humanize_tool_name("read-diff"), "Read Diff");
+    assert_eq!(humanize_tool_name("___"), "___");
+}
+
+#[test]
+fn default_display_detail_extracts_common_context_args() {
+    let tool = EchoTool;
+
+    let missing = ToolCall::new("c-1", "echo", Value::Null);
+    assert!(tool.display_detail(&missing).is_none());
+
+    let call = ToolCall::new(
+        "c-2",
+        "echo",
+        json!({"name": "ignored", "to": "steven@example.com"}),
+    );
+    assert_eq!(
+        tool.display_detail(&call).as_deref(),
+        Some("steven@example.com")
+    );
+
+    let spaced = ToolCall::new("c-3", "echo", json!({"command": "  ls   -la  "}));
+    assert_eq!(tool.display_detail(&spaced).as_deref(), Some("ls -la"));
+
+    let long = "x".repeat(200);
+    let long_call = ToolCall::new("c-4", "echo", json!({"query": long}));
+    let detail = tool.display_detail(&long_call).unwrap();
+    assert!(detail.chars().count() <= 80);
+    assert!(detail.ends_with("..."));
+}
+
+#[test]
+fn policy_display_metadata_overrides_derived_defaults() {
+    let tool = PolicyTool {
+        policy: ToolPolicy::read_only()
+            .with_display(ToolDisplay::label("Reading file").with_detail("README.md")),
+    };
+    let call = ToolCall::new("c-1", tool.name(), json!({"path": "src/lib.rs"}));
+
+    assert_eq!(tool.display_label(&call).as_deref(), Some("Reading file"));
+    assert_eq!(tool.display_detail(&call).as_deref(), Some("README.md"));
+
+    let serialized = serde_json::to_value(tool.policy()).unwrap();
+    assert_eq!(serialized["display"]["label"], "Reading file");
+}
+
+#[test]
+fn tool_policy_deserializes_without_display_metadata() {
+    let mut json = serde_json::to_value(ToolPolicy::read_only()).unwrap();
+    json.as_object_mut().unwrap().remove("display");
+
+    let policy: ToolPolicy = serde_json::from_value(json).unwrap();
+    assert!(policy.display.is_empty());
+}
+
+#[test]
+fn timeout_policy_uses_richer_timeout_semantics() {
+    let call = ToolCall::new("c-1", "mcp_file-read", json!({}));
+
+    let inherited = PolicyTool {
+        policy: ToolPolicy::read_only(),
+    };
+    assert_eq!(inherited.timeout_policy(&call), ToolTimeout::Inherit);
+
+    let legacy_ms = PolicyTool {
+        policy: ToolPolicy::read_only().with_runtime(ToolRuntime {
+            timeout_ms: Some(12_000),
+            ..ToolRuntime::default()
+        }),
+    };
+    assert_eq!(legacy_ms.timeout_policy(&call), ToolTimeout::Millis(12_000));
+
+    let unbounded = PolicyTool {
+        policy: ToolPolicy::read_only().with_runtime(ToolRuntime {
+            timeout: ToolTimeout::Unbounded,
+            timeout_ms: Some(12_000),
+            ..ToolRuntime::default()
+        }),
+    };
+    assert_eq!(unbounded.timeout_policy(&call), ToolTimeout::Unbounded);
 }
 
 #[tokio::test]

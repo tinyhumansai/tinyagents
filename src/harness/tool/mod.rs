@@ -67,6 +67,42 @@ impl ToolFormat {
     }
 }
 
+impl ToolTimeout {
+    /// Returns `true` for the default inherited timeout behavior.
+    pub fn is_inherit(&self) -> bool {
+        matches!(self, ToolTimeout::Inherit)
+    }
+}
+
+impl ToolDisplay {
+    /// Returns `true` when no display metadata is set.
+    pub fn is_empty(&self) -> bool {
+        self.label.is_none() && self.detail.is_none()
+    }
+
+    /// Creates display metadata with optional label and detail fields.
+    pub fn new(label: Option<impl Into<String>>, detail: Option<impl Into<String>>) -> Self {
+        Self {
+            label: label.map(Into::into),
+            detail: detail.map(Into::into),
+        }
+    }
+
+    /// Creates display metadata with only a label.
+    pub fn label(label: impl Into<String>) -> Self {
+        Self {
+            label: Some(label.into()),
+            detail: None,
+        }
+    }
+
+    /// Sets the static display detail.
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+}
+
 impl ToolCall {
     /// Creates a tool call with the given id, name, and arguments.
     pub fn new(id: impl Into<String>, name: impl Into<String>, arguments: Value) -> Self {
@@ -140,6 +176,7 @@ impl ToolPolicy {
                 background_safe: true,
                 ..ToolAccess::default()
             },
+            display: ToolDisplay::default(),
         }
     }
 
@@ -173,6 +210,12 @@ impl ToolPolicy {
         self
     }
 
+    /// Sets human-facing presentation metadata for timeline/audit use.
+    pub fn with_display(mut self, display: ToolDisplay) -> Self {
+        self.display = display;
+        self
+    }
+
     /// Marks the tool as requiring explicit human approval before each call.
     pub fn requiring_approval(mut self) -> Self {
         self.classified = true;
@@ -189,6 +232,110 @@ impl ToolPolicy {
             || s.destructive
             || s.external_service
             || s.payment
+    }
+}
+
+/// Derives a title-cased human-readable label from a raw tool name.
+///
+/// Common machine prefixes are stripped, and `snake_case` / `kebab-case` names
+/// become spaced labels. Degenerate names fall back to the original input so
+/// callers never receive an empty label unless the input itself was empty.
+pub fn humanize_tool_name(name: &str) -> String {
+    let trimmed = name
+        .strip_prefix("composio_")
+        .or_else(|| name.strip_prefix("mcp_"))
+        .unwrap_or(name);
+
+    let mut out = String::with_capacity(trimmed.len());
+    let mut capitalize = true;
+    for ch in trimmed.chars() {
+        if ch == '_' || ch == '-' {
+            if !out.is_empty() && !out.ends_with(' ') {
+                out.push(' ');
+            }
+            capitalize = true;
+        } else if capitalize {
+            out.extend(ch.to_uppercase());
+            capitalize = false;
+        } else {
+            out.push(ch);
+        }
+    }
+
+    let label = out.trim();
+    if label.is_empty() {
+        name.to_string()
+    } else {
+        label.to_string()
+    }
+}
+
+/// Extracts a compact human-facing detail from common tool argument keys.
+///
+/// The first recognized scalar value wins, using keys that usually identify the
+/// resource being acted on (`path`, `query`, `to`, `url`, and similar). Returns
+/// `None` for non-object args, empty values, and complex values.
+pub fn context_detail_from_args(args: &Value) -> Option<String> {
+    const CONTEXT_KEYS: &[&str] = &[
+        "to",
+        "recipient",
+        "recipient_email",
+        "to_email",
+        "email",
+        "query",
+        "q",
+        "search",
+        "search_query",
+        "url",
+        "file_path",
+        "path",
+        "command",
+        "cmd",
+        "subject",
+        "title",
+        "channel",
+        "channel_id",
+        "repo",
+        "repository",
+        "name",
+        "id",
+    ];
+
+    let obj = args.as_object()?;
+    for key in CONTEXT_KEYS {
+        let Some(value) = obj.get(*key) else {
+            continue;
+        };
+        if let Some(rendered) = render_context_value(value) {
+            return Some(rendered);
+        }
+    }
+    None
+}
+
+fn render_context_value(value: &Value) -> Option<String> {
+    const MAX_DETAIL: usize = 80;
+
+    let raw = match value {
+        Value::String(s) => s.trim().to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => String::new(),
+    };
+    let raw = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.chars().count() > MAX_DETAIL {
+        let truncated: String = raw.chars().take(MAX_DETAIL.saturating_sub(3)).collect();
+        Some(format!("{truncated}..."))
+    } else {
+        Some(raw)
     }
 }
 
