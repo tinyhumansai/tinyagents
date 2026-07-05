@@ -418,6 +418,23 @@ where
                     .await;
                 return Err(err);
             }
+            // Whole-run wall-clock deadline: stop *between* super-steps once the
+            // elapsed run time reaches it, leaving the last committed boundary
+            // checkpoint intact (unlike an external `tokio::time::timeout`, which
+            // aborts mid-super-step and cannot). The already-completed super-steps
+            // and their checkpoints are preserved; the run fails with `Timeout`.
+            if let Some(deadline) = self.run_deadline {
+                let elapsed = started_at.elapsed().unwrap_or_default();
+                if elapsed >= deadline {
+                    let err = TinyAgentsError::Timeout(format!(
+                        "graph run exceeded its {deadline:?} deadline after {steps} super-step(s) \
+                         ({elapsed:?} elapsed)"
+                    ));
+                    self.fail_run(&run_id, &thread_id, started_at, steps, &err, None)
+                        .await;
+                    return Err(err);
+                }
+            }
             // Node-loop recursion: enforce `max_visits_per_node` per activation.
             for activation in &active {
                 if let Err(err) = recursion.record_node_visit(&mut node_visits, &activation.node) {
