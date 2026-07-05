@@ -97,7 +97,7 @@ fn terminal_item(result: Result<AgentLoopResult>) -> AgentStreamItem {
 enum Phase<'a> {
     /// The run future is still executing.
     Running {
-        run_fut: Pin<Box<dyn Future<Output = Result<AgentLoopResult>> + 'a>>,
+        run_fut: Pin<Box<dyn Future<Output = Result<AgentLoopResult>> + Send + 'a>>,
         listener_guard: ChannelListenerGuard,
     },
     /// The run has finished; drain any buffered events, then emit `terminal`.
@@ -130,7 +130,7 @@ impl<State: Send + Sync, Ctx: Send + Sync + 'static> AgentHarness<State, Ctx> {
         ctx_data: Ctx,
         config: RunConfig,
         input: Vec<Message>,
-    ) -> impl futures::Stream<Item = AgentStreamItem> + 'a {
+    ) -> impl futures::Stream<Item = AgentStreamItem> + Send + 'a {
         let ctx = RunContext::new(config, ctx_data);
         self.invoke_stream_in_context(state, ctx, input)
     }
@@ -147,7 +147,7 @@ impl<State: Send + Sync, Ctx: Send + Sync + 'static> AgentHarness<State, Ctx> {
         state: &'a State,
         ctx: RunContext<Ctx>,
         input: Vec<Message>,
-    ) -> impl futures::Stream<Item = AgentStreamItem> + 'a {
+    ) -> impl futures::Stream<Item = AgentStreamItem> + Send + 'a {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         // Subscribe before driving so no event (starting with `RunStarted`) is
         // missed. The listener rides the run's `EventSink`, which sub-agents
@@ -163,7 +163,7 @@ impl<State: Send + Sync, Ctx: Send + Sync + 'static> AgentHarness<State, Ctx> {
         // the shared `drive(.., streaming = true)` path; it drives *our* `ctx`
         // (with the listener already attached) and hands back the terminal
         // `AgentLoopResult`.
-        let run_fut: Pin<Box<dyn Future<Output = Result<AgentLoopResult>> + 'a>> =
+        let run_fut: Pin<Box<dyn Future<Output = Result<AgentLoopResult>> + Send + 'a>> =
             Box::pin(self.invoke_streaming_in_context_with_status(state, ctx, input));
 
         futures::stream::unfold(
