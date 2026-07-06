@@ -80,7 +80,12 @@ fn builds_trace_and_generation_batch() {
     assert_eq!(events[0]["body"]["metadata"]["root_run_id"], "root-1");
     assert_eq!(events[0]["body"]["metadata"]["run_id"], "run-1");
     assert_eq!(events[2]["type"], "generation-create");
-    assert_eq!(events[2]["body"]["id"], "model-call");
+    // The observation id is namespaced by the (globally-unique) trace id so it
+    // cannot collide across turns/threads that reuse the same run-scoped call_id.
+    // Here the trace id defaults to the root run id ("root-1").
+    assert_eq!(events[2]["body"]["id"], "root-1:model-call");
+    // The raw call_id survives in metadata for in-run correlation.
+    assert_eq!(events[2]["body"]["metadata"]["call_id"], "model-call");
     assert_eq!(events[2]["body"]["usage"]["input"], 3);
     // Payload-free generation: no input/output body fields.
     assert!(events[2]["body"].get("input").is_none());
@@ -154,6 +159,91 @@ fn populates_generation_and_tool_io_when_captured() {
         "full event payload must not be duplicated into metadata"
     );
     assert_eq!(gen_meta["run_id"], "run-1");
+}
+
+#[test]
+fn call_scoped_observation_ids_are_unique_per_trace() {
+    // Regression for the Langfuse id-collision bug: two turns on two different
+    // threads reuse the SAME run-scoped call_id (`agent_turn-model-1`, the
+    // deterministic id every interactive turn gets). Because Langfuse upserts
+    // observations by `id` project-wide, a bare call_id made each new turn's
+    // model generation overwrite the previous one onto the newest trace — so
+    // every earlier trace lost its model usage/cost/content. The id must now be
+    // distinct per trace.
+    let client =
+        LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t").unwrap();
+
+    let build = |trace_id: &str| {
+        client
+            .build_ingestion_batch(
+                LangfuseTraceConfig {
+                    trace_id: Some(trace_id.to_string()),
+                    ..Default::default()
+                },
+                &[
+                    obs(
+                        1,
+                        AgentEvent::ModelCompleted {
+                            call_id: CallId::new("agent_turn-model-1"),
+                            started_at_ms: None,
+                            usage: Some(Usage {
+                                input_tokens: 1,
+                                output_tokens: 1,
+                                total_tokens: 2,
+                                ..Default::default()
+                            }),
+                            input: None,
+                            output: None,
+                        },
+                    ),
+                    obs(
+                        2,
+                        AgentEvent::ToolCompleted {
+                            call_id: CallId::new("agent_turn-tool-1"),
+                            tool_name: "lookup".to_string(),
+                            started_at_ms: None,
+                            input: None,
+                            output: None,
+                            duration_ms: None,
+                            output_bytes: None,
+                            error: None,
+                        },
+                    ),
+                ],
+            )
+            .unwrap()
+    };
+
+    let extract_ids = |batch: &Value| -> (String, String) {
+        let events = batch["batch"].as_array().unwrap();
+        let gen_id = events
+            .iter()
+            .find(|e| e["type"] == "generation-create")
+            .unwrap()["body"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let span_id = events.iter().find(|e| e["type"] == "span-create").unwrap()["body"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        (gen_id, span_id)
+    };
+
+    let (gen_a, span_a) = extract_ids(&build("thread-A:turn-1"));
+    let (gen_b, span_b) = extract_ids(&build("thread-B:turn-2"));
+
+    // Same call_id, different traces → different observation ids (no overwrite).
+    assert_ne!(
+        gen_a, gen_b,
+        "model generation ids must not collide across traces"
+    );
+    assert_ne!(
+        span_a, span_b,
+        "tool span ids must not collide across traces"
+    );
+    assert_eq!(gen_a, "thread-A:turn-1:agent_turn-model-1");
+    assert_eq!(span_b, "thread-B:turn-2:agent_turn-tool-1");
 }
 
 #[test]

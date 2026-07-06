@@ -290,26 +290,41 @@ fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
             usage,
             input,
             output,
-        } => json!({
-            "id": obs.event_id.as_str(),
-            "timestamp": timestamp,
-            "type": "generation-create",
-            "body": clean_nulls(json!({
-                "id": call_id.as_str(),
-                "traceId": trace_id,
-                "name": "model",
-                // Use the loop-captured start time so the generation has a
-                // real duration; fall back to the completion timestamp (a
-                // zero-width point) for events journaled before the field
-                // existed.
-                "startTime": started_at_ms.map(iso_ms).unwrap_or_else(|| timestamp.clone()),
-                "endTime": timestamp,
-                "usage": usage.map(langfuse_usage),
-                "input": input,
-                "output": output,
-                "metadata": metadata,
-            })),
-        }),
+        } => {
+            // Langfuse upserts observations by `id` across the ENTIRE project, so
+            // the observation id must be globally unique. `call_id` is only
+            // unique within a single run (e.g. `agent_turn-model-1`), and the
+            // logical run id is reused by every interactive turn — so a bare
+            // call_id collides across turns and threads, and each new turn's
+            // generation silently overwrites the previous one, stealing it onto
+            // the newest trace (leaving every earlier trace with no model usage/
+            // cost/content). Namespace the id with the globally-unique, per-trace
+            // `trace_id`: it never collides across turns yet stays stable for
+            // idempotent re-ingestion of the same run. The raw `call_id` rides in
+            // metadata so in-run correlation (model.started ↔ this generation) is
+            // preserved.
+            let metadata = with_call_id(metadata, call_id.as_str());
+            json!({
+                "id": obs.event_id.as_str(),
+                "timestamp": timestamp,
+                "type": "generation-create",
+                "body": clean_nulls(json!({
+                    "id": scoped_observation_id(trace_id, call_id.as_str()),
+                    "traceId": trace_id,
+                    "name": "model",
+                    // Use the loop-captured start time so the generation has a
+                    // real duration; fall back to the completion timestamp (a
+                    // zero-width point) for events journaled before the field
+                    // existed.
+                    "startTime": started_at_ms.map(iso_ms).unwrap_or_else(|| timestamp.clone()),
+                    "endTime": timestamp,
+                    "usage": usage.map(langfuse_usage),
+                    "input": input,
+                    "output": output,
+                    "metadata": metadata,
+                })),
+            })
+        }
         AgentEvent::ToolCompleted {
             call_id,
             tool_name,
@@ -328,7 +343,12 @@ fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
                 (Some(start), Some(dur)) => iso_ms(start.saturating_add(*dur)),
                 _ => timestamp.clone(),
             };
-            let mut tool_metadata = metadata.clone();
+            // Same project-wide id-collision hazard as ModelCompleted above:
+            // builtin tools take deterministic per-run call_ids (e.g.
+            // `agent_turn-tool-1`) that repeat every turn, so a bare call_id
+            // overwrites earlier tool spans onto the newest trace. Namespace with
+            // the per-trace id; keep the raw call_id in metadata for correlation.
+            let mut tool_metadata = with_call_id(metadata.clone(), call_id.as_str());
             if let (Some(map), Some(bytes)) = (tool_metadata.as_object_mut(), output_bytes) {
                 map.insert("output_bytes".into(), json!(bytes));
             }
@@ -340,7 +360,7 @@ fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
                 // Langfuse rejects it, silently dropping every tool observation.
                 "type": "span-create",
                 "body": clean_nulls(json!({
-                    "id": call_id.as_str(),
+                    "id": scoped_observation_id(trace_id, call_id.as_str()),
                     "traceId": trace_id,
                     "name": tool_name,
                     "startTime": started_at_ms.map(iso_ms).unwrap_or_else(|| timestamp.clone()),
@@ -380,6 +400,27 @@ fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
             })),
         }),
     }
+}
+
+/// Build a globally-unique-yet-stable Langfuse observation id for a call-scoped
+/// observation (model generation / tool span). Langfuse keys observations by
+/// `id` across the whole project and upserts on collision, so we prefix the
+/// (only run-unique) `call_id` with the globally-unique `trace_id`. The result
+/// is deterministic for a given (trace, call), keeping re-ingestion idempotent
+/// while never colliding across turns or threads.
+fn scoped_observation_id(trace_id: &str, call_id: &str) -> String {
+    format!("{trace_id}:{call_id}")
+}
+
+/// Fold the raw `call_id` into an observation's metadata so in-run correlation
+/// (e.g. `model.started` ↔ its `model` generation) survives even though the
+/// public observation id is now trace-namespaced. Returns the metadata
+/// unchanged when it is not a JSON object.
+fn with_call_id(mut metadata: Value, call_id: &str) -> Value {
+    if let Some(map) = metadata.as_object_mut() {
+        map.insert("call_id".into(), json!(call_id));
+    }
+    metadata
 }
 
 fn langfuse_usage(usage: Usage) -> Value {
