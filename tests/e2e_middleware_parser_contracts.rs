@@ -186,6 +186,7 @@ async fn middleware_stack_runs_lifecycle_hooks_and_builtin_guards() {
     let mut tool_delta = ToolDelta {
         call_id: "tool-1".into(),
         content: "progress".into(),
+        tool_name: None,
     };
     stack
         .run_on_tool_delta(&mut ctx, &(), &mut tool_delta)

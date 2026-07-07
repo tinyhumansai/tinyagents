@@ -86,6 +86,10 @@ impl OpenAiStreamAcc {
                         pending.push_back(ModelStreamItem::ToolCallDelta(ToolDelta {
                             call_id,
                             content: args,
+                            // Surface the tool name (captured into `slot.name` from
+                            // the call-opening fragment) so consumers can label the
+                            // call as it streams; the accumulator keeps the first.
+                            tool_name: Some(slot.name.clone()).filter(|n| !n.is_empty()),
                         }));
                     }
                 }

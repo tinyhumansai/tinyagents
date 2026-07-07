@@ -311,6 +311,14 @@ pub struct ToolDelta {
     pub call_id: String,
     /// Incremental content fragment.
     pub content: String,
+    /// The tool's name, when known. Providers that surface it on the first
+    /// (call-opening) delta populate this so consumers can label a tool call as
+    /// soon as it begins — before its arguments have streamed. Subsequent
+    /// argument fragments leave it `None`; [`StreamAccumulator`] remembers the
+    /// first non-empty name per `call_id` and stamps it onto the reconstructed
+    /// [`ToolCall`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
 }
 
 /// A tool the harness can invoke during an agent loop.

@@ -686,8 +686,10 @@ pub struct StreamAccumulator {
     /// the final message text).
     reasoning: String,
     /// Per-call-id accumulated tool-call argument fragments, in first-seen
-    /// order.
-    tool_chunks: Vec<(String, String)>,
+    /// order: `(call_id, arguments, tool_name)`. The name is the first non-empty
+    /// `ToolDelta::tool_name` seen for the call (providers surface it on the
+    /// call-opening delta); `None` until one arrives.
+    tool_chunks: Vec<(String, String, Option<String>)>,
     /// Most recent usage value seen.
     usage: Option<Usage>,
     /// Authoritative final response, when a `Completed` item was seen.
@@ -710,11 +712,15 @@ impl StreamAccumulator {
                 self.text.push_str(&delta.text);
                 self.reasoning.push_str(&delta.reasoning);
                 if let Some(tool_call) = &delta.tool_call {
-                    self.push_tool_chunk(&tool_call.call_id, &tool_call.content);
+                    self.push_tool_chunk(
+                        &tool_call.call_id,
+                        &tool_call.content,
+                        tool_call.tool_name.as_deref(),
+                    );
                 }
             }
             ModelStreamItem::ToolCallDelta(delta) => {
-                self.push_tool_chunk(&delta.call_id, &delta.content);
+                self.push_tool_chunk(&delta.call_id, &delta.content, delta.tool_name.as_deref());
             }
             ModelStreamItem::UsageDelta(usage) => {
                 self.usage = Some(*usage);
@@ -741,13 +747,23 @@ impl StreamAccumulator {
     }
 
     /// Appends a tool-call argument fragment for `call_id`, preserving
-    /// first-seen ordering across calls.
-    fn push_tool_chunk(&mut self, call_id: &str, content: &str) {
-        if let Some(entry) = self.tool_chunks.iter_mut().find(|(id, _)| id == call_id) {
+    /// first-seen ordering across calls. Records the first non-empty `tool_name`
+    /// seen for the call (call-opening deltas carry it; argument fragments do
+    /// not) so the reconstructed [`ToolCall`] is named.
+    fn push_tool_chunk(&mut self, call_id: &str, content: &str, tool_name: Option<&str>) {
+        if let Some(entry) = self.tool_chunks.iter_mut().find(|(id, ..)| id == call_id) {
             entry.1.push_str(content);
+            if entry.2.is_none() {
+                if let Some(name) = tool_name.filter(|n| !n.is_empty()) {
+                    entry.2 = Some(name.to_string());
+                }
+            }
         } else {
-            self.tool_chunks
-                .push((call_id.to_string(), content.to_string()));
+            self.tool_chunks.push((
+                call_id.to_string(),
+                content.to_string(),
+                tool_name.filter(|n| !n.is_empty()).map(str::to_string),
+            ));
         }
     }
 
@@ -805,8 +821,8 @@ impl StreamAccumulator {
         let tool_calls = self
             .tool_chunks
             .into_iter()
-            .map(|(id, args)| ToolCall {
-                name: String::new(),
+            .map(|(id, args, name)| ToolCall {
+                name: name.unwrap_or_default(),
                 arguments: serde_json::from_str(&args).unwrap_or(Value::Null),
                 id,
             })
