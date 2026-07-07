@@ -684,6 +684,34 @@ fn finish_backfills_usage_from_stream_delta_when_completed_lacks_it() {
     assert_eq!(finished.message.usage, Some(Usage::new(4, 6)));
 }
 
+#[test]
+fn finish_names_reconstructed_tool_call_from_the_call_opening_delta_name() {
+    // A call-opening delta carries the tool name (no args yet); subsequent
+    // argument fragments carry only content. With no authoritative `Completed`
+    // response, the accumulator must still name the reconstructed tool call from
+    // the first non-empty `tool_name` it saw for that call id.
+    use crate::harness::tool::ToolDelta;
+
+    let mut acc = StreamAccumulator::new();
+    acc.push(&ModelStreamItem::ToolCallDelta(ToolDelta {
+        call_id: "call-1".into(),
+        content: String::new(),
+        tool_name: Some("search".into()),
+    }));
+    acc.push(&ModelStreamItem::ToolCallDelta(ToolDelta {
+        call_id: "call-1".into(),
+        content: r#"{"q":"rust"}"#.into(),
+        tool_name: None,
+    }));
+
+    let finished = acc.finish().unwrap();
+    assert_eq!(finished.message.tool_calls.len(), 1);
+    let call = &finished.message.tool_calls[0];
+    assert_eq!(call.id, "call-1");
+    assert_eq!(call.name, "search", "name carried from the opening delta");
+    assert_eq!(call.arguments, serde_json::json!({ "q": "rust" }));
+}
+
 /// Round-trips a [`ModelStreamItem`] through JSON and asserts the re-serialized
 /// form is byte-for-byte stable, proving every variant survives serde.
 fn roundtrip_stream_item(item: ModelStreamItem) {
@@ -704,6 +732,7 @@ fn model_stream_item_roundtrips_every_variant() {
         crate::harness::tool::ToolDelta {
             call_id: "call-1".into(),
             content: "{\"q\":1}".into(),
+            tool_name: None,
         },
     ));
     roundtrip_stream_item(ModelStreamItem::UsageDelta(Usage::new(3, 5)));
