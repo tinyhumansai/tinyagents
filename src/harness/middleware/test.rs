@@ -10,7 +10,7 @@ use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::events::{AgentEvent, RecordingListener};
 use crate::harness::message::{AssistantMessage, ContentBlock, Message, UserMessage};
 use crate::harness::model::{ModelRequest, ModelResponse, PromptSegment, SegmentRole};
-use crate::harness::summarization::{SummarizationPolicy, TrimStrategy};
+use crate::harness::summarization::{SummarizationPolicy, Summarizer, SummaryRecord, TrimStrategy};
 use crate::harness::tool::{ToolCall, ToolResult};
 use crate::harness::usage::Usage;
 
@@ -395,6 +395,173 @@ async fn context_compression_compresses_at_or_above_threshold() {
     assert_eq!(compressed.len(), 1);
     assert!(compressed[0].0 > 0);
     assert!(compressed[0].1 > 0);
+}
+
+/// A [`Summarizer`] that always fails — models the real gap the
+/// `ConcatSummarizer` can never exhibit (a model-backed summarizer whose
+/// provider call is rejected).
+struct FailingSummarizer;
+
+#[async_trait]
+impl Summarizer for FailingSummarizer {
+    async fn summarize(&self, _messages: &[Message]) -> Result<SummaryRecord> {
+        Err(TinyAgentsError::Model("summarizer boom".to_string()))
+    }
+}
+
+/// Build an over-threshold transcript `[system, big-1, big-2, big-3]` under a
+/// 100-token window / 0.5 threshold (→ 50-token trigger budget), so the
+/// compression middleware is guaranteed to fire.
+fn over_threshold_request() -> (SummarizationPolicy, Vec<Message>) {
+    let policy = SummarizationPolicy {
+        keep_last: 1,
+        ..SummarizationPolicy::default()
+    }
+    .with_context_window(100)
+    .with_threshold_fraction(0.5);
+    let big = "a".repeat(200);
+    let messages = vec![
+        Message::system("You are a helpful assistant."),
+        user(&format!("{big}-1")),
+        user(&format!("{big}-2")),
+        user(&format!("{big}-3")),
+    ];
+    (policy, messages)
+}
+
+#[tokio::test]
+async fn context_compression_falls_back_to_trim_when_summarizer_errors() {
+    // Regression for the "summarizer failure aborts the run" gap: under the
+    // default FallbackTrim policy a failing summarizer must NOT abort. The
+    // middleware front-drops the transcript to the trigger budget (keeping the
+    // leading system prompt) and continues, emitting a MiddlewareFailed
+    // diagnostic plus a Compressed event for the trim.
+    let (policy, before) = over_threshold_request();
+    let mw = Arc::new(ContextCompressionMiddleware::with_summarizer(
+        policy,
+        Box::new(FailingSummarizer),
+    ));
+    // Default failure policy is the trim fallback.
+    assert_eq!(mw.failure_policy(), CompressionFailurePolicy::FallbackTrim);
+
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw.clone());
+
+    let recorder = Arc::new(RecordingListener::new());
+    let mut c = ctx();
+    c.events.subscribe(recorder.clone());
+
+    let mut request = ModelRequest {
+        messages: before.clone(),
+        ..Default::default()
+    };
+    stack
+        .run_before_model(&mut c, &(), &mut request)
+        .await
+        .expect("summarizer failure must not abort the run under FallbackTrim");
+
+    // Trimmed from the front — strictly fewer messages — with the system prompt
+    // preserved (MaxTokens drops system messages last).
+    assert!(request.messages.len() < before.len());
+    assert!(matches!(request.messages[0], Message::System(_)));
+    // No summary record could be produced (the summarizer failed).
+    assert!(mw.records().is_empty());
+
+    let events: Vec<AgentEvent> = recorder.events().into_iter().map(|r| r.event).collect();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::MiddlewareFailed { name, error }
+                if name == "context_compression" && error.contains("summarizer boom")
+        )),
+        "a MiddlewareFailed diagnostic naming the failure must be emitted: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Compressed { .. })),
+        "the fallback trim must emit a Compressed event: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn context_compression_abort_policy_propagates_summarizer_error() {
+    // Opt back into the legacy behaviour: Abort propagates the error so the run
+    // fails, but still emits the MiddlewareFailed diagnostic first.
+    let (policy, before) = over_threshold_request();
+    let mw = Arc::new(
+        ContextCompressionMiddleware::with_summarizer(policy, Box::new(FailingSummarizer))
+            .with_failure_policy(CompressionFailurePolicy::Abort),
+    );
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw.clone());
+
+    let recorder = Arc::new(RecordingListener::new());
+    let mut c = ctx();
+    c.events.subscribe(recorder.clone());
+
+    let mut request = ModelRequest {
+        messages: before,
+        ..Default::default()
+    };
+    let result = stack.run_before_model(&mut c, &(), &mut request).await;
+    assert!(
+        result.is_err(),
+        "Abort must propagate the summarizer error and fail the run"
+    );
+
+    let events: Vec<AgentEvent> = recorder.events().into_iter().map(|r| r.event).collect();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::MiddlewareFailed { name, .. } if name == "context_compression"
+        )),
+        "Abort must still emit the MiddlewareFailed diagnostic: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn context_compression_pass_through_policy_keeps_transcript_and_continues() {
+    // PassThrough leaves the (over-threshold) transcript untouched and lets the
+    // run continue, emitting only the MiddlewareFailed diagnostic.
+    let (policy, before) = over_threshold_request();
+    let mw = Arc::new(
+        ContextCompressionMiddleware::with_summarizer(policy, Box::new(FailingSummarizer))
+            .with_failure_policy(CompressionFailurePolicy::PassThrough),
+    );
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(mw.clone());
+
+    let recorder = Arc::new(RecordingListener::new());
+    let mut c = ctx();
+    c.events.subscribe(recorder.clone());
+
+    let mut request = ModelRequest {
+        messages: before.clone(),
+        ..Default::default()
+    };
+    stack
+        .run_before_model(&mut c, &(), &mut request)
+        .await
+        .expect("PassThrough must not abort the run");
+
+    // Transcript is untouched.
+    assert_eq!(request.messages, before);
+    let events: Vec<AgentEvent> = recorder.events().into_iter().map(|r| r.event).collect();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::MiddlewareFailed { name, .. } if name == "context_compression"
+        )),
+        "PassThrough must emit the MiddlewareFailed diagnostic: {events:?}"
+    );
+    // No compression happened, so no Compressed event.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Compressed { .. })),
+        "PassThrough must not emit a Compressed event: {events:?}"
+    );
 }
 
 #[tokio::test]
