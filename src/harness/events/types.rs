@@ -182,6 +182,28 @@ pub enum AgentEvent {
         recovery: String,
     },
 
+    /// The model called a *registered* tool with arguments that failed schema
+    /// validation, and the run's
+    /// [`InvalidArgsPolicy`][crate::harness::runtime::InvalidArgsPolicy]
+    /// recovered from it instead of aborting.
+    ///
+    /// Distinct from a tool that ran and returned an error: no tool was
+    /// executed. The tool name, arguments, and validation error are preserved
+    /// so the event stream can drive repair/analysis.
+    InvalidToolArgs {
+        /// Identifier of the offending tool call.
+        call_id: CallId,
+        /// The registered tool whose schema the supplied arguments violated.
+        tool_name: String,
+        /// The raw arguments the model supplied, preserved verbatim so repair
+        /// middleware or analysis can re-target or replay the invocation.
+        arguments: serde_json::Value,
+        /// The schema-validation error detail.
+        error: String,
+        /// How the run recovered (currently always `"tool_error"`).
+        recovery: String,
+    },
+
     /// A per-agent isolated workspace/sandbox was prepared.
     WorkspacePrepared {
         /// Audit identity of the policy that produced the environment.
@@ -575,6 +597,7 @@ impl AgentEvent {
             AgentEvent::ToolStarted { .. } => "tool.started",
             AgentEvent::ToolCompleted { .. } => "tool.completed",
             AgentEvent::UnknownToolCall { .. } => "tool.unknown",
+            AgentEvent::InvalidToolArgs { .. } => "tool.invalid_args",
             AgentEvent::BudgetWarning { .. } => "budget.warning",
             AgentEvent::BudgetReserved { .. } => "budget.reserved",
             AgentEvent::BudgetReconciled { .. } => "budget.reconciled",
