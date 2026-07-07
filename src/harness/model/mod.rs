@@ -753,10 +753,10 @@ impl StreamAccumulator {
     fn push_tool_chunk(&mut self, call_id: &str, content: &str, tool_name: Option<&str>) {
         if let Some(entry) = self.tool_chunks.iter_mut().find(|(id, ..)| id == call_id) {
             entry.1.push_str(content);
-            if entry.2.is_none() {
-                if let Some(name) = tool_name.filter(|n| !n.is_empty()) {
-                    entry.2 = Some(name.to_string());
-                }
+            if entry.2.is_none()
+                && let Some(name) = tool_name.filter(|n| !n.is_empty())
+            {
+                entry.2 = Some(name.to_string());
             }
         } else {
             self.tool_chunks.push((
