@@ -84,6 +84,7 @@ use crate::harness::middleware::{
 use crate::harness::model::{
     ChatModel, ModelDelta, ModelRequest, ModelResolutionSource, ModelResponse, ModelStreamItem,
     ResolvedModel, ResolvedModelBinding, ResponseFormat, StreamAccumulator, ToolChoice,
+    model_eligible,
 };
 use crate::harness::runtime::{AgentHarness, UnknownToolPolicy};
 use crate::harness::structured::{StructuredExtractor, StructuredStrategy};

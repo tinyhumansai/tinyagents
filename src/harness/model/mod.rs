@@ -633,7 +633,11 @@ fn model_satisfies<State: Send + Sync>(
 /// provider-retired model is never selected. A model with no profile carries no
 /// lifecycle facts, so it is treated as usable (consistent with capability
 /// gating, which only rejects a model when a profile is present and fails).
-fn model_eligible<State: Send + Sync>(
+///
+/// Exposed to the crate so the agent loop's runtime fallback path can apply the
+/// same gate to fallback candidates that initial [`ModelRegistry::resolve`]
+/// applies to the primary selection (issue #4641).
+pub(crate) fn model_eligible<State: Send + Sync>(
     model: &dyn ChatModel<State>,
     required: Option<&CapabilitySet>,
     allow_retired: bool,
