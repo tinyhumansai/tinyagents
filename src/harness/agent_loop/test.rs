@@ -1267,6 +1267,58 @@ async fn cancelled_mid_run_stops_before_next_model_call() {
     assert_eq!(*invocations.lock().unwrap(), 1);
 }
 
+/// A model whose unary `invoke` never returns on its own, signalling once it has
+/// started so a test can cancel the run while the call is genuinely in flight.
+struct BlockForeverModel {
+    started: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl ChatModel<()> for BlockForeverModel {
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+        self.started.notify_one();
+        // Simulate a long buffered (non-streamed) provider call that only ends
+        // when the caller drops this future. Without the loop racing
+        // cancellation against the in-flight call, the run would hang here.
+        std::future::pending::<()>().await;
+        unreachable!("pending future never resolves")
+    }
+}
+
+#[tokio::test]
+async fn cancelled_during_unary_model_call_drops_the_in_flight_call() {
+    let token = CancellationToken::new();
+    let started = Arc::new(tokio::sync::Notify::new());
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(BlockForeverModel {
+            started: started.clone(),
+        }),
+    );
+
+    let ctx = RunContext::new(RunConfig::new("cancel-unary"), ()).with_cancellation(token.clone());
+
+    // Cancel only once the model call has actually begun, so the pre-call
+    // checkpoint cannot short-circuit and we exercise the in-flight race.
+    let canceller = tokio::spawn(async move {
+        started.notified().await;
+        token.cancel();
+    });
+
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        harness.invoke_in_context(&(), ctx, vec![Message::user("hi")]),
+    )
+    .await
+    .expect("run must not hang: a cancel mid unary call must drop the in-flight future")
+    .expect_err("a run cancelled mid model call must not complete");
+
+    assert!(matches!(err, TinyAgentsError::Cancelled), "got {err:?}");
+    canceller.await.unwrap();
+}
+
 // ── Per-model-call timeout ─────────────────────────────────────────────────────
 
 #[tokio::test]
