@@ -124,6 +124,16 @@ pub enum TinyAgentsError {
     #[error("limit exceeded: {0}")]
     LimitExceeded(String),
 
+    /// The provider returned an empty completion — no text, no tool calls, and
+    /// no structured output — while
+    /// [`crate::harness::runtime::RunPolicy`]'s `error_on_empty_response` guard
+    /// was enabled. Raised in the agent loop's finalization branch instead of
+    /// terminating the run with a blank final answer, so the caller can
+    /// re-prompt or surface a real failure rather than silently succeeding with
+    /// empty content.
+    #[error("model returned an empty response")]
+    EmptyResponse,
+
     /// The run exceeded its wall-clock deadline.
     #[error("run timed out: {0}")]
     Timeout(String),

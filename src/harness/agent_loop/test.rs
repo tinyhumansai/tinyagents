@@ -422,6 +422,44 @@ async fn single_model_call_no_tools() {
 }
 
 #[tokio::test]
+async fn empty_response_fails_the_run_when_guard_enabled() {
+    // openhuman#4638: an empty provider completion (no text, no tool calls, no
+    // structured output) must not terminate the run with a blank final answer
+    // when the guard is enabled — it fails with a typed `EmptyResponse` so the
+    // caller can re-prompt instead of silently succeeding on empty content.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("")));
+    harness.with_policy(RunPolicy {
+        error_on_empty_response: true,
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("an empty response should fail the run");
+    assert!(
+        matches!(err, TinyAgentsError::EmptyResponse),
+        "expected EmptyResponse, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn empty_response_terminates_normally_when_guard_disabled() {
+    // The guard is opt-in: with the default policy an empty completion still
+    // terminates the run with a blank final answer (preserved behavior).
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("")));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("run succeeds with a blank final by default");
+    assert_eq!(run.model_calls, 1);
+    assert_eq!(run.text(), Some(String::new()));
+}
+
+#[tokio::test]
 async fn model_requests_tool_then_finishes() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model(
