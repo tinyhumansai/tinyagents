@@ -50,6 +50,46 @@ fn char_len_matches_text_char_count_including_multibyte() {
 }
 
 #[test]
+fn estimated_char_weight_counts_non_text_blocks() {
+    let text = "hello";
+    let reasoning = "some private reasoning";
+    let json_block = json!({"key": "value", "n": 42});
+    let msg = Message::User(UserMessage {
+        content: vec![
+            ContentBlock::Text(text.into()),
+            ContentBlock::Json(json_block.clone()),
+            ContentBlock::thinking(reasoning),
+        ],
+    });
+
+    // Visible-text accounting still ignores JSON and reasoning.
+    assert_eq!(msg.char_len(), text.chars().count());
+
+    // Token-estimation weight additionally counts JSON and reasoning, which
+    // occupy real context, so it is strictly larger than the visible-text len.
+    let expected =
+        text.chars().count() + json_block.to_string().chars().count() + reasoning.chars().count();
+    assert_eq!(msg.estimated_char_weight(), expected);
+    assert!(msg.estimated_char_weight() > msg.char_len());
+}
+
+#[test]
+fn estimated_char_weight_costs_images_that_carry_no_visible_text() {
+    let msg = Message::User(UserMessage {
+        content: vec![ContentBlock::Image(ImageRef {
+            url: "data:image/png;base64,AAAA".into(),
+            mime_type: Some("image/png".into()),
+        })],
+    });
+
+    // An image contributes no visible text but a flat, non-trivial weight, so a
+    // vision-heavy transcript can no longer under-count to zero and defeat
+    // compaction gating.
+    assert_eq!(msg.char_len(), 0);
+    assert_eq!(msg.estimated_char_weight(), super::IMAGE_CHAR_WEIGHT);
+}
+
+#[test]
 fn assistant_holds_tool_calls_and_usage() {
     let msg = Message::Assistant(AssistantMessage {
         id: Some("m-1".into()),
