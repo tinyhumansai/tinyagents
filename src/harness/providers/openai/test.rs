@@ -1057,3 +1057,23 @@ fn parses_model_listing_envelope() {
     assert_eq!(listing.data[1].created, None);
     assert_eq!(listing.data[1].owned_by, None);
 }
+
+#[test]
+fn derive_profile_populates_known_context_windows() {
+    // A recognized id gets its context window from the shared provider-neutral
+    // hint table, so context-window-aware compaction has a real window to gate
+    // on instead of falling back to a fixed threshold.
+    assert_eq!(
+        super::transport::derive_profile("openai", "gpt-4o-mini").max_input_tokens,
+        Some(128_000)
+    );
+    assert_eq!(
+        super::transport::derive_profile("openai", "gpt-4.1").max_input_tokens,
+        Some(1_047_576)
+    );
+    // An unrecognized id stays `None` rather than guessing a window.
+    assert_eq!(
+        super::transport::derive_profile("openai", "totally-unknown-model").max_input_tokens,
+        None
+    );
+}
