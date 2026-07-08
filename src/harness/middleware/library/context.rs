@@ -7,8 +7,9 @@
 use super::*;
 use crate::harness::cache::{CacheLayoutEvent, PromptCacheLayout};
 use crate::harness::middleware::{
-    ContextCompressionMiddleware, DEFAULT_CACHE_GUARD_EVENT_CAP, DEFAULT_COMPRESSION_RECORD_CAP,
-    MessageTrimMiddleware, MicrocompactMiddleware, PromptCacheGuardMiddleware,
+    CompressionFailurePolicy, ContextCompressionMiddleware, DEFAULT_CACHE_GUARD_EVENT_CAP,
+    DEFAULT_COMPRESSION_RECORD_CAP, MessageTrimMiddleware, MicrocompactMiddleware,
+    PromptCacheGuardMiddleware,
 };
 use crate::harness::summarization::{
     ConcatSummarizer, SummarizationPolicy, Summarizer, SummaryRecord, TrimStrategy,
@@ -57,6 +58,10 @@ impl ContextCompressionMiddleware {
     }
 
     /// Creates a compression middleware with a custom [`Summarizer`].
+    ///
+    /// The failure policy defaults to
+    /// [`CompressionFailurePolicy::FallbackTrim`]; override it with
+    /// [`with_failure_policy`](Self::with_failure_policy).
     pub fn with_summarizer(policy: SummarizationPolicy, summarizer: Box<dyn Summarizer>) -> Self {
         Self {
             label: "context_compression",
@@ -64,7 +69,21 @@ impl ContextCompressionMiddleware {
             summarizer,
             records: std::sync::Mutex::new(std::collections::VecDeque::new()),
             max_records: DEFAULT_COMPRESSION_RECORD_CAP,
+            on_failure: CompressionFailurePolicy::default(),
         }
+    }
+
+    /// Sets the [`CompressionFailurePolicy`] applied when the [`Summarizer`]
+    /// returns an `Err`. Defaults to
+    /// [`CompressionFailurePolicy::FallbackTrim`].
+    pub fn with_failure_policy(mut self, on_failure: CompressionFailurePolicy) -> Self {
+        self.on_failure = on_failure;
+        self
+    }
+
+    /// Returns the configured [`CompressionFailurePolicy`].
+    pub fn failure_policy(&self) -> CompressionFailurePolicy {
+        self.on_failure
     }
 
     /// Sets the maximum number of [`SummaryRecord`]s retained before the
@@ -123,7 +142,40 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for ContextCom
         }
 
         let from_tokens = total_message_tokens(&request.messages);
-        let record = self.summarizer.summarize(&to_summarize).await?;
+        let record = match self.summarizer.summarize(&to_summarize).await {
+            Ok(record) => record,
+            Err(err) => {
+                // A summarizer failure hits precisely the longest, most valuable
+                // transcripts (the ones that reached the compaction threshold).
+                // Emit a diagnostic and recover per the configured
+                // `CompressionFailurePolicy` instead of aborting the whole run.
+                ctx.emit(AgentEvent::MiddlewareFailed {
+                    name: self.label.to_string(),
+                    error: err.to_string(),
+                });
+                match self.on_failure {
+                    // Legacy behaviour: propagate and let the run fail.
+                    CompressionFailurePolicy::Abort => return Err(err),
+                    // Keep the (over-threshold) transcript verbatim and continue.
+                    CompressionFailurePolicy::PassThrough => return Ok(()),
+                    // Deterministic front-drop to the policy's trigger budget,
+                    // preserving system messages (see `TrimStrategy::MaxTokens`).
+                    CompressionFailurePolicy::FallbackTrim => {
+                        let trimmed = trim_messages(
+                            &request.messages,
+                            &TrimStrategy::MaxTokens(self.policy.trigger_budget()),
+                        );
+                        let to_tokens = total_message_tokens(&trimmed);
+                        request.messages = trimmed;
+                        ctx.emit(AgentEvent::Compressed {
+                            from_tokens,
+                            to_tokens,
+                        });
+                        return Ok(());
+                    }
+                }
+            }
+        };
 
         // `plan` returns `to_keep` as `[system prompts..., recent turns...]`.
         // Insert the summary *after* the leading system prompts, not at index 0:

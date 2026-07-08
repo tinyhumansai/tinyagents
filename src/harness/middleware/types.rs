@@ -489,12 +489,50 @@ pub struct MessageTrimMiddleware {
 /// [`ContextCompressionMiddleware`] retains before evicting the oldest.
 pub const DEFAULT_COMPRESSION_RECORD_CAP: usize = 1024;
 
+/// How [`ContextCompressionMiddleware`] recovers when its [`Summarizer`]
+/// returns an `Err`.
+///
+/// The default
+/// [`ConcatSummarizer`][crate::harness::summarization::ConcatSummarizer] is
+/// infallible, but the [`Summarizer`] trait allows failure (for example a
+/// model-backed summarizer whose provider call is rejected). A summarizer
+/// failure strikes precisely on the longest, most valuable transcripts — the
+/// ones that reached the compaction threshold — so propagating the error and
+/// aborting the whole run is the worst outcome. This policy selects the
+/// recovery behaviour; the default is [`FallbackTrim`](Self::FallbackTrim).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CompressionFailurePolicy {
+    /// Propagate the summarizer error, aborting the run. This is the legacy
+    /// behaviour from before the policy existed.
+    Abort,
+
+    /// Deterministically front-drop the oldest messages (system messages
+    /// preserved) until the transcript fits the policy's trigger budget, then
+    /// continue. Loses old context but keeps the run alive. The default.
+    #[default]
+    FallbackTrim,
+
+    /// Leave the transcript untouched and continue. The next model call sees the
+    /// full (over-threshold) transcript; use when the caller would rather risk a
+    /// provider-side context error than drop history.
+    PassThrough,
+}
+
+/// Middleware that condenses older transcript history into a summary when the
+/// transcript nears the model's context window. See
+/// [`ContextCompressionMiddleware::new`] and
+/// [`with_summarizer`](ContextCompressionMiddleware::with_summarizer) for
+/// construction, and [`CompressionFailurePolicy`] /
+/// [`with_failure_policy`](ContextCompressionMiddleware::with_failure_policy)
+/// for how a summarizer error is recovered.
 pub struct ContextCompressionMiddleware {
     pub(crate) label: &'static str,
     pub(crate) policy: SummarizationPolicy,
     pub(crate) summarizer: Box<dyn Summarizer>,
     pub(crate) records: Mutex<VecDeque<SummaryRecord>>,
     pub(crate) max_records: usize,
+    /// Recovery behaviour when [`Summarizer::summarize`] returns `Err`.
+    pub(crate) on_failure: CompressionFailurePolicy,
 }
 
 // ── MicrocompactMiddleware ────────────────────────────────────────────────────
