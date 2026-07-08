@@ -295,6 +295,18 @@ pub enum AgentEvent {
         resolved: String,
     },
 
+    /// A runtime fallback candidate was skipped because it failed the request's
+    /// capability/lifecycle gate — it lacks a required capability or is
+    /// provider-retired — so the fallback chain advanced to the next candidate
+    /// instead. Initial resolution gates the primary selection the same way;
+    /// this makes the equivalent gate on the fallback path observable (issue
+    /// #4641), so a primary failure can never silently fall back to a model that
+    /// cannot satisfy the request.
+    FallbackSkipped {
+        /// The fallback model name that was skipped.
+        model: String,
+    },
+
     /// A sub-agent child run is about to be invoked from a parent run.
     SubAgentStarted {
         /// Name of the sub-agent being invoked.
@@ -591,6 +603,7 @@ impl AgentEvent {
             AgentEvent::RateLimitWaited { .. } => "rate_limit.waited",
             AgentEvent::FallbackSelected { .. } => "model.fallback_selected",
             AgentEvent::ModelOverrideSkipped { .. } => "model.override_skipped",
+            AgentEvent::FallbackSkipped { .. } => "model.fallback_skipped",
             AgentEvent::SubAgentStarted { .. } => "subagent.started",
             AgentEvent::SubAgentCompleted { .. } => "subagent.completed",
             AgentEvent::SubAgentReused { .. } => "subagent.reused",

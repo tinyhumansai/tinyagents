@@ -23,8 +23,8 @@ use crate::harness::middleware::{
     ModelMiddleware, ToolHandler, ToolMiddleware,
 };
 use crate::harness::model::{
-    ChatModel, ModelProfile, ModelRequest, ModelResponse, ModelStreamItem, ResponseFormat,
-    ToolChoice,
+    CapabilitySet, ChatModel, ModelProfile, ModelRequest, ModelResponse, ModelStreamItem,
+    ResponseFormat, ToolChoice,
 };
 use crate::harness::providers::MockModel;
 use crate::harness::retry::{FallbackPolicy, RetryPolicy};
@@ -1007,6 +1007,151 @@ async fn fallback_chain_with_repeated_model_name_terminates() {
     // chain's repeated `primary` entry is skipped as already-visited.
     assert_eq!(*primary.attempts.lock().unwrap(), 1);
     assert_eq!(*backup.attempts.lock().unwrap(), 1);
+}
+
+/// A model with an explicit profile that always fails with a retryable error
+/// and counts attempts. Unlike [`FailingModel`] it advertises a profile, so it
+/// can be selected under a `required_capabilities` gate.
+struct ProfiledFailingModel {
+    profile: ModelProfile,
+    attempts: Mutex<usize>,
+}
+
+#[async_trait]
+impl ChatModel<()> for ProfiledFailingModel {
+    fn profile(&self) -> Option<&ModelProfile> {
+        Some(&self.profile)
+    }
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+        *self.attempts.lock().unwrap() += 1;
+        Err(TinyAgentsError::Model("transient boom".to_string()))
+    }
+}
+
+/// A model with an explicit profile that returns fixed text and counts
+/// invocations, so a test can prove an ineligible fallback candidate is never
+/// invoked while a later eligible one is.
+struct ProfiledTextModel {
+    profile: ModelProfile,
+    text: &'static str,
+    attempts: Mutex<usize>,
+}
+
+#[async_trait]
+impl ChatModel<()> for ProfiledTextModel {
+    fn profile(&self) -> Option<&ModelProfile> {
+        Some(&self.profile)
+    }
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+        *self.attempts.lock().unwrap() += 1;
+        Ok(ModelResponse::assistant(self.text))
+    }
+}
+
+/// Middleware that stamps an explicit model override and a required-capability
+/// set onto every request, so a test can drive resolution + fallback under a
+/// capability gate without a public request-building entry point.
+struct RequireCapsMiddleware {
+    model: &'static str,
+    caps: CapabilitySet,
+}
+
+#[async_trait]
+impl Middleware<(), ()> for RequireCapsMiddleware {
+    fn name(&self) -> &str {
+        "require_caps"
+    }
+    async fn before_model(
+        &self,
+        _ctx: &mut RunContext<()>,
+        _state: &(),
+        request: &mut ModelRequest,
+    ) -> Result<()> {
+        request.model = Some(self.model.to_string());
+        request.required_capabilities = Some(self.caps.clone());
+        Ok(())
+    }
+}
+
+/// Runtime fallback must apply the same capability/lifecycle gate that initial
+/// resolution does: on a primary failure, a fallback candidate that cannot
+/// satisfy the request's `required_capabilities` is skipped (never invoked) and
+/// the chain advances to the next eligible model, emitting `FallbackSkipped`
+/// for the skipped candidate (issue #4641).
+#[tokio::test]
+async fn runtime_fallback_skips_capability_ineligible_candidate() {
+    use crate::harness::testkit::EventRecorder;
+
+    let tool_capable = ModelProfile {
+        tool_calling: true,
+        ..ModelProfile::default()
+    };
+    let tool_incapable = ModelProfile {
+        tool_calling: false,
+        ..ModelProfile::default()
+    };
+
+    let primary = Arc::new(ProfiledFailingModel {
+        profile: tool_capable.clone(),
+        attempts: Mutex::new(0),
+    });
+    // Ineligible under the required `tool_calling` gate: must be skipped and
+    // never invoked.
+    let backup = Arc::new(ProfiledTextModel {
+        profile: tool_incapable,
+        text: "from backup",
+        attempts: Mutex::new(0),
+    });
+    // Eligible: the chain must reach and use this one.
+    let tertiary = Arc::new(ProfiledTextModel {
+        profile: tool_capable,
+        text: "recovered",
+        attempts: Mutex::new(0),
+    });
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("primary", primary.clone());
+    harness.register_model("backup", backup.clone());
+    harness.register_model("tertiary", tertiary.clone());
+    harness.push_middleware(Arc::new(RequireCapsMiddleware {
+        model: "primary",
+        caps: CapabilitySet {
+            tool_calling: true,
+            ..CapabilitySet::default()
+        },
+    }));
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(1),
+        fallback: Some(FallbackPolicy::new(["primary", "backup", "tertiary"])),
+        ..RunPolicy::default()
+    });
+
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(RunConfig::new("fallback-caps-run"), ()).with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("fallback reaches the eligible tertiary model");
+
+    // The ineligible `backup` was skipped; the eligible `tertiary` answered.
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert_eq!(*primary.attempts.lock().unwrap(), 1, "primary tried once");
+    assert_eq!(
+        *backup.attempts.lock().unwrap(),
+        0,
+        "capability-ineligible fallback must never be invoked"
+    );
+    assert_eq!(*tertiary.attempts.lock().unwrap(), 1, "tertiary answered");
+
+    // The skip is observable as a diagnostic event naming the skipped model.
+    assert!(
+        recorder.events().iter().any(|e| matches!(
+            e,
+            AgentEvent::FallbackSkipped { model } if model == "backup"
+        )),
+        "skipped fallback candidate must be surfaced as FallbackSkipped; got kinds {:?}",
+        recorder.kinds()
+    );
 }
 
 #[tokio::test]
