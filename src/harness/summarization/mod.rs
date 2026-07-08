@@ -48,10 +48,16 @@ pub fn estimate_tokens(text: &str) -> u64 {
 }
 
 /// Estimate the total tokens for a [`Message`] using the same `chars / 4`
-/// heuristic as [`estimate_tokens`], but counting characters directly over the
-/// message's text blocks rather than allocating the concatenated string first.
+/// heuristic as [`estimate_tokens`], counting weight directly over the message
+/// content rather than allocating the concatenated string first.
+///
+/// Uses [`Message::estimated_char_weight`] (all content blocks) rather than
+/// `char_len` (visible text only): images, structured JSON, and model reasoning
+/// occupy real context, so counting only text would under-estimate a
+/// multimodal or tool-heavy transcript to near-zero and silently prevent
+/// [`SummarizationPolicy::should_summarize`] from ever triggering.
 fn message_token_estimate(msg: &Message) -> u64 {
-    let chars = msg.char_len() as u64;
+    let chars = msg.estimated_char_weight() as u64;
     if chars == 0 { 0 } else { (chars / 4).max(1) }
 }
 
