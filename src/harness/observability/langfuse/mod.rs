@@ -4,6 +4,8 @@
 //! send directly to a self-hosted Langfuse instance with public/secret keys, or
 //! to the TinyHumans backend proxy with a bearer token.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Value, json};
 
 use crate::error::{Result, TinyAgentsError};
@@ -109,6 +111,13 @@ impl LangfuseClient {
             .unwrap_or_else(|| iso_ms(now_ms()));
         let metadata = trace_metadata(&trace, observations);
 
+        // The per-call generation is projected from `ModelCompleted`, which does
+        // not carry the model name — only `ModelStarted` does. Pre-scan the batch
+        // to correlate each call's model by `call_id` so the generation can stamp
+        // `body["model"]`; without it Langfuse can't map pricing and every
+        // generation's cost is $0.
+        let call_models = collect_call_models(observations);
+
         let mut batch = Vec::with_capacity(observations.len() + 1);
         batch.push(json!({
             "id": format!("{}:trace", trace_id),
@@ -129,7 +138,7 @@ impl LangfuseClient {
         }));
 
         for obs in observations {
-            batch.push(observation_event(&trace_id, obs));
+            batch.push(observation_event(&trace_id, obs, &call_models));
         }
 
         Ok(json!({ "batch": batch }))
@@ -269,7 +278,27 @@ fn trace_metadata(trace: &LangfuseTraceConfig, observations: &[AgentObservation]
     }
 }
 
-fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
+/// Collect the model each `ModelStarted` announced, keyed by its `call_id`.
+///
+/// The per-call `generation-create` is built from `ModelCompleted`, which does
+/// not carry the model name; this correlation lets the generation stamp
+/// `body["model"]` so Langfuse can price the call. Borrows from `observations`,
+/// which outlive the batch build.
+fn collect_call_models(observations: &[AgentObservation]) -> BTreeMap<&str, &str> {
+    let mut models = BTreeMap::new();
+    for obs in observations {
+        if let AgentEvent::ModelStarted { call_id, model } = &obs.event {
+            models.insert(call_id.as_str(), model.as_str());
+        }
+    }
+    models
+}
+
+fn observation_event(
+    trace_id: &str,
+    obs: &AgentObservation,
+    call_models: &BTreeMap<&str, &str>,
+) -> Value {
     let timestamp = iso_ms(obs.ts_ms);
     // Attach only run lineage, offset, and the event *kind* — not the full event
     // payload. The event's meaningful fields (input/output/usage/name) are
@@ -312,6 +341,11 @@ fn observation_event(trace_id: &str, obs: &AgentObservation) -> Value {
                     "id": scoped_observation_id(trace_id, call_id.as_str()),
                     "traceId": trace_id,
                     "name": "model",
+                    // The model the matching `ModelStarted` announced for this
+                    // call. Langfuse maps its pricing table off this field, so
+                    // without it every generation's cost is $0. `clean_nulls`
+                    // drops the key when the model can't be correlated.
+                    "model": call_models.get(call_id.as_str()).copied(),
                     // Use the loop-captured start time so the generation has a
                     // real duration; fall back to the completion timestamp (a
                     // zero-width point) for events journaled before the field
