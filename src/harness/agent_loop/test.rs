@@ -28,7 +28,7 @@ use crate::harness::model::{
 };
 use crate::harness::providers::MockModel;
 use crate::harness::retry::{FallbackPolicy, RetryPolicy};
-use crate::harness::runtime::{AgentHarness, RunPolicy, UnknownToolPolicy};
+use crate::harness::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy, UnknownToolPolicy};
 use crate::harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
 use crate::harness::usage::Usage;
 
@@ -714,6 +714,50 @@ async fn invalid_tool_arguments_fail_before_tool_execution() {
         *calls.lock().unwrap(),
         0,
         "tool implementation must not run"
+    );
+}
+
+#[tokio::test]
+async fn invalid_tool_arguments_return_tool_error_recovers() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            // `query` is required to be a string; 42 violates the schema, so
+            // admission must recover instead of running the tool or aborting.
+            tool_call_response("call-1", "strict_lookup", json!({ "query": 42 })),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StrictLookupTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::ReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("invalid arguments are recoverable under ReturnToolError");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "the tool implementation must not run on invalid arguments"
+    );
+    // The injected tool-error message carries the validation detail so the
+    // model can self-correct on the next turn.
+    let injected = run
+        .messages
+        .iter()
+        .any(|m| format!("{m:?}").contains("invalid arguments for tool `strict_lookup`"));
+    assert!(
+        injected,
+        "recovery message should be injected into the transcript"
     );
 }
 

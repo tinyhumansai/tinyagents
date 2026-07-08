@@ -86,7 +86,7 @@ use crate::harness::model::{
     ResolvedModel, ResolvedModelBinding, ResponseFormat, StreamAccumulator, ToolChoice,
     model_eligible,
 };
-use crate::harness::runtime::{AgentHarness, UnknownToolPolicy};
+use crate::harness::runtime::{AgentHarness, InvalidArgsPolicy, UnknownToolPolicy};
 use crate::harness::structured::{StructuredExtractor, StructuredStrategy};
 use crate::harness::tool::{Tool, ToolCall, ToolSchema};
 use futures::StreamExt;
