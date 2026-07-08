@@ -698,8 +698,13 @@ pub struct StreamAccumulator {
     usage: Option<Usage>,
     /// Authoritative final response, when a `Completed` item was seen.
     completed: Option<ModelResponse>,
-    /// Terminal error message, when a failure item was seen.
+    /// Terminal error message, when an unstructured `Failed` item was seen.
     failed: Option<String>,
+    /// Terminal structured provider failure, when a `ProviderFailed` item was
+    /// seen. Kept as the full struct (not stringified) so `finish()` can return
+    /// [`crate::error::TinyAgentsError::Provider`] and preserve the
+    /// status/code/`retryable` classification the retry layer needs.
+    failed_provider: Option<ProviderError>,
 }
 
 impl StreamAccumulator {
@@ -736,16 +741,11 @@ impl StreamAccumulator {
                 self.failed = Some(message.clone());
             }
             ModelStreamItem::ProviderFailed(error) => {
-                self.failed = Some(format!(
-                    "{} provider error{}: {}",
-                    error.provider,
-                    error
-                        .code
-                        .as_deref()
-                        .map(|code| format!(" ({code})"))
-                        .unwrap_or_default(),
-                    error.message
-                ));
+                // Retain the structured error rather than stringifying it, so
+                // `finish()` can surface `TinyAgentsError::Provider` and the retry
+                // layer sees the real status/code/`retryable` (a permanent 401 /
+                // `insufficient_quota` / 400 must not be retried as transient).
+                self.failed_provider = Some(error.clone());
             }
         }
     }
@@ -771,10 +771,10 @@ impl StreamAccumulator {
         }
     }
 
-    /// Returns `true` when a terminal item (`Completed` or `Failed`) has been
-    /// folded in.
+    /// Returns `true` when a terminal item (`Completed`, `Failed`, or
+    /// `ProviderFailed`) has been folded in.
     pub fn is_terminal(&self) -> bool {
-        self.completed.is_some() || self.failed.is_some()
+        self.completed.is_some() || self.failed.is_some() || self.failed_provider.is_some()
     }
 
     /// Returns the accumulated reasoning/thinking text streamed so far (the
@@ -787,9 +787,16 @@ impl StreamAccumulator {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::error::TinyAgentsError::Model`] when a
-    /// [`ModelStreamItem::Failed`] item was folded in.
+    /// Returns [`crate::error::TinyAgentsError::Provider`] when a
+    /// [`ModelStreamItem::ProviderFailed`] item was folded in — preserving the
+    /// structured status/code/`retryable` so a permanent failure is not retried
+    /// as transient — or [`crate::error::TinyAgentsError::Model`] when an
+    /// unstructured [`ModelStreamItem::Failed`] item was folded in.
     pub fn finish(self) -> Result<ModelResponse> {
+        if let Some(error) = self.failed_provider {
+            return Err(crate::error::TinyAgentsError::Provider(Box::new(error)));
+        }
+
         if let Some(message) = self.failed {
             return Err(crate::error::TinyAgentsError::Model(message));
         }

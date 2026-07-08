@@ -513,7 +513,11 @@ fn provider_spec_builds_compatible_model() {
 }
 
 #[test]
-fn provider_failed_stream_item_finishes_as_model_error() {
+fn provider_failed_stream_item_finishes_as_provider_error() {
+    // A streamed `ProviderFailed` must finish as `TinyAgentsError::Provider` with
+    // the structured error preserved (status/code/`retryable`), so the retry
+    // layer classifies it from `retryable` instead of the old behavior that
+    // stringified it into `Model` and always retried it as transient.
     let mut accumulator = StreamAccumulator::new();
     accumulator.push(&ModelStreamItem::ProviderFailed(ProviderError {
         provider: "groq".to_string(),
@@ -525,8 +529,16 @@ fn provider_failed_stream_item_finishes_as_model_error() {
         raw: None,
     }));
 
-    let error = accumulator.finish().unwrap_err().to_string();
-    assert!(error.contains("groq provider error (rate_limit): too many requests"));
+    match accumulator.finish().unwrap_err() {
+        TinyAgentsError::Provider(error) => {
+            assert_eq!(error.provider, "groq");
+            assert_eq!(error.status, Some(429));
+            assert_eq!(error.code.as_deref(), Some("rate_limit"));
+            assert_eq!(error.message, "too many requests");
+            assert!(error.retryable);
+        }
+        other => panic!("expected Provider error, got {other:?}"),
+    }
 }
 
 #[tokio::test]

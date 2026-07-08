@@ -685,6 +685,59 @@ fn finish_backfills_usage_from_stream_delta_when_completed_lacks_it() {
 }
 
 #[test]
+fn finish_preserves_provider_error_classification_from_provider_failed() {
+    // A streamed `ProviderFailed` carrying a non-retryable provider error (401
+    // auth) must surface as `TinyAgentsError::Provider` with the struct intact —
+    // not stringified into `Model` — so `is_retryable` classifies it as permanent
+    // instead of retrying + fallback-churning it as transient.
+    use crate::error::TinyAgentsError;
+    use crate::harness::retry::is_retryable;
+
+    let mut acc = StreamAccumulator::new();
+    acc.push(&ModelStreamItem::Started);
+    acc.push(&ModelStreamItem::ProviderFailed(ProviderError {
+        provider: "openai".into(),
+        status: Some(401),
+        code: Some("invalid_api_key".into()),
+        message: "Incorrect API key provided".into(),
+        retryable: false,
+        ..ProviderError::default()
+    }));
+
+    assert!(acc.is_terminal());
+    let err = acc.finish().unwrap_err();
+    match &err {
+        TinyAgentsError::Provider(error) => {
+            assert_eq!(error.status, Some(401));
+            assert_eq!(error.code.as_deref(), Some("invalid_api_key"));
+            assert!(!error.retryable);
+        }
+        other => panic!("expected Provider error, got {other:?}"),
+    }
+    assert!(
+        !is_retryable(&err),
+        "a permanent streamed provider failure must not be retried as transient"
+    );
+}
+
+#[test]
+fn finish_maps_unstructured_failed_to_model_error() {
+    // The unstructured `Failed(String)` path stays `TinyAgentsError::Model` — no
+    // structured detail to classify from, so the retry layer treats it as a
+    // transient transport/parse failure.
+    use crate::error::TinyAgentsError;
+
+    let mut acc = StreamAccumulator::new();
+    acc.push(&ModelStreamItem::Failed("stream broke".into()));
+
+    assert!(acc.is_terminal());
+    match acc.finish().unwrap_err() {
+        TinyAgentsError::Model(message) => assert_eq!(message, "stream broke"),
+        other => panic!("expected Model error, got {other:?}"),
+    }
+}
+
+#[test]
 fn finish_names_reconstructed_tool_call_from_the_call_opening_delta_name() {
     // A call-opening delta carries the tool name (no args yet); subsequent
     // argument fragments carry only content. With no authoritative `Completed`
