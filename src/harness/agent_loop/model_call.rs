@@ -120,8 +120,23 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                         self.invoke_model_streaming_once(state, ctx, &model, request, call_id);
                     Self::with_call_budget(remaining, run_id.as_str(), "model call", fut).await
                 } else {
+                    // Race the wall-clock-bounded unary call against cooperative
+                    // cancellation, mirroring the streaming path: a cancel
+                    // requested while a buffered (non-streamed) provider call is
+                    // in flight drops the future — reqwest cancels the underlying
+                    // request — and unwinds with `Cancelled` instead of paying
+                    // for the call to run to completion. `cancelled()` is
+                    // cancel-safe, and the pre-call `is_cancelled()` check above
+                    // still short-circuits before the request is ever issued.
+                    let cancellation = ctx.cancellation.clone();
                     let fut = model.invoke(state, request.clone());
-                    Self::with_call_budget(remaining, run_id.as_str(), "model call", fut).await
+                    let budgeted =
+                        Self::with_call_budget(remaining, run_id.as_str(), "model call", fut);
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => Err(TinyAgentsError::Cancelled),
+                        result = budgeted => result,
+                    }
                 };
                 match attempt_result {
                     Ok(response) => break Ok(response),
