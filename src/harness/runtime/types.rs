@@ -144,6 +144,15 @@ pub struct RunPolicy {
     /// [`crate::harness::model::ModelRequest::cache_policy`] does not override
     /// it. A request-level `cache_policy` always wins over this default.
     pub cache: CachePolicy,
+    /// When `true`, an empty provider completion in the finalization branch (no
+    /// text, no tool calls, and no structured output) fails the run with
+    /// [`crate::error::TinyAgentsError::EmptyResponse`] instead of terminating
+    /// with a blank final answer.
+    ///
+    /// Defaults to `false` to preserve the historical behavior for callers who
+    /// rely on empty finals; opt in to turn a silent blank success into a typed
+    /// error the caller can re-prompt on.
+    pub error_on_empty_response: bool,
 }
 
 impl Default for RunPolicy {
@@ -161,6 +170,8 @@ impl Default for RunPolicy {
                 response_cache_enabled: true,
                 protect_prompt_prefix: false,
             },
+            // Opt-in: preserve the historical blank-final behavior by default.
+            error_on_empty_response: false,
         }
     }
 }

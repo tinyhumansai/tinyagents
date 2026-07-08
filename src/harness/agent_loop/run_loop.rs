@@ -280,6 +280,21 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     let output = extractor.extract(&response)?;
                     run.structured = Some(output.value);
                 }
+                // An empty provider completion — no text, no tool calls, and no
+                // structured output — must not silently become the terminal
+                // answer (openhuman#4638). When the policy opts in, drop the
+                // empty assistant row appended above and fail with a typed error
+                // so the caller can re-prompt instead of returning a blank
+                // success. Gated off by default to preserve callers that rely on
+                // empty finals.
+                if self.policy.error_on_empty_response
+                    && run.structured.is_none()
+                    && tool_calls.is_empty()
+                    && response.text().trim().is_empty()
+                {
+                    messages.pop();
+                    return Err(TinyAgentsError::EmptyResponse);
+                }
                 run.final_response = Some(response);
                 break;
             }
