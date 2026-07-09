@@ -758,6 +758,80 @@ async fn microcompact_is_idempotent() {
     assert_eq!(request.messages[1].text(), "SECOND");
 }
 
+// ── token-budget gate (issue tinyhumansai/openhuman#4755) ──────────────────────
+
+#[tokio::test]
+async fn microcompact_with_token_budget_is_a_noop_below_budget() {
+    // More than `keep_recent` tool results, but the whole transcript fits the
+    // configured budget: NOTHING is blanked, so the request stays byte-stable
+    // across iterations and the provider KV-cache prefix is preserved. This is
+    // the fix — the ungated middleware would have blanked the two oldest here
+    // (see `microcompact_clears_older_tool_bodies_and_keeps_recent`), churning
+    // the cache to reclaim tokens the model had ample room for.
+    let mw = MicrocompactMiddleware::new(1, CLEARED).with_token_budget(100_000);
+    assert_eq!(mw.token_budget(), Some(100_000));
+    let mut request = ModelRequest {
+        messages: vec![
+            Message::system("sys"),
+            Message::tool("t1", "FIRST_BODY"),
+            Message::tool("t2", "SECOND_BODY"),
+            Message::tool("t3", "THIRD_BODY"),
+        ],
+        ..Default::default()
+    };
+    mw.before_model(&mut ctx(), &(), &mut request)
+        .await
+        .unwrap();
+    assert_eq!(request.messages[1].text(), "FIRST_BODY");
+    assert_eq!(request.messages[2].text(), "SECOND_BODY");
+    assert_eq!(request.messages[3].text(), "THIRD_BODY");
+}
+
+#[tokio::test]
+async fn microcompact_with_token_budget_blanks_once_over_budget() {
+    // Same shape, but the (un-blanked) transcript exceeds the tiny budget, so
+    // compaction is genuinely needed to stay under the window: the gate lets the
+    // usual keep-recent blanking run and reclaims tokens.
+    let body = "x".repeat(400); // ~100 estimated tokens each (chars / 4)
+    let mw = MicrocompactMiddleware::new(1, CLEARED).with_token_budget(10);
+    let mut request = ModelRequest {
+        messages: vec![
+            Message::tool("t1", body.clone()),
+            Message::tool("t2", body.clone()),
+            Message::tool("t3", body.clone()),
+        ],
+        ..Default::default()
+    };
+    mw.before_model(&mut ctx(), &(), &mut request)
+        .await
+        .unwrap();
+    assert_eq!(request.messages[0].text(), CLEARED);
+    assert_eq!(request.messages[1].text(), CLEARED);
+    assert_eq!(request.messages[2].text(), body);
+}
+
+#[tokio::test]
+async fn microcompact_with_token_budget_zero_disables_the_gate() {
+    // `budget == 0` is an explicit opt-out: the gate is `None`, so blanking
+    // reverts to the legacy count-only behaviour even on a tiny transcript.
+    let mw = MicrocompactMiddleware::new(1, CLEARED).with_token_budget(0);
+    assert_eq!(mw.token_budget(), None);
+    let mut request = ModelRequest {
+        messages: vec![
+            Message::tool("t1", "A"),
+            Message::tool("t2", "B"),
+            Message::tool("t3", "C"),
+        ],
+        ..Default::default()
+    };
+    mw.before_model(&mut ctx(), &(), &mut request)
+        .await
+        .unwrap();
+    assert_eq!(request.messages[0].text(), CLEARED);
+    assert_eq!(request.messages[1].text(), CLEARED);
+    assert_eq!(request.messages[2].text(), "C");
+}
+
 #[tokio::test]
 async fn microcompact_emits_no_event_by_default() {
     // Default construction is silent: bodies are still cleared, but no
