@@ -96,6 +96,52 @@ fn builds_trace_and_generation_batch() {
 }
 
 #[test]
+fn generation_carries_model_from_model_started() {
+    let client =
+        LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t").unwrap();
+    let batch = client
+        .build_ingestion_batch(
+            LangfuseTraceConfig::default(),
+            &[
+                obs(
+                    0,
+                    AgentEvent::ModelStarted {
+                        call_id: CallId::new("model-call"),
+                        model: "managed.chat-v1".to_string(),
+                    },
+                ),
+                obs(
+                    1,
+                    AgentEvent::ModelCompleted {
+                        call_id: CallId::new("model-call"),
+                        started_at_ms: None,
+                        usage: Some(Usage {
+                            input_tokens: 3,
+                            output_tokens: 4,
+                            total_tokens: 7,
+                            ..Default::default()
+                        }),
+                        input: None,
+                        output: None,
+                    },
+                ),
+            ],
+        )
+        .unwrap();
+
+    let events = batch["batch"].as_array().unwrap();
+    let generation = events
+        .iter()
+        .find(|e| e["type"] == "generation-create")
+        .expect("a generation-create observation");
+    // The generation is projected from `ModelCompleted` (which carries no model);
+    // it is correlated by `call_id` to the model that `ModelStarted` announced,
+    // so Langfuse can map pricing instead of recording cost $0.
+    assert_eq!(generation["body"]["model"], "managed.chat-v1");
+    assert_eq!(generation["body"]["metadata"]["call_id"], "model-call");
+}
+
+#[test]
 fn populates_generation_and_tool_io_when_captured() {
     let client =
         LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t").unwrap();

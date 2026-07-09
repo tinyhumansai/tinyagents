@@ -308,13 +308,14 @@ impl PromptBuilder {
             "tools": self.tools,
         });
 
-        // Stream the canonical JSON straight into the digest; `Sha256`
-        // implements `std::io::Write`.
+        // Serialize the canonical JSON, then feed it to the digest via
+        // `Digest::update` (digest 0.11 dropped the `io::Write` impl the previous
+        // `to_writer` path relied on). Serializing an already-materialized
+        // `Value` does not fail in practice; on the impossible error we hash empty
+        // data for a stable result.
         let mut hasher = Sha256::new();
-        if serde_json::to_writer(&mut hasher, &payload).is_err() {
-            // Serializing an already-materialized `Value` does not fail in
-            // practice; fall back to hashing empty data for a stable result.
-            hasher = Sha256::new();
+        if let Ok(bytes) = serde_json::to_vec(&payload) {
+            hasher.update(&bytes);
         }
         let digest = hasher.finalize();
         digest.iter().map(|byte| format!("{byte:02x}")).collect()

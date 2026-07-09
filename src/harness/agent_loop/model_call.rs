@@ -120,8 +120,23 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                         self.invoke_model_streaming_once(state, ctx, &model, request, call_id);
                     Self::with_call_budget(remaining, run_id.as_str(), "model call", fut).await
                 } else {
+                    // Race the wall-clock-bounded unary call against cooperative
+                    // cancellation, mirroring the streaming path: a cancel
+                    // requested while a buffered (non-streamed) provider call is
+                    // in flight drops the future — reqwest cancels the underlying
+                    // request — and unwinds with `Cancelled` instead of paying
+                    // for the call to run to completion. `cancelled()` is
+                    // cancel-safe, and the pre-call `is_cancelled()` check above
+                    // still short-circuits before the request is ever issued.
+                    let cancellation = ctx.cancellation.clone();
                     let fut = model.invoke(state, request.clone());
-                    Self::with_call_budget(remaining, run_id.as_str(), "model call", fut).await
+                    let budgeted =
+                        Self::with_call_budget(remaining, run_id.as_str(), "model call", fut);
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => Err(TinyAgentsError::Cancelled),
+                        result = budgeted => result,
+                    }
                 };
                 match attempt_result {
                     Ok(response) => break Ok(response),
@@ -179,18 +194,45 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     if matches!(error, TinyAgentsError::Timeout(_)) {
                         return Err(error);
                     }
-                    // Retries exhausted (or non-retryable): try the next model
-                    // in the fallback chain, if any, skipping any name already
-                    // visited in this chain so a chain with a repeated name
-                    // cannot alternate between the same models forever.
-                    let next = self
-                        .policy
-                        .fallback
-                        .as_ref()
-                        .and_then(|fallback| fallback.next_after(&current_name))
-                        .map(str::to_owned)
-                        .filter(|name| !visited.contains(name));
-                    match next.and_then(|name| self.models.get(&name).map(|m| (name, m))) {
+                    // Retries exhausted (or non-retryable): walk the fallback
+                    // chain for the next model, skipping any name already
+                    // visited in this chain (so a chain with a repeated name
+                    // cannot alternate between the same models forever) and any
+                    // candidate that fails the request's capability/lifecycle
+                    // gate. Initial resolution gates the primary selection
+                    // through `model_eligible`; without the same gate here a
+                    // primary failure could silently fall back to a model that
+                    // can't call tools, lacks vision, or has a smaller context
+                    // window (issue #4641). `allow_retired` is `false` to match
+                    // `ModelRegistry::resolve_request`.
+                    let required = request.required_capabilities.as_ref();
+                    let mut cursor = current_name.clone();
+                    let selected = loop {
+                        let next = self
+                            .policy
+                            .fallback
+                            .as_ref()
+                            .and_then(|fallback| fallback.next_after(&cursor))
+                            .map(str::to_owned)
+                            .filter(|name| !visited.contains(name));
+                        let Some((name, next_model)) =
+                            next.and_then(|name| self.models.get(&name).map(|m| (name, m)))
+                        else {
+                            break None;
+                        };
+                        if !model_eligible(next_model.as_ref(), required, false) {
+                            // Ineligible candidate: record it as visited, make
+                            // the skip observable, and keep walking the chain.
+                            visited.insert(name.clone());
+                            ctx.emit(AgentEvent::FallbackSkipped {
+                                model: name.clone(),
+                            });
+                            cursor = name;
+                            continue;
+                        }
+                        break Some((name, next_model));
+                    };
+                    match selected {
                         Some((name, next_model)) => {
                             visited.insert(name.clone());
                             resolved = ResolvedModel {

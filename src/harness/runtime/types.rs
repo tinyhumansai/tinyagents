@@ -73,6 +73,28 @@ pub enum UnknownToolPolicy {
     },
 }
 
+/// How the agent loop reacts when the model calls a *registered* tool with
+/// arguments that fail schema validation.
+///
+/// The default is [`InvalidArgsPolicy::Fail`], preserving the historical
+/// fail-fast behavior where a missing `required` field, wrong type, or bad
+/// `enum` aborts the whole turn. The recoverable variant lets a run keep going
+/// so the model can self-correct — the recovery still consumes a tool-call
+/// budget slot, so [`RunLimits::max_tool_calls`] bounds any invalid-args loop.
+/// Mirrors [`UnknownToolPolicy`] for the schema-validation seam.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum InvalidArgsPolicy {
+    /// Abort the run with
+    /// [`TinyAgentsError::Validation`][crate::error::TinyAgentsError::Validation]
+    /// (the default, historical behavior).
+    #[default]
+    Fail,
+    /// Inject a tool-error result (carrying the validation detail and the
+    /// tool's expected parameter schema) back into the transcript and continue
+    /// the loop, letting the model retry with corrected arguments.
+    ReturnToolError,
+}
+
 /// Controls whether the agent loop captures model and tool **payloads**
 /// (prompt/completion text, tool arguments/results) onto the
 /// [`AgentEvent::ModelCompleted`][crate::harness::events::AgentEvent::ModelCompleted]
@@ -126,6 +148,9 @@ pub struct RunPolicy {
     pub limits: RunLimits,
     /// How the loop reacts to a model call for an unregistered tool.
     pub unknown_tool: UnknownToolPolicy,
+    /// How the loop reacts when a registered tool's arguments fail schema
+    /// validation.
+    pub invalid_args: InvalidArgsPolicy,
     /// Retry policy applied to each model call.
     pub retry: RetryPolicy,
     /// Optional ordered model fallback chain.
@@ -144,6 +169,15 @@ pub struct RunPolicy {
     /// [`crate::harness::model::ModelRequest::cache_policy`] does not override
     /// it. A request-level `cache_policy` always wins over this default.
     pub cache: CachePolicy,
+    /// When `true`, an empty provider completion in the finalization branch (no
+    /// text, no tool calls, and no structured output) fails the run with
+    /// [`crate::error::TinyAgentsError::EmptyResponse`] instead of terminating
+    /// with a blank final answer.
+    ///
+    /// Defaults to `false` to preserve the historical behavior for callers who
+    /// rely on empty finals; opt in to turn a silent blank success into a typed
+    /// error the caller can re-prompt on.
+    pub error_on_empty_response: bool,
 }
 
 impl Default for RunPolicy {
@@ -151,6 +185,7 @@ impl Default for RunPolicy {
         Self {
             limits: RunLimits::default(),
             unknown_tool: UnknownToolPolicy::default(),
+            invalid_args: InvalidArgsPolicy::default(),
             retry: RetryPolicy::default(),
             fallback: None,
             default_response_format: None,
@@ -161,6 +196,8 @@ impl Default for RunPolicy {
                 response_cache_enabled: true,
                 protect_prompt_prefix: false,
             },
+            // Opt-in: preserve the historical blank-final behavior by default.
+            error_on_empty_response: false,
         }
     }
 }

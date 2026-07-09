@@ -82,6 +82,14 @@ pub(super) fn is_reasoning_model(model: &str) -> bool {
 /// All targets support tool calling, streaming (including tool-call chunks),
 /// and JSON Schema response formats. Modern OpenAI-family models additionally
 /// advertise native structured output and (for the o-series) reasoning output.
+///
+/// The context window is populated from the provider-neutral
+/// [`context_window_for_model_id`][crate::harness::model::context_window_for_model_id]
+/// hint table when the id is recognized (`None` otherwise), so downstream
+/// context-window-aware trimming/compaction
+/// ([`SummarizationPolicy::from_profile`][crate::harness::summarization::SummarizationPolicy::from_profile])
+/// engages on a real window instead of silently falling back to a fixed
+/// threshold.
 pub(super) fn derive_profile(provider: &str, model: &str) -> ModelProfile {
     let lower = model.to_ascii_lowercase();
     let reasoning = is_reasoning_model(model);
@@ -101,6 +109,7 @@ pub(super) fn derive_profile(provider: &str, model: &str) -> ModelProfile {
         native_structured_output: native_structured,
         json_schema: true,
         reasoning,
+        max_input_tokens: crate::harness::model::context_window_for_model_id(model),
         ..ModelProfile::default()
     }
 }

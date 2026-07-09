@@ -200,7 +200,35 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 }
             }
         };
-        tool.schema().validate_call(call)?;
+        if let Err(err) = tool.schema().validate_call(call) {
+            // The model called a registered tool with schema-invalid arguments.
+            // Apply the run's `InvalidArgsPolicy` instead of unconditionally
+            // aborting the turn (mirrors the unknown-tool recovery above).
+            if matches!(self.policy.invalid_args, InvalidArgsPolicy::Fail) {
+                return Err(err);
+            }
+            // `ReturnToolError`: inject a tool-error result carrying the
+            // validation detail and the tool's expected parameter schema, then
+            // continue so the model can correct itself. This consumed one
+            // tool-call budget slot above, bounding the loop.
+            let call_id = CallId::new(call.id.clone());
+            let detail = err.to_string();
+            let schema_repr = serde_json::to_string(&tool.schema().parameters)
+                .unwrap_or_else(|_| "<unserializable>".to_string());
+            let message = format!(
+                "invalid arguments for tool `{}`: {detail}; expected schema: {schema_repr}",
+                call.name
+            );
+            let record = ctx.emit(AgentEvent::InvalidToolArgs {
+                call_id,
+                tool_name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                error: detail,
+                recovery: "tool_error".to_string(),
+            });
+            status.set_last_event(record.id);
+            return Ok(ResolvedToolCall::ErrorMessage(message));
+        }
         Ok(ResolvedToolCall::Tool(tool))
     }
 

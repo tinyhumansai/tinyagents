@@ -513,7 +513,11 @@ fn provider_spec_builds_compatible_model() {
 }
 
 #[test]
-fn provider_failed_stream_item_finishes_as_model_error() {
+fn provider_failed_stream_item_finishes_as_provider_error() {
+    // A streamed `ProviderFailed` must finish as `TinyAgentsError::Provider` with
+    // the structured error preserved (status/code/`retryable`), so the retry
+    // layer classifies it from `retryable` instead of the old behavior that
+    // stringified it into `Model` and always retried it as transient.
     let mut accumulator = StreamAccumulator::new();
     accumulator.push(&ModelStreamItem::ProviderFailed(ProviderError {
         provider: "groq".to_string(),
@@ -525,8 +529,16 @@ fn provider_failed_stream_item_finishes_as_model_error() {
         raw: None,
     }));
 
-    let error = accumulator.finish().unwrap_err().to_string();
-    assert!(error.contains("groq provider error (rate_limit): too many requests"));
+    match accumulator.finish().unwrap_err() {
+        TinyAgentsError::Provider(error) => {
+            assert_eq!(error.provider, "groq");
+            assert_eq!(error.status, Some(429));
+            assert_eq!(error.code.as_deref(), Some("rate_limit"));
+            assert_eq!(error.message, "too many requests");
+            assert!(error.retryable);
+        }
+        other => panic!("expected Provider error, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -1115,4 +1127,23 @@ fn with_auth_style_and_with_header_build_without_panicking() {
         .with_auth_style(AuthStyle::XApiKey)
         .with_header("HTTP-Referer", "https://openhuman.example")
         .with_header("X-Title", "OpenHuman");
+}
+#[test]
+fn derive_profile_populates_known_context_windows() {
+    // A recognized id gets its context window from the shared provider-neutral
+    // hint table, so context-window-aware compaction has a real window to gate
+    // on instead of falling back to a fixed threshold.
+    assert_eq!(
+        super::transport::derive_profile("openai", "gpt-4o-mini").max_input_tokens,
+        Some(128_000)
+    );
+    assert_eq!(
+        super::transport::derive_profile("openai", "gpt-4.1").max_input_tokens,
+        Some(1_047_576)
+    );
+    // An unrecognized id stays `None` rather than guessing a window.
+    assert_eq!(
+        super::transport::derive_profile("openai", "totally-unknown-model").max_input_tokens,
+        None
+    );
 }

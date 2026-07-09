@@ -281,9 +281,14 @@ async fn model_request_response_registry_and_stream_contracts_are_stable() {
         },
     )]));
     let err = collect_model_stream(failed_stream).await.unwrap_err();
+    // A streamed `ProviderFailed` now surfaces as a structured
+    // `TinyAgentsError::Provider` whose `Display` renders the provider, HTTP
+    // status, code, and message (preserving the classification the retry layer
+    // needs) rather than the old flattened "<provider> provider error" string.
     assert!(
         err.to_string()
-            .contains("mock provider error (internal): nope")
+            .contains("mock returned HTTP 500 (internal): nope"),
+        "unexpected error string: {err}"
     );
 }
 

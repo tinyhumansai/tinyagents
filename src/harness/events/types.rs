@@ -182,6 +182,28 @@ pub enum AgentEvent {
         recovery: String,
     },
 
+    /// The model called a *registered* tool with arguments that failed schema
+    /// validation, and the run's
+    /// [`InvalidArgsPolicy`][crate::harness::runtime::InvalidArgsPolicy]
+    /// recovered from it instead of aborting.
+    ///
+    /// Distinct from a tool that ran and returned an error: no tool was
+    /// executed. The tool name, arguments, and validation error are preserved
+    /// so the event stream can drive repair/analysis.
+    InvalidToolArgs {
+        /// Identifier of the offending tool call.
+        call_id: CallId,
+        /// The registered tool whose schema the supplied arguments violated.
+        tool_name: String,
+        /// The raw arguments the model supplied, preserved verbatim so repair
+        /// middleware or analysis can re-target or replay the invocation.
+        arguments: serde_json::Value,
+        /// The schema-validation error detail.
+        error: String,
+        /// How the run recovered (currently always `"tool_error"`).
+        recovery: String,
+    },
+
     /// A per-agent isolated workspace/sandbox was prepared.
     WorkspacePrepared {
         /// Audit identity of the policy that produced the environment.
@@ -293,6 +315,18 @@ pub enum AgentEvent {
         requested: String,
         /// The model that was actually resolved instead.
         resolved: String,
+    },
+
+    /// A runtime fallback candidate was skipped because it failed the request's
+    /// capability/lifecycle gate — it lacks a required capability or is
+    /// provider-retired — so the fallback chain advanced to the next candidate
+    /// instead. Initial resolution gates the primary selection the same way;
+    /// this makes the equivalent gate on the fallback path observable (issue
+    /// #4641), so a primary failure can never silently fall back to a model that
+    /// cannot satisfy the request.
+    FallbackSkipped {
+        /// The fallback model name that was skipped.
+        model: String,
     },
 
     /// A sub-agent child run is about to be invoked from a parent run.
@@ -575,6 +609,7 @@ impl AgentEvent {
             AgentEvent::ToolStarted { .. } => "tool.started",
             AgentEvent::ToolCompleted { .. } => "tool.completed",
             AgentEvent::UnknownToolCall { .. } => "tool.unknown",
+            AgentEvent::InvalidToolArgs { .. } => "tool.invalid_args",
             AgentEvent::BudgetWarning { .. } => "budget.warning",
             AgentEvent::BudgetReserved { .. } => "budget.reserved",
             AgentEvent::BudgetReconciled { .. } => "budget.reconciled",
@@ -591,6 +626,7 @@ impl AgentEvent {
             AgentEvent::RateLimitWaited { .. } => "rate_limit.waited",
             AgentEvent::FallbackSelected { .. } => "model.fallback_selected",
             AgentEvent::ModelOverrideSkipped { .. } => "model.override_skipped",
+            AgentEvent::FallbackSkipped { .. } => "model.fallback_skipped",
             AgentEvent::SubAgentStarted { .. } => "subagent.started",
             AgentEvent::SubAgentCompleted { .. } => "subagent.completed",
             AgentEvent::SubAgentReused { .. } => "subagent.reused",
