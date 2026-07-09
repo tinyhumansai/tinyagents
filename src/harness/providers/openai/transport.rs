@@ -6,6 +6,28 @@
 
 use super::*;
 
+/// How the provider expects the API credential to be sent on each request.
+///
+/// OpenAI-compatible endpoints diverge on auth: hosted OpenAI and most gateways
+/// use `Bearer`, some providers use a bare `x-api-key`, Anthropic's compat
+/// endpoint pairs `x-api-key` with an `anthropic-version` header, and a few need
+/// an arbitrary custom header carrying the raw credential. Defaults to
+/// [`AuthStyle::Bearer`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AuthStyle {
+    /// No authentication header (e.g. a local Ollama server).
+    None,
+    /// `Authorization: Bearer <key>` — hosted OpenAI and most gateways.
+    #[default]
+    Bearer,
+    /// `x-api-key: <key>` — used by some OpenAI-compatible providers.
+    XApiKey,
+    /// `x-api-key: <key>` + `anthropic-version: 2023-06-01` (Anthropic compat).
+    Anthropic,
+    /// A custom header name carrying the raw credential.
+    Custom(String),
+}
+
 /// A [`ChatModel`] backed by the hosted OpenAI Chat Completions API.
 ///
 /// Construct one with [`OpenAiModel::new`] (plus the `with_*` builders) or
@@ -14,8 +36,13 @@ use super::*;
 pub struct OpenAiModel {
     /// Shared HTTP client.
     client: reqwest::Client,
-    /// API key sent as a `Bearer` token.
+    /// API credential; how it is sent is governed by [`Self::auth`].
     api_key: String,
+    /// How `api_key` is attached to each request (default [`AuthStyle::Bearer`]).
+    auth: AuthStyle,
+    /// Extra static headers attached to every request (e.g. provider
+    /// attribution headers). Applied after the auth header.
+    extra_headers: Vec<(String, String)>,
     /// Default model id used when a request does not override it.
     model: String,
     /// Provider family identifier used in profiles and normalized errors.
@@ -24,6 +51,23 @@ pub struct OpenAiModel {
     base_url: String,
     /// Capability profile derived from the default model id.
     profile: ModelProfile,
+}
+
+/// The auth headers `(name, value)` for a given [`AuthStyle`] + credential.
+///
+/// Pure (no request), so the header mapping is unit-testable without a network
+/// round-trip. Applied by [`OpenAiModel::authorized`].
+pub(super) fn auth_headers(auth: &AuthStyle, api_key: &str) -> Vec<(String, String)> {
+    match auth {
+        AuthStyle::None => Vec::new(),
+        AuthStyle::Bearer => vec![("Authorization".to_string(), format!("Bearer {api_key}"))],
+        AuthStyle::XApiKey => vec![("x-api-key".to_string(), api_key.to_string())],
+        AuthStyle::Anthropic => vec![
+            ("x-api-key".to_string(), api_key.to_string()),
+            ("anthropic-version".to_string(), "2023-06-01".to_string()),
+        ],
+        AuthStyle::Custom(name) => vec![(name.clone(), api_key.to_string())],
+    }
 }
 
 /// Returns `true` for OpenAI o-series reasoning models (`o1`/`o3`/`o4`), which
@@ -80,11 +124,30 @@ impl OpenAiModel {
                 .build()
                 .expect("default reqwest client builds"),
             api_key: api_key.into(),
+            auth: AuthStyle::Bearer,
+            extra_headers: Vec::new(),
             model: DEFAULT_MODEL.to_string(),
             provider: "openai".to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
             profile: derive_profile("openai", DEFAULT_MODEL),
         }
+    }
+
+    /// Overrides how the API credential is sent (default [`AuthStyle::Bearer`]).
+    ///
+    /// Use this for OpenAI-compatible endpoints that authenticate with
+    /// `x-api-key`, the Anthropic header pair, or a custom header instead of a
+    /// bearer token.
+    pub fn with_auth_style(mut self, auth: AuthStyle) -> Self {
+        self.auth = auth;
+        self
+    }
+
+    /// Attaches a static header to every request (repeatable). Applied after the
+    /// auth header — e.g. provider attribution headers.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra_headers.push((name.into(), value.into()));
+        self
     }
 
     /// Overrides the default model id.
@@ -412,12 +475,20 @@ impl OpenAiModel {
         })
     }
 
-    /// Attaches the provider's bearer credential to an outbound request.
+    /// Attaches the provider's credential (per [`Self::auth`]) plus any static
+    /// [`Self::extra_headers`] to an outbound request.
     ///
-    /// The single place the `Authorization` header is set, shared by the chat
-    /// and model-listing calls.
-    fn authorized(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        builder.header("Authorization", format!("Bearer {}", self.api_key))
+    /// The single place auth is applied, shared by the chat and model-listing
+    /// calls. The header mapping itself lives in the pure [`auth_headers`] helper
+    /// so it is unit-testable without a network round-trip.
+    fn authorized(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        for (name, value) in auth_headers(&self.auth, &self.api_key) {
+            builder = builder.header(name, value);
+        }
+        for (name, value) in &self.extra_headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        builder
     }
 
     /// Sends `builder` and returns the checked (2xx) [`reqwest::Response`].

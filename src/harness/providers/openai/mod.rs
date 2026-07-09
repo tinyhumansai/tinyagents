@@ -69,12 +69,12 @@ mod convert;
 mod sse;
 mod transport;
 
-pub use transport::OpenAiModel;
+pub use transport::{AuthStyle, OpenAiModel};
 
 use convert::*;
 use sse::*;
 #[cfg(test)]
-use transport::request_timeout;
+use transport::{auth_headers, request_timeout};
 
 #[cfg(test)]
 mod test;

@@ -1070,6 +1070,64 @@ fn parses_model_listing_envelope() {
     assert_eq!(listing.data[1].owned_by, None);
 }
 
+// ── Auth styles ───────────────────────────────────────────────────────
+
+#[test]
+fn auth_headers_bearer_is_the_default() {
+    // A freshly-constructed model authenticates with a bearer token.
+    let headers = auth_headers(&AuthStyle::default(), "secret");
+    assert_eq!(
+        headers,
+        vec![("Authorization".to_string(), "Bearer secret".to_string())]
+    );
+    assert_eq!(AuthStyle::default(), AuthStyle::Bearer);
+}
+
+#[test]
+fn auth_headers_x_api_key_sends_bare_key_without_authorization() {
+    let headers = auth_headers(&AuthStyle::XApiKey, "secret");
+    assert_eq!(
+        headers,
+        vec![("x-api-key".to_string(), "secret".to_string())]
+    );
+    // No bearer `Authorization` header for this style.
+    assert!(!headers.iter().any(|(name, _)| name == "Authorization"));
+}
+
+#[test]
+fn auth_headers_anthropic_pairs_key_with_version() {
+    let headers = auth_headers(&AuthStyle::Anthropic, "secret");
+    assert_eq!(
+        headers,
+        vec![
+            ("x-api-key".to_string(), "secret".to_string()),
+            ("anthropic-version".to_string(), "2023-06-01".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn auth_headers_custom_uses_the_named_header() {
+    let headers = auth_headers(&AuthStyle::Custom("api-key".to_string()), "secret");
+    assert_eq!(headers, vec![("api-key".to_string(), "secret".to_string())]);
+}
+
+#[test]
+fn auth_headers_none_sends_nothing() {
+    assert!(auth_headers(&AuthStyle::None, "secret").is_empty());
+}
+
+#[test]
+fn with_auth_style_and_with_header_build_without_panicking() {
+    // The builders compose; a non-bearer style + a static attribution header is a
+    // valid model (the field mapping is covered by `auth_headers_*` above).
+    let _model = OpenAiModel::new("secret")
+        .with_base_url("https://example.test/v1")
+        .with_model("some-model")
+        .with_auth_style(AuthStyle::XApiKey)
+        .with_header("HTTP-Referer", "https://openhuman.example")
+        .with_header("X-Title", "OpenHuman");
+}
 #[test]
 fn derive_profile_populates_known_context_windows() {
     // A recognized id gets its context window from the shared provider-neutral
