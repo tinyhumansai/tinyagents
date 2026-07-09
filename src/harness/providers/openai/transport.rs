@@ -43,6 +43,12 @@ pub struct OpenAiModel {
     /// Extra static headers attached to every request (e.g. provider
     /// attribution headers). Applied after the auth header.
     extra_headers: Vec<(String, String)>,
+    /// Model-id glob patterns (`*` wildcard) whose targets reject a `temperature`
+    /// parameter; matching requests omit `temperature` entirely. Empty by default.
+    temperature_unsupported: Vec<String>,
+    /// When set, overrides the request's sampling temperature for every call
+    /// (unless the model is in [`Self::temperature_unsupported`]).
+    temperature_override: Option<f64>,
     /// Default model id used when a request does not override it.
     model: String,
     /// Provider family identifier used in profiles and normalized errors.
@@ -68,6 +74,56 @@ pub(super) fn auth_headers(auth: &AuthStyle, api_key: &str) -> Vec<(String, Stri
         ],
         AuthStyle::Custom(name) => vec![(name.clone(), api_key.to_string())],
     }
+}
+
+/// Case-insensitive glob match supporting the `*` wildcard (the only metacharacter
+/// used by model-id patterns). `"o1*"` matches `"o1-mini"`; `"*turbo"` matches
+/// `"gpt-4-turbo"`; a pattern with no `*` matches exactly.
+pub(super) fn glob_match(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.to_ascii_lowercase();
+    let value = value.to_ascii_lowercase();
+    let segments: Vec<&str> = pattern.split('*').collect();
+    if segments.len() == 1 {
+        return pattern == value;
+    }
+    let mut cursor = 0usize;
+    for (idx, segment) in segments.iter().enumerate() {
+        if segment.is_empty() {
+            continue;
+        }
+        if idx == 0 {
+            // A non-empty leading segment must be a prefix.
+            if !value[cursor..].starts_with(segment) {
+                return false;
+            }
+            cursor += segment.len();
+        } else if idx == segments.len() - 1 {
+            // A non-empty trailing segment must be a suffix.
+            return value[cursor..].ends_with(segment);
+        } else {
+            match value[cursor..].find(segment) {
+                Some(offset) => cursor += offset + segment.len(),
+                None => return false,
+            }
+        }
+    }
+    // Trailing `*` (empty last segment) matches the remainder.
+    true
+}
+
+/// The `temperature` to send for `model`: `None` (omitted) when the model matches
+/// a temperature-unsupported pattern, else the override if set, else the request's
+/// temperature. Pure, so the policy is unit-testable without a request.
+pub(super) fn effective_temperature(
+    model: &str,
+    request_temperature: Option<f64>,
+    temperature_override: Option<f64>,
+    temperature_unsupported: &[String],
+) -> Option<f64> {
+    if temperature_unsupported.iter().any(|p| glob_match(p, model)) {
+        return None;
+    }
+    temperature_override.or(request_temperature)
 }
 
 /// Returns `true` for OpenAI o-series reasoning models (`o1`/`o3`/`o4`), which
@@ -126,6 +182,8 @@ impl OpenAiModel {
             api_key: api_key.into(),
             auth: AuthStyle::Bearer,
             extra_headers: Vec::new(),
+            temperature_unsupported: Vec::new(),
+            temperature_override: None,
             model: DEFAULT_MODEL.to_string(),
             provider: "openai".to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
@@ -147,6 +205,26 @@ impl OpenAiModel {
     /// auth header — e.g. provider attribution headers.
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra_headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Sets model-id glob patterns (`*` wildcard, case-insensitive) whose targets
+    /// reject a `temperature` parameter. A request whose model matches any pattern
+    /// omits `temperature` from the wire body (e.g. OpenAI o-series / some hosted
+    /// reasoning models that 400 on an explicit temperature).
+    pub fn with_temperature_unsupported_models(
+        mut self,
+        patterns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.temperature_unsupported = patterns.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Overrides the sampling temperature for every request (unless the model is
+    /// temperature-unsupported). Useful for endpoints that require a fixed
+    /// temperature regardless of the caller's request.
+    pub fn with_temperature_override(mut self, temperature: Option<f64>) -> Self {
+        self.temperature_override = temperature;
         self
     }
 
@@ -457,13 +535,20 @@ impl OpenAiModel {
             (request.max_tokens, None)
         };
 
+        let temperature = effective_temperature(
+            &model,
+            request.temperature,
+            self.temperature_override,
+            &self.temperature_unsupported,
+        );
+
         Ok(ChatCompletionRequest {
             model,
             messages,
             tools,
             tool_choice,
             response_format,
-            temperature: request.temperature,
+            temperature,
             top_p: request.top_p,
             max_tokens,
             max_completion_tokens,

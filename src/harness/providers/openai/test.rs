@@ -1147,3 +1147,52 @@ fn derive_profile_populates_known_context_windows() {
         None
     );
 }
+
+// ── Temperature suppression / override ────────────────────────────────
+
+#[test]
+fn glob_match_handles_prefix_suffix_infix_and_exact() {
+    assert!(glob_match("o1*", "o1-mini"));
+    assert!(glob_match("o3*", "o3"));
+    assert!(glob_match("gpt-5*", "GPT-5-Turbo")); // case-insensitive
+    assert!(glob_match("*turbo", "gpt-4-turbo"));
+    assert!(glob_match("*mid*", "a-middle-b"));
+    assert!(glob_match("gpt-4o", "gpt-4o")); // no wildcard → exact
+    assert!(!glob_match("o1*", "gpt-4o"));
+    assert!(!glob_match("gpt-4o", "gpt-4o-mini")); // exact, not prefix
+    assert!(!glob_match("*turbo", "turbo-x"));
+}
+
+#[test]
+fn effective_temperature_omits_for_unsupported_models() {
+    let unsupported = vec!["o1*".to_string(), "gpt-5*".to_string()];
+    // Matching model → temperature omitted regardless of request/override.
+    assert_eq!(
+        effective_temperature("o1-mini", Some(0.7), Some(0.2), &unsupported),
+        None
+    );
+    // Non-matching model → request temperature passes through.
+    assert_eq!(
+        effective_temperature("gpt-4o", Some(0.7), None, &unsupported),
+        Some(0.7)
+    );
+}
+
+#[test]
+fn effective_temperature_override_wins_over_request() {
+    // Override applies when the model supports temperature.
+    assert_eq!(
+        effective_temperature("gpt-4o", Some(0.7), Some(0.2), &[]),
+        Some(0.2)
+    );
+    // No override, no request → None.
+    assert_eq!(effective_temperature("gpt-4o", None, None, &[]), None);
+}
+
+#[test]
+fn temperature_builders_compose() {
+    let _model = OpenAiModel::new("k")
+        .with_model("o1-mini")
+        .with_temperature_unsupported_models(["o1*", "o3*"])
+        .with_temperature_override(Some(0.0));
+}
