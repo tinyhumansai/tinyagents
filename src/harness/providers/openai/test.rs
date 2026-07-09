@@ -1120,9 +1120,10 @@ fn recovers_tool_args_with_leaked_trailing_template_marker() {
     // model's trailing `<tool_call|>` chat-template delimiter into
     // `function.arguments`. The JSON is otherwise valid, so stripping the
     // marker must recover the call instead of failing the turn.
-    let response =
-        parse_response(tool_call_body(r#"{"tool":"GMAIL_CREATE_EMAIL_DRAFT","x":1}<tool_call|>"#))
-            .expect("leaked marker must be recovered");
+    let response = parse_response(tool_call_body(
+        r#"{"tool":"GMAIL_CREATE_EMAIL_DRAFT","x":1}<tool_call|>"#,
+    ))
+    .expect("leaked marker must be recovered");
     let calls = response.tool_calls();
     assert_eq!(calls.len(), 1);
     assert_eq!(
@@ -1145,10 +1146,14 @@ fn recovers_first_call_when_fragments_are_concatenated() {
     // A leaked delimiter can also sit *between* two concatenated argument
     // objects (e.g. an accumulator over-merge). After stripping the marker the
     // string is `{...}{...}`; recovery keeps the first complete object.
-    let response =
-        parse_response(tool_call_body(r#"{"tool":"gmail"}<tool_call|>{"tool":"other"}"#))
-            .expect("leading call must be recovered");
-    assert_eq!(response.tool_calls()[0].arguments, json!({ "tool": "gmail" }));
+    let response = parse_response(tool_call_body(
+        r#"{"tool":"gmail"}<tool_call|>{"tool":"other"}"#,
+    ))
+    .expect("leading call must be recovered");
+    assert_eq!(
+        response.tool_calls()[0].arguments,
+        json!({ "tool": "gmail" })
+    );
 }
 
 #[test]
@@ -1156,8 +1161,10 @@ fn still_fails_fast_on_genuinely_malformed_tool_args() {
     // The exact corruption seen in the wild carries a stray `]` *inside* the
     // JSON — not just a leaked delimiter — so it cannot be safely repaired. It
     // must fail fast (a clear, non-retryable model error) rather than hang.
-    let err = parse_response(tool_call_body(r#"{"arguments":{"body":"hi"]}}<tool_call|>"#))
-        .expect_err("unrepairable args must fail closed");
+    let err = parse_response(tool_call_body(
+        r#"{"arguments":{"body":"hi"]}}<tool_call|>"#,
+    ))
+    .expect_err("unrepairable args must fail closed");
     assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
     let message = err.to_string();
     assert!(message.contains("call-1"), "{message}");
@@ -1193,7 +1200,9 @@ async fn sse_stream_recovers_tool_args_with_leaked_template_marker() {
     for item in &items {
         merged.push(item);
     }
-    let response = merged.finish().expect("stream must not fail on a recoverable marker");
+    let response = merged
+        .finish()
+        .expect("stream must not fail on a recoverable marker");
     let calls = response.tool_calls();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].name, "composio_execute");
