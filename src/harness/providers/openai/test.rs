@@ -1089,3 +1089,113 @@ fn derive_profile_populates_known_context_windows() {
         None
     );
 }
+
+/// Builds an OpenAI-shaped non-streaming response body carrying a single tool
+/// call whose `function.arguments` string is `raw` (verbatim, including any
+/// corruption). Used to exercise `parse_tool_arguments` recovery/fail-fast.
+fn tool_call_body(raw: &str) -> serde_json::Value {
+    json!({
+        "id": "chatcmpl-toolargs",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": { "name": "composio_execute", "arguments": raw }
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }
+        ]
+    })
+}
+
+#[test]
+fn recovers_tool_args_with_leaked_trailing_template_marker() {
+    // Regression (openhuman#4766): an OpenAI-compatible gateway leaked a
+    // model's trailing `<tool_call|>` chat-template delimiter into
+    // `function.arguments`. The JSON is otherwise valid, so stripping the
+    // marker must recover the call instead of failing the turn.
+    let response =
+        parse_response(tool_call_body(r#"{"tool":"GMAIL_CREATE_EMAIL_DRAFT","x":1}<tool_call|>"#))
+            .expect("leaked marker must be recovered");
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].arguments,
+        json!({ "tool": "GMAIL_CREATE_EMAIL_DRAFT", "x": 1 })
+    );
+}
+
+#[test]
+fn recovers_tool_args_wrapped_in_tool_call_tags() {
+    // Some templates wrap the whole call in `<tool_call>…</tool_call>`; both
+    // delimiters must be stripped before parsing.
+    let response = parse_response(tool_call_body(r#"<tool_call>{"q":"hi"}</tool_call>"#))
+        .expect("wrapped args must be recovered");
+    assert_eq!(response.tool_calls()[0].arguments, json!({ "q": "hi" }));
+}
+
+#[test]
+fn recovers_first_call_when_fragments_are_concatenated() {
+    // A leaked delimiter can also sit *between* two concatenated argument
+    // objects (e.g. an accumulator over-merge). After stripping the marker the
+    // string is `{...}{...}`; recovery keeps the first complete object.
+    let response =
+        parse_response(tool_call_body(r#"{"tool":"gmail"}<tool_call|>{"tool":"other"}"#))
+            .expect("leading call must be recovered");
+    assert_eq!(response.tool_calls()[0].arguments, json!({ "tool": "gmail" }));
+}
+
+#[test]
+fn still_fails_fast_on_genuinely_malformed_tool_args() {
+    // The exact corruption seen in the wild carries a stray `]` *inside* the
+    // JSON — not just a leaked delimiter — so it cannot be safely repaired. It
+    // must fail fast (a clear, non-retryable model error) rather than hang.
+    let err = parse_response(tool_call_body(r#"{"arguments":{"body":"hi"]}}<tool_call|>"#))
+        .expect_err("unrepairable args must fail closed");
+    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
+    let message = err.to_string();
+    assert!(message.contains("call-1"), "{message}");
+    assert!(message.contains("raw arguments"), "{message}");
+}
+
+#[test]
+fn valid_tool_args_containing_marker_substring_are_left_intact() {
+    // A legitimate arguments object whose *string value* contains the marker
+    // text parses cleanly on the first attempt, so the repair path never runs
+    // and the value is preserved verbatim.
+    let response =
+        parse_response(tool_call_body(r#"{"body":"use <tool_call|> literally"}"#)).unwrap();
+    assert_eq!(
+        response.tool_calls()[0].arguments,
+        json!({ "body": "use <tool_call|> literally" })
+    );
+}
+
+#[tokio::test]
+async fn sse_stream_recovers_tool_args_with_leaked_template_marker() {
+    // The streaming reduce (`OpenAiStreamAcc::into_response`) shares
+    // `parse_tool_arguments`, so a leaked trailing marker across the terminal
+    // must reconstruct a usable call instead of finishing as a model error
+    // (which is what orphaned the parent's join/reduce in openhuman#4766).
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-x\",\"function\":{\"name\":\"composio_execute\",\"arguments\":\"{\\\"q\\\":1}<tool_call|>\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().expect("stream must not fail on a recoverable marker");
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "composio_execute");
+    assert_eq!(calls[0].arguments, json!({ "q": 1 }));
+}
