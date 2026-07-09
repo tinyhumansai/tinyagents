@@ -319,10 +319,10 @@ fn recover_tool_arguments(raw: &str) -> Option<Value> {
     let candidate = stripped.as_deref().unwrap_or(raw);
 
     // Strategy 1: the marker-stripped string parses cleanly on its own.
-    if stripped.is_some() {
-        if let Ok(value) = serde_json::from_str::<Value>(candidate) {
-            return Some(value);
-        }
+    if stripped.is_some()
+        && let Ok(value) = serde_json::from_str::<Value>(candidate)
+    {
+        return Some(value);
     }
 
     // Strategy 2: recover the first complete JSON value if it is an object.
