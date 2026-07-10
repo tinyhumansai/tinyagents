@@ -1475,3 +1475,33 @@ fn merge_provider_options_prefers_overrides_and_handles_nulls() {
         json!(["top_k", 40])
     );
 }
+
+#[test]
+fn error_source_chain_walks_all_causes() {
+    use std::fmt;
+    // A transport error whose outer Display hides the actionable errno one link
+    // down the `source()` chain (the reqwest/hyper shape).
+    #[derive(Debug)]
+    struct Outer(std::io::Error);
+    impl fmt::Display for Outer {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "error sending request for url (http://localhost:1234/)")
+        }
+    }
+    impl std::error::Error for Outer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+    let io = std::io::Error::new(
+        std::io::ErrorKind::ConnectionRefused,
+        "connection refused (os error 111)",
+    );
+    let chain = error_source_chain(&Outer(io));
+    assert!(chain.contains("error sending request for url (http://localhost:1234/)"));
+    assert!(chain.contains("connection refused (os error 111)"));
+    assert_eq!(
+        chain,
+        "error sending request for url (http://localhost:1234/): connection refused (os error 111)"
+    );
+}

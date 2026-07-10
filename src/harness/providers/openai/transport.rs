@@ -742,8 +742,12 @@ impl OpenAiModel {
         url: &str,
     ) -> Result<reqwest::Response> {
         let response = builder.send().await.map_err(|e| {
-            let error =
-                self.provider_error(format!("{what} to {url} failed: {e}"), None, None, None);
+            let error = self.provider_error(
+                format!("{what} to {url} failed: {}", error_source_chain(&e)),
+                None,
+                None,
+                None,
+            );
             TinyAgentsError::Model(self.provider_failure_message(&error))
         })?;
 
@@ -851,6 +855,27 @@ pub(super) fn request_timeout(timeout_ms: Option<u64>, streaming: bool) -> Optio
         None if streaming => None,
         None => Some(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)),
     }
+}
+
+/// Renders an error together with its full `source()` cause chain, joined by
+/// `": "`.
+///
+/// `reqwest`/`hyper` transport errors surface only their outermost context in
+/// `Display` (e.g. `error sending request for url (...)`), while the actionable
+/// detail — `connection refused (os error 111)`, a TLS failure, a DNS error —
+/// lives one or more links down the `source()` chain. A plain `{e}` drops it, so
+/// callers that classify on the message (loopback-offline detection, transport
+/// retryability) never see it. Walking the chain here keeps the whole shape in
+/// the `TinyAgentsError::Model` string. Pure, so it is unit-testable.
+pub(super) fn error_source_chain(err: &dyn std::error::Error) -> String {
+    let mut rendered = err.to_string();
+    let mut source = err.source();
+    while let Some(inner) = source {
+        rendered.push_str(": ");
+        rendered.push_str(&inner.to_string());
+        source = inner.source();
+    }
+    rendered
 }
 
 /// Merges baked `defaults` under a request's own `overrides` provider options.
