@@ -75,7 +75,7 @@ use convert::*;
 use sse::*;
 #[cfg(test)]
 use transport::{
-    auth_headers, effective_temperature, glob_match, merge_provider_options,
+    auth_headers, effective_temperature, error_source_chain, glob_match, merge_provider_options,
     merge_system_into_user, request_timeout,
 };
 
