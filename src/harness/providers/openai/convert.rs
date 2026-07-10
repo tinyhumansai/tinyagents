@@ -255,11 +255,102 @@ pub(super) fn parse_tool_arguments(
     if raw.trim().is_empty() {
         return Ok(Value::Object(Map::new()));
     }
-    serde_json::from_str(raw).map_err(|err| {
-        TinyAgentsError::Model(format!(
-            "{context} contained invalid JSON arguments for tool call `{call_id}` (`{name}`): {err}; raw arguments: {raw:?}"
-        ))
-    })
+    match serde_json::from_str(raw) {
+        Ok(value) => Ok(value),
+        Err(err) => {
+            // Some OpenAI-compatible gateways fail to strip a model's
+            // chat-template tool-call delimiters (e.g. a trailing `<tool_call|>`)
+            // before placing the call in `function.arguments`, turning
+            // otherwise-valid JSON into an unparseable blob. Seen in the wild
+            // leaking a trailing `<tool_call|>` into a Composio `composio_execute`
+            // call, which then never parses — orphaning the sub-agent's reduce.
+            // Attempt one conservative repair before failing. `recover_tool_arguments`
+            // runs only after `raw` has already failed to parse, so well-formed
+            // arguments are never rewritten.
+            if let Some(value) = recover_tool_arguments(raw) {
+                return Ok(value);
+            }
+            // Still unparseable after repair: fail fast with a clear,
+            // non-retryable error. Surfacing the failure keeps the malformed
+            // call from becoming a never-resolving tool call that stalls the
+            // agent loop (and the parent's join/reduce) indefinitely.
+            Err(TinyAgentsError::Model(format!(
+                "{context} contained invalid JSON arguments for tool call `{call_id}` (`{name}`): {err}; raw arguments: {raw:?}"
+            )))
+        }
+    }
+}
+
+/// Chat-template tool-call delimiters that some OpenAI-compatible gateways fail
+/// to strip before placing a call in `function.arguments`. Different model
+/// families (Hermes/Qwen/Kimi/…) wrap tool calls in their own markers; a
+/// leaked one turns valid argument JSON unparseable.
+const TOOL_CALL_TEMPLATE_MARKERS: &[&str] = &[
+    "<|tool_calls_section_end|>",
+    "<|tool_call_begin|>",
+    "<|tool_call_end|>",
+    "<|tool_call|>",
+    "<|tool_sep|>",
+    "<tool_call|>",
+    "</tool_call>",
+    "<tool_call>",
+];
+
+/// Attempts to recover a usable arguments object from a tool-call arguments
+/// string that failed to parse as JSON.
+///
+/// Two conservative strategies, tried in order; the caller only invokes this
+/// *after* the raw string has already failed `serde_json::from_str`, so this can
+/// never rewrite arguments that were already valid:
+///
+/// 1. Strip leaked chat-template tool-call delimiters (see
+///    [`TOOL_CALL_TEMPLATE_MARKERS`]) and re-parse — recovers a valid call whose
+///    only corruption is a leaked marker (e.g. `{"a":1}<tool_call|>`).
+/// 2. Take the first complete JSON *object* from the front of the (marker-stripped)
+///    string — recovers a valid leading call followed by trailing template noise
+///    or a second concatenated fragment (e.g. `{"a":1}<tool_call|>{"b":2}`).
+///
+/// Restricting strategy 2 to a leading `Value::Object` keeps it from accepting a
+/// bare number/string scraped out of surrounding noise as if it were the call's
+/// arguments. Returns `None` when neither strategy yields valid object-shaped JSON,
+/// so the caller still fails fast on genuinely malformed input.
+fn recover_tool_arguments(raw: &str) -> Option<Value> {
+    let stripped = strip_tool_call_markers(raw);
+    let candidate = stripped.as_deref().unwrap_or(raw);
+
+    // Strategy 1: the marker-stripped string parses cleanly on its own.
+    if stripped.is_some()
+        && let Ok(value) = serde_json::from_str::<Value>(candidate)
+    {
+        return Some(value);
+    }
+
+    // Strategy 2: recover the first complete JSON value if it is an object.
+    let mut values =
+        serde_json::Deserializer::from_str(candidate.trim_start()).into_iter::<Value>();
+    match values.next() {
+        Some(Ok(value @ Value::Object(_))) => Some(value),
+        _ => None,
+    }
+}
+
+/// Removes any [`TOOL_CALL_TEMPLATE_MARKERS`] found in `raw` and trims the
+/// result. Returns `Some(cleaned)` only when a marker was actually present and
+/// the trimmed result is non-empty; otherwise `None` (nothing to strip).
+fn strip_tool_call_markers(raw: &str) -> Option<String> {
+    let mut cleaned = raw.to_string();
+    let mut changed = false;
+    for &marker in TOOL_CALL_TEMPLATE_MARKERS {
+        if cleaned.contains(marker) {
+            cleaned = cleaned.replace(marker, "");
+            changed = true;
+        }
+    }
+    if !changed {
+        return None;
+    }
+    let trimmed = cleaned.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// Converts an OpenAI [`UsageWire`] into the harness-neutral [`Usage`].
