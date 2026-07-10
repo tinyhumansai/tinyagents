@@ -49,6 +49,10 @@ pub struct OpenAiModel {
     /// When set, overrides the request's sampling temperature for every call
     /// (unless the model is in [`Self::temperature_unsupported`]).
     temperature_override: Option<f64>,
+    /// When `true`, system messages are folded into the first user message and
+    /// the `system` role is dropped — for OpenAI-compatible endpoints that reject
+    /// a `system` role. `false` by default (system messages pass through).
+    merge_system_into_user: bool,
     /// Default model id used when a request does not override it.
     model: String,
     /// Provider family identifier used in profiles and normalized errors.
@@ -126,6 +130,85 @@ pub(super) fn effective_temperature(
     temperature_override.or(request_temperature)
 }
 
+/// Concatenates the text of a message's content blocks (non-text blocks — images,
+/// json, thinking — are ignored). Used to gather system-prompt text for merging.
+fn content_text(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Folds all `system` messages into the first `user` message and drops the
+/// `system` role, for endpoints that reject a `system` role. The concatenated
+/// system text is prefixed to the first user message (`"{system}\n\n{user}"` —
+/// matching the common host behavior); image/other user content blocks are
+/// preserved. When there is no user message, the system text is promoted to a
+/// user turn. Pure, so the transform is unit-testable.
+pub(super) fn merge_system_into_user(messages: &[Message]) -> Vec<Message> {
+    use crate::harness::message::UserMessage;
+
+    let system_text = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::System(s) => {
+                let t = content_text(&s.content);
+                (!t.is_empty()).then_some(t)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    if system_text.is_empty() {
+        // Nothing to fold; drop any (empty) system messages if present, else pass
+        // through untouched.
+        if messages.iter().any(|m| matches!(m, Message::System(_))) {
+            return messages
+                .iter()
+                .filter(|m| !matches!(m, Message::System(_)))
+                .cloned()
+                .collect();
+        }
+        return messages.to_vec();
+    }
+
+    let mut merged: Vec<Message> = Vec::with_capacity(messages.len());
+    let mut folded = false;
+    for msg in messages {
+        match msg {
+            Message::System(_) => {} // dropped
+            Message::User(user) if !folded => {
+                folded = true;
+                let mut content = Vec::with_capacity(user.content.len() + 1);
+                match user.content.split_first() {
+                    Some((ContentBlock::Text(first), rest)) => {
+                        content.push(ContentBlock::Text(format!("{system_text}\n\n{first}")));
+                        content.extend(rest.iter().cloned());
+                    }
+                    _ => {
+                        content.push(ContentBlock::Text(format!("{system_text}\n\n")));
+                        content.extend(user.content.iter().cloned());
+                    }
+                }
+                merged.push(Message::User(UserMessage { content }));
+            }
+            other => merged.push(other.clone()),
+        }
+    }
+
+    if !folded {
+        // No user message to fold into — promote the system text to a user turn.
+        merged.insert(0, Message::user(system_text));
+    }
+
+    merged
+}
+
 /// Returns `true` for OpenAI o-series reasoning models (`o1`/`o3`/`o4`), which
 /// reject `max_tokens` and require `max_completion_tokens` instead.
 pub(super) fn is_reasoning_model(model: &str) -> bool {
@@ -184,6 +267,7 @@ impl OpenAiModel {
             extra_headers: Vec::new(),
             temperature_unsupported: Vec::new(),
             temperature_override: None,
+            merge_system_into_user: false,
             model: DEFAULT_MODEL.to_string(),
             provider: "openai".to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
@@ -225,6 +309,13 @@ impl OpenAiModel {
     /// temperature regardless of the caller's request.
     pub fn with_temperature_override(mut self, temperature: Option<f64>) -> Self {
         self.temperature_override = temperature;
+        self
+    }
+
+    /// Folds system messages into the first user message and drops the `system`
+    /// role, for OpenAI-compatible endpoints that reject a `system` role.
+    pub fn with_merge_system_into_user(mut self) -> Self {
+        self.merge_system_into_user = true;
         self
     }
 
@@ -493,8 +584,16 @@ impl OpenAiModel {
         &self,
         request: &ModelRequest,
     ) -> Result<ChatCompletionRequest> {
-        let messages = request
-            .messages
+        // Optionally fold system messages into the first user turn (for endpoints
+        // that reject a `system` role) before wire translation.
+        let merged_messages;
+        let source_messages: &[Message] = if self.merge_system_into_user {
+            merged_messages = merge_system_into_user(&request.messages);
+            &merged_messages
+        } else {
+            &request.messages
+        };
+        let messages = source_messages
             .iter()
             .map(translate_message)
             .collect::<Result<Vec<_>>>()?;

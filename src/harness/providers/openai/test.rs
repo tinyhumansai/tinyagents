@@ -1196,3 +1196,70 @@ fn temperature_builders_compose() {
         .with_temperature_unsupported_models(["o1*", "o3*"])
         .with_temperature_override(Some(0.0));
 }
+
+// ── merge_system_into_user ────────────────────────────────────────────
+
+#[test]
+fn merge_system_folds_into_first_user_and_drops_system_role() {
+    let merged = merge_system_into_user(&[
+        Message::system("You are terse."),
+        Message::user("Hi"),
+        Message::assistant("Hello"),
+        Message::user("Bye"),
+    ]);
+    // System dropped; its text prefixes the FIRST user turn only.
+    assert_eq!(merged.len(), 3);
+    assert!(matches!(merged[0], Message::User(_)));
+    assert_eq!(merged[0].text(), "You are terse.\n\nHi");
+    assert!(matches!(merged[1], Message::Assistant(_)));
+    assert_eq!(merged[2].text(), "Bye");
+    assert!(!merged.iter().any(|m| matches!(m, Message::System(_))));
+}
+
+#[test]
+fn merge_system_concatenates_multiple_system_messages() {
+    let merged = merge_system_into_user(&[
+        Message::system("Rule 1."),
+        Message::system("Rule 2."),
+        Message::user("Go"),
+    ]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].text(), "Rule 1.\n\nRule 2.\n\nGo");
+}
+
+#[test]
+fn merge_system_promotes_to_user_when_no_user_message() {
+    let merged = merge_system_into_user(&[Message::system("Only system.")]);
+    assert_eq!(merged.len(), 1);
+    assert!(matches!(merged[0], Message::User(_)));
+    assert_eq!(merged[0].text(), "Only system.");
+}
+
+#[test]
+fn merge_system_preserves_user_image_blocks() {
+    use crate::harness::message::{ImageRef, UserMessage};
+    let user_with_image = Message::User(UserMessage {
+        content: vec![
+            ContentBlock::Text("caption".to_string()),
+            ContentBlock::Image(ImageRef {
+                url: "https://example.test/x.png".to_string(),
+                mime_type: None,
+            }),
+        ],
+    });
+    let merged = merge_system_into_user(&[Message::system("sys"), user_with_image]);
+    assert_eq!(merged.len(), 1);
+    if let Message::User(u) = &merged[0] {
+        assert_eq!(u.content.len(), 2); // text (merged) + image preserved
+        assert!(matches!(u.content[0], ContentBlock::Text(ref t) if t == "sys\n\ncaption"));
+        assert!(matches!(u.content[1], ContentBlock::Image(_)));
+    } else {
+        panic!("expected a user message");
+    }
+}
+
+#[test]
+fn merge_system_is_noop_without_system_messages() {
+    let input = vec![Message::user("just user")];
+    assert_eq!(merge_system_into_user(&input), input);
+}
