@@ -1070,6 +1070,64 @@ fn parses_model_listing_envelope() {
     assert_eq!(listing.data[1].owned_by, None);
 }
 
+// ── Auth styles ───────────────────────────────────────────────────────
+
+#[test]
+fn auth_headers_bearer_is_the_default() {
+    // A freshly-constructed model authenticates with a bearer token.
+    let headers = auth_headers(&AuthStyle::default(), "secret");
+    assert_eq!(
+        headers,
+        vec![("Authorization".to_string(), "Bearer secret".to_string())]
+    );
+    assert_eq!(AuthStyle::default(), AuthStyle::Bearer);
+}
+
+#[test]
+fn auth_headers_x_api_key_sends_bare_key_without_authorization() {
+    let headers = auth_headers(&AuthStyle::XApiKey, "secret");
+    assert_eq!(
+        headers,
+        vec![("x-api-key".to_string(), "secret".to_string())]
+    );
+    // No bearer `Authorization` header for this style.
+    assert!(!headers.iter().any(|(name, _)| name == "Authorization"));
+}
+
+#[test]
+fn auth_headers_anthropic_pairs_key_with_version() {
+    let headers = auth_headers(&AuthStyle::Anthropic, "secret");
+    assert_eq!(
+        headers,
+        vec![
+            ("x-api-key".to_string(), "secret".to_string()),
+            ("anthropic-version".to_string(), "2023-06-01".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn auth_headers_custom_uses_the_named_header() {
+    let headers = auth_headers(&AuthStyle::Custom("api-key".to_string()), "secret");
+    assert_eq!(headers, vec![("api-key".to_string(), "secret".to_string())]);
+}
+
+#[test]
+fn auth_headers_none_sends_nothing() {
+    assert!(auth_headers(&AuthStyle::None, "secret").is_empty());
+}
+
+#[test]
+fn with_auth_style_and_with_header_build_without_panicking() {
+    // The builders compose; a non-bearer style + a static attribution header is a
+    // valid model (the field mapping is covered by `auth_headers_*` above).
+    let _model = OpenAiModel::new("secret")
+        .with_base_url("https://example.test/v1")
+        .with_model("some-model")
+        .with_auth_style(AuthStyle::XApiKey)
+        .with_header("HTTP-Referer", "https://openhuman.example")
+        .with_header("X-Title", "OpenHuman");
+}
 #[test]
 fn derive_profile_populates_known_context_windows() {
     // A recognized id gets its context window from the shared provider-neutral
@@ -1088,6 +1146,122 @@ fn derive_profile_populates_known_context_windows() {
         super::transport::derive_profile("openai", "totally-unknown-model").max_input_tokens,
         None
     );
+}
+
+// ── Temperature suppression / override ────────────────────────────────
+
+#[test]
+fn glob_match_handles_prefix_suffix_infix_and_exact() {
+    assert!(glob_match("o1*", "o1-mini"));
+    assert!(glob_match("o3*", "o3"));
+    assert!(glob_match("gpt-5*", "GPT-5-Turbo")); // case-insensitive
+    assert!(glob_match("*turbo", "gpt-4-turbo"));
+    assert!(glob_match("*mid*", "a-middle-b"));
+    assert!(glob_match("gpt-4o", "gpt-4o")); // no wildcard → exact
+    assert!(!glob_match("o1*", "gpt-4o"));
+    assert!(!glob_match("gpt-4o", "gpt-4o-mini")); // exact, not prefix
+    assert!(!glob_match("*turbo", "turbo-x"));
+}
+
+#[test]
+fn effective_temperature_omits_for_unsupported_models() {
+    let unsupported = vec!["o1*".to_string(), "gpt-5*".to_string()];
+    // Matching model → temperature omitted regardless of request/override.
+    assert_eq!(
+        effective_temperature("o1-mini", Some(0.7), Some(0.2), &unsupported),
+        None
+    );
+    // Non-matching model → request temperature passes through.
+    assert_eq!(
+        effective_temperature("gpt-4o", Some(0.7), None, &unsupported),
+        Some(0.7)
+    );
+}
+
+#[test]
+fn effective_temperature_override_wins_over_request() {
+    // Override applies when the model supports temperature.
+    assert_eq!(
+        effective_temperature("gpt-4o", Some(0.7), Some(0.2), &[]),
+        Some(0.2)
+    );
+    // No override, no request → None.
+    assert_eq!(effective_temperature("gpt-4o", None, None, &[]), None);
+}
+
+#[test]
+fn temperature_builders_compose() {
+    let _model = OpenAiModel::new("k")
+        .with_model("o1-mini")
+        .with_temperature_unsupported_models(["o1*", "o3*"])
+        .with_temperature_override(Some(0.0));
+}
+
+// ── merge_system_into_user ────────────────────────────────────────────
+
+#[test]
+fn merge_system_folds_into_first_user_and_drops_system_role() {
+    let merged = merge_system_into_user(&[
+        Message::system("You are terse."),
+        Message::user("Hi"),
+        Message::assistant("Hello"),
+        Message::user("Bye"),
+    ]);
+    // System dropped; its text prefixes the FIRST user turn only.
+    assert_eq!(merged.len(), 3);
+    assert!(matches!(merged[0], Message::User(_)));
+    assert_eq!(merged[0].text(), "You are terse.\n\nHi");
+    assert!(matches!(merged[1], Message::Assistant(_)));
+    assert_eq!(merged[2].text(), "Bye");
+    assert!(!merged.iter().any(|m| matches!(m, Message::System(_))));
+}
+
+#[test]
+fn merge_system_concatenates_multiple_system_messages() {
+    let merged = merge_system_into_user(&[
+        Message::system("Rule 1."),
+        Message::system("Rule 2."),
+        Message::user("Go"),
+    ]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].text(), "Rule 1.\n\nRule 2.\n\nGo");
+}
+
+#[test]
+fn merge_system_promotes_to_user_when_no_user_message() {
+    let merged = merge_system_into_user(&[Message::system("Only system.")]);
+    assert_eq!(merged.len(), 1);
+    assert!(matches!(merged[0], Message::User(_)));
+    assert_eq!(merged[0].text(), "Only system.");
+}
+
+#[test]
+fn merge_system_preserves_user_image_blocks() {
+    use crate::harness::message::{ImageRef, UserMessage};
+    let user_with_image = Message::User(UserMessage {
+        content: vec![
+            ContentBlock::Text("caption".to_string()),
+            ContentBlock::Image(ImageRef {
+                url: "https://example.test/x.png".to_string(),
+                mime_type: None,
+            }),
+        ],
+    });
+    let merged = merge_system_into_user(&[Message::system("sys"), user_with_image]);
+    assert_eq!(merged.len(), 1);
+    if let Message::User(u) = &merged[0] {
+        assert_eq!(u.content.len(), 2); // text (merged) + image preserved
+        assert!(matches!(u.content[0], ContentBlock::Text(ref t) if t == "sys\n\ncaption"));
+        assert!(matches!(u.content[1], ContentBlock::Image(_)));
+    } else {
+        panic!("expected a user message");
+    }
+}
+
+#[test]
+fn merge_system_is_noop_without_system_messages() {
+    let input = vec![Message::user("just user")];
+    assert_eq!(merge_system_into_user(&input), input);
 }
 
 /// Builds an OpenAI-shaped non-streaming response body carrying a single tool
