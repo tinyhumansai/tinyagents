@@ -74,7 +74,9 @@ pub use transport::{AuthStyle, OpenAiModel};
 use convert::*;
 use sse::*;
 #[cfg(test)]
-use transport::{auth_headers, merge_system_into_user, request_timeout};
+use transport::{
+    auth_headers, effective_temperature, glob_match, merge_system_into_user, request_timeout,
+};
 
 #[cfg(test)]
 mod test;
