@@ -566,11 +566,34 @@ pub struct ContextCompressionMiddleware {
 /// [`AgentEvent::Compressed`][crate::harness::events::AgentEvent::Compressed]
 /// event carrying the before/after token estimate is emitted; when disabled the
 /// middleware mutates the request silently.
+///
+/// # Prompt-cache stability ([`token_budget`](Self::with_token_budget))
+///
+/// Blanking a tool body that was sent *verbatim* on an earlier iteration mutates
+/// an already-transmitted prefix position, which invalidates the provider's
+/// KV-cache from that point on. Because "keep the newest `keep_recent`" is a
+/// *moving* boundary, the default (ungated) middleware rewrites one more
+/// tool-result full→placeholder on essentially every model call once a run has
+/// more than `keep_recent` tool results — churning the cache prefix even when
+/// the whole transcript still fits the model's context window (paying an
+/// uncached re-read to save tokens the model had room for).
+///
+/// [`with_token_budget`](Self::with_token_budget) gates the blanking on the
+/// transcript's estimated token count: below the budget the middleware is a
+/// no-op, so requests stay **append-only and fully cache-eligible**; only once
+/// the (un-blanked) transcript exceeds the budget does it start reclaiming
+/// tokens. The gate reads the pre-blank token estimate, which grows
+/// monotonically, so it never oscillates between blanked and full. Left unset
+/// (`None`, the default) the middleware behaves exactly as before.
 pub struct MicrocompactMiddleware {
     pub(crate) label: &'static str,
     pub(crate) keep_recent: usize,
     pub(crate) placeholder: String,
     pub(crate) emit_events: bool,
+    /// Optional estimated-token floor below which blanking is skipped so the
+    /// cache prefix stays stable. `None` = always blank once past `keep_recent`
+    /// (legacy behaviour). See [`MicrocompactMiddleware::with_token_budget`].
+    pub(crate) token_budget: Option<u64>,
 }
 
 // ── PromptCacheGuardMiddleware ────────────────────────────────────────────────

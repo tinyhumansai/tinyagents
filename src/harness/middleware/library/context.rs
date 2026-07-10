@@ -226,6 +226,7 @@ impl MicrocompactMiddleware {
             keep_recent,
             placeholder: placeholder.into(),
             emit_events: false,
+            token_budget: None,
         }
     }
 
@@ -238,6 +239,22 @@ impl MicrocompactMiddleware {
         self
     }
 
+    /// Only blank stale tool bodies once the transcript's estimated tokens
+    /// exceed `budget`; below it the middleware is a no-op so the request stays
+    /// append-only and the provider KV-cache prefix is preserved (issue
+    /// tinyhumansai/openhuman#4755).
+    ///
+    /// Set this below the model's context window (leaving headroom for the reply
+    /// and the `keep_recent` verbatim results) so a run that fits the window is
+    /// never compacted — compaction only kicks in when it is actually needed to
+    /// stay under the window, which is the only time the cache-invalidation cost
+    /// of blanking an already-sent tool body pays for itself. `budget == 0`
+    /// disables the gate (equivalent to leaving it unset).
+    pub fn with_token_budget(mut self, budget: u64) -> Self {
+        self.token_budget = (budget > 0).then_some(budget);
+        self
+    }
+
     /// The number of most-recent tool-result bodies kept verbatim.
     pub fn keep_recent(&self) -> usize {
         self.keep_recent
@@ -246,6 +263,11 @@ impl MicrocompactMiddleware {
     /// The placeholder text swapped in for cleared tool-result bodies.
     pub fn placeholder(&self) -> &str {
         &self.placeholder
+    }
+
+    /// The estimated-token floor below which blanking is skipped, if configured.
+    pub fn token_budget(&self) -> Option<u64> {
+        self.token_budget
     }
 }
 
@@ -273,11 +295,31 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for Microcompa
             return Ok(());
         }
 
+        // Prompt-cache preservation (issue tinyhumansai/openhuman#4755): when a
+        // token budget is configured, skip blanking while the transcript still
+        // fits within it. Blanking a tool body that was sent verbatim on an
+        // earlier iteration mutates an already-transmitted prefix position and
+        // invalidates the provider KV-cache from there on; doing that every call
+        // (the boundary moves by one each turn) churns the cache to reclaim
+        // tokens the model still has room for. Gating on the *pre-blank* estimate
+        // — which grows monotonically as the run appends — keeps the request
+        // append-only (fully cache-eligible) below budget and can't oscillate.
+        // Reuse `from_tokens` when events are on so we never estimate twice.
         let from_tokens = if self.emit_events {
             total_message_tokens(&request.messages)
         } else {
             0
         };
+        if let Some(budget) = self.token_budget {
+            let tokens = if self.emit_events {
+                from_tokens
+            } else {
+                total_message_tokens(&request.messages)
+            };
+            if tokens <= budget {
+                return Ok(());
+            }
+        }
 
         let cut = tool_idxs.len() - self.keep_recent;
         let mut cleared = 0usize;
