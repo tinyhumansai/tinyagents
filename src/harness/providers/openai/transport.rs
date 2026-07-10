@@ -6,6 +6,28 @@
 
 use super::*;
 
+/// How the provider expects the API credential to be sent on each request.
+///
+/// OpenAI-compatible endpoints diverge on auth: hosted OpenAI and most gateways
+/// use `Bearer`, some providers use a bare `x-api-key`, Anthropic's compat
+/// endpoint pairs `x-api-key` with an `anthropic-version` header, and a few need
+/// an arbitrary custom header carrying the raw credential. Defaults to
+/// [`AuthStyle::Bearer`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AuthStyle {
+    /// No authentication header (e.g. a local Ollama server).
+    None,
+    /// `Authorization: Bearer <key>` — hosted OpenAI and most gateways.
+    #[default]
+    Bearer,
+    /// `x-api-key: <key>` — used by some OpenAI-compatible providers.
+    XApiKey,
+    /// `x-api-key: <key>` + `anthropic-version: 2023-06-01` (Anthropic compat).
+    Anthropic,
+    /// A custom header name carrying the raw credential.
+    Custom(String),
+}
+
 /// A [`ChatModel`] backed by the hosted OpenAI Chat Completions API.
 ///
 /// Construct one with [`OpenAiModel::new`] (plus the `with_*` builders) or
@@ -14,8 +36,23 @@ use super::*;
 pub struct OpenAiModel {
     /// Shared HTTP client.
     client: reqwest::Client,
-    /// API key sent as a `Bearer` token.
+    /// API credential; how it is sent is governed by [`Self::auth`].
     api_key: String,
+    /// How `api_key` is attached to each request (default [`AuthStyle::Bearer`]).
+    auth: AuthStyle,
+    /// Extra static headers attached to every request (e.g. provider
+    /// attribution headers). Applied after the auth header.
+    extra_headers: Vec<(String, String)>,
+    /// Model-id glob patterns (`*` wildcard) whose targets reject a `temperature`
+    /// parameter; matching requests omit `temperature` entirely. Empty by default.
+    temperature_unsupported: Vec<String>,
+    /// When set, overrides the request's sampling temperature for every call
+    /// (unless the model is in [`Self::temperature_unsupported`]).
+    temperature_override: Option<f64>,
+    /// When `true`, system messages are folded into the first user message and
+    /// the `system` role is dropped — for OpenAI-compatible endpoints that reject
+    /// a `system` role. `false` by default (system messages pass through).
+    merge_system_into_user: bool,
     /// Default model id used when a request does not override it.
     model: String,
     /// Provider family identifier used in profiles and normalized errors.
@@ -24,6 +61,152 @@ pub struct OpenAiModel {
     base_url: String,
     /// Capability profile derived from the default model id.
     profile: ModelProfile,
+}
+
+/// The auth headers `(name, value)` for a given [`AuthStyle`] + credential.
+///
+/// Pure (no request), so the header mapping is unit-testable without a network
+/// round-trip. Applied by [`OpenAiModel::authorized`].
+pub(super) fn auth_headers(auth: &AuthStyle, api_key: &str) -> Vec<(String, String)> {
+    match auth {
+        AuthStyle::None => Vec::new(),
+        AuthStyle::Bearer => vec![("Authorization".to_string(), format!("Bearer {api_key}"))],
+        AuthStyle::XApiKey => vec![("x-api-key".to_string(), api_key.to_string())],
+        AuthStyle::Anthropic => vec![
+            ("x-api-key".to_string(), api_key.to_string()),
+            ("anthropic-version".to_string(), "2023-06-01".to_string()),
+        ],
+        AuthStyle::Custom(name) => vec![(name.clone(), api_key.to_string())],
+    }
+}
+
+/// Case-insensitive glob match supporting the `*` wildcard (the only metacharacter
+/// used by model-id patterns). `"o1*"` matches `"o1-mini"`; `"*turbo"` matches
+/// `"gpt-4-turbo"`; a pattern with no `*` matches exactly.
+pub(super) fn glob_match(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.to_ascii_lowercase();
+    let value = value.to_ascii_lowercase();
+    let segments: Vec<&str> = pattern.split('*').collect();
+    if segments.len() == 1 {
+        return pattern == value;
+    }
+    let mut cursor = 0usize;
+    for (idx, segment) in segments.iter().enumerate() {
+        if segment.is_empty() {
+            continue;
+        }
+        if idx == 0 {
+            // A non-empty leading segment must be a prefix.
+            if !value[cursor..].starts_with(segment) {
+                return false;
+            }
+            cursor += segment.len();
+        } else if idx == segments.len() - 1 {
+            // A non-empty trailing segment must be a suffix.
+            return value[cursor..].ends_with(segment);
+        } else {
+            match value[cursor..].find(segment) {
+                Some(offset) => cursor += offset + segment.len(),
+                None => return false,
+            }
+        }
+    }
+    // Trailing `*` (empty last segment) matches the remainder.
+    true
+}
+
+/// The `temperature` to send for `model`: `None` (omitted) when the model matches
+/// a temperature-unsupported pattern, else the override if set, else the request's
+/// temperature. Pure, so the policy is unit-testable without a request.
+pub(super) fn effective_temperature(
+    model: &str,
+    request_temperature: Option<f64>,
+    temperature_override: Option<f64>,
+    temperature_unsupported: &[String],
+) -> Option<f64> {
+    if temperature_unsupported.iter().any(|p| glob_match(p, model)) {
+        return None;
+    }
+    temperature_override.or(request_temperature)
+}
+
+/// Concatenates the text of a message's content blocks (non-text blocks — images,
+/// json, thinking — are ignored). Used to gather system-prompt text for merging.
+fn content_text(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Folds all `system` messages into the first `user` message and drops the
+/// `system` role, for endpoints that reject a `system` role. The concatenated
+/// system text is prefixed to the first user message (`"{system}\n\n{user}"` —
+/// matching the common host behavior); image/other user content blocks are
+/// preserved. When there is no user message, the system text is promoted to a
+/// user turn. Pure, so the transform is unit-testable.
+pub(super) fn merge_system_into_user(messages: &[Message]) -> Vec<Message> {
+    use crate::harness::message::UserMessage;
+
+    let system_text = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::System(s) => {
+                let t = content_text(&s.content);
+                (!t.is_empty()).then_some(t)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    if system_text.is_empty() {
+        // Nothing to fold; drop any (empty) system messages if present, else pass
+        // through untouched.
+        if messages.iter().any(|m| matches!(m, Message::System(_))) {
+            return messages
+                .iter()
+                .filter(|m| !matches!(m, Message::System(_)))
+                .cloned()
+                .collect();
+        }
+        return messages.to_vec();
+    }
+
+    let mut merged: Vec<Message> = Vec::with_capacity(messages.len());
+    let mut folded = false;
+    for msg in messages {
+        match msg {
+            Message::System(_) => {} // dropped
+            Message::User(user) if !folded => {
+                folded = true;
+                let mut content = Vec::with_capacity(user.content.len() + 1);
+                match user.content.split_first() {
+                    Some((ContentBlock::Text(first), rest)) => {
+                        content.push(ContentBlock::Text(format!("{system_text}\n\n{first}")));
+                        content.extend(rest.iter().cloned());
+                    }
+                    _ => {
+                        content.push(ContentBlock::Text(format!("{system_text}\n\n")));
+                        content.extend(user.content.iter().cloned());
+                    }
+                }
+                merged.push(Message::User(UserMessage { content }));
+            }
+            other => merged.push(other.clone()),
+        }
+    }
+
+    if !folded {
+        // No user message to fold into — promote the system text to a user turn.
+        merged.insert(0, Message::user(system_text));
+    }
+
+    merged
 }
 
 /// Returns `true` for OpenAI o-series reasoning models (`o1`/`o3`/`o4`), which
@@ -80,11 +263,60 @@ impl OpenAiModel {
                 .build()
                 .expect("default reqwest client builds"),
             api_key: api_key.into(),
+            auth: AuthStyle::Bearer,
+            extra_headers: Vec::new(),
+            temperature_unsupported: Vec::new(),
+            temperature_override: None,
+            merge_system_into_user: false,
             model: DEFAULT_MODEL.to_string(),
             provider: "openai".to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
             profile: derive_profile("openai", DEFAULT_MODEL),
         }
+    }
+
+    /// Overrides how the API credential is sent (default [`AuthStyle::Bearer`]).
+    ///
+    /// Use this for OpenAI-compatible endpoints that authenticate with
+    /// `x-api-key`, the Anthropic header pair, or a custom header instead of a
+    /// bearer token.
+    pub fn with_auth_style(mut self, auth: AuthStyle) -> Self {
+        self.auth = auth;
+        self
+    }
+
+    /// Attaches a static header to every request (repeatable). Applied after the
+    /// auth header — e.g. provider attribution headers.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra_headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Sets model-id glob patterns (`*` wildcard, case-insensitive) whose targets
+    /// reject a `temperature` parameter. A request whose model matches any pattern
+    /// omits `temperature` from the wire body (e.g. OpenAI o-series / some hosted
+    /// reasoning models that 400 on an explicit temperature).
+    pub fn with_temperature_unsupported_models(
+        mut self,
+        patterns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.temperature_unsupported = patterns.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Overrides the sampling temperature for every request (unless the model is
+    /// temperature-unsupported). Useful for endpoints that require a fixed
+    /// temperature regardless of the caller's request.
+    pub fn with_temperature_override(mut self, temperature: Option<f64>) -> Self {
+        self.temperature_override = temperature;
+        self
+    }
+
+    /// Folds system messages into the first user message and drops the `system`
+    /// role, for OpenAI-compatible endpoints that reject a `system` role.
+    pub fn with_merge_system_into_user(mut self) -> Self {
+        self.merge_system_into_user = true;
+        self
     }
 
     /// Overrides the default model id.
@@ -352,8 +584,16 @@ impl OpenAiModel {
         &self,
         request: &ModelRequest,
     ) -> Result<ChatCompletionRequest> {
-        let messages = request
-            .messages
+        // Optionally fold system messages into the first user turn (for endpoints
+        // that reject a `system` role) before wire translation.
+        let merged_messages;
+        let source_messages: &[Message] = if self.merge_system_into_user {
+            merged_messages = merge_system_into_user(&request.messages);
+            &merged_messages
+        } else {
+            &request.messages
+        };
+        let messages = source_messages
             .iter()
             .map(translate_message)
             .collect::<Result<Vec<_>>>()?;
@@ -394,13 +634,20 @@ impl OpenAiModel {
             (request.max_tokens, None)
         };
 
+        let temperature = effective_temperature(
+            &model,
+            request.temperature,
+            self.temperature_override,
+            &self.temperature_unsupported,
+        );
+
         Ok(ChatCompletionRequest {
             model,
             messages,
             tools,
             tool_choice,
             response_format,
-            temperature: request.temperature,
+            temperature,
             top_p: request.top_p,
             max_tokens,
             max_completion_tokens,
@@ -412,12 +659,20 @@ impl OpenAiModel {
         })
     }
 
-    /// Attaches the provider's bearer credential to an outbound request.
+    /// Attaches the provider's credential (per [`Self::auth`]) plus any static
+    /// [`Self::extra_headers`] to an outbound request.
     ///
-    /// The single place the `Authorization` header is set, shared by the chat
-    /// and model-listing calls.
-    fn authorized(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        builder.header("Authorization", format!("Bearer {}", self.api_key))
+    /// The single place auth is applied, shared by the chat and model-listing
+    /// calls. The header mapping itself lives in the pure [`auth_headers`] helper
+    /// so it is unit-testable without a network round-trip.
+    fn authorized(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        for (name, value) in auth_headers(&self.auth, &self.api_key) {
+            builder = builder.header(name, value);
+        }
+        for (name, value) in &self.extra_headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        builder
     }
 
     /// Sends `builder` and returns the checked (2xx) [`reqwest::Response`].
