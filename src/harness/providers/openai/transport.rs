@@ -59,8 +59,14 @@ pub struct OpenAiModel {
     provider: String,
     /// API base URL (no trailing slash); `/chat/completions` is appended.
     base_url: String,
-    /// Capability profile derived from the default model id.
+    /// Capability profile derived from the default model id, optionally adjusted
+    /// by [`Self::with_native_tool_calling`] / [`Self::with_vision`].
     profile: ModelProfile,
+    /// Provider-specific options baked onto every request (e.g. a local model's
+    /// `{"options": {"num_ctx": 8192}}`). Merged under each request's own
+    /// `provider_options`, which win on key conflicts. `Value::Null` by default
+    /// (no baked options). See [`Self::with_default_provider_options`].
+    default_provider_options: Value,
 }
 
 /// The auth headers `(name, value)` for a given [`AuthStyle`] + credential.
@@ -272,6 +278,7 @@ impl OpenAiModel {
             provider: "openai".to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
             profile: derive_profile("openai", DEFAULT_MODEL),
+            default_provider_options: Value::Null,
         }
     }
 
@@ -316,6 +323,48 @@ impl OpenAiModel {
     /// role, for OpenAI-compatible endpoints that reject a `system` role.
     pub fn with_merge_system_into_user(mut self) -> Self {
         self.merge_system_into_user = true;
+        self
+    }
+
+    /// Overrides whether this model advertises **native** tool calling on its
+    /// [`profile`](ChatModel::profile). Many self-hosted / local OpenAI-compatible
+    /// runtimes (Ollama and others) reject the OpenAI `tools` parameter with an
+    /// HTTP 400; passing `false` lets a harness detect that and embed tool specs
+    /// in the prompt instead of sending native `tools`. Disabling native tools
+    /// also clears `parallel_tool_calls` and `streaming_tool_chunks`, which are
+    /// meaningless without them.
+    ///
+    /// This mutates the derived profile, so apply it **after**
+    /// [`with_model`](Self::with_model) / [`with_provider`](Self::with_provider)
+    /// (which re-derive the profile).
+    pub fn with_native_tool_calling(mut self, enabled: bool) -> Self {
+        self.profile.tool_calling = enabled;
+        if !enabled {
+            self.profile.parallel_tool_calls = false;
+            self.profile.streaming_tool_chunks = false;
+        }
+        self
+    }
+
+    /// Overrides whether this model advertises image input (vision) on its
+    /// [`profile`](ChatModel::profile). The OpenAI wire preset defaults to `true`;
+    /// pass `false` for text-only local/self-hosted models so a harness does not
+    /// route image content to an endpoint that cannot accept it.
+    ///
+    /// This mutates the derived profile, so apply it **after**
+    /// [`with_model`](Self::with_model) / [`with_provider`](Self::with_provider).
+    pub fn with_vision(mut self, enabled: bool) -> Self {
+        self.profile.modalities.image_in = enabled;
+        self
+    }
+
+    /// Bakes provider-specific options onto every request (e.g. a local model's
+    /// `{"options": {"num_ctx": 8192}}`). These are merged **under** each
+    /// request's own [`ModelRequest::provider_options`], so a per-call option of
+    /// the same key wins. Reserved OpenAI fields are still stripped downstream by
+    /// [`provider_extra_options`]. Passing `Value::Null` clears the baked options.
+    pub fn with_default_provider_options(mut self, options: Value) -> Self {
+        self.default_provider_options = options;
         self
     }
 
@@ -655,7 +704,10 @@ impl OpenAiModel {
             seed: request.seed,
             stream: false,
             stream_options: None,
-            extra: provider_extra_options(&request.provider_options)?,
+            extra: provider_extra_options(&merge_provider_options(
+                &self.default_provider_options,
+                &request.provider_options,
+            ))?,
         })
     }
 
@@ -798,6 +850,34 @@ pub(super) fn request_timeout(timeout_ms: Option<u64>, streaming: bool) -> Optio
         Some(ms) => Some(Duration::from_millis(ms)),
         None if streaming => None,
         None => Some(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)),
+    }
+}
+
+/// Merges baked `defaults` under a request's own `overrides` provider options.
+///
+/// Keys present in `overrides` win over `defaults`. A `Null` on either side
+/// contributes nothing; when neither side is an object the result is
+/// `Value::Null`, so [`provider_extra_options`] short-circuits to an empty map.
+///
+/// A **non-null, non-object** `overrides` is invalid caller input and is returned
+/// untouched (never merged) so [`provider_extra_options`] still rejects it with
+/// its clear validation error instead of the merge silently dropping it. Pure, so
+/// the merge policy is unit-testable without a request.
+pub(super) fn merge_provider_options(defaults: &Value, overrides: &Value) -> Value {
+    if !overrides.is_null() && !overrides.is_object() {
+        return overrides.clone();
+    }
+    match (defaults.as_object(), overrides.as_object()) {
+        (None, None) => Value::Null,
+        (Some(base), None) => Value::Object(base.clone()),
+        (None, Some(over)) => Value::Object(over.clone()),
+        (Some(base), Some(over)) => {
+            let mut merged = base.clone();
+            for (key, value) in over {
+                merged.insert(key.clone(), value.clone());
+            }
+            Value::Object(merged)
+        }
     }
 }
 

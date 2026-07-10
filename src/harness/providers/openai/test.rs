@@ -1382,3 +1382,96 @@ async fn sse_stream_recovers_tool_args_with_leaked_template_marker() {
     assert_eq!(calls[0].name, "composio_execute");
     assert_eq!(calls[0].arguments, json!({ "q": 1 }));
 }
+// `ChatModel::profile` is generic over `State`; pin `State = ()` so the concrete
+// `OpenAiModel` handle disambiguates without a turbofish at every call site.
+fn profile_of(model: &OpenAiModel) -> &crate::harness::model::ModelProfile {
+    ChatModel::<()>::profile(model).expect("openai models expose a profile")
+}
+
+#[test]
+fn with_native_tool_calling_false_clears_tool_profile_flags() {
+    let model = OpenAiModel::new("k")
+        .with_model("qwen2.5")
+        .with_native_tool_calling(false);
+    let profile = profile_of(&model);
+    assert!(!profile.tool_calling);
+    assert!(!profile.parallel_tool_calls);
+    assert!(!profile.streaming_tool_chunks);
+
+    // Re-enabling restores native tool calling on the profile.
+    let re = OpenAiModel::new("k")
+        .with_model("qwen2.5")
+        .with_native_tool_calling(false)
+        .with_native_tool_calling(true);
+    assert!(profile_of(&re).tool_calling);
+}
+
+#[test]
+fn with_vision_toggles_image_in_modality() {
+    let off = OpenAiModel::new("k")
+        .with_model("qwen2.5")
+        .with_vision(false);
+    assert!(!profile_of(&off).modalities.image_in);
+
+    let on = OpenAiModel::new("k")
+        .with_model("gpt-4.1-mini")
+        .with_vision(true);
+    assert!(profile_of(&on).modalities.image_in);
+}
+
+#[test]
+fn default_provider_options_are_baked_onto_every_request() {
+    let model = OpenAiModel::ollama()
+        .with_model("qwen2.5")
+        .with_default_provider_options(json!({ "options": { "num_ctx": 8192 } }));
+
+    // A request with no provider_options still carries the baked options.
+    let request = ModelRequest::new(vec![Message::user("hi")]);
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+    assert_eq!(value["options"]["num_ctx"], json!(8192));
+}
+
+#[test]
+fn request_provider_options_win_over_baked_defaults() {
+    let model = OpenAiModel::ollama()
+        .with_model("qwen2.5")
+        .with_default_provider_options(
+            json!({ "options": { "num_ctx": 8192 }, "keep_alive": "5m" }),
+        );
+
+    // The per-call `options` key overrides the baked one; unrelated baked keys
+    // (`keep_alive`) still flow through.
+    let request = ModelRequest::new(vec![Message::user("hi")])
+        .with_provider_options(json!({ "options": { "num_ctx": 2048 } }));
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+    assert_eq!(value["options"]["num_ctx"], json!(2048));
+    assert_eq!(value["keep_alive"], json!("5m"));
+}
+
+#[test]
+fn merge_provider_options_prefers_overrides_and_handles_nulls() {
+    let defaults = json!({ "a": 1, "b": 2 });
+    let overrides = json!({ "b": 20, "c": 30 });
+    assert_eq!(
+        merge_provider_options(&defaults, &overrides),
+        json!({ "a": 1, "b": 20, "c": 30 })
+    );
+    assert_eq!(
+        merge_provider_options(&serde_json::Value::Null, &overrides),
+        overrides
+    );
+    assert_eq!(
+        merge_provider_options(&defaults, &serde_json::Value::Null),
+        defaults
+    );
+    assert_eq!(
+        merge_provider_options(&serde_json::Value::Null, &serde_json::Value::Null),
+        serde_json::Value::Null
+    );
+    // A non-null, non-object override is passed through untouched (not merged), so
+    // downstream validation still rejects it rather than the merge hiding it.
+    assert_eq!(
+        merge_provider_options(&defaults, &json!(["top_k", 40])),
+        json!(["top_k", 40])
+    );
+}
