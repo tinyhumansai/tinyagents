@@ -272,12 +272,29 @@ async fn harness_run_with_capture_exports_generation_and_tool_io() {
 
     // Tool observations are exported as `span-create` (a valid Langfuse
     // ingestion type); `tool-create` is rejected by older/self-hosted Langfuse.
+    // Select by input payload since the per-run "agent" span is also a
+    // `span-create` (the run tree's root), sitting above the tool span.
     let tool = events
         .iter()
-        .find(|e| e["type"] == "span-create")
+        .find(|e| e["type"] == "span-create" && e["body"].get("input").is_some())
         .expect("a tool observation");
     assert_eq!(tool["body"]["input"]["q"], "weather");
     assert_eq!(tool["body"]["output"], "tool-output");
+
+    // Every generation and the tool span nest under the run's span, so the
+    // exported trace renders as a tree rather than a flat event list.
+    let run_span = events
+        .iter()
+        .find(|e| e["type"] == "span-create" && e["body"]["name"] == "agent")
+        .expect("a run span");
+    let run_span_id = run_span["body"]["id"].as_str().unwrap();
+    assert_eq!(tool["body"]["parentObservationId"], run_span_id);
+    assert!(
+        generations
+            .iter()
+            .all(|g| g["body"]["parentObservationId"] == run_span_id),
+        "every generation nests under the run span"
+    );
 }
 
 /// A two-node line graph over `i32` with overwrite semantics: `a -> b`.
