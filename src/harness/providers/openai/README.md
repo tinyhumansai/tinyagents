@@ -64,6 +64,12 @@ Streaming responses are decoded by a small state machine (`SseState` /
   two HTTP chunks is never corrupted into replacement characters.
 - Index-less streamed tool-call fragments (some providers omit the tool-call
   index on continuation chunks) are correlated by id rather than position.
+- Parallel tool-call fragments that all arrive with `index: 0` (Ollama's `/v1`
+  bug, ollama/ollama#15457) are kept distinct: when an explicit index carries a
+  non-empty id that conflicts with the id already recorded at that slot, a fresh
+  slot is opened instead of merging two calls onto one.
+- A later fragment with an empty `function.name` never overwrites a name already
+  recorded for the slot (LM Studio, lmstudio-bug-tracker#649).
 - A trailing partial line without a final newline (providers that terminate
   the last SSE event without a trailing newline) is still flushed.
 - Mid-stream error payloads (`data: {"error": ...}`) surface as a stream error
@@ -139,6 +145,35 @@ tags from the visible text, matching how the side-channel is normalized.
   path (visible segments concatenate; the block-bordering whitespace is
   trimmed). Live deltas carry no separator/trim, so the authoritative clean
   text is the terminal response.
+
+## Local-model tolerance (tool calls)
+
+Small local servers (Ollama, LM Studio, llama.cpp, vLLM) routinely violate the
+OpenAI tool-call contract. A single non-conforming field used to fail
+deserialization of the *whole* response, so the model appeared "broken". The
+wire structs (`types.rs`) and the translator (`convert.rs`) are deliberately
+lenient — leniency is additive to the serde shapes (`#[serde(default)]` /
+custom deserializers), so hosted OpenAI is unaffected:
+
+- **Missing/empty `id`** — Ollama omitted the tool-call `id` until v0.12.11. An
+  empty or absent id is treated as absent and a stable `tool-{index}` fallback
+  is synthesized (the same one the streaming path uses) so tool results still
+  correlate back to the call.
+- **Missing `type`** — defaulted rather than required.
+- **`arguments` as an object** — some servers send `function.arguments` as a
+  JSON object instead of the OpenAI-standard stringified JSON; it is normalized
+  to the parsed arguments either way.
+- **Malformed `arguments` JSON** — when arguments cannot be parsed even after the
+  conservative chat-template-marker repair (`recover_tool_arguments`), the call
+  does **not** fail the model call. It is surfaced as a `ToolCall` with
+  `invalid: Some(reason)` and the raw string preserved in `arguments`. The agent
+  loop feeds `reason` back to the model as an error tool result (an
+  `AgentEvent::InvalidToolArgs` recovery, mirroring LangChain's
+  `invalid_tool_calls` and the AI SDK's invalid dynamic tool parts) so the model
+  can retry, and — because the call always resolves — a malformed blob can never
+  become a never-resolving tool call that stalls the loop. This leniency is
+  unconditional: unlike `InvalidArgsPolicy` (which governs *schema* validation of
+  well-formed arguments), an unparseable payload is a transport-level defect.
 
 ## Error handling
 

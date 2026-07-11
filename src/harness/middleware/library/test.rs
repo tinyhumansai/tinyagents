@@ -42,6 +42,7 @@ fn tool_call(name: &str) -> ToolCall {
         id: "call-1".to_string(),
         name: name.to_string(),
         arguments: json!({}),
+        invalid: None,
     }
 }
 
@@ -1300,6 +1301,7 @@ async fn redaction_scrubs_tool_call_arguments_and_raw_payloads() {
         id: "c1".to_string(),
         name: "http".to_string(),
         arguments: json!({"header": "Bearer sk-secret", "nested": ["sk-secret"]}),
+        invalid: None,
     });
     response.raw = Some(json!({"choices": [{"text": "token sk-secret"}]}));
     stack
@@ -1320,6 +1322,7 @@ async fn redaction_scrubs_tool_call_arguments_and_raw_payloads() {
         id: "c2".to_string(),
         name: "http".to_string(),
         arguments: json!({"key": "sk-secret"}),
+        invalid: None,
     };
     stack
         .run_before_tool(&mut ctx, &(), &mut call)

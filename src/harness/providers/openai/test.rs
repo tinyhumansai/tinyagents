@@ -193,6 +193,7 @@ fn translates_assistant_tool_calls_to_stringified_arguments() {
                 id: "call-1".to_string(),
                 name: "get_weather".to_string(),
                 arguments: json!({ "city": "Paris" }),
+                invalid: None,
             }],
             usage: None,
         }),
@@ -289,7 +290,11 @@ fn parses_openai_response_with_content_tool_call_and_usage() {
 }
 
 #[test]
-fn parse_response_errors_on_invalid_tool_argument_json() {
+fn parse_response_marks_invalid_tool_argument_json_instead_of_failing() {
+    // Malformed argument JSON must not fail the whole model call (which made
+    // small local models appear "broken"). Instead the call is surfaced as an
+    // `invalid` ToolCall with the raw arguments preserved so the agent loop can
+    // feed the error back to the model.
     let body = json!({
         "id": "chatcmpl-badargs",
         "choices": [
@@ -312,12 +317,81 @@ fn parse_response_errors_on_invalid_tool_argument_json() {
         ]
     });
 
-    let err = parse_response(body).expect_err("invalid arguments must fail");
-    let message = err.to_string();
-    assert!(matches!(err, TinyAgentsError::Model(_)));
-    assert!(message.contains("call-bad"), "{message}");
-    assert!(message.contains("lookup"), "{message}");
-    assert!(message.contains("raw arguments"), "{message}");
+    let response = parse_response(body).expect("malformed args must not fail the call");
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "call-bad");
+    assert_eq!(calls[0].name, "lookup");
+    // Raw arguments preserved verbatim as a JSON string value.
+    assert_eq!(calls[0].arguments, json!("{\"q\":"));
+    let reason = calls[0].invalid.as_deref().expect("call marked invalid");
+    assert!(reason.contains("call-bad"), "{reason}");
+    assert!(reason.contains("lookup"), "{reason}");
+    assert!(reason.contains("raw arguments"), "{reason}");
+}
+
+#[test]
+fn parses_id_less_tool_call_with_synthesized_fallback_id() {
+    // Ollama's /v1 endpoint omitted the tool-call `id` entirely until v0.12.11,
+    // and some servers omit `type`. Neither may fail deserialization; a
+    // missing/empty id gets the same `tool-{index}` fallback the streaming path
+    // uses so the agent loop can still correlate the result.
+    let body = json!({
+        "id": "chatcmpl-noid",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "tool_calls": [
+                    // No `id`, no `type`.
+                    { "function": { "name": "ping", "arguments": "{}" } },
+                    // Explicit empty id is treated as absent.
+                    { "id": "", "type": "function", "function": { "name": "pong", "arguments": "{\"n\":1}" } }
+                ]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    let response = parse_response(body).unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].id, "tool-0");
+    assert_eq!(calls[0].name, "ping");
+    assert_eq!(calls[0].arguments, json!({}));
+    assert_eq!(calls[1].id, "tool-1");
+    assert_eq!(calls[1].name, "pong");
+    assert_eq!(calls[1].arguments, json!({ "n": 1 }));
+}
+
+#[test]
+fn parses_object_form_tool_arguments() {
+    // Some OpenAI-compatible servers send `function.arguments` as a JSON object
+    // instead of the OpenAI-standard stringified JSON. It must normalize to the
+    // same parsed arguments, not fail the response.
+    let body = json!({
+        "id": "chatcmpl-obj",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call-obj",
+                    "type": "function",
+                    "function": { "name": "get_weather", "arguments": { "city": "Paris" } }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    let response = parse_response(body).unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "get_weather");
+    assert_eq!(calls[0].arguments, json!({ "city": "Paris" }));
+    assert!(
+        calls[0].invalid.is_none(),
+        "object args are valid, not invalid"
+    );
 }
 
 #[test]
@@ -669,52 +743,43 @@ async fn sse_stream_preserves_reasoning_content_as_side_channel() {
 }
 
 #[tokio::test]
-async fn sse_stream_invalid_tool_argument_json_fails_terminally() {
-    use futures::StreamExt;
-
+async fn sse_stream_invalid_tool_argument_json_reconstructs_as_invalid_call() {
+    // A streamed tool call whose reassembled arguments are malformed must not
+    // fail the stream terminally: it reconstructs as an `invalid` ToolCall (raw
+    // arguments preserved) so the agent loop can feed the error back to the
+    // model and the call still resolves instead of stalling the loop.
     let raw: Vec<Vec<u8>> = vec![
         b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-bad\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\"}}]}}]}\n\n".to_vec(),
         b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
         b"data: [DONE]\n\n".to_vec(),
     ];
-    let bytes = futures::stream::iter(
-        raw.into_iter()
-            .map(|v| Ok::<bytes::Bytes, TinyAgentsError>(bytes::Bytes::from(v))),
+
+    let items = collect_sse(raw).await;
+
+    // No terminal failure is emitted; the stream completes normally.
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, ModelStreamItem::ProviderFailed(_))),
+        "malformed args must not emit ProviderFailed"
     );
-
-    let state = SseState {
-        bytes: Box::pin(bytes),
-        buf: Vec::new(),
-        pending: std::collections::VecDeque::new(),
-        acc: OpenAiStreamAcc::default(),
-        provider: "openai".to_string(),
-        model: "gpt-4.1-mini".to_string(),
-        started: false,
-        finished: false,
-        terminal_emitted: false,
-    };
-    let items: Vec<ModelStreamItem> = futures::stream::unfold(state, sse_next).collect().await;
-
-    let failed = items
-        .iter()
-        .find_map(|item| match item {
-            ModelStreamItem::ProviderFailed(error) => Some(error),
-            _ => None,
-        })
-        .expect("invalid arguments should emit ProviderFailed");
-    assert_eq!(failed.code.as_deref(), Some("invalid_tool_arguments"));
-    assert!(!failed.retryable);
-    assert!(failed.message.contains("call-bad"), "{}", failed.message);
-    assert!(failed.message.contains("lookup"), "{}", failed.message);
+    assert!(matches!(items.last(), Some(ModelStreamItem::Completed(_))));
 
     let mut merged = StreamAccumulator::new();
     for item in &items {
         merged.push(item);
     }
-    let err = merged
+    let response = merged
         .finish()
-        .expect_err("provider failure must reach accumulator");
-    assert!(err.to_string().contains("invalid_tool_arguments"));
+        .expect("stream must reconstruct an invalid call, not fail");
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "call-bad");
+    assert_eq!(calls[0].name, "lookup");
+    assert_eq!(calls[0].arguments, json!("{\"q\":"));
+    let reason = calls[0].invalid.as_deref().expect("call marked invalid");
+    assert!(reason.contains("call-bad"), "{reason}");
+    assert!(reason.contains("lookup"), "{reason}");
 }
 
 /// Drives an SSE byte stream through the parser and returns every item.
@@ -1112,6 +1177,67 @@ async fn sse_stream_correlates_indexless_parallel_tool_calls_by_id() {
     assert_eq!(calls[1].id, "call-b");
     assert_eq!(calls[1].name, "beta");
     assert_eq!(calls[1].arguments, json!({ "y": 2 }));
+}
+
+#[tokio::test]
+async fn sse_stream_index_zero_parallel_tool_calls_do_not_merge() {
+    // Ollama's /v1 endpoint emitted parallel tool calls all carrying `index: 0`
+    // (ollama/ollama#15457). Two distinct ids at the same index must open two
+    // separate slots instead of silently merging into one. Interleaved
+    // continuation fragments (still `index: 0`, carrying the id) must route back
+    // to the correct already-open slot rather than the occupant of slot 0.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"function\":{\"name\":\"alpha\",\"arguments\":\"{\\\"x\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-b\",\"function\":{\"name\":\"beta\",\"arguments\":\"{\\\"y\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"function\":{\"arguments\":\"1}\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-b\",\"function\":{\"arguments\":\"2}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "index-0 parallel calls must not merge: {calls:?}"
+    );
+    assert_eq!(calls[0].id, "call-a");
+    assert_eq!(calls[0].name, "alpha");
+    assert_eq!(calls[0].arguments, json!({ "x": 1 }));
+    assert_eq!(calls[1].id, "call-b");
+    assert_eq!(calls[1].name, "beta");
+    assert_eq!(calls[1].arguments, json!({ "y": 2 }));
+}
+
+#[tokio::test]
+async fn sse_stream_empty_name_continuation_never_overwrites_recorded_name() {
+    // LM Studio (lmstudio-bug-tracker#649) can send a later tool-call fragment
+    // whose `function.name` is an empty string. It must never clobber the name
+    // already recorded from the call-opening fragment.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"\",\"arguments\":\"1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].name, "lookup",
+        "an empty-name continuation must not overwrite the recorded name"
+    );
+    assert_eq!(calls[0].arguments, json!({ "q": 1 }));
 }
 
 #[tokio::test]
@@ -1545,18 +1671,21 @@ fn recovers_first_call_when_fragments_are_concatenated() {
 }
 
 #[test]
-fn still_fails_fast_on_genuinely_malformed_tool_args() {
+fn marks_genuinely_malformed_tool_args_invalid_instead_of_hanging() {
     // The exact corruption seen in the wild carries a stray `]` *inside* the
-    // JSON — not just a leaked delimiter — so it cannot be safely repaired. It
-    // must fail fast (a clear, non-retryable model error) rather than hang.
-    let err = parse_response(tool_call_body(
+    // JSON — not just a leaked delimiter — so it cannot be safely repaired.
+    // Rather than fail the call (or hang on a never-resolving one), it is
+    // surfaced as an `invalid` ToolCall the agent loop can bounce back to the
+    // model with a clear error.
+    let response = parse_response(tool_call_body(
         r#"{"arguments":{"body":"hi"]}}<tool_call|>"#,
     ))
-    .expect_err("unrepairable args must fail closed");
-    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
-    let message = err.to_string();
-    assert!(message.contains("call-1"), "{message}");
-    assert!(message.contains("raw arguments"), "{message}");
+    .expect("unrepairable args must resolve as an invalid call, not fail");
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    let reason = calls[0].invalid.as_deref().expect("call marked invalid");
+    assert!(reason.contains("call-1"), "{reason}");
+    assert!(reason.contains("raw arguments"), "{reason}");
 }
 
 #[test]

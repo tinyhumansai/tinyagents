@@ -254,6 +254,29 @@ assert!(run.messages.iter().any(|m| m.text().contains("unknown tool `missing`"))
 // A single UnknownToolCall event was recorded with recovery == "tool_error".
 ```
 
+## Invalid tool-argument recovery
+
+Two distinct failures can affect a provider-supplied call's arguments, and they
+are handled separately:
+
+- **Schema-invalid** (well-formed JSON that violates the tool's input schema) is
+  governed by `RunPolicy::invalid_args: InvalidArgsPolicy`. `Fail` (default,
+  historical) aborts the turn; `ReturnToolError` injects a repairable tool-error
+  message (carrying the validation detail and the expected schema) and continues.
+- **Unparseable** (malformed JSON the provider could not parse into arguments at
+  all) is surfaced by the provider as a `ToolCall` with `invalid: Some(reason)`
+  and the raw string preserved in `arguments`. Small local models (Ollama, LM
+  Studio, llama.cpp, vLLM) emit this occasionally. The agent loop **always**
+  recovers here — independent of `InvalidArgsPolicy`, since an unparseable
+  payload is a transport-level defect, not a schema violation — by injecting the
+  parse `reason` back to the model as an error tool result so it can retry. The
+  recovery emits `AgentEvent::InvalidToolArgs { call_id, tool_name, arguments,
+  error, recovery: "tool_error" }` and consumes one tool-call budget slot, so
+  `RunLimits::max_tool_calls` bounds the retry loop. Because the call always
+  resolves, a malformed argument blob can never become a never-resolving tool
+  call that stalls the loop. See the OpenAI provider README for how the wire
+  parser produces these invalid calls.
+
 ## Tool policy enforcement
 
 Beyond the model-visible `ToolSchema`, each tool advertises a structured,

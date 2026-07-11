@@ -124,6 +124,7 @@ pub(super) fn tool_call_batched_impl<State: Send + Sync + 'static>(
                     id: call_id.as_str().to_string(),
                     name: name.clone(),
                     arguments: arguments.clone(),
+                    invalid: None,
                 };
                 async move {
                     let start = Instant::now();

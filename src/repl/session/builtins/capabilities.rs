@@ -64,6 +64,7 @@ pub(super) fn tool_call_impl<State: Send + Sync + 'static>(
         id: call_id.as_str().to_string(),
         name: tool_name.clone(),
         arguments: arguments.clone(),
+        invalid: None,
     };
     emit_call_started(ctx, &call_id, ReplCallKind::Tool, &tool_name);
     let start = Instant::now();

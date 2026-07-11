@@ -386,6 +386,7 @@ mod tool_tests {
             id: "c1".to_string(),
             name: "todo".to_string(),
             arguments: args,
+            invalid: None,
         }
     }
 

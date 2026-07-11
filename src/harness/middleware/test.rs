@@ -1246,6 +1246,7 @@ fn tool_call() -> ToolCall {
         id: "call-1".to_string(),
         name: "fake".to_string(),
         arguments: serde_json::Value::Null,
+        invalid: None,
     }
 }
 

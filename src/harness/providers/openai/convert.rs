@@ -272,21 +272,21 @@ pub(super) fn parse_chat_response(
         .message
         .tool_calls
         .into_iter()
-        .map(|call| {
-            Ok(ToolCall {
-                id: call.id.clone(),
-                name: call.function.name.clone(),
-                // Tool arguments arrive as a JSON string. Invalid JSON is a
-                // provider/model error, not an empty/default argument payload.
-                arguments: parse_tool_arguments(
-                    "openai response",
-                    &call.id,
-                    &call.function.name,
-                    &call.function.arguments,
-                )?,
-            })
+        .enumerate()
+        .map(|(index, call)| {
+            // Local servers routinely omit `id`; synthesize the same
+            // `tool-{index}` fallback the streaming path uses so the agent loop
+            // can still correlate the tool result back to this call. An empty
+            // id is treated as absent.
+            tool_call_from_wire(
+                "openai response",
+                index,
+                &call.id,
+                &call.function.name,
+                &call.function.arguments,
+            )
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Vec<_>>();
 
     let usage = parsed.usage.map(convert_usage);
 
@@ -317,12 +317,47 @@ pub(super) fn tool_call_id(slot: usize, id: &str) -> String {
     }
 }
 
-pub(super) fn parse_tool_arguments(
+/// Builds a provider-neutral [`ToolCall`] from the wire fields, tolerating the
+/// defects small local models produce.
+///
+/// `slot` is the tool call's position in the response (used to synthesize a
+/// stable `tool-{slot}` id when the provider omits one — Ollama did so until
+/// v0.12.11). When the arguments cannot be parsed even after repair, the call is
+/// marked [`ToolCall::invalid`] with the raw arguments preserved rather than
+/// failing the whole model call: the agent loop feeds the error back to the
+/// model as a tool result so it can retry (mirroring LangChain and the AI SDK),
+/// and — because the call still resolves — a malformed argument blob can never
+/// become a never-resolving tool call that stalls the loop.
+pub(super) fn tool_call_from_wire(
     context: &str,
-    call_id: &str,
+    slot: usize,
+    id: &str,
     name: &str,
     raw: &str,
-) -> Result<Value> {
+) -> ToolCall {
+    let call_id = tool_call_id(slot, id);
+    match parse_tool_arguments(raw) {
+        Ok(arguments) => ToolCall {
+            id: call_id,
+            name: name.to_string(),
+            arguments,
+            invalid: None,
+        },
+        Err(detail) => {
+            let reason = format!(
+                "{context} contained invalid JSON arguments for tool call `{call_id}` (`{name}`): {detail}; raw arguments: {raw:?}"
+            );
+            ToolCall::invalid(call_id, name, raw, reason)
+        }
+    }
+}
+
+/// Parses a tool-call arguments string into JSON, returning `Err(detail)` with a
+/// short human-readable reason when the string cannot be recovered.
+///
+/// This never fails the model call itself; the caller
+/// ([`tool_call_from_wire`]) turns an `Err` into an [`ToolCall::invalid`] call.
+pub(super) fn parse_tool_arguments(raw: &str) -> std::result::Result<Value, String> {
     // Some OpenAI-compatible backends emit an empty arguments string for a
     // zero-argument tool call. That is a well-formed "no arguments" payload, not
     // malformed JSON, so map it to an empty object instead of failing the call.
@@ -344,13 +379,7 @@ pub(super) fn parse_tool_arguments(
             if let Some(value) = recover_tool_arguments(raw) {
                 return Ok(value);
             }
-            // Still unparseable after repair: fail fast with a clear,
-            // non-retryable error. Surfacing the failure keeps the malformed
-            // call from becoming a never-resolving tool call that stalls the
-            // agent loop (and the parent's join/reduce) indefinitely.
-            Err(TinyAgentsError::Model(format!(
-                "{context} contained invalid JSON arguments for tool call `{call_id}` (`{name}`): {err}; raw arguments: {raw:?}"
-            )))
+            Err(err.to_string())
         }
     }
 }

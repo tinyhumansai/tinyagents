@@ -72,6 +72,7 @@ fn tool_call_strategy_reads_matching_call() {
         id: "tc-1".to_string(),
         name: "extract_answer".to_string(),
         arguments: json!({"answer": "yes"}),
+        invalid: None,
     });
     let output = extractor.extract(&response).unwrap();
     assert_eq!(output.value["answer"], "yes");
