@@ -106,11 +106,32 @@ impl OpenAiStreamAcc {
     /// carrying a known id reuses that slot, and an id-less continuation fragment
     /// (arguments only) appends to the most recent slot — so parallel calls no
     /// longer all collapse onto slot 0.
+    ///
+    /// One exception guards Ollama's `/v1` parallel-tool-call bug
+    /// (ollama/ollama#15457), where every parallel call arrives with `index: 0`:
+    /// when an explicit index carries a non-empty id that *conflicts* with the id
+    /// already recorded at that slot, the fragment is a distinct new call, not a
+    /// continuation, so it opens a fresh slot (or reuses an existing slot already
+    /// opened for that id) instead of silently merging two calls onto one.
     fn resolve_slot(&mut self, fragment: &ToolCallChunkWire) -> usize {
         if let Some(index) = fragment.index {
             let idx = index as usize;
             while self.tool_calls.len() <= idx {
                 self.tool_calls.push(ToolCallBuild::default());
+            }
+            if let Some(id) = fragment.id.as_deref().filter(|id| !id.is_empty()) {
+                let occupant = &self.tool_calls[idx];
+                if !occupant.id.is_empty() && occupant.id != id {
+                    // Conflict: a second distinct call reusing index 0. Reuse a
+                    // slot already opened for this id if one exists (so its later
+                    // continuation fragments still land correctly), else open a
+                    // fresh slot rather than overwriting the occupant.
+                    if let Some(pos) = self.tool_calls.iter().position(|slot| slot.id == id) {
+                        return pos;
+                    }
+                    self.tool_calls.push(ToolCallBuild::default());
+                    return self.tool_calls.len() - 1;
+                }
             }
             return idx;
         }
