@@ -734,6 +734,10 @@ impl OpenAiModel {
     /// Translates a provider-neutral [`ModelRequest`] into the OpenAI wire
     /// request body, applying this instance's baseline request-shape
     /// degradations (see [`Self::baseline_degrade`]).
+    ///
+    /// Test-only: production paths go through [`Self::build_chat_body`] /
+    /// [`Self::post_chat_with_degrade`], which thread an explicit [`Degrade`].
+    #[cfg(test)]
     pub(super) fn translate_request(
         &self,
         request: &ModelRequest,
@@ -995,6 +999,57 @@ impl OpenAiModel {
         self.send_checked(builder, what, &url).await
     }
 
+    /// Builds the chat-completions wire body for `request` under the given
+    /// `degrade`, setting the streaming fields when `streaming` is `true`.
+    fn build_chat_body(
+        &self,
+        request: &ModelRequest,
+        degrade: Degrade,
+        streaming: bool,
+    ) -> Result<ChatCompletionRequest> {
+        let mut body = self.translate_request_with(request, degrade)?;
+        if streaming {
+            body.stream = true;
+            body.stream_options = Some(json!({ "include_usage": true }));
+        }
+        Ok(body)
+    }
+
+    /// Posts a chat-completions request with automatic single-shot degraded
+    /// retry for local-server request-shape rejections.
+    ///
+    /// The first attempt applies this instance's baseline degradations. If it
+    /// fails with an HTTP 400 whose body implicates a named `tool_choice` or a
+    /// `json_object` `response_format` that the request actually used — and that
+    /// shape was not already degraded — the request is rebuilt with that shape
+    /// degraded and sent exactly once more. Any other error (or a request that
+    /// used neither shape) surfaces unchanged. Shared by [`Self::invoke`] and
+    /// [`Self::stream`], so the retry covers the streaming path too.
+    async fn post_chat_with_degrade(
+        &self,
+        request: &ModelRequest,
+        streaming: bool,
+        what: &str,
+    ) -> Result<reqwest::Response> {
+        let baseline = self.baseline_degrade();
+        let body = self.build_chat_body(request, baseline, streaming)?;
+        match self
+            .post_json(&body, request.timeout_ms, streaming, what)
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(TinyAgentsError::Provider(err))
+                if err.status == Some(400)
+                    && let Some(degrade) = degrade_for_400(&err.message, request, baseline) =>
+            {
+                let retry = self.build_chat_body(request, degrade, streaming)?;
+                self.post_json(&retry, request.timeout_ms, streaming, what)
+                    .await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     fn provider_error(
         &self,
         message: impl Into<String>,
@@ -1061,7 +1116,9 @@ impl OpenAiModel {
 /// Each field, when `true`, replaces a request shape that some local
 /// OpenAI-compatible servers reject with an equivalent one they accept. The
 /// baseline comes from the instance's capability knobs
-/// ([`OpenAiModel::baseline_degrade`]) from the instance's capability knobs.
+/// ([`OpenAiModel::baseline_degrade`]) from the instance's capability knobs; a
+/// 400 whose error body implicates one of these shapes turns the corresponding
+/// field on for a single degraded retry (see [`degrade_for_400`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Degrade {
     /// Degrade a named `tool_choice` to `"required"` + a filtered `tools` array.
@@ -1069,6 +1126,40 @@ pub(super) struct Degrade {
     /// Degrade `response_format:{"type":"json_object"}` to a permissive
     /// `json_schema`.
     pub json_object: bool,
+}
+
+/// Computes the additional degradation to apply after an HTTP 400, or `None`
+/// when the failure is not an auto-degradable request-shape rejection.
+///
+/// Returns `Some(degrade)` only when the 400 error body implicates a shape the
+/// request actually used *and* that shape was not already degraded on the
+/// original attempt — so a degraded retry is issued at most once and only when
+/// it could plausibly help. The returned [`Degrade`] is the union of `already`
+/// and the newly implicated shape, so the retry keeps any baseline degradations.
+///
+/// Pure, so the 400-detection policy is unit-testable without a network call.
+pub(super) fn degrade_for_400(
+    message: &str,
+    request: &ModelRequest,
+    already: Degrade,
+) -> Option<Degrade> {
+    let lower = message.to_ascii_lowercase();
+    let mut degrade = already;
+
+    if !already.named_tool_choice
+        && lower.contains("tool_choice")
+        && matches!(request.tool_choice, ToolChoice::Tool(_))
+    {
+        degrade.named_tool_choice = true;
+    }
+    if !already.json_object
+        && lower.contains("response_format")
+        && matches!(request.response_format, Some(ResponseFormat::JsonObject))
+    {
+        degrade.json_object = true;
+    }
+
+    (degrade != already).then_some(degrade)
 }
 
 /// Resolves the per-request timeout to apply to an outbound HTTP call.
@@ -1170,10 +1261,8 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         if self.responses_api_primary {
             return self.invoke_responses(&request).await;
         }
-        let body = self.translate_request(&request)?;
-
         let response = self
-            .post_json(&body, request.timeout_ms, false, "request")
+            .post_chat_with_degrade(&request, false, "request")
             .await?;
 
         let text = response.text().await.map_err(|e| {
@@ -1222,12 +1311,8 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             ];
             return Ok(Box::pin(futures::stream::iter(items)));
         }
-        let mut body = self.translate_request(&request)?;
-        body.stream = true;
-        body.stream_options = Some(json!({ "include_usage": true }));
-
         let response = self
-            .post_json(&body, request.timeout_ms, true, "stream request")
+            .post_chat_with_degrade(&request, true, "stream request")
             .await?;
 
         // Forward each raw chunk as the `bytes::Bytes` buffer reqwest already

@@ -1562,3 +1562,93 @@ fn baseline_knobs_default_to_supported_wire_shapes() {
     );
     assert_eq!(value["response_format"], json!({ "type": "json_object" }));
 }
+
+#[test]
+fn degrade_for_400_targets_only_the_shape_the_request_used() {
+    let named = ModelRequest::new(vec![Message::user("hi")])
+        .with_tools(vec![ToolSchema::new("t", "d", json!({}))])
+        .with_tool_choice(ToolChoice::Tool("t".to_string()));
+    assert_eq!(
+        degrade_for_400(
+            "Invalid tool_choice type: 'object'. Supported string values: none, auto, required",
+            &named,
+            Degrade::default(),
+        ),
+        Some(Degrade {
+            named_tool_choice: true,
+            json_object: false,
+        })
+    );
+
+    let json = ModelRequest::new(vec![Message::user("hi")])
+        .with_response_format(ResponseFormat::JsonObject);
+    assert_eq!(
+        degrade_for_400(
+            "'response_format.type' must be 'json_schema' or 'text'",
+            &json,
+            Degrade::default(),
+        ),
+        Some(Degrade {
+            named_tool_choice: false,
+            json_object: true,
+        })
+    );
+}
+
+#[test]
+fn degrade_for_400_ignores_unrelated_or_already_degraded_failures() {
+    let named = ModelRequest::new(vec![Message::user("hi")])
+        .with_tools(vec![ToolSchema::new("t", "d", json!({}))])
+        .with_tool_choice(ToolChoice::Tool("t".to_string()));
+
+    // A tool_choice message but the request used `Required` (not a named tool):
+    // there is nothing to degrade, so no retry.
+    let required = ModelRequest::new(vec![Message::user("hi")])
+        .with_tools(vec![ToolSchema::new("t", "d", json!({}))])
+        .with_tool_choice(ToolChoice::Required);
+    assert_eq!(
+        degrade_for_400("Invalid tool_choice type", &required, Degrade::default()),
+        None
+    );
+
+    // An unrelated 400 never triggers a degraded retry.
+    assert_eq!(
+        degrade_for_400("context length exceeded", &named, Degrade::default()),
+        None
+    );
+
+    // Already degraded on the first attempt -> no repeat (prevents a retry loop).
+    assert_eq!(
+        degrade_for_400(
+            "Invalid tool_choice type",
+            &named,
+            Degrade {
+                named_tool_choice: true,
+                json_object: false,
+            },
+        ),
+        None
+    );
+}
+
+#[test]
+fn degrade_for_400_unions_with_existing_baseline_degrade() {
+    // A json_object 400 while the named-tool-choice degrade is already baked on
+    // keeps that baseline flag set for the retry.
+    let json = ModelRequest::new(vec![Message::user("hi")])
+        .with_response_format(ResponseFormat::JsonObject);
+    assert_eq!(
+        degrade_for_400(
+            "response_format must be json_schema",
+            &json,
+            Degrade {
+                named_tool_choice: true,
+                json_object: false,
+            },
+        ),
+        Some(Degrade {
+            named_tool_choice: true,
+            json_object: true,
+        })
+    );
+}
