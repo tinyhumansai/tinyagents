@@ -4,6 +4,7 @@
 //! Split out of `openai/mod.rs`; see that module's doc comment for the
 //! full provider overview.
 
+use super::responses;
 use super::*;
 
 /// How the provider expects the API credential to be sent on each request.
@@ -67,6 +68,19 @@ pub struct OpenAiModel {
     /// `provider_options`, which win on key conflicts. `Value::Null` by default
     /// (no baked options). See [`Self::with_default_provider_options`].
     default_provider_options: Value,
+    /// When `true`, calls go to the OpenAI **Responses API** (`/v1/responses`)
+    /// instead of Chat Completions. See [`Self::with_responses_api_primary`].
+    responses_api_primary: bool,
+    /// When `true` (Responses path only), omit `max_output_tokens` from the wire
+    /// body — the OpenAI Codex OAuth backend rejects it. See
+    /// [`Self::with_responses_omit_max_output_tokens`].
+    responses_omit_max_output_tokens: bool,
+    /// Static query parameters appended to every request URL (e.g. the Codex
+    /// `client_version`). See [`Self::with_extra_query_param`].
+    extra_query_params: Vec<(String, String)>,
+    /// A `User-Agent` header override (e.g. the Codex CLI UA). `None` uses
+    /// reqwest's default. See [`Self::with_user_agent`].
+    user_agent: Option<String>,
 }
 
 /// The auth headers `(name, value)` for a given [`AuthStyle`] + credential.
@@ -279,7 +293,45 @@ impl OpenAiModel {
             base_url: DEFAULT_BASE_URL.to_string(),
             profile: derive_profile("openai", DEFAULT_MODEL),
             default_provider_options: Value::Null,
+            responses_api_primary: false,
+            responses_omit_max_output_tokens: false,
+            extra_query_params: Vec::new(),
+            user_agent: None,
         }
+    }
+
+    /// Routes calls to the OpenAI **Responses API** (`/v1/responses`) instead of
+    /// Chat Completions. Required for the OpenAI Codex OAuth backend; pair with
+    /// [`with_extra_query_param`](Self::with_extra_query_param) +
+    /// [`with_user_agent`](Self::with_user_agent) for Codex.
+    pub fn with_responses_api_primary(mut self) -> Self {
+        self.responses_api_primary = true;
+        self
+    }
+
+    /// Omits `max_output_tokens` from Responses requests (the Codex OAuth backend
+    /// rejects it). No effect on the Chat Completions path.
+    pub fn with_responses_omit_max_output_tokens(mut self) -> Self {
+        self.responses_omit_max_output_tokens = true;
+        self
+    }
+
+    /// Appends a static query parameter to every request URL (repeatable) — e.g.
+    /// the Codex `client_version`.
+    pub fn with_extra_query_param(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.extra_query_params.push((name.into(), value.into()));
+        self
+    }
+
+    /// Overrides the `User-Agent` header sent on every request (e.g. the Codex
+    /// CLI user agent).
+    pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.user_agent = Some(user_agent.into());
+        self
     }
 
     /// Overrides how the API credential is sent (default [`AuthStyle::Bearer`]).
@@ -724,7 +776,90 @@ impl OpenAiModel {
         for (name, value) in &self.extra_headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
+        if let Some(user_agent) = &self.user_agent {
+            builder = builder.header(reqwest::header::USER_AGENT, user_agent.as_str());
+        }
+        if !self.extra_query_params.is_empty() {
+            builder = builder.query(&self.extra_query_params);
+        }
         builder
+    }
+
+    /// The `/responses` endpoint URL — a sibling of `/chat/completions` under the
+    /// same base URL, tolerating a base that already ends in `/responses` or a
+    /// `…/v1` chat base.
+    fn responses_url(&self) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        if base.ends_with("/responses") {
+            base.to_string()
+        } else {
+            format!("{base}/responses")
+        }
+    }
+
+    /// Builds the `/v1/responses` request body from a provider-neutral request.
+    fn translate_responses_request(&self, request: &ModelRequest) -> responses::ResponsesRequest {
+        let model = request.model.clone().unwrap_or_else(|| self.model.clone());
+        let (instructions, input) = responses::build_responses_input(&request.messages);
+        let max_output_tokens = if self.responses_omit_max_output_tokens {
+            None
+        } else {
+            request.max_tokens
+        };
+        responses::ResponsesRequest {
+            model,
+            input,
+            instructions,
+            stream: None,
+            store: Some(false),
+            max_output_tokens,
+        }
+    }
+
+    /// Issues a `POST` to the Responses endpoint and maps the body onto a
+    /// [`ModelResponse`]. On a 400 whose body implicates `max_output_tokens`, the
+    /// request is retried once without that field (some `/responses` backends
+    /// reject the cap outright).
+    async fn invoke_responses(&self, request: &ModelRequest) -> Result<ModelResponse> {
+        let url = self.responses_url();
+        let body = self.translate_responses_request(request);
+        let response = match self.send_responses(&body, request.timeout_ms, &url).await {
+            Ok(r) => r,
+            Err(TinyAgentsError::Provider(err))
+                if err.status == Some(400)
+                    && body.max_output_tokens.is_some()
+                    && err.message.contains("max_output_tokens") =>
+            {
+                // Retry once without the cap.
+                let retry = responses::ResponsesRequest {
+                    max_output_tokens: None,
+                    ..body
+                };
+                self.send_responses(&retry, request.timeout_ms, &url)
+                    .await?
+            }
+            Err(e) => return Err(e),
+        };
+        let text = response.text().await.map_err(|e| {
+            TinyAgentsError::Model(format!("openai responses body read failed: {e}"))
+        })?;
+        let value: Value = serde_json::from_str(&text)?;
+        Ok(responses::parse_responses_response(value))
+    }
+
+    /// Shared `POST {responses_url}` with auth, query params, and timeout, mapped
+    /// through the same checked-transport tail as chat calls.
+    async fn send_responses(
+        &self,
+        body: &responses::ResponsesRequest,
+        timeout_ms: Option<u64>,
+        url: &str,
+    ) -> Result<reqwest::Response> {
+        let mut builder = self.authorized(self.client.post(url)).json(body);
+        if let Some(timeout) = request_timeout(timeout_ms, false) {
+            builder = builder.timeout(timeout);
+        }
+        self.send_checked(builder, "responses request", url).await
     }
 
     /// Sends `builder` and returns the checked (2xx) [`reqwest::Response`].
@@ -960,6 +1095,9 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
     /// status (the message includes the status code and response body), and
     /// [`TinyAgentsError::Serialization`] when the response cannot be decoded.
     async fn invoke(&self, _state: &State, request: ModelRequest) -> Result<ModelResponse> {
+        if self.responses_api_primary {
+            return self.invoke_responses(&request).await;
+        }
         let body = self.translate_request(&request)?;
 
         let response = self
@@ -994,6 +1132,24 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
     /// surfaced as [`ModelStreamItem::ProviderFailed`] inside the stream
     /// instead).
     async fn stream(&self, _state: &State, request: ModelRequest) -> Result<ModelStream> {
+        // The Responses path is text-in/text-out in this port: do the unary call
+        // and surface it as a single terminal `Completed` (a leading `Started` +
+        // one `MessageDelta` carrying the text so a UI still renders it). True
+        // Responses SSE is a follow-up.
+        if self.responses_api_primary {
+            let response = self.invoke_responses(&request).await?;
+            let delta = crate::harness::message::MessageDelta {
+                text: response.text(),
+                reasoning: String::new(),
+                tool_call: None,
+            };
+            let items = vec![
+                ModelStreamItem::Started,
+                ModelStreamItem::MessageDelta(delta),
+                ModelStreamItem::Completed(response),
+            ];
+            return Ok(Box::pin(futures::stream::iter(items)));
+        }
         let mut body = self.translate_request(&request)?;
         body.stream = true;
         body.stream_options = Some(json!({ "include_usage": true }));
