@@ -87,7 +87,8 @@ pub use error::{Result, TinyAgentsError};
 pub use registry::{
     AliasBinding, CapabilityRegistry, ComponentId, ComponentKind, ComponentMetadata,
     DiagnosticSeverity, ModelCapabilities, ModelCatalog, ModelCatalogEntry, ModelCatalogSnapshot,
-    ModelCatalogSource, ModelPricing, RegistryDiagnostic, RegistrySnapshot,
+    ModelCatalogSource, ModelPricing, ModelRouter, RegistryDiagnostic, RegistrySnapshot,
+    WorkloadRoute,
 };
 
 // --- Language: registry → blueprint binding façade ---
