@@ -444,3 +444,58 @@ fn merges_caller_trace_metadata_over_defaults() {
     assert_eq!(meta["root_run_id"], "override");
     assert_eq!(meta["run_id"], "run-1");
 }
+
+#[test]
+fn builds_numeric_trace_score() {
+    let client =
+        LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t").unwrap();
+    let batch = client.build_score_batch(
+        LangfuseScore::numeric("trace-1", "helpfulness", 0.9).with_comment("solid answer"),
+    );
+    let event = &batch["batch"].as_array().unwrap()[0];
+    assert_eq!(event["type"], "score-create");
+    assert_eq!(event["body"]["traceId"], "trace-1");
+    assert_eq!(event["body"]["name"], "helpfulness");
+    assert_eq!(event["body"]["value"], 0.9);
+    assert_eq!(event["body"]["dataType"], "NUMERIC");
+    assert_eq!(event["body"]["comment"], "solid answer");
+    // A trace-level score derives a deterministic, observation-free id.
+    assert_eq!(event["body"]["id"], "trace-1:score:helpfulness");
+    assert!(event["body"].get("observationId").is_none());
+}
+
+#[test]
+fn builds_categorical_and_boolean_scores() {
+    let client =
+        LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t").unwrap();
+
+    let categorical =
+        client.build_score_batch(LangfuseScore::categorical("trace-1", "verdict", "correct"));
+    let cat_body = &categorical["batch"].as_array().unwrap()[0]["body"];
+    assert_eq!(cat_body["value"], "correct");
+    assert_eq!(cat_body["dataType"], "CATEGORICAL");
+
+    let boolean = client.build_score_batch(LangfuseScore::boolean("trace-1", "passed", true));
+    let bool_body = &boolean["batch"].as_array().unwrap()[0]["body"];
+    // Boolean scores serialize as 1/0 with a BOOLEAN data type.
+    assert_eq!(bool_body["value"], 1);
+    assert_eq!(bool_body["dataType"], "BOOLEAN");
+}
+
+#[test]
+fn score_can_target_a_single_observation() {
+    let client =
+        LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t").unwrap();
+    let batch = client.build_score_batch(
+        LangfuseScore::numeric("trace-1", "faithfulness", 1.0)
+            .on_observation("trace-1:agent_turn-model-1"),
+    );
+    let body = &batch["batch"].as_array().unwrap()[0]["body"];
+    assert_eq!(body["observationId"], "trace-1:agent_turn-model-1");
+    // The id namespaces the observation so per-generation scores don't collide
+    // with the trace-level score of the same name.
+    assert_eq!(
+        body["id"],
+        "trace-1:trace-1:agent_turn-model-1:score:faithfulness"
+    );
+}

@@ -16,7 +16,9 @@ use crate::harness::usage::Usage;
 
 mod types;
 
-pub use types::{LangfuseAuth, LangfuseClient, LangfuseTraceConfig};
+pub use types::{
+    LangfuseAuth, LangfuseClient, LangfuseScore, LangfuseScoreValue, LangfuseTraceConfig,
+};
 
 impl LangfuseClient {
     /// Creates a client from a base URL and auth mode.
@@ -158,6 +160,44 @@ impl LangfuseClient {
         }
 
         Ok(json!({ "batch": batch }))
+    }
+
+    /// Builds a `score-create` ingestion batch for `score` without sending it.
+    ///
+    /// The score id defaults to a deterministic value derived from the trace,
+    /// observation, and name so re-scoring the same target is idempotent
+    /// (Langfuse upserts scores by id). Pair with a `trace_id` that matches an
+    /// exported trace — recall the harness/graph exporters default their trace
+    /// id to the run's `root_run_id` — to attach an evaluation to a run.
+    pub fn build_score_batch(&self, score: LangfuseScore) -> Value {
+        let timestamp = iso_ms(now_ms());
+        let score_id = score.id.clone().unwrap_or_else(|| default_score_id(&score));
+        let event_id = format!("{score_id}:score");
+        json!({
+            "batch": [json!({
+                "id": event_id,
+                "timestamp": timestamp,
+                "type": "score-create",
+                "body": clean_nulls(json!({
+                    "id": score_id,
+                    "traceId": score.trace_id,
+                    "observationId": score.observation_id,
+                    "name": score.name,
+                    "value": score.value.to_value(),
+                    "dataType": score.value.data_type(),
+                    "comment": score.comment,
+                })),
+            })]
+        })
+    }
+
+    /// Attaches an evaluation `score` to an already-exported trace (or one of
+    /// its observations) by sending a `score-create` ingestion batch. Mirrors
+    /// Langfuse's `createScore` — the way LangChain/LangGraph traces are graded
+    /// after the fact (human ratings, LLM-as-judge, regression metrics).
+    pub async fn create_score(&self, score: LangfuseScore) -> Result<Value> {
+        let payload = self.build_score_batch(score);
+        self.send_batch(payload).await
     }
 
     /// Sends observations as one Langfuse ingestion batch.
@@ -558,6 +598,16 @@ fn observation_event(
                 "metadata": metadata,
             })),
         }),
+    }
+}
+
+/// Derives a stable score id from its target and name so re-scoring the same
+/// (trace, observation, metric) upserts the existing score rather than
+/// duplicating it. A trace-level score omits the observation segment.
+fn default_score_id(score: &LangfuseScore) -> String {
+    match &score.observation_id {
+        Some(obs) => format!("{}:{}:score:{}", score.trace_id, obs, score.name),
+        None => format!("{}:score:{}", score.trace_id, score.name),
     }
 }
 
