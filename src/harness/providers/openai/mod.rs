@@ -17,6 +17,15 @@
 //! the translation logic and the HTTP transport, keeping OpenAI-specific JSON
 //! out of the rest of the harness.
 //!
+//! Local OpenAI-compatible runtimes (LM Studio, llama.cpp server, …) reject a
+//! named `tool_choice` object and a `json_object` response format with an HTTP
+//! 400. The transport degrades both to shapes they accept — `tool_choice`
+//! `"required"` with the `tools` array filtered to the named tool, and a
+//! permissive `json_schema` — either eagerly via
+//! [`OpenAiModel::with_named_tool_choice`] / [`OpenAiModel::with_json_object_format`]
+//! or automatically as a single retry when a 400 body implicates the shape. See
+//! the module `README.md` "Local-server compatibility" section.
+//!
 //! # Example
 //!
 //! ```no_run

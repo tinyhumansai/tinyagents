@@ -69,6 +69,42 @@ Streaming responses are decoded by a small state machine (`SseState` /
 - Mid-stream error payloads (`data: {"error": ...}`) surface as a stream error
   instead of being silently swallowed.
 
+## Local-server compatibility
+
+Local OpenAI-compatible runtimes (LM Studio, llama.cpp server, and others)
+implement a stricter subset of the Chat Completions request surface than hosted
+OpenAI and reject two request shapes with an HTTP 400:
+
+- **Named `tool_choice`** — `{"type":"function","function":{"name":...}}` is
+  refused (`Invalid tool_choice type: 'object'`); only `none`/`auto`/`required`
+  are accepted.
+- **`response_format: {"type":"json_object"}`** — refused
+  (`'response_format.type' must be 'json_schema' or 'text'`).
+
+The provider degrades both without dropping semantics:
+
+- A named tool choice becomes `tool_choice: "required"` **and** the wire `tools`
+  array is filtered down to just the named tool, so the model still has exactly
+  one tool to call. If the named tool is not in the list, `tools` is left intact
+  and `"required"` is still sent.
+- A `json_object` response format becomes a permissive `json_schema`
+  (`{"name":"json_object","schema":{"type":"object"},"strict":false}`), which
+  still guarantees a JSON object.
+
+Two knobs control this per instance (default `true` = the hosted-OpenAI shapes):
+
+- `.with_named_tool_choice(false)` — always degrade named tool choice.
+- `.with_json_object_format(false)` — always degrade `json_object`.
+
+**Zero-config auto-degrade:** even with the knobs left on, a first attempt that
+fails with an HTTP 400 whose error body implicates `tool_choice` (for a named
+tool-choice request) or `response_format` (for a `json_object` request) is
+retried **once** with the offending shape degraded. The retry covers both the
+unary and streaming paths, and never loops — at most one degraded retry per
+call, and only for the shape the request actually used. This means unmodified
+`from_env()` / preset instances "just work" against LM Studio and friends
+without any per-provider configuration.
+
 ## Error handling
 
 Non-2xx responses are normalized through `parse_error_body` / `provider_error`
