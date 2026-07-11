@@ -93,6 +93,11 @@ pub struct OpenAiModel {
     /// A `User-Agent` header override (e.g. the Codex CLI UA). `None` uses
     /// reqwest's default. See [`Self::with_user_agent`].
     user_agent: Option<String>,
+    /// Inline `<think>…</think>` reasoning-tag extraction config. `Some` (the
+    /// default, plain `think`) moves inline chain-of-thought onto the reasoning
+    /// channel; `None` disables it and passes content through untouched. See
+    /// [`Self::with_reasoning_tag_extraction`].
+    reasoning_tags: Option<ReasoningTagExtraction>,
 }
 
 /// The auth headers `(name, value)` for a given [`AuthStyle`] + credential.
@@ -311,6 +316,10 @@ impl OpenAiModel {
             responses_omit_max_output_tokens: false,
             extra_query_params: Vec::new(),
             user_agent: None,
+            // Inline `<think>` extraction defaults ON: it activates only on an
+            // exact opening tag, so the false-positive risk is negligible while
+            // unhandled leakage is the common local-model failure.
+            reasoning_tags: Some(ReasoningTagExtraction::default()),
         }
     }
 
@@ -418,6 +427,24 @@ impl OpenAiModel {
     /// triggers the same degraded retry automatically (once).
     pub fn with_json_object_format(mut self, supported: bool) -> Self {
         self.json_object_format_supported = supported;
+        self
+    }
+
+    /// Configures inline `<think>…</think>` reasoning-tag extraction for
+    /// OpenAI-compatible reasoning models that embed chain-of-thought in the
+    /// visible `content` string (qwen3, deepseek-r1 distills via Ollama `/v1`,
+    /// LM Studio, llama.cpp) rather than on the `reasoning_content` /
+    /// `reasoning` side-channel.
+    ///
+    /// Enabled by default with the plain `think` tag. Pass `None` to disable it
+    /// (content passes through verbatim), or `Some(config)` to customize the tag
+    /// name, separator, or DeepSeek-R1 template mode via
+    /// [`ReasoningTagExtraction`]. Extracted reasoning surfaces as a leading
+    /// [`ContentBlock::Thinking`](crate::harness::message::ContentBlock::Thinking)
+    /// block on both the unary and streamed paths, consistent with the
+    /// side-channel normalization.
+    pub fn with_reasoning_tag_extraction(mut self, config: Option<ReasoningTagExtraction>) -> Self {
+        self.reasoning_tags = config;
         self
     }
 
@@ -1270,7 +1297,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         })?;
 
         let value: Value = serde_json::from_str(&text)?;
-        parse_response(value)
+        parse_chat_response(value, self.reasoning_tags.as_ref())
     }
 
     /// Streams the OpenAI Chat Completions response as a real [`ModelStream`].
@@ -1327,7 +1354,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             bytes: Box::pin(bytes),
             buf: Vec::new(),
             pending: VecDeque::new(),
-            acc: OpenAiStreamAcc::default(),
+            acc: OpenAiStreamAcc::new(self.reasoning_tags.clone()),
             provider: self.provider.clone(),
             model: self.model.clone(),
             started: false,
