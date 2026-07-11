@@ -739,6 +739,220 @@ async fn collect_sse(raw: Vec<Vec<u8>>) -> Vec<ModelStreamItem> {
     futures::stream::unfold(state, sse_next).collect().await
 }
 
+/// Like [`collect_sse`], but with a specific inline reasoning-tag extraction
+/// config (`None` disables inline extraction).
+async fn collect_sse_with(
+    raw: Vec<Vec<u8>>,
+    reasoning_tags: Option<ReasoningTagExtraction>,
+) -> Vec<ModelStreamItem> {
+    use futures::StreamExt;
+
+    let bytes = futures::stream::iter(
+        raw.into_iter()
+            .map(|v| Ok::<bytes::Bytes, TinyAgentsError>(bytes::Bytes::from(v))),
+    );
+    let state = SseState {
+        bytes: Box::pin(bytes),
+        buf: Vec::new(),
+        pending: std::collections::VecDeque::new(),
+        acc: OpenAiStreamAcc::new(reasoning_tags),
+        provider: "openai".to_string(),
+        model: "gpt-4.1-mini".to_string(),
+        started: false,
+        finished: false,
+        terminal_emitted: false,
+    };
+    futures::stream::unfold(state, sse_next).collect().await
+}
+
+/// Concatenates the reasoning fragments across every streamed `MessageDelta`.
+fn stream_reasoning(items: &[ModelStreamItem]) -> String {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta.reasoning.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Concatenates the text of every leading `Thinking` block on a response.
+fn response_reasoning(response: &ModelResponse) -> String {
+    response
+        .message
+        .content
+        .iter()
+        .filter_map(|block| block.as_thinking().map(|(text, _)| text.to_string()))
+        .collect()
+}
+
+/// Concatenates the visible-text fragments across every streamed `MessageDelta`.
+fn stream_text(items: &[ModelStreamItem]) -> String {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta.text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Builds a one-content-delta SSE body carrying `content`, then a stop chunk.
+fn content_chunks(deltas: &[&str]) -> Vec<Vec<u8>> {
+    let mut raw: Vec<Vec<u8>> = deltas
+        .iter()
+        .map(|d| {
+            format!(
+                "data: {}\n\n",
+                json!({ "choices": [{ "delta": { "content": d } }] })
+            )
+            .into_bytes()
+        })
+        .collect();
+    raw.push(b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n".to_vec());
+    raw.push(b"data: [DONE]\n\n".to_vec());
+    raw
+}
+
+#[tokio::test]
+async fn sse_stream_extracts_inline_think_tags() {
+    let items = collect_sse_with(
+        content_chunks(&["<think>reasoning here</think>", "the answer"]),
+        Some(ReasoningTagExtraction::default()),
+    )
+    .await;
+
+    // Live deltas keep chain-of-thought off the visible channel.
+    assert_eq!(stream_reasoning(&items), "reasoning here");
+    assert_eq!(stream_text(&items), "the answer");
+
+    // The terminal response carries a leading Thinking block + clean text.
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "the answer");
+    assert_eq!(response_reasoning(&response), "reasoning here");
+    assert_eq!(
+        response.message.content.first(),
+        Some(&crate::harness::message::ContentBlock::Thinking {
+            text: "reasoning here".into(),
+            signature: None,
+        })
+    );
+}
+
+#[tokio::test]
+async fn sse_stream_inline_think_tag_split_across_deltas() {
+    // The opening tag is split across three network chunks: `<th`, `ink`, `>`.
+    let items = collect_sse_with(
+        content_chunks(&["before<th", "ink", ">secret</think>after"]),
+        Some(ReasoningTagExtraction::default()),
+    )
+    .await;
+
+    assert_eq!(stream_reasoning(&items), "secret");
+    assert_eq!(stream_text(&items), "beforeafter");
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "beforeafter");
+    assert_eq!(response_reasoning(&response), "secret");
+}
+
+#[tokio::test]
+async fn sse_stream_disabled_extraction_leaks_think_tags() {
+    // With extraction disabled the inline tags pass straight through — the
+    // documented opt-out behavior.
+    let items = collect_sse_with(content_chunks(&["<think>cot</think>answer"]), None).await;
+
+    assert_eq!(stream_text(&items), "<think>cot</think>answer");
+    assert_eq!(stream_reasoning(&items), "");
+}
+
+#[tokio::test]
+async fn sse_stream_side_channel_and_inline_reasoning_combine() {
+    // A response carrying BOTH a side-channel reasoning fragment and an inline
+    // <think> section: side-channel leads, inline follows, joined by the
+    // configured separator.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"side\"}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"<think>inline</think>done\"},\"finish_reason\":\"stop\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let items = collect_sse_with(raw, Some(ReasoningTagExtraction::default())).await;
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "done");
+    assert_eq!(response_reasoning(&response), "side\ninline");
+}
+
+#[tokio::test]
+async fn sse_stream_start_with_reasoning_deepseek_template() {
+    // DeepSeek-R1 template: output begins mid-reasoning, only a closing tag.
+    let items = collect_sse_with(
+        content_chunks(&["chain of thought", "</think>final"]),
+        Some(ReasoningTagExtraction::default().with_start_with_reasoning(true)),
+    )
+    .await;
+
+    assert_eq!(stream_reasoning(&items), "chain of thought");
+    assert_eq!(stream_text(&items), "final");
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "final");
+    assert_eq!(response_reasoning(&response), "chain of thought");
+}
+
+#[test]
+fn parse_chat_response_extracts_inline_think_and_side_channel() {
+    let body = json!({
+        "id": "chatcmpl-think",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "side",
+                    "content": "<think>inline</think>\n\nThe answer is 42."
+                },
+                "finish_reason": "stop"
+            }
+        ]
+    });
+
+    let cfg = ReasoningTagExtraction::default();
+    let response = parse_chat_response(body, Some(&cfg)).unwrap();
+    assert_eq!(response.text(), "The answer is 42.");
+    // Side-channel leads, inline follows, separator-joined.
+    assert_eq!(response_reasoning(&response), "side\ninline");
+}
+
+#[test]
+fn parse_chat_response_without_config_leaves_inline_tags_in_text() {
+    let body = json!({
+        "id": "chatcmpl-plain",
+        "choices": [
+            { "message": { "role": "assistant", "content": "<think>x</think>y" }, "finish_reason": "stop" }
+        ]
+    });
+
+    let response = parse_chat_response(body, None).unwrap();
+    assert_eq!(response.text(), "<think>x</think>y");
+    assert_eq!(response_reasoning(&response), "");
+}
+
 #[tokio::test]
 async fn sse_stream_reassembles_multibyte_char_split_across_chunks() {
     // A 4-byte emoji in the content payload, split down the middle across two

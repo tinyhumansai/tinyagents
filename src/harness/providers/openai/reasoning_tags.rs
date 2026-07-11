@@ -271,16 +271,20 @@ pub(super) fn extract_reasoning(
         return (content.to_string(), String::new());
     }
 
-    let join_trimmed = |parts: &[&str]| {
-        parts
-            .iter()
-            .map(|part| part.trim())
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join(&config.separator)
-    };
+    // Visible text: concatenate the surviving segments (matching the streaming
+    // deltas, which carry no separator) and trim the whitespace that bordered
+    // the removed sections at the ends.
+    let visible = visible_parts.concat().trim().to_string();
+    // Reasoning: join distinct sections with the configured separator, trimming
+    // each so tag-adjacent whitespace does not bloat the thinking block.
+    let reasoning = reasoning_parts
+        .iter()
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(&config.separator);
 
-    (join_trimmed(&visible_parts), join_trimmed(&reasoning_parts))
+    (visible, reasoning)
 }
 
 #[cfg(test)]
@@ -449,10 +453,12 @@ mod tests {
     }
 
     #[test]
-    fn non_streaming_multiple_sections_join_with_separator() {
+    fn non_streaming_multiple_sections_join_reasoning_with_separator() {
         let cfg = ReasoningTagExtraction::default();
         let (visible, reasoning) = extract_reasoning(&cfg, "a<think>r1</think>b<think>r2</think>c");
-        assert_eq!(visible, "a\nb\nc");
+        // Visible segments concatenate (consistent with the streamed deltas);
+        // reasoning sections join with the separator.
+        assert_eq!(visible, "abc");
         assert_eq!(reasoning, "r1\nr2");
     }
 
