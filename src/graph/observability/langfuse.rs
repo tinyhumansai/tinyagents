@@ -128,18 +128,29 @@ impl GraphLangfuseExporter {
         let trace_ts = iso_ms(first.ts_ms);
         let health = GraphHealthSummary::from_observations(observations);
 
-        let mut batch = Vec::with_capacity(observations.len() + 1);
+        let mut batch = Vec::with_capacity(observations.len() + 2);
         batch.push(trace_create(&trace_id, &trace_ts, &trace, first, &health));
+
+        // A structural span for the graph run itself, sitting directly under the
+        // trace. Every step, subgraph, and point event nests under it, and — key
+        // for a unified trace — its id follows the same `{trace}:run:{run_id}`
+        // scheme the harness exporter parents its run spans to. A sub-agent that
+        // a graph node spawns carries `parent_run_id == graph run id`, so its
+        // harness-exported run span nests directly under this graph-run span
+        // rather than floating at the trace root.
+        let run_parent = run_span_id(&trace_id, first.root_run_id.as_str());
+        batch.push(graph_run_span(&trace_id, &run_parent, observations, first));
 
         let mut consumed = vec![false; observations.len()];
         push_span_events(
             &trace_id,
+            &run_parent,
             observations,
             &mut consumed,
             &mut batch,
             self.span_metadata_fn.as_deref(),
         );
-        push_point_events(&trace_id, observations, &consumed, &mut batch);
+        push_point_events(&trace_id, &run_parent, observations, &consumed, &mut batch);
 
         Ok(json!({ "batch": batch }))
     }
@@ -153,6 +164,59 @@ impl GraphLangfuseExporter {
         let payload = self.build_ingestion_batch(trace, observations)?;
         self.client.send_batch(payload).await
     }
+}
+
+/// The stable Langfuse observation id for a run's span, shared with the harness
+/// exporter (`{trace_id}:run:{run_id}`) so a graph run and the harness agent
+/// runs its nodes spawn resolve to one nested tree under the same trace.
+fn run_span_id(trace_id: &str, run_id: &str) -> String {
+    format!("{trace_id}:run:{run_id}")
+}
+
+/// Builds the structural `span-create` for the graph run, parented to the trace.
+///
+/// The span brackets the run: it starts at the first observation and ends at the
+/// last (or at a terminal `RunCompleted`/`RunFailed` when present). It is a plain
+/// structural anchor — run failure is still surfaced by the dedicated
+/// `run.failed` point event — so its only job is to give steps, subgraphs, and
+/// any child agent runs a single parent to nest under.
+fn graph_run_span(
+    trace_id: &str,
+    run_span_id: &str,
+    observations: &[GraphObservation],
+    first: &GraphObservation,
+) -> Value {
+    let start_ts = first.ts_ms;
+    // Prefer a terminal run event's timestamp; else close at the last observation.
+    let end_ts = observations
+        .iter()
+        .rev()
+        .find(|o| {
+            matches!(
+                o.event,
+                GraphEvent::RunCompleted { .. } | GraphEvent::RunFailed { .. }
+            )
+        })
+        .or_else(|| observations.last())
+        .map(|o| o.ts_ms)
+        .unwrap_or(start_ts);
+    json!({
+        "id": run_span_id,
+        "timestamp": iso_ms(end_ts),
+        "type": "span-create",
+        "body": clean_nulls(json!({
+            "id": run_span_id,
+            "traceId": trace_id,
+            "name": first.graph_id.as_str(),
+            "startTime": iso_ms(start_ts),
+            "endTime": iso_ms(end_ts),
+            "metadata": json!({
+                "run_id": first.run_id.as_str(),
+                "root_run_id": first.root_run_id.as_str(),
+                "graph_id": first.graph_id.as_str(),
+            }),
+        })),
+    })
 }
 
 /// Resolves the Langfuse trace id: the configured id when set, else the first
@@ -225,6 +289,7 @@ fn trace_create(
 /// re-emitted as point events. Unpaired starts become open spans (start only).
 fn push_span_events(
     trace_id: &str,
+    run_parent: &str,
     observations: &[GraphObservation],
     consumed: &mut [bool],
     batch: &mut Vec<Value>,
@@ -249,6 +314,7 @@ fn push_span_events(
                     consumed[idx] = true;
                     batch.push(step_span(
                         trace_id,
+                        run_parent,
                         *step,
                         start_ts,
                         Some(obs.ts_ms),
@@ -309,6 +375,7 @@ fn push_span_events(
                     consumed[idx] = true;
                     batch.push(subgraph_span(
                         trace_id,
+                        run_parent,
                         node,
                         namespace,
                         start_ts,
@@ -327,7 +394,7 @@ fn push_span_events(
         while let Some((start_idx, start_ts)) = queue.pop_front() {
             let obs = &observations[start_idx];
             batch.push(step_span(
-                trace_id, step, start_ts, None, obs, obs, injector,
+                trace_id, run_parent, step, start_ts, None, obs, obs, injector,
             ));
         }
     }
@@ -349,6 +416,7 @@ fn push_span_events(
         while let Some((start_idx, start_ts)) = queue.pop_front() {
             batch.push(subgraph_span(
                 trace_id,
+                run_parent,
                 &node,
                 &namespace,
                 start_ts,
@@ -364,6 +432,7 @@ fn push_span_events(
 /// span, mapping `run.failed` to `ERROR` level with the rendered error.
 fn push_point_events(
     trace_id: &str,
+    run_parent: &str,
     observations: &[GraphObservation],
     consumed: &[bool],
     batch: &mut Vec<Value>,
@@ -388,6 +457,7 @@ fn push_point_events(
             "body": clean_nulls(json!({
                 "id": obs.event_id.as_str(),
                 "traceId": trace_id,
+                "parentObservationId": run_parent,
                 "name": obs.event.kind(),
                 "startTime": ts,
                 "level": level,
@@ -402,6 +472,7 @@ fn push_point_events(
 #[allow(clippy::too_many_arguments)]
 fn step_span(
     trace_id: &str,
+    run_parent: &str,
     step: usize,
     start_ts: u64,
     end_ts: Option<u64>,
@@ -413,7 +484,7 @@ fn step_span(
     span_event(
         trace_id,
         &format!("{trace_id}:step:{step}"),
-        None,
+        Some(run_parent.to_string()),
         &format!("step {step}"),
         start_ts,
         end_ts,
@@ -454,8 +525,10 @@ fn node_span(
 }
 
 /// Builds a `span-create` for an embedded subgraph, parented to the trace.
+#[allow(clippy::too_many_arguments)]
 fn subgraph_span(
     trace_id: &str,
+    run_parent: &str,
     node: &NodeId,
     namespace: &[String],
     start_ts: u64,
@@ -467,7 +540,7 @@ fn subgraph_span(
     span_event(
         trace_id,
         &format!("{trace_id}:subgraph:{}", namespace.join("/")),
-        None,
+        Some(run_parent.to_string()),
         &format!("subgraph {}", node.as_str()),
         start_ts,
         end_ts,

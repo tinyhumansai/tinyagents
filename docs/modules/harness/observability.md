@@ -343,11 +343,41 @@ replays them verbatim.
 
 Downstream, the Langfuse exporter reads these fields to populate the
 Input/Output panels of a generation (`generation-create`) and a tool
-observation (`tool-create`). With capture disabled the fields are absent and the
+observation (`span-create`). With capture disabled the fields are absent and the
 observation renders with ids, timing, and usage only. The harness exporter also
 defaults the trace-level metadata from the run lineage (root/first run ids and
 parent), mirroring the graph exporter, so a trace is correlatable even when the
 caller passes no metadata.
+
+## Langfuse Observation Tree
+
+The harness exporter mirrors LangChain's callback **run tree** rather than a
+flat event list. For each distinct `run_id` in a batch it emits one
+`span-create` (`{trace_id}:run:{run_id}`, named `agent` for the top-level run
+and `sub-agent` for any spawned child), folding the `RunStarted`/`RunCompleted`/
+`RunFailed` events into that span's start/end window and ERROR status. Every
+model generation, tool span, and remaining event then nests under its run span
+via `parentObservationId`.
+
+Because run-span ids are deterministic and trace-namespaced, the tree spans
+**separately exported batches**: a sub-agent run whose observations are shipped
+in their own batch carries `parent_run_id`, so its run span resolves to
+`{trace_id}:run:{parent_run_id}` and nests under the parent agent's span in the
+same trace. The graph exporter emits a matching `{trace_id}:run:{run_id}` span
+for the graph run, so a graph run and the agent runs its nodes spawn
+reconstruct one unified nested tree.
+
+## Scores
+
+`LangfuseClient::create_score` (and the offline `build_score_batch`) mirrors
+Langfuse's `createScore` — the way a LangChain/LangGraph trace is graded after
+the fact (human ratings, LLM-as-judge, regression metrics). A `LangfuseScore`
+is numeric, categorical, or boolean; scoped to a `trace_id` and optionally to a
+single observation id; and carries an optional comment. Score ids default to a
+deterministic value derived from the target and metric name, so re-scoring the
+same target upserts rather than duplicating. Point the score's `trace_id` at an
+exported trace (recall both exporters default the trace id to the run's
+`root_run_id`) to attach the evaluation to that run.
 
 ## Graph Events
 

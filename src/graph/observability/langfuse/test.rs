@@ -172,13 +172,22 @@ fn steps_and_nodes_become_timed_spans() {
         .unwrap();
     let events = batch["batch"].as_array().unwrap();
 
+    // The graph run itself is a structural span under the trace, named for the
+    // graph, that every step nests beneath. Its id uses the shared
+    // `{trace}:run:{run}` scheme so harness sub-agent runs (parent_run_id = the
+    // graph run) nest under it too, unifying graph + agent into one trace tree.
+    let run_span = find(events, "span-create", "root-1:run:root-1").expect("graph run span");
+    assert_eq!(run_span["body"]["name"], "demo-graph");
+    assert!(run_span["body"].get("parentObservationId").is_none());
+    assert_eq!(run_span["body"]["startTime"], "2024-01-01T00:00:01.000Z");
+
     // Superstep span with real start/end times.
     let step = find(events, "span-create", "root-1:step:1").expect("step span");
     assert_eq!(step["body"]["name"], "step 1");
     assert_eq!(step["body"]["startTime"], "2024-01-01T00:00:01.010Z");
     assert_eq!(step["body"]["endTime"], "2024-01-01T00:00:01.090Z");
-    // Steps parent to the trace, not another span.
-    assert!(step["body"].get("parentObservationId").is_none());
+    // Steps parent to the graph-run span, not straight to the trace.
+    assert_eq!(step["body"]["parentObservationId"], "root-1:run:root-1");
 
     // Node a completed cleanly and is parented to its step span.
     let node_a = find(events, "span-create", "root-1:node:a:1").expect("node a span");

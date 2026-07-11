@@ -40,7 +40,14 @@ surface and operational constraints.
     `AgentLatencyMetrics::from_observations(&[AgentObservation])`.
 - `LangfuseAuth`, `LangfuseClient`, `LangfuseTraceConfig` (re-exported from the
   private `langfuse` submodule) — the Langfuse exporter used to ship harness
-  (and, via shared helpers, graph) traces to Langfuse.
+  (and, via shared helpers, graph) traces to Langfuse. The exporter emits a
+  per-run span (`{trace}:run:{run_id}`, `agent`/`sub-agent`) and nests every
+  generation, tool span, and event under it, so a run — and sub-agent recursion
+  across separately-exported batches — surfaces as a tree, matching LangChain's
+  callback run hierarchy.
+- `LangfuseScore` / `LangfuseScoreValue` — an evaluation score (numeric,
+  categorical, or boolean; trace- or observation-scoped) attached to an exported
+  trace via `LangfuseClient::create_score`, mirroring Langfuse's `createScore`.
 
 ## Persistence bridge
 

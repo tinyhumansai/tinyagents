@@ -421,4 +421,24 @@ async fn graph_observations_export_to_langfuse_trace_and_spans() {
             .any(|e| e["type"] == "span-create" && e["body"]["level"] == "ERROR"),
         "healthy run has no ERROR spans"
     );
+
+    // The graph run is a structural span under the trace, and every step nests
+    // beneath it. Its id follows the `{trace}:run:{run}` scheme the harness
+    // exporter parents its agent run spans to, so a graph run and the sub-agent
+    // runs its nodes spawn reconstruct a single nested tree under one trace.
+    let graph_run_span = format!("{run_id}:run:{run_id}");
+    let run_span = events
+        .iter()
+        .find(|e| e["body"]["id"] == graph_run_span)
+        .expect("graph run span");
+    assert_eq!(run_span["type"], "span-create");
+    assert!(run_span["body"].get("parentObservationId").is_none());
+    let step_1 = events
+        .iter()
+        .find(|e| e["body"]["id"] == format!("{run_id}:step:1"))
+        .expect("step 1 span");
+    assert_eq!(step_1["body"]["parentObservationId"], graph_run_span);
+    // A harness agent run spawned by a graph node carries parent_run_id == the
+    // graph run id, so its harness run span resolves to exactly this parent id
+    // and nests under the graph run rather than floating at the trace root.
 }

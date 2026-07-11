@@ -43,10 +43,12 @@ so existing runs are unchanged.
   `from_status`).
 - `GraphLangfuseExporter` (`langfuse/`) — exports a run's observations to
   Langfuse, turning supersteps and nodes into timed spans (failures promoted
-  to `ERROR`) and attaching the health summary to the trace. It shares the
-  harness `LangfuseClient` transport and defaults its `traceId` to the run's
-  `root_run_id`, so a graph run and the agent/tool runs its nodes spawn land
-  under one trace.
+  to `ERROR`) and attaching the health summary to the trace. It emits a
+  structural graph-run span (`{trace}:run:{run_id}`) that steps, subgraphs, and
+  point events nest under. It shares the harness `LangfuseClient` transport and
+  defaults its `traceId` to the run's `root_run_id`; because the graph-run span
+  uses the same id scheme the harness exporter parents its agent run spans to,
+  a graph run and the agent/tool runs its nodes spawn nest into one trace tree.
 
 ## Persistence bridge
 
