@@ -1157,6 +1157,40 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             .post_json(&body, request.timeout_ms, true, "stream request")
             .await?;
 
+        // Leniency: some OpenAI-compatible endpoints (and test mocks) ignore
+        // `stream: true` and return a single non-streaming JSON body. Detect a
+        // non-`text/event-stream` content-type and parse it as one completion,
+        // surfaced as `Started` + one `MessageDelta` + `Completed` — matching the
+        // tolerant behaviour of hand-rolled OpenAI-compatible clients so a
+        // non-streaming upstream still drives a streaming turn.
+        let is_event_stream = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.to_ascii_lowercase().contains("text/event-stream"))
+            .unwrap_or(false);
+        if !is_event_stream {
+            let text = response.text().await.map_err(|e| {
+                TinyAgentsError::Model(format!("openai non-stream stream-body read failed: {e}"))
+            })?;
+            let value: Value = serde_json::from_str(&text)?;
+            let mut parsed = parse_response(value)?;
+            if !self.profile.tool_calling && !request.tools.is_empty() {
+                parsed = prompt_tools::apply_to_response(parsed);
+            }
+            let delta = crate::harness::message::MessageDelta {
+                text: parsed.text(),
+                reasoning: String::new(),
+                tool_call: None,
+            };
+            let items = vec![
+                ModelStreamItem::Started,
+                ModelStreamItem::MessageDelta(delta),
+                ModelStreamItem::Completed(parsed),
+            ];
+            return Ok(Box::pin(futures::stream::iter(items)));
+        }
+
         // Forward each raw chunk as the `bytes::Bytes` buffer reqwest already
         // produced (a cheap refcount clone, no per-chunk copy); only the error
         // type is mapped onto the crate error. `SseState` is crate-internal,
