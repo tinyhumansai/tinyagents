@@ -112,7 +112,32 @@ impl ToolCall {
             id: id.into(),
             name: name.into(),
             arguments,
+            invalid: None,
         }
+    }
+
+    /// Creates a tool call the provider could not parse: `raw` (the unparseable
+    /// arguments string) is preserved as the arguments value and `reason`
+    /// records why parsing failed. The agent loop feeds `reason` back to the
+    /// model as an error tool result instead of failing the run.
+    pub fn invalid(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        raw: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            arguments: Value::String(raw.into()),
+            invalid: Some(reason.into()),
+        }
+    }
+
+    /// Returns `true` when the model emitted unparseable arguments for this call
+    /// (see [`Self::invalid`]).
+    pub fn is_invalid(&self) -> bool {
+        self.invalid.is_some()
     }
 }
 

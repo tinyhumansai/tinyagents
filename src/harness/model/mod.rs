@@ -836,6 +836,7 @@ impl StreamAccumulator {
                 name: name.unwrap_or_default(),
                 arguments: serde_json::from_str(&args).unwrap_or(Value::Null),
                 id,
+                invalid: None,
             })
             .collect();
         let message = AssistantMessage {

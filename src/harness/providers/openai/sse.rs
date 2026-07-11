@@ -149,7 +149,12 @@ impl OpenAiStreamAcc {
     }
 
     /// Consumes the accumulator into the final, merged [`ModelResponse`].
-    fn into_response(self) -> Result<ModelResponse> {
+    ///
+    /// Infallible: a tool call whose reassembled arguments cannot be parsed is
+    /// surfaced as an [`ToolCall::invalid`] call (raw arguments preserved) rather
+    /// than failing the whole stream, so the agent loop can feed the error back
+    /// to the model and the call still resolves instead of stalling the loop.
+    fn into_response(self) -> ModelResponse {
         let mut content = Vec::new();
         // Reasoning streamed on the side channel leads the final message as a
         // `Thinking` block so it survives persistence and provider replay.
@@ -171,28 +176,21 @@ impl OpenAiStreamAcc {
             .into_iter()
             .enumerate()
             .filter(|(_, b)| !b.name.is_empty() || !b.args.is_empty())
-            .map(|(idx, b)| {
-                let id = tool_call_id(idx, &b.id);
-                Ok(ToolCall {
-                    id: id.clone(),
-                    name: b.name.clone(),
-                    arguments: parse_tool_arguments("openai stream", &id, &b.name, &b.args)?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .map(|(idx, b)| tool_call_from_wire("openai stream", idx, &b.id, &b.name, &b.args))
+            .collect::<Vec<_>>();
         let message = AssistantMessage {
             id: self.id,
             content,
             tool_calls,
             usage: self.usage,
         };
-        Ok(ModelResponse {
+        ModelResponse {
             message,
             usage: self.usage,
             finish_reason: self.finish_reason,
             raw: None,
             resolved_model: None,
-        })
+        }
     }
 }
 
@@ -346,20 +344,11 @@ pub(super) async fn sse_next(mut state: SseState) -> Option<(ModelStreamItem, Ss
                 return None;
             }
             state.terminal_emitted = true;
-            return match std::mem::take(&mut state.acc).into_response() {
-                Ok(response) => Some((ModelStreamItem::Completed(response), state)),
-                Err(error) => {
-                    let provider_error = ProviderError {
-                        provider: state.provider.clone(),
-                        model: Some(state.model.clone()),
-                        code: Some("invalid_tool_arguments".to_string()),
-                        message: error.to_string(),
-                        retryable: false,
-                        ..ProviderError::default()
-                    };
-                    Some((ModelStreamItem::ProviderFailed(provider_error), state))
-                }
-            };
+            // Reconstruction is infallible: malformed tool arguments become an
+            // `ToolCall::invalid` call inside the response (not a stream
+            // failure), so the agent loop recovers instead of aborting the run.
+            let response = std::mem::take(&mut state.acc).into_response();
+            return Some((ModelStreamItem::Completed(response), state));
         }
         match state.bytes.next().await {
             Some(Ok(chunk)) => {

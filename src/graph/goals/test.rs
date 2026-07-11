@@ -284,6 +284,7 @@ mod tool_tests {
             id: id.to_string(),
             name: name.to_string(),
             arguments: args,
+            invalid: None,
         }
     }
 

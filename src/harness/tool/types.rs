@@ -70,8 +70,23 @@ pub struct ToolCall {
     /// Name of the tool to invoke.
     pub name: String,
     /// Arguments supplied by the model, as raw JSON.
+    ///
+    /// When [`Self::invalid`] is set, this preserves the raw (unparseable)
+    /// arguments string the model emitted (as a JSON string value) instead of a
+    /// parsed object.
     #[serde(default)]
     pub arguments: Value,
+    /// Set when the model emitted arguments that could not be parsed as JSON.
+    ///
+    /// Small local models (Ollama, LM Studio, llama.cpp, vLLM) occasionally emit
+    /// malformed argument JSON. Rather than fail the whole model call, the
+    /// provider surfaces the call with this error message and the raw arguments
+    /// preserved in [`Self::arguments`]; the agent loop feeds the message back to
+    /// the model as an error tool result so it can retry (mirroring LangChain's
+    /// `invalid_tool_calls` and the AI SDK's invalid dynamic tool parts). `None`
+    /// on a well-formed call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid: Option<String>,
 }
 
 /// The outcome of executing a [`ToolCall`].

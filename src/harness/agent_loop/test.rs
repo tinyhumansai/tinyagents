@@ -149,6 +149,29 @@ fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> Mod
     }
 }
 
+/// Builds a tool-call response whose arguments the provider could not parse,
+/// mirroring what the OpenAI provider produces for a small local model that
+/// emitted malformed argument JSON: the raw string is preserved and the call is
+/// marked [`ToolCall::invalid`].
+fn invalid_tool_call_response(id: &str, name: &str, raw: &str) -> ModelResponse {
+    let reason = format!(
+        "openai response contained invalid JSON arguments for tool call `{id}` (`{name}`): \
+         EOF while parsing a value; raw arguments: {raw:?}"
+    );
+    ModelResponse {
+        message: AssistantMessage {
+            id: Some(format!("msg-{id}")),
+            content: Vec::new(),
+            tool_calls: vec![ToolCall::invalid(id, name, raw, reason)],
+            usage: Some(Usage::new(7, 3)),
+        },
+        usage: Some(Usage::new(7, 3)),
+        finish_reason: Some("tool_calls".to_string()),
+        raw: None,
+        resolved_model: None,
+    }
+}
+
 /// Builds a plain-text assistant response with explicit usage.
 fn text_response(text: &str, input: u64, output: u64) -> ModelResponse {
     ModelResponse {
@@ -758,6 +781,64 @@ async fn invalid_tool_arguments_return_tool_error_recovers() {
     assert!(
         injected,
         "recovery message should be injected into the transcript"
+    );
+}
+
+#[tokio::test]
+async fn malformed_tool_arguments_recover_as_error_tool_result() {
+    // A small local model emitted arguments the provider could not parse, so the
+    // response carries a `ToolCall::invalid` call. The loop must feed the parse
+    // error back to the model as a tool result and continue — *without* running
+    // the tool and *without* failing the run — so it can retry. This holds under
+    // the default `InvalidArgsPolicy::Fail` (which governs schema validation of
+    // well-formed args, not unparseable ones), proving the leniency is
+    // unconditional.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            invalid_tool_call_response("call-x", "strict_lookup", "{\"query\":"),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StrictLookupTool {
+        calls: Arc::clone(&calls),
+    }));
+
+    use crate::harness::testkit::EventRecorder;
+    let recorder = EventRecorder::new();
+    let ctx =
+        RunContext::new(RunConfig::new("malformed-args-run"), ()).with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("lookup")])
+        .await
+        .expect("malformed args recover without failing the run");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "the tool implementation must not run on unparseable arguments"
+    );
+    // The injected tool-error message carries the parse detail so the model can
+    // self-correct on the next turn.
+    let injected = run
+        .messages
+        .iter()
+        .any(|m| format!("{m:?}").contains("invalid JSON arguments"));
+    assert!(
+        injected,
+        "an error tool result should be injected into the transcript"
+    );
+    // The recovery is surfaced as an `InvalidToolArgs` event.
+    assert!(
+        recorder
+            .events()
+            .iter()
+            .any(|e| matches!(e, AgentEvent::InvalidToolArgs { .. })),
+        "an InvalidToolArgs event should be emitted; got kinds {:?}",
+        recorder.kinds()
     );
 }
 
