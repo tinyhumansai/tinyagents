@@ -140,8 +140,51 @@ pub struct FunctionChunkWire {
     #[serde(default)]
     pub name: Option<String>,
     /// Incremental stringified-JSON arguments fragment.
-    #[serde(default)]
+    ///
+    /// OpenAI streams this as a string fragment, but some OpenAI-compatible
+    /// local servers emit the completed arguments as a JSON **object** in a
+    /// single delta. [`deserialize_optional_arguments`] normalizes either shape
+    /// to the stringified form the accumulator concatenates.
+    #[serde(default, deserialize_with = "deserialize_optional_arguments")]
     pub arguments: Option<String>,
+}
+
+/// Normalizes a tool-call `function.arguments` payload to the stringified-JSON
+/// form the provider expects.
+///
+/// OpenAI sends `arguments` as a JSON **string**, but OpenAI-compatible local
+/// servers (LM Studio, some vLLM/llama.cpp builds) send it as a JSON **object**
+/// instead, or omit it entirely. A single unexpected shape used to fail
+/// deserialization of the *whole* response, so the model appeared "broken".
+/// This accepts a string, an object/array (re-serialized to its JSON text), or
+/// a null/absent value (an empty string).
+fn deserialize_arguments<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text,
+        // An object/array (or any non-string scalar) is re-serialized to its
+        // canonical JSON text so downstream string parsing is uniform.
+        Some(other) => other.to_string(),
+    })
+}
+
+/// The streaming counterpart of [`deserialize_arguments`], preserving the
+/// `Option` wrapper used by incremental deltas (a fragment that carries no
+/// `arguments` key stays `None` rather than becoming an empty string).
+fn deserialize_optional_arguments<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => Some(text),
+        Some(other) => Some(other.to_string()),
+    })
 }
 
 /// The `content` of a [`ChatMessageWire`].
@@ -228,9 +271,18 @@ pub struct FunctionSchemaWire {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCallWire {
     /// Provider-assigned call id.
+    ///
+    /// Defaulted because local servers violate the OpenAI contract: Ollama's
+    /// `/v1` endpoint omitted `id` entirely until v0.12.11. An empty string is
+    /// treated as absent by the translator, which synthesizes a stable
+    /// `tool-{index}` fallback so result correlation still works.
+    #[serde(default)]
     pub id: String,
     /// Always `"function"`.
-    #[serde(rename = "type")]
+    ///
+    /// Defaulted because some OpenAI-compatible servers omit `type`; a single
+    /// missing field used to fail deserialization of the whole response.
+    #[serde(rename = "type", default)]
     pub kind: String,
     /// The function name and stringified-JSON arguments.
     pub function: FunctionCallWire,
@@ -240,8 +292,15 @@ pub struct ToolCallWire {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FunctionCallWire {
     /// Function name.
+    #[serde(default)]
     pub name: String,
     /// Arguments encoded as a JSON **string** (OpenAI sends stringified JSON).
+    ///
+    /// Some OpenAI-compatible local servers send a JSON **object** instead of a
+    /// string, or omit the field; [`deserialize_arguments`] normalizes any of
+    /// those shapes to the stringified form so one non-conforming field can no
+    /// longer fail the whole response.
+    #[serde(default, deserialize_with = "deserialize_arguments")]
     pub arguments: String,
 }
 
