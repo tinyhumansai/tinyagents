@@ -69,6 +69,41 @@ Streaming responses are decoded by a small state machine (`SseState` /
 - Mid-stream error payloads (`data: {"error": ...}`) surface as a stream error
   instead of being silently swallowed.
 
+## Inline reasoning-tag extraction
+
+Reasoning models served through OpenAI-compatible local runtimes (qwen3 and
+deepseek-r1 distills via Ollama `/v1`, LM Studio, llama.cpp) often emit their
+chain-of-thought **inline** in the normal `content` string wrapped in
+`<think>…</think>`, rather than on the `reasoning_content` / `reasoning`
+side-channel. `reasoning_tags.rs` moves that inline chain-of-thought onto the
+reasoning channel (a leading `ContentBlock::Thinking` block) and strips the
+tags from the visible text, matching how the side-channel is normalized.
+
+- **Enabled by default** for the plain `think` tag. It activates only on an
+  exact opening tag, so the false-positive risk is negligible while unhandled
+  leakage is the common local-model failure. Toggle with
+  `OpenAiModel::with_reasoning_tag_extraction(config)`: pass `None` to disable
+  (content passes through verbatim) or `Some(ReasoningTagExtraction::new(tag))`
+  to customize the tag name / separator.
+- **Streaming-safe.** Content deltas are scanned incrementally; any trailing
+  bytes that could be the prefix of an opening/closing tag are held back until
+  the next delta resolves them (the Vercel AI SDK's `getPotentialStartIndex`
+  trick), so a tag split across deltas is neither leaked nor mangled. A lone
+  `<` or a look-alike such as `<thinker>` is released as soon as it is
+  disproven, never held forever.
+- **DeepSeek-R1 template mode.** When the output BEGINS mid-reasoning with no
+  opening tag and only a closing `</think>` appears, set
+  `ReasoningTagExtraction::default().with_start_with_reasoning(true)` (the AI
+  SDK's `startWithReasoning`); off by default.
+- **Side-channel interaction.** Inline-tag reasoning and side-channel reasoning
+  both feed the single leading `Thinking` block; when both appear, side-channel
+  reasoning leads and inline reasoning follows, joined by the configured
+  separator. The streamed terminal `Completed` response recomputes the split
+  from the raw accumulated content so it is consistent with the non-streaming
+  path (visible segments concatenate; the block-bordering whitespace is
+  trimmed). Live deltas carry no separator/trim, so the authoritative clean
+  text is the terminal response.
+
 ## Error handling
 
 Non-2xx responses are normalized through `parse_error_body` / `provider_error`
@@ -102,6 +137,7 @@ via `provider_failure_message`. Malformed JSON bodies surface as
 | `mod.rs` | Module wiring: shared imports/constants and re-exports (`OpenAiModel`). |
 | `transport.rs` | `OpenAiModel` construction, provider presets, request building, and the `ChatModel` impl (`invoke`/`stream`). |
 | `convert.rs` | Request/response translation between harness types and the OpenAI wire format. |
+| `reasoning_tags.rs` | Streaming-safe inline `<think>…</think>` reasoning-tag extraction (`ReasoningTagExtraction`, `ReasoningTagStream`, `extract_reasoning`). |
 | `sse.rs` | SSE stream parsing and incremental accumulation (`SseState`, `OpenAiStreamAcc`, `sse_next`). |
 | `types.rs` | Wire (de)serialization shapes (`ModelListWire`, `ModelListing`, request/response bodies). |
 | `test.rs` | Unit tests (SSE boundary decoding, tool-call correlation, error mapping, presets). |
