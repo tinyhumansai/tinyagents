@@ -272,12 +272,29 @@ async fn harness_run_with_capture_exports_generation_and_tool_io() {
 
     // Tool observations are exported as `span-create` (a valid Langfuse
     // ingestion type); `tool-create` is rejected by older/self-hosted Langfuse.
+    // Select by input payload since the per-run "agent" span is also a
+    // `span-create` (the run tree's root), sitting above the tool span.
     let tool = events
         .iter()
-        .find(|e| e["type"] == "span-create")
+        .find(|e| e["type"] == "span-create" && e["body"].get("input").is_some())
         .expect("a tool observation");
     assert_eq!(tool["body"]["input"]["q"], "weather");
     assert_eq!(tool["body"]["output"], "tool-output");
+
+    // Every generation and the tool span nest under the run's span, so the
+    // exported trace renders as a tree rather than a flat event list.
+    let run_span = events
+        .iter()
+        .find(|e| e["type"] == "span-create" && e["body"]["name"] == "agent")
+        .expect("a run span");
+    let run_span_id = run_span["body"]["id"].as_str().unwrap();
+    assert_eq!(tool["body"]["parentObservationId"], run_span_id);
+    assert!(
+        generations
+            .iter()
+            .all(|g| g["body"]["parentObservationId"] == run_span_id),
+        "every generation nests under the run span"
+    );
 }
 
 /// A two-node line graph over `i32` with overwrite semantics: `a -> b`.
@@ -404,4 +421,24 @@ async fn graph_observations_export_to_langfuse_trace_and_spans() {
             .any(|e| e["type"] == "span-create" && e["body"]["level"] == "ERROR"),
         "healthy run has no ERROR spans"
     );
+
+    // The graph run is a structural span under the trace, and every step nests
+    // beneath it. Its id follows the `{trace}:run:{run}` scheme the harness
+    // exporter parents its agent run spans to, so a graph run and the sub-agent
+    // runs its nodes spawn reconstruct a single nested tree under one trace.
+    let graph_run_span = format!("{run_id}:run:{run_id}");
+    let run_span = events
+        .iter()
+        .find(|e| e["body"]["id"] == graph_run_span)
+        .expect("graph run span");
+    assert_eq!(run_span["type"], "span-create");
+    assert!(run_span["body"].get("parentObservationId").is_none());
+    let step_1 = events
+        .iter()
+        .find(|e| e["body"]["id"] == format!("{run_id}:step:1"))
+        .expect("step 1 span");
+    assert_eq!(step_1["body"]["parentObservationId"], graph_run_span);
+    // A harness agent run spawned by a graph node carries parent_run_id == the
+    // graph run id, so its harness run span resolves to exactly this parent id
+    // and nests under the graph run rather than floating at the trace root.
 }

@@ -313,14 +313,17 @@ The batch maps the graph run onto Langfuse's trace/observation model:
 - one `trace-create` (id defaults to the run's `root_run_id`; name defaults to
   the `graph_id`; session defaults to the run's `thread_id`) with the
   `GraphHealthSummary` folded into trace metadata
+- one structural `span-create` for the graph run (`{trace}:run:{run_id}`, named
+  for the `graph_id`), parented to the trace, bracketing the whole run
 - one timed `span-create` per superstep (`{trace}:step:{n}`), parented to the
-  trace
+  graph-run span
 - one timed `span-create` per node handler (`{trace}:node:{name}:{step}`),
   parented to its superstep span; `node.failed` promotes the span to `ERROR`
   level with the rendered error as `statusMessage`
-- one timed `span-create` per embedded subgraph
+- one timed `span-create` per embedded subgraph, parented to the graph-run span
 - an `event-create` for every remaining observation (routes, checkpoints,
-  interrupts, custom writes, run lifecycle), with `run.failed` mapped to `ERROR`
+  interrupts, custom writes, run lifecycle), parented to the graph-run span,
+  with `run.failed` mapped to `ERROR`
 
 Still-running work (a `node.started` with no terminal event) is exported as an
 open span with a start time but no end time.
@@ -333,6 +336,14 @@ to that root run id, exporting a graph run **and** its child agent runs lands
 every graph step, node, model generation, and tool call under one Langfuse
 trace. This is what makes full end-to-end telemetry — including tool health and
 tool timing — visible in a single trace tree.
+
+The nesting is exact, not just co-located: the graph-run span
+(`{trace}:run:{run_id}`) uses the same id scheme the harness exporter parents
+its agent run spans to. A sub-agent a node spawns carries `parent_run_id` equal
+to the graph run id, so its harness-exported run span resolves to
+`{trace}:run:{graph_run_id}` and nests directly under the graph-run span rather
+than floating at the trace root — the graph, its nodes, and their agents form
+one contiguous tree.
 
 ## Debug Payloads
 

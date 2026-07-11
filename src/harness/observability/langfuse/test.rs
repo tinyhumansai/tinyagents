@@ -177,28 +177,47 @@ fn populates_generation_and_tool_io_when_captured() {
         .unwrap();
 
     let events = batch["batch"].as_array().unwrap();
-    assert_eq!(events[1]["type"], "generation-create");
-    assert_eq!(events[1]["body"]["input"][0]["content"], "hi");
-    assert_eq!(events[1]["body"]["output"]["content"], "hello there");
-    assert_eq!(events[2]["type"], "span-create");
-    assert_eq!(events[2]["body"]["input"]["query"], "weather");
-    assert_eq!(events[2]["body"]["output"], "sunny");
+    let generation = events
+        .iter()
+        .find(|e| e["type"] == "generation-create")
+        .expect("a generation-create observation");
+    let tool = events
+        .iter()
+        .find(|e| e["type"] == "span-create" && e["body"]["name"] == "lookup")
+        .expect("the tool span");
+    assert_eq!(generation["body"]["input"][0]["content"], "hi");
+    assert_eq!(generation["body"]["output"]["content"], "hello there");
+    assert_eq!(tool["body"]["input"]["query"], "weather");
+    assert_eq!(tool["body"]["output"], "sunny");
 
     // The loop-captured start time gives each observation a real duration
     // (start < end) instead of the zero-width start == end point.
-    assert_eq!(events[1]["body"]["startTime"], iso_ms(1_704_067_199_000));
-    assert_eq!(events[1]["body"]["endTime"], iso_ms(1_704_067_200_000));
-    assert_eq!(events[2]["body"]["startTime"], iso_ms(1_704_067_199_500));
+    assert_eq!(generation["body"]["startTime"], iso_ms(1_704_067_199_000));
+    assert_eq!(generation["body"]["endTime"], iso_ms(1_704_067_200_000));
+    assert_eq!(tool["body"]["startTime"], iso_ms(1_704_067_199_500));
     // The tool span's end time is now start + the event's own duration_ms
     // (1_704_067_199_500 + 250), a real execution window rather than the
     // journal-append timestamp.
-    assert_eq!(events[2]["body"]["endTime"], iso_ms(1_704_067_199_750));
+    assert_eq!(tool["body"]["endTime"], iso_ms(1_704_067_199_750));
     // Result size rides metadata even though this fixture also captured output.
-    assert_eq!(events[2]["body"]["metadata"]["output_bytes"], 5);
+    assert_eq!(tool["body"]["metadata"]["output_bytes"], 5);
+
+    // Both the generation and the tool span nest under the run's span, which
+    // itself sits directly under the trace — the LangChain run-tree shape.
+    assert_eq!(
+        generation["body"]["parentObservationId"],
+        "root-1:run:run-1"
+    );
+    assert_eq!(tool["body"]["parentObservationId"], "root-1:run:run-1");
+    let run_span = events
+        .iter()
+        .find(|e| e["body"]["id"] == "root-1:run:run-1")
+        .expect("a run span");
+    assert_eq!(run_span["type"], "span-create");
 
     // Observation metadata carries only lineage + event kind, not the whole
     // event payload (which would duplicate input/output already in `body`).
-    let gen_meta = &events[1]["body"]["metadata"];
+    let gen_meta = &generation["body"]["metadata"];
     assert_eq!(gen_meta["event_kind"], "model.completed");
     assert!(
         gen_meta.get("event").is_none(),
@@ -269,7 +288,11 @@ fn call_scoped_observation_ids_are_unique_per_trace() {
             .as_str()
             .unwrap()
             .to_string();
-        let span_id = events.iter().find(|e| e["type"] == "span-create").unwrap()["body"]["id"]
+        // The tool span, not the run span (which is also a `span-create`).
+        let span_id = events
+            .iter()
+            .find(|e| e["type"] == "span-create" && e["body"]["name"] == "lookup")
+            .unwrap()["body"]["id"]
             .as_str()
             .unwrap()
             .to_string();
@@ -290,6 +313,109 @@ fn call_scoped_observation_ids_are_unique_per_trace() {
     );
     assert_eq!(gen_a, "thread-A:turn-1:agent_turn-model-1");
     assert_eq!(span_b, "thread-B:turn-2:agent_turn-tool-1");
+}
+
+#[test]
+fn sub_agent_run_nests_under_its_parent_run_span() {
+    // A child run (distinct run_id, parented to the top-level run) exported in
+    // its own batch must reference its parent's run span so the two batches
+    // reconstruct one recursion tree under a shared trace.
+    let client =
+        LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t").unwrap();
+
+    let child = AgentObservation {
+        event_id: EventId::new("evt-child"),
+        run_id: RunId::new("child-run"),
+        parent_run_id: Some(RunId::new("run-1")),
+        root_run_id: RunId::new("root-1"),
+        offset: 0,
+        ts_ms: 1_704_067_200_500,
+        event: AgentEvent::ModelCompleted {
+            call_id: CallId::new("child-model"),
+            started_at_ms: None,
+            usage: None,
+            input: None,
+            output: None,
+        },
+    };
+
+    let batch = client
+        .build_ingestion_batch(
+            LangfuseTraceConfig {
+                trace_id: Some("root-1".to_string()),
+                ..Default::default()
+            },
+            &[child],
+        )
+        .unwrap();
+    let events = batch["batch"].as_array().unwrap();
+
+    // The child run gets a "sub-agent" span parented to the parent run's span,
+    // and its generation nests under that sub-agent span.
+    let run_span = events
+        .iter()
+        .find(|e| e["type"] == "span-create" && e["body"]["name"] == "sub-agent")
+        .expect("a sub-agent run span");
+    assert_eq!(run_span["body"]["id"], "root-1:run:child-run");
+    assert_eq!(
+        run_span["body"]["parentObservationId"], "root-1:run:run-1",
+        "the sub-agent span nests under its parent run's span (from the parent batch)"
+    );
+    let generation = events
+        .iter()
+        .find(|e| e["type"] == "generation-create")
+        .expect("the child generation");
+    assert_eq!(
+        generation["body"]["parentObservationId"],
+        "root-1:run:child-run"
+    );
+}
+
+#[test]
+fn run_span_carries_run_error_and_window() {
+    // RunStarted/RunFailed are folded into the run span rather than emitted as
+    // standalone events: the span carries the start/end window and ERROR status.
+    let client =
+        LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t").unwrap();
+    let batch = client
+        .build_ingestion_batch(
+            LangfuseTraceConfig::default(),
+            &[
+                obs(
+                    0,
+                    AgentEvent::RunStarted {
+                        run_id: RunId::new("run-1"),
+                        thread_id: None,
+                    },
+                ),
+                obs(
+                    1,
+                    AgentEvent::RunFailed {
+                        run_id: RunId::new("run-1"),
+                        error: "boom".to_string(),
+                    },
+                ),
+            ],
+        )
+        .unwrap();
+    let events = batch["batch"].as_array().unwrap();
+
+    // No standalone run.started / run.failed events survive.
+    assert!(
+        !events
+            .iter()
+            .any(|e| e["body"]["name"] == "run.started" || e["body"]["name"] == "run.failed"),
+        "run-lifecycle events are consumed into the run span"
+    );
+    let run_span = events
+        .iter()
+        .find(|e| e["body"]["id"] == "root-1:run:run-1")
+        .expect("a run span");
+    assert_eq!(run_span["type"], "span-create");
+    assert_eq!(run_span["body"]["level"], "ERROR");
+    assert_eq!(run_span["body"]["statusMessage"], "boom");
+    assert_eq!(run_span["body"]["startTime"], iso_ms(1_704_067_200_000));
+    assert_eq!(run_span["body"]["endTime"], iso_ms(1_704_067_200_001));
 }
 
 #[test]
@@ -317,4 +443,59 @@ fn merges_caller_trace_metadata_over_defaults() {
     // Caller keys win on collision with the defaulted lineage.
     assert_eq!(meta["root_run_id"], "override");
     assert_eq!(meta["run_id"], "run-1");
+}
+
+#[test]
+fn builds_numeric_trace_score() {
+    let client =
+        LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t").unwrap();
+    let batch = client.build_score_batch(
+        LangfuseScore::numeric("trace-1", "helpfulness", 0.9).with_comment("solid answer"),
+    );
+    let event = &batch["batch"].as_array().unwrap()[0];
+    assert_eq!(event["type"], "score-create");
+    assert_eq!(event["body"]["traceId"], "trace-1");
+    assert_eq!(event["body"]["name"], "helpfulness");
+    assert_eq!(event["body"]["value"], 0.9);
+    assert_eq!(event["body"]["dataType"], "NUMERIC");
+    assert_eq!(event["body"]["comment"], "solid answer");
+    // A trace-level score derives a deterministic, observation-free id.
+    assert_eq!(event["body"]["id"], "trace-1:score:helpfulness");
+    assert!(event["body"].get("observationId").is_none());
+}
+
+#[test]
+fn builds_categorical_and_boolean_scores() {
+    let client =
+        LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t").unwrap();
+
+    let categorical =
+        client.build_score_batch(LangfuseScore::categorical("trace-1", "verdict", "correct"));
+    let cat_body = &categorical["batch"].as_array().unwrap()[0]["body"];
+    assert_eq!(cat_body["value"], "correct");
+    assert_eq!(cat_body["dataType"], "CATEGORICAL");
+
+    let boolean = client.build_score_batch(LangfuseScore::boolean("trace-1", "passed", true));
+    let bool_body = &boolean["batch"].as_array().unwrap()[0]["body"];
+    // Boolean scores serialize as 1/0 with a BOOLEAN data type.
+    assert_eq!(bool_body["value"], 1);
+    assert_eq!(bool_body["dataType"], "BOOLEAN");
+}
+
+#[test]
+fn score_can_target_a_single_observation() {
+    let client =
+        LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t").unwrap();
+    let batch = client.build_score_batch(
+        LangfuseScore::numeric("trace-1", "faithfulness", 1.0)
+            .on_observation("trace-1:agent_turn-model-1"),
+    );
+    let body = &batch["batch"].as_array().unwrap()[0]["body"];
+    assert_eq!(body["observationId"], "trace-1:agent_turn-model-1");
+    // The id namespaces the observation so per-generation scores don't collide
+    // with the trace-level score of the same name.
+    assert_eq!(
+        body["id"],
+        "trace-1:trace-1:agent_turn-model-1:score:faithfulness"
+    );
 }

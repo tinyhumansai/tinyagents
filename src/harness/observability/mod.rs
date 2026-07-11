@@ -30,7 +30,9 @@ mod worker;
 
 pub(crate) use worker::{AppendWorker, DEFAULT_DRAIN_CAPACITY};
 
-pub use langfuse::{LangfuseAuth, LangfuseClient, LangfuseTraceConfig};
+pub use langfuse::{
+    LangfuseAuth, LangfuseClient, LangfuseScore, LangfuseScoreValue, LangfuseTraceConfig,
+};
 // Shared Langfuse payload helpers reused by the graph observability exporter so
 // ISO-8601 timestamp formatting and null-field pruning live in one place.
 pub(crate) use langfuse::{clean_nulls, iso_ms};

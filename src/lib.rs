@@ -147,7 +147,9 @@ pub use harness::observability::{
     HarnessStatusStore, InMemoryEventJournal, InMemoryStatusStore, JournalSink, JsonlSink,
     RedactingSink, StoreEventJournal,
 };
-pub use harness::observability::{LangfuseAuth, LangfuseClient, LangfuseTraceConfig};
+pub use harness::observability::{
+    LangfuseAuth, LangfuseClient, LangfuseScore, LangfuseScoreValue, LangfuseTraceConfig,
+};
 
 // --- Graph: durable execution model (LangGraph-style) ---
 // Re-exported with explicit names so the durable API is discoverable at the

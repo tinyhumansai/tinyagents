@@ -16,7 +16,9 @@ use crate::harness::usage::Usage;
 
 mod types;
 
-pub use types::{LangfuseAuth, LangfuseClient, LangfuseTraceConfig};
+pub use types::{
+    LangfuseAuth, LangfuseClient, LangfuseScore, LangfuseScoreValue, LangfuseTraceConfig,
+};
 
 impl LangfuseClient {
     /// Creates a client from a base URL and auth mode.
@@ -118,7 +120,7 @@ impl LangfuseClient {
         // generation's cost is $0.
         let call_models = collect_call_models(observations);
 
-        let mut batch = Vec::with_capacity(observations.len() + 1);
+        let mut batch = Vec::with_capacity(observations.len() + 2);
         batch.push(json!({
             "id": format!("{}:trace", trace_id),
             "timestamp": timestamp,
@@ -137,11 +139,65 @@ impl LangfuseClient {
             })),
         }));
 
+        // Emit one span per run so the batch surfaces a **run tree** rather than
+        // a flat list, mirroring how LangChain's callback handler nests LLM
+        // generations and tool spans under the chain/agent run that produced
+        // them. Each run span is parented (cross-batch, via a deterministic id)
+        // to its `parent_run_id`'s span, so a sub-agent run exported in its own
+        // batch nests under the parent agent's span in the same trace.
+        for run in run_spans(&trace_id, observations) {
+            batch.push(run);
+        }
+
         for obs in observations {
+            // Run-lifecycle events are consumed into the run span (its start,
+            // end, and error/status); re-emitting them as standalone events
+            // would duplicate the run boundary the span already represents.
+            if is_run_lifecycle(&obs.event) {
+                continue;
+            }
             batch.push(observation_event(&trace_id, obs, &call_models));
         }
 
         Ok(json!({ "batch": batch }))
+    }
+
+    /// Builds a `score-create` ingestion batch for `score` without sending it.
+    ///
+    /// The score id defaults to a deterministic value derived from the trace,
+    /// observation, and name so re-scoring the same target is idempotent
+    /// (Langfuse upserts scores by id). Pair with a `trace_id` that matches an
+    /// exported trace — recall the harness/graph exporters default their trace
+    /// id to the run's `root_run_id` — to attach an evaluation to a run.
+    pub fn build_score_batch(&self, score: LangfuseScore) -> Value {
+        let timestamp = iso_ms(now_ms());
+        let score_id = score.id.clone().unwrap_or_else(|| default_score_id(&score));
+        let event_id = format!("{score_id}:score");
+        json!({
+            "batch": [json!({
+                "id": event_id,
+                "timestamp": timestamp,
+                "type": "score-create",
+                "body": clean_nulls(json!({
+                    "id": score_id,
+                    "traceId": score.trace_id,
+                    "observationId": score.observation_id,
+                    "name": score.name,
+                    "value": score.value.to_value(),
+                    "dataType": score.value.data_type(),
+                    "comment": score.comment,
+                })),
+            })]
+        })
+    }
+
+    /// Attaches an evaluation `score` to an already-exported trace (or one of
+    /// its observations) by sending a `score-create` ingestion batch. Mirrors
+    /// Langfuse's `createScore` — the way LangChain/LangGraph traces are graded
+    /// after the fact (human ratings, LLM-as-judge, regression metrics).
+    pub async fn create_score(&self, score: LangfuseScore) -> Result<Value> {
+        let payload = self.build_score_batch(score);
+        self.send_batch(payload).await
     }
 
     /// Sends observations as one Langfuse ingestion batch.
@@ -278,6 +334,121 @@ fn trace_metadata(trace: &LangfuseTraceConfig, observations: &[AgentObservation]
     }
 }
 
+/// Whether an event marks a run boundary that the run span already represents.
+///
+/// These events are folded into the per-run span (its start time, end time, and
+/// error/status) rather than emitted as standalone observations.
+fn is_run_lifecycle(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::RunStarted { .. }
+            | AgentEvent::RunCompleted { .. }
+            | AgentEvent::RunFailed { .. }
+    )
+}
+
+/// The stable, cross-batch Langfuse observation id for a run's span. Prefixing
+/// with the (globally-unique) `trace_id` keeps it unique across turns/threads
+/// while staying deterministic, so a child run exported in a *separate* batch
+/// can reference its parent run's span by the same id and nest under it.
+fn run_span_id(trace_id: &str, run_id: &str) -> String {
+    format!("{trace_id}:run:{run_id}")
+}
+
+/// Accumulates a single run's timing/lineage while scanning the batch so the
+/// exporter can emit one span per run.
+struct RunAcc<'a> {
+    parent_run_id: Option<&'a str>,
+    root_run_id: &'a str,
+    first_ts: u64,
+    last_ts: u64,
+    /// Terminal timestamp from a `RunCompleted`/`RunFailed`, when the run ended
+    /// within this batch. `None` leaves the span open (still running).
+    end_ts: Option<u64>,
+    error: Option<&'a str>,
+}
+
+impl<'a> RunAcc<'a> {
+    fn new(obs: &'a AgentObservation) -> Self {
+        Self {
+            parent_run_id: obs.parent_run_id.as_ref().map(|id| id.as_str()),
+            root_run_id: obs.root_run_id.as_str(),
+            first_ts: obs.ts_ms,
+            last_ts: obs.ts_ms,
+            end_ts: None,
+            error: None,
+        }
+    }
+
+    fn observe(&mut self, obs: &'a AgentObservation) {
+        self.first_ts = self.first_ts.min(obs.ts_ms);
+        self.last_ts = self.last_ts.max(obs.ts_ms);
+        match &obs.event {
+            AgentEvent::RunCompleted { .. } => self.end_ts = Some(obs.ts_ms),
+            AgentEvent::RunFailed { error, .. } => {
+                self.end_ts = Some(obs.ts_ms);
+                self.error = Some(error.as_str());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Builds a `span-create` per distinct run in the batch, in first-seen order.
+///
+/// A run whose `run_id == root_run_id` is the top-level agent (`"agent"`); any
+/// other run was spawned by a parent and is labelled `"sub-agent"`. The span is
+/// parented to its `parent_run_id`'s run span (which may live in another batch)
+/// so the trace renders the full recursion tree.
+fn run_spans(trace_id: &str, observations: &[AgentObservation]) -> Vec<Value> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut runs: BTreeMap<&str, RunAcc> = BTreeMap::new();
+    for obs in observations {
+        let rid = obs.run_id.as_str();
+        runs.entry(rid)
+            .and_modify(|acc| acc.observe(obs))
+            .or_insert_with(|| {
+                order.push(rid);
+                let mut acc = RunAcc::new(obs);
+                acc.observe(obs);
+                acc
+            });
+    }
+
+    order
+        .into_iter()
+        .map(|rid| {
+            let acc = &runs[rid];
+            let span_id = run_span_id(trace_id, rid);
+            let is_root = rid == acc.root_run_id;
+            let name = if is_root { "agent" } else { "sub-agent" };
+            // Close the span at the terminal event when present, else at the
+            // last observation seen (a real window for a completed export).
+            let end_iso = iso_ms(acc.end_ts.unwrap_or(acc.last_ts));
+            json!({
+                "id": span_id,
+                "timestamp": end_iso,
+                "type": "span-create",
+                "body": clean_nulls(json!({
+                    "id": span_id,
+                    "traceId": trace_id,
+                    "parentObservationId": acc.parent_run_id.map(|p| run_span_id(trace_id, p)),
+                    "name": name,
+                    "startTime": iso_ms(acc.first_ts),
+                    "endTime": end_iso,
+                    "level": acc.error.map(|_| "ERROR"),
+                    "statusMessage": acc.error,
+                    "metadata": json!({
+                        "run_id": rid,
+                        "root_run_id": acc.root_run_id,
+                        "parent_run_id": acc.parent_run_id,
+                    }),
+                })),
+            })
+        })
+        .collect()
+}
+
 /// Collect the model each `ModelStarted` announced, keyed by its `call_id`.
 ///
 /// The per-call `generation-create` is built from `ModelCompleted`, which does
@@ -300,6 +471,9 @@ fn observation_event(
     call_models: &BTreeMap<&str, &str>,
 ) -> Value {
     let timestamp = iso_ms(obs.ts_ms);
+    // Every per-call observation nests under its run's span so the trace renders
+    // as a tree (agent → generation/tool), matching LangChain's run hierarchy.
+    let parent = run_span_id(trace_id, obs.run_id.as_str());
     // Attach only run lineage, offset, and the event *kind* — not the full event
     // payload. The event's meaningful fields (input/output/usage/name) are
     // already lifted into the observation `body`; embedding the whole event here
@@ -340,6 +514,7 @@ fn observation_event(
                 "body": clean_nulls(json!({
                     "id": scoped_observation_id(trace_id, call_id.as_str()),
                     "traceId": trace_id,
+                    "parentObservationId": parent,
                     "name": "model",
                     // The model the matching `ModelStarted` announced for this
                     // call. Langfuse maps its pricing table off this field, so
@@ -396,6 +571,7 @@ fn observation_event(
                 "body": clean_nulls(json!({
                     "id": scoped_observation_id(trace_id, call_id.as_str()),
                     "traceId": trace_id,
+                    "parentObservationId": parent,
                     "name": tool_name,
                     "startTime": started_at_ms.map(iso_ms).unwrap_or_else(|| timestamp.clone()),
                     "endTime": end_time,
@@ -407,20 +583,8 @@ fn observation_event(
                 })),
             })
         }
-        AgentEvent::RunFailed { error, .. } => json!({
-            "id": obs.event_id.as_str(),
-            "timestamp": timestamp,
-            "type": "event-create",
-            "body": clean_nulls(json!({
-                "id": obs.event_id.as_str(),
-                "traceId": trace_id,
-                "name": obs.event.kind(),
-                "startTime": timestamp,
-                "level": "ERROR",
-                "statusMessage": error,
-                "metadata": metadata,
-            })),
-        }),
+        // Run-lifecycle events (RunStarted/RunCompleted/RunFailed) never reach
+        // here — they are consumed into the run span by `is_run_lifecycle`.
         _ => json!({
             "id": obs.event_id.as_str(),
             "timestamp": timestamp,
@@ -428,11 +592,22 @@ fn observation_event(
             "body": clean_nulls(json!({
                 "id": obs.event_id.as_str(),
                 "traceId": trace_id,
+                "parentObservationId": parent,
                 "name": obs.event.kind(),
                 "startTime": timestamp,
                 "metadata": metadata,
             })),
         }),
+    }
+}
+
+/// Derives a stable score id from its target and name so re-scoring the same
+/// (trace, observation, metric) upserts the existing score rather than
+/// duplicating it. A trace-level score omits the observation segment.
+fn default_score_id(score: &LangfuseScore) -> String {
+    match &score.observation_id {
+        Some(obs) => format!("{}:{}:score:{}", score.trace_id, obs, score.name),
+        None => format!("{}:score:{}", score.trace_id, score.name),
     }
 }
 
