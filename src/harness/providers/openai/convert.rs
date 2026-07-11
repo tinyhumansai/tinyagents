@@ -182,7 +182,24 @@ pub(super) fn translate_response_format(format: &ResponseFormat) -> Option<Value
 /// Returns [`TinyAgentsError::Serialization`] if the value does not match the
 /// expected response shape, or [`TinyAgentsError::Model`] when no choices are
 /// present.
+/// Test-only shorthand for [`parse_chat_response`] with inline extraction off.
+/// The production paths call [`parse_chat_response`] directly with the model's
+/// configured [`ReasoningTagExtraction`].
+#[cfg(test)]
 pub(super) fn parse_response(value: Value) -> Result<ModelResponse> {
+    parse_chat_response(value, None)
+}
+
+/// Like [`parse_response`], but also normalizes reasoning into a leading
+/// [`ContentBlock::Thinking`] block. Side-channel reasoning
+/// (`reasoning_content` / `reasoning`) is always extracted; inline
+/// `<think>…</think>` tags in the visible content are extracted only when
+/// `reasoning_tags` is `Some`. When both are present, side-channel reasoning
+/// leads and inline reasoning follows, joined by the configured separator.
+pub(super) fn parse_chat_response(
+    value: Value,
+    reasoning_tags: Option<&ReasoningTagExtraction>,
+) -> Result<ModelResponse> {
     let parsed: ChatCompletionResponse = serde_json::from_value(value.clone())?;
 
     let choice = parsed.choices.into_iter().next().ok_or_else(|| {
@@ -190,8 +207,45 @@ pub(super) fn parse_response(value: Value) -> Result<ModelResponse> {
     })?;
 
     let mut content = Vec::new();
-    if let Some(text) = choice.message.content.filter(|t| !t.is_empty()) {
-        content.push(ContentBlock::Text(text));
+
+    // Side-channel reasoning first, normalized the same way as the stream path.
+    let mut reasoning = String::new();
+    for value in [choice.message.reasoning_content, choice.message.reasoning]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(fragment) = reasoning_value_text(value) {
+            reasoning.push_str(&fragment);
+        }
+    }
+
+    // Inline `<think>` extraction on the visible content, when enabled.
+    let visible = match (
+        choice.message.content.filter(|t| !t.is_empty()),
+        reasoning_tags,
+    ) {
+        (Some(text), Some(config)) => {
+            let (visible, inline) = extract_reasoning(config, &text);
+            if !inline.is_empty() {
+                if !reasoning.is_empty() {
+                    reasoning.push_str(config.separator());
+                }
+                reasoning.push_str(&inline);
+            }
+            visible
+        }
+        (Some(text), None) => text,
+        (None, _) => String::new(),
+    };
+
+    if !reasoning.is_empty() {
+        content.push(ContentBlock::Thinking {
+            text: reasoning,
+            signature: None,
+        });
+    }
+    if !visible.is_empty() {
+        content.push(ContentBlock::Text(visible));
     }
 
     let tool_calls = choice
