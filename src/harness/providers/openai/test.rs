@@ -1475,3 +1475,90 @@ fn merge_provider_options_prefers_overrides_and_handles_nulls() {
         json!(["top_k", 40])
     );
 }
+
+// ---------------------------------------------------------------------------
+// Local-server request-shape degradation (named tool_choice, json_object)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn degrades_named_tool_choice_to_required_and_filters_tools() {
+    // The endpoint rejects the object form: send `"required"` and drop every
+    // tool except the named one so the model has no other tool to pick.
+    let model = OpenAiModel::new("k")
+        .with_model("m")
+        .with_named_tool_choice(false);
+    let request = ModelRequest::new(vec![Message::user("hi")])
+        .with_tools(vec![
+            ToolSchema::new("get_weather", "w", json!({})),
+            ToolSchema::new("get_time", "t", json!({})),
+        ])
+        .with_tool_choice(ToolChoice::Tool("get_weather".to_string()));
+
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+
+    assert_eq!(value["tool_choice"], json!("required"));
+    let tools = value["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["function"]["name"], json!("get_weather"));
+}
+
+#[test]
+fn degraded_named_tool_choice_keeps_tools_when_named_tool_absent() {
+    // Named tool not in the list: leave `tools` intact but still send "required".
+    let model = OpenAiModel::new("k")
+        .with_model("m")
+        .with_named_tool_choice(false);
+    let request = ModelRequest::new(vec![Message::user("hi")])
+        .with_tools(vec![ToolSchema::new("get_time", "t", json!({}))])
+        .with_tool_choice(ToolChoice::Tool("missing".to_string()));
+
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+
+    assert_eq!(value["tool_choice"], json!("required"));
+    let tools = value["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["function"]["name"], json!("get_time"));
+}
+
+#[test]
+fn degrades_json_object_to_permissive_json_schema() {
+    let model = OpenAiModel::new("k")
+        .with_model("m")
+        .with_json_object_format(false);
+    let request = ModelRequest::new(vec![Message::user("hi")])
+        .with_response_format(ResponseFormat::JsonObject);
+
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+
+    assert_eq!(
+        value["response_format"],
+        json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "json_object",
+                "schema": { "type": "object" },
+                "strict": false,
+            }
+        })
+    );
+}
+
+#[test]
+fn baseline_knobs_default_to_supported_wire_shapes() {
+    // Default knobs preserve the hosted-OpenAI object/json_object wire shapes, so
+    // an accidental default flip would fail here.
+    let model = model();
+    assert_eq!(model.baseline_degrade(), Degrade::default());
+
+    let request = ModelRequest::new(vec![Message::user("hi")])
+        .with_tools(vec![ToolSchema::new("t", "d", json!({}))])
+        .with_tool_choice(ToolChoice::Tool("t".to_string()))
+        .with_response_format(ResponseFormat::JsonObject);
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+
+    assert_eq!(
+        value["tool_choice"],
+        json!({ "type": "function", "function": { "name": "t" } })
+    );
+    assert_eq!(value["response_format"], json!({ "type": "json_object" }));
+}

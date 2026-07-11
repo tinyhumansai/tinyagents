@@ -148,6 +148,26 @@ pub(super) fn translate_tool_choice(choice: &ToolChoice) -> Value {
     }
 }
 
+/// The degraded `response_format` wire form for a [`ResponseFormat::JsonObject`]
+/// request against a server that rejects `{"type":"json_object"}` (LM Studio,
+/// and likely other local OpenAI-compatible runtimes).
+///
+/// Maps to a permissive `json_schema` that constrains output to *some* JSON
+/// object without pinning its shape: an empty object schema with `strict:false`,
+/// so the model is free to choose keys. Verified accepted by LM Studio; a strict
+/// or fully-specified schema would over-constrain the free-form "just JSON"
+/// intent that [`ResponseFormat::JsonObject`] expresses.
+pub(super) fn degraded_json_object_format() -> Value {
+    json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "json_object",
+            "schema": { "type": "object" },
+            "strict": false,
+        }
+    })
+}
+
 /// Translates a [`ResponseFormat`] into the OpenAI `response_format` JSON value.
 ///
 /// Returns `None` for [`ResponseFormat::Text`] so the field is omitted entirely.

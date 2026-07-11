@@ -54,6 +54,18 @@ pub struct OpenAiModel {
     /// the `system` role is dropped — for OpenAI-compatible endpoints that reject
     /// a `system` role. `false` by default (system messages pass through).
     merge_system_into_user: bool,
+    /// Whether the endpoint accepts a **named** `tool_choice`
+    /// (`{"type":"function","function":{"name":…}}`). `true` by default. When
+    /// `false`, a [`ToolChoice::Tool`] request is degraded to
+    /// `tool_choice:"required"` with the `tools` array filtered to the named tool
+    /// — some local runtimes (LM Studio, llama.cpp server) 400 on the object form.
+    /// See [`Self::with_named_tool_choice`].
+    named_tool_choice_supported: bool,
+    /// Whether the endpoint accepts `response_format:{"type":"json_object"}`.
+    /// `true` by default. When `false`, a [`ResponseFormat::JsonObject`] request is
+    /// degraded to a permissive `json_schema` wire form — some local runtimes 400
+    /// on `json_object`. See [`Self::with_json_object_format`].
+    json_object_format_supported: bool,
     /// Default model id used when a request does not override it.
     model: String,
     /// Provider family identifier used in profiles and normalized errors.
@@ -288,6 +300,8 @@ impl OpenAiModel {
             temperature_unsupported: Vec::new(),
             temperature_override: None,
             merge_system_into_user: false,
+            named_tool_choice_supported: true,
+            json_object_format_supported: true,
             model: DEFAULT_MODEL.to_string(),
             provider: "openai".to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
@@ -375,6 +389,35 @@ impl OpenAiModel {
     /// role, for OpenAI-compatible endpoints that reject a `system` role.
     pub fn with_merge_system_into_user(mut self) -> Self {
         self.merge_system_into_user = true;
+        self
+    }
+
+    /// Declares whether the endpoint accepts a **named** `tool_choice`
+    /// (`{"type":"function","function":{"name":…}}`). `true` by default.
+    ///
+    /// Pass `false` for local OpenAI-compatible runtimes (LM Studio, llama.cpp
+    /// server, and others) that only accept the string forms `none`/`auto`/
+    /// `required` and 400 on the object form. A [`ToolChoice::Tool`] request is
+    /// then degraded to `tool_choice:"required"` with the wire `tools` array
+    /// filtered down to just the named tool, preserving the "must call *this*
+    /// tool" semantics. Independent of this flag, a 400 whose body implicates
+    /// `tool_choice` triggers the same degraded retry automatically (once).
+    pub fn with_named_tool_choice(mut self, supported: bool) -> Self {
+        self.named_tool_choice_supported = supported;
+        self
+    }
+
+    /// Declares whether the endpoint accepts
+    /// `response_format:{"type":"json_object"}`. `true` by default.
+    ///
+    /// Pass `false` for local OpenAI-compatible runtimes that only accept
+    /// `json_schema`/`text` and 400 on `json_object`. A
+    /// [`ResponseFormat::JsonObject`] request is then degraded to a permissive
+    /// `json_schema` wire form (an empty object schema with `strict:false`).
+    /// Independent of this flag, a 400 whose body implicates `response_format`
+    /// triggers the same degraded retry automatically (once).
+    pub fn with_json_object_format(mut self, supported: bool) -> Self {
+        self.json_object_format_supported = supported;
         self
     }
 
@@ -678,12 +721,33 @@ impl OpenAiModel {
         &self.base_url
     }
 
+    /// The baseline request-shape degradations to apply for this instance,
+    /// derived from its capability knobs. A `true` field means "degrade this
+    /// shape on the wire".
+    pub(super) fn baseline_degrade(&self) -> Degrade {
+        Degrade {
+            named_tool_choice: !self.named_tool_choice_supported,
+            json_object: !self.json_object_format_supported,
+        }
+    }
+
     /// Translates a provider-neutral [`ModelRequest`] into the OpenAI wire
-    /// request body. The per-request `model` override wins over the instance
-    /// default.
+    /// request body, applying this instance's baseline request-shape
+    /// degradations (see [`Self::baseline_degrade`]).
     pub(super) fn translate_request(
         &self,
         request: &ModelRequest,
+    ) -> Result<ChatCompletionRequest> {
+        self.translate_request_with(request, self.baseline_degrade())
+    }
+
+    /// Translates a provider-neutral [`ModelRequest`] into the OpenAI wire
+    /// request body, applying the given request-shape `degrade`. The per-request
+    /// `model` override wins over the instance default.
+    pub(super) fn translate_request_with(
+        &self,
+        request: &ModelRequest,
+        degrade: Degrade,
     ) -> Result<ChatCompletionRequest> {
         // Optionally fold system messages into the first user turn (for endpoints
         // that reject a `system` role) before wire translation.
@@ -699,7 +763,7 @@ impl OpenAiModel {
             .map(translate_message)
             .collect::<Result<Vec<_>>>()?;
 
-        let tools: Vec<ToolWire> = request
+        let mut tools: Vec<ToolWire> = request
             .tools
             .iter()
             .map(|schema| ToolWire {
@@ -715,14 +779,32 @@ impl OpenAiModel {
         // tool_choice is only meaningful when tools are declared.
         let tool_choice = if tools.is_empty() {
             None
+        } else if let (true, ToolChoice::Tool(name)) =
+            (degrade.named_tool_choice, &request.tool_choice)
+        {
+            // The endpoint rejects a named `tool_choice` object. Preserve the
+            // "must call *this* tool" semantics by sending `"required"` and, when
+            // the named tool is actually declared, filtering the wire `tools`
+            // down to just it so the model has no other tool to pick. If the named
+            // tool is absent, leave `tools` intact (mirrors the un-degraded path,
+            // which would also send an unmatched name) and still send "required".
+            if tools.iter().any(|t| t.function.name == *name) {
+                tools.retain(|t| t.function.name == *name);
+            }
+            Some(json!("required"))
         } else {
             Some(translate_tool_choice(&request.tool_choice))
         };
 
-        let response_format = request
-            .response_format
-            .as_ref()
-            .and_then(translate_response_format);
+        let response_format = request.response_format.as_ref().and_then(|format| {
+            if degrade.json_object && matches!(format, ResponseFormat::JsonObject) {
+                // The endpoint rejects `{"type":"json_object"}`; use a permissive
+                // `json_schema` that still guarantees a JSON object.
+                Some(degraded_json_object_format())
+            } else {
+                translate_response_format(format)
+            }
+        });
 
         let model = request.model.clone().unwrap_or_else(|| self.model.clone());
         // The o-series reasoning models reject `max_tokens` and require
@@ -972,6 +1054,21 @@ impl OpenAiModel {
             .map(str::to_string);
         self.provider_error(message, Some(status), code, raw)
     }
+}
+
+/// Request-shape degradations to apply when building an OpenAI wire body.
+///
+/// Each field, when `true`, replaces a request shape that some local
+/// OpenAI-compatible servers reject with an equivalent one they accept. The
+/// baseline comes from the instance's capability knobs
+/// ([`OpenAiModel::baseline_degrade`]) from the instance's capability knobs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Degrade {
+    /// Degrade a named `tool_choice` to `"required"` + a filtered `tools` array.
+    pub named_tool_choice: bool,
+    /// Degrade `response_format:{"type":"json_object"}` to a permissive
+    /// `json_schema`.
+    pub json_object: bool,
 }
 
 /// Resolves the per-request timeout to apply to an outbound HTTP call.
