@@ -270,8 +270,8 @@ fn embedding_identity_signature_is_stable() {
     );
 }
 
-#[test]
-fn voyage_and_noop_identity_match_host_contract() {
+#[tokio::test]
+async fn voyage_and_noop_identity_match_host_contract() {
     let voyage = VoyageEmbeddingModel::new("test-key");
     assert_eq!(voyage.name(), "voyage");
     assert_eq!(voyage.model_id(), VOYAGE_DEFAULT_MODEL);
@@ -282,4 +282,18 @@ fn voyage_and_noop_identity_match_host_contract() {
 
     let noop = NoopEmbeddingModel;
     assert_eq!(noop.signature(), "provider=none;model=none;dims=0");
+    assert_eq!(
+        noop.embed(&["first".into(), "second".into()])
+            .await
+            .unwrap(),
+        vec![Vec::<f32>::new(), Vec::<f32>::new()]
+    );
+}
+
+#[test]
+fn gemini_openai_compatible_model_id_is_not_rewritten() {
+    let model = OpenAiEmbeddingModel::new("test-key")
+        .with_base_url("https://generativelanguage.googleapis.com/v1beta/openai")
+        .with_model("gemini-embedding-001");
+    assert_eq!(model.model(), "gemini-embedding-001");
 }

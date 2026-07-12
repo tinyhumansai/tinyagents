@@ -278,8 +278,8 @@ mod cohere;
 mod noop;
 mod ollama;
 mod openai;
-pub mod rate_limit;
-pub mod retry_after;
+mod rate_limit;
+mod retry_after;
 mod voyage;
 
 pub use noop::NoopEmbeddingModel;
@@ -287,6 +287,10 @@ pub use ollama::{
     DEFAULT_OLLAMA_DIMENSIONS, DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL, OllamaEmbeddingModel,
 };
 pub use openai::OpenAiEmbeddingModel;
+pub use rate_limit::{DEFAULT_REQUESTS_PER_MINUTE, acquire, rate_limit, set_rate_limit};
+pub use retry_after::{
+    BASE_BACKOFF_MS, MAX_BACKOFF_MS, MAX_RETRIES, backoff_ms_for_attempt, parse_retry_after_ms,
+};
 pub use types::format_embedding_signature;
 pub use voyage::{
     VOYAGE_API_BASE, VOYAGE_DEFAULT_DIMENSIONS, VOYAGE_DEFAULT_MODEL, VoyageEmbeddingModel,

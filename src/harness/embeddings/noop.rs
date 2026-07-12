@@ -23,7 +23,7 @@ impl EmbeddingModel for NoopEmbeddingModel {
         0
     }
 
-    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        Ok(Vec::new())
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        Ok(vec![Vec::new(); texts.len()])
     }
 }

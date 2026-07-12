@@ -65,7 +65,7 @@ impl OpenAiEmbeddingModel {
 
     /// Overrides the embedding model id.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        self.model = normalize_model_for_base_url(&self.base_url, &model.into());
+        self.model = model.into();
         self
     }
 
@@ -73,7 +73,11 @@ impl OpenAiEmbeddingModel {
     /// endpoint is always `{base_url}/embeddings`.
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into().trim_end_matches('/').to_string();
-        self.model = normalize_model_for_base_url(&self.base_url, &self.model);
+        self
+    }
+
+    pub(crate) fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
         self
     }
 
@@ -285,24 +289,5 @@ fn embeddings_url(base_url: &str) -> String {
         format!("{}/v1/embeddings", base_url.trim_end_matches('/'))
     } else {
         format!("{}/embeddings", base_url.trim_end_matches('/'))
-    }
-}
-
-fn normalize_model_for_base_url(base_url: &str, model: &str) -> String {
-    let is_gemini = reqwest::Url::parse(base_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|host| {
-            host == "generativelanguage.googleapis.com"
-                || host.ends_with(".generativelanguage.googleapis.com")
-        });
-    if is_gemini
-        && !model.is_empty()
-        && !model.starts_with("models/")
-        && !model.starts_with("tunedModels/")
-    {
-        format!("models/{model}")
-    } else {
-        model.to_owned()
     }
 }

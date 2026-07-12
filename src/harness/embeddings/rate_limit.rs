@@ -15,13 +15,13 @@ static BUCKETS: OnceLock<Mutex<HashMap<String, Arc<TokenBucket>>>> = OnceLock::n
 
 pub fn set_rate_limit(per_minute: u32) {
     let previous = CONFIGURED_LIMIT.swap(per_minute, Ordering::Relaxed);
-    if previous != per_minute {
-        if let Some(registry) = BUCKETS.get() {
-            registry
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clear();
-        }
+    if previous != per_minute
+        && let Some(registry) = BUCKETS.get()
+    {
+        registry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
     }
     tracing::debug!(
         target: "tinyagents::embeddings::rate_limit",

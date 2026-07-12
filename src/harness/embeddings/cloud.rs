@@ -15,6 +15,7 @@ pub type BearerResolver = Arc<dyn Fn() -> Result<String> + Send + Sync>;
 
 /// Cloud model whose credential lifecycle remains owned by the host.
 pub struct CloudEmbeddingModel {
+    client: reqwest::Client,
     base_url: String,
     model: String,
     dimensions: usize,
@@ -29,6 +30,7 @@ impl CloudEmbeddingModel {
         bearer: BearerResolver,
     ) -> Self {
         Self {
+            client: reqwest::Client::new(),
             base_url: base_url.into().trim().trim_end_matches('/').to_owned(),
             model: model.into(),
             dimensions,
@@ -69,6 +71,7 @@ impl EmbeddingModel for CloudEmbeddingModel {
             ));
         }
         OpenAiEmbeddingModel::new(bearer)
+            .with_client(self.client.clone())
             .with_base_url(&self.base_url)
             .with_model(&self.model)
             .with_dimensions(self.dimensions)
