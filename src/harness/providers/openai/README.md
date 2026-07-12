@@ -121,12 +121,14 @@ side-channel. `reasoning_tags.rs` moves that inline chain-of-thought onto the
 reasoning channel (a leading `ContentBlock::Thinking` block) and strips the
 tags from the visible text, matching how the side-channel is normalized.
 
-- **Enabled by default** for the plain `think` tag. It activates only on an
-  exact opening tag, so the false-positive risk is negligible while unhandled
-  leakage is the common local-model failure. Toggle with
-  `OpenAiModel::with_reasoning_tag_extraction(config)`: pass `None` to disable
-  (content passes through verbatim) or `Some(ReasoningTagExtraction::new(tag))`
-  to customize the tag name / separator.
+- **Enabled by default for non-hosted base URLs** with the plain `think` tag:
+  unhandled leakage is the common local-model failure, while hosted OpenAI
+  never emits inline `<think>` and extraction there would strip legitimate
+  content that mentions a literal tag, so the hosted default stays off. Toggle
+  with `OpenAiModel::with_reasoning_tag_extraction(config)`: pass `None` to
+  disable everywhere (content passes through verbatim) or
+  `Some(ReasoningTagExtraction::new(tag))` to force it on — including for the
+  hosted base URL — and customize the tag name / separator.
 - **Streaming-safe.** Content deltas are scanned incrementally; any trailing
   bytes that could be the prefix of an opening/closing tag are held back until
   the next delta resolves them (the Vercel AI SDK's `getPotentialStartIndex`
