@@ -267,8 +267,7 @@ impl Retriever {
     /// with a different embedding model. An empty store never errors: it
     /// answers every query with no hits.
     pub async fn retrieve(&self, query: &str, top_k: usize) -> Result<Vec<ScoredDoc>> {
-        let mut vectors = self.model.embed(&[query.to_string()]).await?;
-        let query_vector = vectors.pop().unwrap_or_default();
+        let query_vector = self.model.embed_query(query).await?;
         self.store.query(&query_vector, top_k).await
     }
 }

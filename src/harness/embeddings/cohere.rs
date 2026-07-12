@@ -17,6 +17,7 @@ pub struct CohereEmbeddingModel {
     model: String,
     dimensions: usize,
     base_url: String,
+    query_mode: bool,
 }
 
 impl CohereEmbeddingModel {
@@ -27,6 +28,7 @@ impl CohereEmbeddingModel {
             model: COHERE_DEFAULT_MODEL.to_owned(),
             dimensions: COHERE_DEFAULT_DIMENSIONS,
             base_url: COHERE_API_BASE.to_owned(),
+            query_mode: false,
         }
     }
 
@@ -95,8 +97,9 @@ impl EmbeddingModel for CohereEmbeddingModel {
         let body = serde_json::json!({
             "model": self.model,
             "texts": texts,
-            "input_type": "search_document",
+            "input_type": if self.query_mode { "search_query" } else { "search_document" },
             "embedding_types": ["float"],
+            "output_dimension": self.dimensions,
         });
 
         let mut response = None;
@@ -171,6 +174,19 @@ impl EmbeddingModel for CohereEmbeddingModel {
             }
         }
         Ok(vectors)
+    }
+
+    async fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
+        let query_model = Self {
+            client: self.client.clone(),
+            api_key: self.api_key.clone(),
+            model: self.model.clone(),
+            dimensions: self.dimensions,
+            base_url: self.base_url.clone(),
+            query_mode: true,
+        };
+        let mut vectors = query_model.embed(&[query.to_owned()]).await?;
+        Ok(vectors.pop().unwrap_or_default())
     }
 }
 

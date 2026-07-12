@@ -50,6 +50,13 @@ pub trait EmbeddingModel: Send + Sync {
     /// Returning an empty `Vec` for empty input is valid.
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
 
+    /// Embeds a retrieval query. Asymmetric providers can override this;
+    /// symmetric models reuse [`Self::embed`].
+    async fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
+        let mut vectors = self.embed(&[query.to_owned()]).await?;
+        Ok(vectors.pop().unwrap_or_default())
+    }
+
     /// Returns the fixed dimensionality of every vector this model produces.
     fn dimensions(&self) -> usize;
 

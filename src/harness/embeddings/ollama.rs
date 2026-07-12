@@ -70,7 +70,7 @@ impl OllamaEmbeddingModel {
             })
     }
 
-    async fn embed_one_with_nan_recovery(&self, text: &str) -> Result<Option<Vec<f32>>> {
+    async fn embed_one_with_nan_recovery(&self, text: &str) -> Result<Vec<f32>> {
         let response = self.request(vec![text.to_owned()]).await?;
         if !response.status().is_success() {
             let status = response.status();
@@ -79,9 +79,11 @@ impl OllamaEmbeddingModel {
                 tracing::warn!(
                     target: "tinyagents::embeddings::ollama",
                     model = self.model,
-                    "[embeddings] substituting empty vector for Ollama NaN response"
+                    "[embeddings] Ollama input produced NaN"
                 );
-                return Ok(None);
+                return Err(TinyAgentsError::Embedding(
+                    "Ollama could not encode input without NaN values".into(),
+                ));
             }
             return Err(ollama_http_error(status, &body));
         }
@@ -94,7 +96,7 @@ impl OllamaEmbeddingModel {
         }
         let vector = payload.embeddings.into_iter().next().unwrap();
         self.validate_dimensions(0, &vector)?;
-        Ok(Some(vector))
+        Ok(vector)
     }
 
     async fn embed_per_text(
@@ -104,9 +106,7 @@ impl OllamaEmbeddingModel {
     ) -> Result<Vec<Vec<f32>>> {
         let mut output = vec![Vec::new(); total];
         for (index, text) in live {
-            if let Some(vector) = self.embed_one_with_nan_recovery(text).await? {
-                output[*index] = vector;
-            }
+            output[*index] = self.embed_one_with_nan_recovery(text).await?;
         }
         Ok(output)
     }
@@ -273,7 +273,9 @@ impl EmbeddingModel for OllamaEmbeddingModel {
                     "[embeddings] recovering Ollama NaN batch per text"
                 );
                 if live.len() == 1 {
-                    return Ok(vec![Vec::new(); texts.len()]);
+                    return Err(TinyAgentsError::Embedding(
+                        "Ollama could not encode input without NaN values".into(),
+                    ));
                 }
                 return self.embed_per_text(texts.len(), &live).await;
             }
