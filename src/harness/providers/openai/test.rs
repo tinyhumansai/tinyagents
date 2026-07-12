@@ -531,6 +531,39 @@ fn parse_error_body_classifies_retryability_by_http_status() {
 }
 
 #[test]
+fn reasoning_tag_extraction_defaults_off_for_hosted_openai_only() {
+    // Hosted OpenAI never emits inline `<think>` reasoning; unconditional
+    // extraction there would silently strip legitimate content mentioning a
+    // literal tag. The built-in default therefore only takes effect for
+    // non-hosted base URLs, while an explicit override always wins.
+    let hosted = OpenAiModel::new("k");
+    assert!(
+        hosted.effective_reasoning_tags().is_none(),
+        "hosted default must not extract inline tags"
+    );
+
+    let local = OpenAiModel::compatible("k", "http://localhost:1234/v1", "m");
+    assert!(
+        local.effective_reasoning_tags().is_some(),
+        "compat endpoints get extraction by default"
+    );
+    assert!(OpenAiModel::ollama().effective_reasoning_tags().is_some());
+
+    let forced = OpenAiModel::new("k")
+        .with_reasoning_tag_extraction(Some(ReasoningTagExtraction::default()));
+    assert!(
+        forced.effective_reasoning_tags().is_some(),
+        "explicit override forces extraction on for the hosted base URL"
+    );
+
+    let disabled = OpenAiModel::ollama().with_reasoning_tag_extraction(None);
+    assert!(
+        disabled.effective_reasoning_tags().is_none(),
+        "explicit None disables extraction everywhere"
+    );
+}
+
+#[test]
 fn compatible_presets_set_base_url_and_default_model() {
     let deepseek = OpenAiModel::deepseek("k");
     assert_eq!(deepseek.provider(), "deepseek");
@@ -1212,6 +1245,40 @@ async fn sse_stream_index_zero_parallel_tool_calls_do_not_merge() {
     assert_eq!(calls[1].id, "call-b");
     assert_eq!(calls[1].name, "beta");
     assert_eq!(calls[1].arguments, json!({ "y": 2 }));
+}
+
+#[tokio::test]
+async fn sse_stream_index_zero_id_less_continuations_follow_latest_call() {
+    // Worst-case combination of two local-server defects: parallel calls all
+    // reuse `index: 0` (ollama/ollama#15457) AND continuation fragments carry
+    // no id (the standard OpenAI streaming shape). An id-less continuation
+    // under a reused index must follow the call most recently opened at that
+    // index — not the original occupant of slot 0.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"function\":{\"name\":\"alpha\",\"arguments\":\"{\\\"x\\\":1}\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-b\",\"function\":{\"name\":\"beta\",\"arguments\":\"{\\\"y\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"2}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 2, "expected two distinct calls: {calls:?}");
+    assert_eq!(calls[0].id, "call-a");
+    assert_eq!(calls[0].arguments, json!({ "x": 1 }));
+    assert!(calls[0].invalid.is_none(), "call-a must stay valid");
+    assert_eq!(calls[1].id, "call-b");
+    assert_eq!(
+        calls[1].arguments,
+        json!({ "y": 2 }),
+        "id-less continuation must land on call-b, the latest call at index 0"
+    );
+    assert!(calls[1].invalid.is_none(), "call-b must stay valid");
 }
 
 #[tokio::test]

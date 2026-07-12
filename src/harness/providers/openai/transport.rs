@@ -93,11 +93,19 @@ pub struct OpenAiModel {
     /// A `User-Agent` header override (e.g. the Codex CLI UA). `None` uses
     /// reqwest's default. See [`Self::with_user_agent`].
     user_agent: Option<String>,
-    /// Inline `<think>…</think>` reasoning-tag extraction config. `Some` (the
-    /// default, plain `think`) moves inline chain-of-thought onto the reasoning
-    /// channel; `None` disables it and passes content through untouched. See
-    /// [`Self::with_reasoning_tag_extraction`].
+    /// Inline `<think>…</think>` reasoning-tag extraction config. `Some` moves
+    /// inline chain-of-thought onto the reasoning channel; `None` passes content
+    /// through untouched. Until [`Self::with_reasoning_tag_extraction`] is
+    /// called (`reasoning_tags_overridden == false`) this default only takes
+    /// effect for non-hosted base URLs — see
+    /// [`Self::effective_reasoning_tags`].
     reasoning_tags: Option<ReasoningTagExtraction>,
+    /// Whether [`Self::with_reasoning_tag_extraction`] was called explicitly.
+    /// When `false`, extraction auto-enables only for OpenAI-compatible
+    /// endpoints (`base_url != DEFAULT_BASE_URL`): hosted OpenAI never emits
+    /// inline `<think>` reasoning, and unconditional extraction would silently
+    /// strip legitimate content that mentions a literal `<think>` tag.
+    reasoning_tags_overridden: bool,
 }
 
 /// The auth headers `(name, value)` for a given [`AuthStyle`] + credential.
@@ -316,10 +324,13 @@ impl OpenAiModel {
             responses_omit_max_output_tokens: false,
             extra_query_params: Vec::new(),
             user_agent: None,
-            // Inline `<think>` extraction defaults ON: it activates only on an
-            // exact opening tag, so the false-positive risk is negligible while
-            // unhandled leakage is the common local-model failure.
+            // Inline `<think>` extraction defaults ON, but until overridden it
+            // only takes effect for non-hosted base URLs (see
+            // `effective_reasoning_tags`): unhandled leakage is the common
+            // local-model failure, while hosted OpenAI never emits inline
+            // `<think>` and must not strip literal mentions of the tag.
             reasoning_tags: Some(ReasoningTagExtraction::default()),
+            reasoning_tags_overridden: false,
         }
     }
 
@@ -436,8 +447,12 @@ impl OpenAiModel {
     /// LM Studio, llama.cpp) rather than on the `reasoning_content` /
     /// `reasoning` side-channel.
     ///
-    /// Enabled by default with the plain `think` tag. Pass `None` to disable it
-    /// (content passes through verbatim), or `Some(config)` to customize the tag
+    /// Until this method is called, extraction defaults ON with the plain
+    /// `think` tag for **non-hosted base URLs only** (hosted OpenAI never emits
+    /// inline `<think>` reasoning, and extraction there would silently strip
+    /// legitimate content that mentions a literal tag). Pass `None` to disable
+    /// it everywhere (content passes through verbatim), or `Some(config)` to
+    /// force it on — including for the hosted base URL — and customize the tag
     /// name, separator, or DeepSeek-R1 template mode via
     /// [`ReasoningTagExtraction`]. Extracted reasoning surfaces as a leading
     /// [`ContentBlock::Thinking`](crate::harness::message::ContentBlock::Thinking)
@@ -445,7 +460,19 @@ impl OpenAiModel {
     /// side-channel normalization.
     pub fn with_reasoning_tag_extraction(mut self, config: Option<ReasoningTagExtraction>) -> Self {
         self.reasoning_tags = config;
+        self.reasoning_tags_overridden = true;
         self
+    }
+
+    /// The reasoning-tag extraction config in effect for a call: the explicit
+    /// [`Self::with_reasoning_tag_extraction`] override when one was given,
+    /// otherwise the built-in `think` default gated to OpenAI-compatible
+    /// endpoints (`base_url != DEFAULT_BASE_URL`).
+    pub(super) fn effective_reasoning_tags(&self) -> Option<&ReasoningTagExtraction> {
+        if !self.reasoning_tags_overridden && self.base_url == DEFAULT_BASE_URL {
+            return None;
+        }
+        self.reasoning_tags.as_ref()
     }
 
     /// Overrides whether this model advertises **native** tool calling on its
@@ -1297,7 +1324,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         })?;
 
         let value: Value = serde_json::from_str(&text)?;
-        parse_chat_response(value, self.reasoning_tags.as_ref())
+        parse_chat_response(value, self.effective_reasoning_tags())
     }
 
     /// Streams the OpenAI Chat Completions response as a real [`ModelStream`].
@@ -1354,7 +1381,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             bytes: Box::pin(bytes),
             buf: Vec::new(),
             pending: VecDeque::new(),
-            acc: OpenAiStreamAcc::new(self.reasoning_tags.clone()),
+            acc: OpenAiStreamAcc::new(self.effective_reasoning_tags().cloned()),
             provider: self.provider.clone(),
             model: self.model.clone(),
             started: false,

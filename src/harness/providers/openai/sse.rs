@@ -43,6 +43,13 @@ pub(super) struct OpenAiStreamAcc {
     /// Live per-delta inline-tag splitter, so streamed content deltas route
     /// chain-of-thought onto the reasoning channel instead of leaking it.
     extractor: Option<ReasoningTagStream>,
+    /// Wire `index` → current accumulator slot. Normally the identity mapping,
+    /// but when a backend reuses one index for several parallel calls (Ollama's
+    /// `/v1` bug, ollama/ollama#15457) the conflict handling in
+    /// [`resolve_slot`](Self::resolve_slot) repoints the index at the freshly
+    /// opened slot, so id-less argument continuations for that index keep
+    /// following the call most recently opened there.
+    index_slots: std::collections::HashMap<u32, usize>,
 }
 
 impl OpenAiStreamAcc {
@@ -161,28 +168,39 @@ impl OpenAiStreamAcc {
     /// when an explicit index carries a non-empty id that *conflicts* with the id
     /// already recorded at that slot, the fragment is a distinct new call, not a
     /// continuation, so it opens a fresh slot (or reuses an existing slot already
-    /// opened for that id) instead of silently merging two calls onto one.
+    /// opened for that id) instead of silently merging two calls onto one. The
+    /// index is then repointed at that slot, so subsequent id-less argument
+    /// continuations arriving under the same reused index follow the call most
+    /// recently opened there instead of the original occupant.
     fn resolve_slot(&mut self, fragment: &ToolCallChunkWire) -> usize {
         if let Some(index) = fragment.index {
             let idx = index as usize;
             while self.tool_calls.len() <= idx {
                 self.tool_calls.push(ToolCallBuild::default());
             }
+            let current = *self.index_slots.entry(index).or_insert(idx);
             if let Some(id) = fragment.id.as_deref().filter(|id| !id.is_empty()) {
-                let occupant = &self.tool_calls[idx];
+                let occupant = &self.tool_calls[current];
                 if !occupant.id.is_empty() && occupant.id != id {
                     // Conflict: a second distinct call reusing index 0. Reuse a
                     // slot already opened for this id if one exists (so its later
                     // continuation fragments still land correctly), else open a
-                    // fresh slot rather than overwriting the occupant.
-                    if let Some(pos) = self.tool_calls.iter().position(|slot| slot.id == id) {
-                        return pos;
-                    }
-                    self.tool_calls.push(ToolCallBuild::default());
-                    return self.tool_calls.len() - 1;
+                    // fresh slot rather than overwriting the occupant. Either
+                    // way, repoint the index cursor so id-less argument
+                    // continuations for this index follow the call most
+                    // recently opened here rather than the original occupant.
+                    let slot = match self.tool_calls.iter().position(|slot| slot.id == id) {
+                        Some(pos) => pos,
+                        None => {
+                            self.tool_calls.push(ToolCallBuild::default());
+                            self.tool_calls.len() - 1
+                        }
+                    };
+                    self.index_slots.insert(index, slot);
+                    return slot;
                 }
             }
-            return idx;
+            return current;
         }
         if let Some(id) = fragment.id.as_deref().filter(|id| !id.is_empty()) {
             if let Some(pos) = self.tool_calls.iter().position(|slot| slot.id == id) {
