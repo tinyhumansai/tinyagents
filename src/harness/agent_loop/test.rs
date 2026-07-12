@@ -188,6 +188,26 @@ fn text_response(text: &str, input: u64, output: u64) -> ModelResponse {
     }
 }
 
+/// Builds a *truncated empty* completion: `finish_reason == "length"` with no
+/// text, no tool calls, and no structured output — the failure mode of a local
+/// reasoning model that burned its whole token budget on the hidden reasoning
+/// channel. `reasoning_tokens` is folded into `output_tokens` so the usage
+/// mirrors a real length-truncated response.
+fn truncated_empty_response(reasoning_tokens: u64) -> ModelResponse {
+    ModelResponse {
+        message: AssistantMessage {
+            id: None,
+            content: Vec::new(),
+            tool_calls: Vec::new(),
+            usage: Some(Usage::new(4, reasoning_tokens)),
+        },
+        usage: Some(Usage::new(4, reasoning_tokens)),
+        finish_reason: Some("length".to_string()),
+        raw: None,
+        resolved_model: None,
+    }
+}
+
 /// Middleware that appends a user message to every model request.
 struct InjectMiddleware {
     text: &'static str,
@@ -480,6 +500,166 @@ async fn empty_response_terminates_normally_when_guard_disabled() {
         .expect("run succeeds with a blank final by default");
     assert_eq!(run.model_calls, 1);
     assert_eq!(run.text(), Some(String::new()));
+}
+
+#[tokio::test]
+async fn truncated_empty_response_retries_then_succeeds() {
+    // A local reasoning model burns its whole token budget on the hidden
+    // reasoning channel and returns finish_reason="length" with empty content.
+    // The loop must recover automatically: retry the call with a doubled token
+    // budget and finish on the second, usable response.
+    let model = Arc::new(crate::harness::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+        text_response("recovered", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+
+    use crate::harness::testkit::EventRecorder;
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(
+        RunConfig::new("truncated-retry").with_max_turn_output_tokens(2048),
+        (),
+    )
+    .with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("the truncated-empty response should be retried, not surfaced");
+
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert_eq!(
+        run.model_calls, 2,
+        "the retry counts as a second model call"
+    );
+    assert!(
+        recorder
+            .events()
+            .iter()
+            .any(|e| matches!(e, AgentEvent::RetryScheduled { attempt: 1, .. })),
+        "the retry should be observable; got kinds {:?}",
+        recorder.kinds()
+    );
+    // The first attempt sent the configured 2048 cap; the retry doubled it.
+    let sent: Vec<Option<u32>> = model.requests().iter().map(|r| r.max_tokens).collect();
+    assert_eq!(
+        sent,
+        vec![Some(2048), Some(4096)],
+        "the retried request should carry double the original token budget"
+    );
+}
+
+#[tokio::test]
+async fn truncated_empty_retry_budget_stays_unset_when_request_had_none() {
+    // With no per-turn token cap the budget cannot be doubled, but the retry is
+    // still worthwhile because the failure is stochastic. The retried request
+    // simply carries `None` again.
+    let model = Arc::new(crate::harness::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(64),
+        text_response("recovered", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("a plain retry still recovers a stochastic truncation");
+
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert_eq!(run.model_calls, 2);
+    let sent: Vec<Option<u32>> = model.requests().iter().map(|r| r.max_tokens).collect();
+    assert_eq!(sent, vec![None, None]);
+}
+
+#[tokio::test]
+async fn truncated_empty_retries_exhausted_returns_blank_by_default() {
+    // When every attempt truncates, the retry budget is exhausted and the
+    // historical behavior applies: a blank final success (the empty-response
+    // guard is off by default).
+    let model = Arc::new(crate::harness::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+        truncated_empty_response(4096),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+
+    let ctx = RunContext::new(
+        RunConfig::new("truncated-exhausted").with_max_turn_output_tokens(2048),
+        (),
+    );
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("exhausted retries fall back to the blank-final behavior");
+
+    assert_eq!(run.text(), Some(String::new()));
+    assert_eq!(run.model_calls, 2, "one original attempt plus one retry");
+}
+
+#[tokio::test]
+async fn truncated_empty_retries_exhausted_errors_when_guard_enabled() {
+    // With the empty-response guard on, exhausting the retries surfaces the
+    // typed EmptyResponse error rather than a blank success.
+    let model = Arc::new(crate::harness::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+        truncated_empty_response(4096),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+    harness.with_policy(RunPolicy {
+        error_on_empty_response: true,
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("exhausted retries with the guard on should fail");
+    assert!(
+        matches!(err, TinyAgentsError::EmptyResponse),
+        "expected EmptyResponse, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn truncated_empty_retry_disabled_by_zero_policy() {
+    // truncated_empty_retries=0 restores exact-replay behavior: no retry, a
+    // single model call, blank final.
+    let model = Arc::new(crate::harness::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+    harness.with_policy(RunPolicy {
+        truncated_empty_retries: 0,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("with retries disabled the blank final is returned");
+    assert_eq!(run.model_calls, 1);
+    assert_eq!(run.text(), Some(String::new()));
+}
+
+#[tokio::test]
+async fn length_finish_with_text_is_not_treated_as_truncated_empty() {
+    // A length-truncated response that still carries visible text is a real
+    // answer and must not trigger the retry.
+    let mut partial = text_response("partial answer", 4, 2048);
+    partial.finish_reason = Some("length".to_string());
+    let model = Arc::new(crate::harness::testkit::ScriptedModel::new(vec![partial]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("a length response with text is a normal final");
+    assert_eq!(run.model_calls, 1);
+    assert_eq!(run.text(), Some("partial answer".to_string()));
 }
 
 #[tokio::test]
