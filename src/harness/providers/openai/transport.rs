@@ -807,32 +807,50 @@ impl OpenAiModel {
         request: &ModelRequest,
         degrade: Degrade,
     ) -> Result<ChatCompletionRequest> {
+        // Prompt-guided tools: a model without native tool calling that is still
+        // handed tools gets the tool protocol embedded in its system prompt and no
+        // native `tools` on the wire (many local runtimes 400 on `tools`). The
+        // model's `<tool_call>` blocks are parsed back in [`Self::invoke`]/stream.
+        let prompt_guided_tools = !self.profile.tool_calling && !request.tools.is_empty();
+        let instructed_messages;
+        let base_messages: &[Message] = if prompt_guided_tools {
+            instructed_messages =
+                prompt_tools::with_tool_instructions(&request.messages, &request.tools);
+            &instructed_messages
+        } else {
+            &request.messages
+        };
+
         // Optionally fold system messages into the first user turn (for endpoints
         // that reject a `system` role) before wire translation.
         let merged_messages;
         let source_messages: &[Message] = if self.merge_system_into_user {
-            merged_messages = merge_system_into_user(&request.messages);
+            merged_messages = merge_system_into_user(base_messages);
             &merged_messages
         } else {
-            &request.messages
+            base_messages
         };
         let messages = source_messages
             .iter()
             .map(translate_message)
             .collect::<Result<Vec<_>>>()?;
 
-        let mut tools: Vec<ToolWire> = request
-            .tools
-            .iter()
-            .map(|schema| ToolWire {
-                kind: "function".to_string(),
-                function: FunctionSchemaWire {
-                    name: schema.name.clone(),
-                    description: schema.description.clone(),
-                    parameters: schema.parameters.clone(),
-                },
-            })
-            .collect();
+        let mut tools: Vec<ToolWire> = if prompt_guided_tools {
+            Vec::new()
+        } else {
+            request
+                .tools
+                .iter()
+                .map(|schema| ToolWire {
+                    kind: "function".to_string(),
+                    function: FunctionSchemaWire {
+                        name: schema.name.clone(),
+                        description: schema.description.clone(),
+                        parameters: schema.parameters.clone(),
+                    },
+                })
+                .collect()
+        };
 
         // tool_choice is only meaningful when tools are declared.
         let tool_choice = if tools.is_empty() {
@@ -1324,7 +1342,13 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         })?;
 
         let value: Value = serde_json::from_str(&text)?;
-        parse_chat_response(value, self.effective_reasoning_tags())
+        let response = parse_chat_response(value, self.effective_reasoning_tags())?;
+        // Prompt-guided tools: recover the model's `<tool_call>` blocks into
+        // `message.tool_calls` when native tool calling was suppressed.
+        if !self.profile.tool_calling && !request.tools.is_empty() {
+            return Ok(prompt_tools::apply_to_response(response));
+        }
+        Ok(response)
     }
 
     /// Streams the OpenAI Chat Completions response as a real [`ModelStream`].
@@ -1369,6 +1393,40 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             .post_chat_with_degrade(&request, true, "stream request")
             .await?;
 
+        // Leniency: some OpenAI-compatible endpoints (and test mocks) ignore
+        // `stream: true` and return a single non-streaming JSON body. Detect a
+        // non-`text/event-stream` content-type and parse it as one completion,
+        // surfaced as `Started` + one `MessageDelta` + `Completed` — matching the
+        // tolerant behaviour of hand-rolled OpenAI-compatible clients so a
+        // non-streaming upstream still drives a streaming turn.
+        let is_event_stream = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.to_ascii_lowercase().contains("text/event-stream"))
+            .unwrap_or(false);
+        if !is_event_stream {
+            let text = response.text().await.map_err(|e| {
+                TinyAgentsError::Model(format!("openai non-stream stream-body read failed: {e}"))
+            })?;
+            let value: Value = serde_json::from_str(&text)?;
+            let mut parsed = parse_chat_response(value, self.effective_reasoning_tags())?;
+            if !self.profile.tool_calling && !request.tools.is_empty() {
+                parsed = prompt_tools::apply_to_response(parsed);
+            }
+            let delta = crate::harness::message::MessageDelta {
+                text: parsed.text(),
+                reasoning: String::new(),
+                tool_call: None,
+            };
+            let items = vec![
+                ModelStreamItem::Started,
+                ModelStreamItem::MessageDelta(delta),
+                ModelStreamItem::Completed(parsed),
+            ];
+            return Ok(Box::pin(futures::stream::iter(items)));
+        }
+
         // Forward each raw chunk as the `bytes::Bytes` buffer reqwest already
         // produced (a cheap refcount clone, no per-chunk copy); only the error
         // type is mapped onto the crate error. `SseState` is crate-internal,
@@ -1389,6 +1447,18 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             terminal_emitted: false,
         };
 
-        Ok(Box::pin(futures::stream::unfold(state, sse_next)))
+        let stream = futures::stream::unfold(state, sse_next);
+        // Prompt-guided tools: recover `<tool_call>` blocks from the terminal
+        // `Completed` response into `message.tool_calls` (the streamed text deltas
+        // still carry the raw markup — cleaning them mid-stream is a follow-up).
+        if !self.profile.tool_calling && !request.tools.is_empty() {
+            return Ok(Box::pin(stream.map(|item| match item {
+                ModelStreamItem::Completed(response) => {
+                    ModelStreamItem::Completed(prompt_tools::apply_to_response(response))
+                }
+                other => other,
+            })));
+        }
+        Ok(Box::pin(stream))
     }
 }
