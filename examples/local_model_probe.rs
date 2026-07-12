@@ -79,7 +79,6 @@ fn first_call(response: &ModelResponse) -> Option<&ToolCall> {
     response.message.tool_calls.first()
 }
 
-
 fn msg_text(message: &AssistantMessage) -> String {
     message
         .content
@@ -123,7 +122,10 @@ async fn tool_call(model: &OpenAiModel) -> Outcome {
                 format!(
                     "no tool_calls; finish={:?} text={:?}",
                     resp.finish_reason,
-                    msg_text(&resp.message).chars().take(120).collect::<String>()
+                    msg_text(&resp.message)
+                        .chars()
+                        .take(120)
+                        .collect::<String>()
                 ),
             ),
         },
@@ -240,10 +242,7 @@ async fn parallel_tools(model: &OpenAiModel) -> Outcome {
                 .iter()
                 .map(|c| c.id.as_str())
                 .collect();
-            let unique = ids
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len();
+            let unique = ids.iter().collect::<std::collections::HashSet<_>>().len();
             if n >= 2 && unique == n {
                 ok("parallel-tools", format!("{n} calls, ids={ids:?}"))
             } else if n >= 2 {
@@ -251,7 +250,10 @@ async fn parallel_tools(model: &OpenAiModel) -> Outcome {
             } else {
                 // Small models often serialize calls across turns; only flag
                 // this as informational, not a harness bug.
-                ok("parallel-tools", format!("model made {n} call(s) (model behavior)"))
+                ok(
+                    "parallel-tools",
+                    format!("model made {n} call(s) (model behavior)"),
+                )
             }
         }
         Err(e) => fail("parallel-tools", e.to_string()),
@@ -313,16 +315,16 @@ async fn streaming_tools(model: &OpenAiModel) -> Outcome {
                         "streaming-tools",
                         format!("id={:?} args={}", call.id, call.arguments),
                     ),
-                    Some(call) => fail(
-                        "streaming-tools",
-                        format!("bad args: {}", call.arguments),
-                    ),
+                    Some(call) => fail("streaming-tools", format!("bad args: {}", call.arguments)),
                     None => fail(
                         "streaming-tools",
                         format!(
                             "no tool call; finish={:?} text={:?}",
                             resp.finish_reason,
-                            msg_text(&resp.message).chars().take(120).collect::<String>()
+                            msg_text(&resp.message)
+                                .chars()
+                                .take(120)
+                                .collect::<String>()
                         ),
                     ),
                 },
@@ -345,7 +347,9 @@ async fn json_object(model: &OpenAiModel) -> Outcome {
         Ok(resp) => {
             let text = msg_text(&resp.message);
             match serde_json::from_str::<serde_json::Value>(text.trim()) {
-                Ok(v) if v.is_object() => ok("json-object", text.chars().take(80).collect::<String>()),
+                Ok(v) if v.is_object() => {
+                    ok("json-object", text.chars().take(80).collect::<String>())
+                }
                 _ => fail("json-object", format!("not a JSON object: {text:?}")),
             }
         }
@@ -395,7 +399,10 @@ async fn thinking_leak(model: &OpenAiModel) -> Outcome {
             if text.contains("<think>") || text.contains("</think>") {
                 fail(
                     "thinking-leak",
-                    format!("<think> leaked into text: {:?}", text.chars().take(120).collect::<String>()),
+                    format!(
+                        "<think> leaked into text: {:?}",
+                        text.chars().take(120).collect::<String>()
+                    ),
                 )
             } else {
                 ok("thinking-leak", text.chars().take(60).collect::<String>())

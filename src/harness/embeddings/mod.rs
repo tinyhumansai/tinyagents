@@ -273,9 +273,30 @@ impl Retriever {
     }
 }
 
+mod cloud;
+mod cohere;
+mod noop;
+mod ollama;
 mod openai;
+pub mod rate_limit;
+pub mod retry_after;
+mod voyage;
 
+pub use noop::NoopEmbeddingModel;
+pub use ollama::{
+    DEFAULT_OLLAMA_DIMENSIONS, DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL, OllamaEmbeddingModel,
+};
 pub use openai::OpenAiEmbeddingModel;
+pub use types::format_embedding_signature;
+pub use voyage::{
+    VOYAGE_API_BASE, VOYAGE_DEFAULT_DIMENSIONS, VOYAGE_DEFAULT_MODEL, VoyageEmbeddingModel,
+};
 
 #[cfg(test)]
 mod test;
+pub use cloud::{
+    BearerResolver, CloudEmbeddingModel, DEFAULT_CLOUD_DIMENSIONS, DEFAULT_CLOUD_MODEL,
+};
+pub use cohere::{
+    COHERE_API_BASE, COHERE_DEFAULT_DIMENSIONS, COHERE_DEFAULT_MODEL, CohereEmbeddingModel,
+};
