@@ -73,6 +73,27 @@ deterministic) and enabled per policy via
 `retry::RetryPolicy::with_backoff_sleep`. A real provider integration retries
 after a genuine, growing delay while unit tests stay sleep-free.
 
+## Truncated-empty recovery
+
+Local reasoning models (for example `qwen3` via Ollama) intermittently spend
+their entire token budget on the hidden reasoning channel and return
+`finish_reason == "length"` with no visible text, no tool calls, and no
+structured output — a result useless to every caller. Before finalizing such a
+turn (and before structured extraction, which would otherwise fail on the empty
+completion) the loop retries the model call up to
+`runtime::RunPolicy::truncated_empty_retries` times (default `1`, so two
+attempts total). Each retry drops the useless assistant row, doubles the
+request's `max_tokens` when one was set — clamped at 4x the original cap, and a
+deliberate override of the per-turn output cap that caused the truncation — or
+re-issues unchanged when no budget was set (the failure is stochastic, so a
+plain retry still helps). Each attempt counts as a model call and emits
+`AgentEvent::RetryScheduled`. The retry runs *before*
+`RunPolicy::error_on_empty_response`; only once the retries are exhausted does
+that guard (if enabled) turn the still-blank final into
+`TinyAgentsError::EmptyResponse`. Set `truncated_empty_retries` to `0` to
+restore exact-replay behavior. The recovery lives in the shared `run_loop`, so
+it applies identically to the unary and streaming paths.
+
 ## Public surface
 
 - `AgentHarness::invoke(state, ctx_data, config, input) -> Result<AgentRun>` —
