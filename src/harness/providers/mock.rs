@@ -212,6 +212,7 @@ impl<State: Send + Sync> ChatModel<State> for MockModel {
                     id: format!("mock-tool-{call_id}"),
                     name: name.clone(),
                     arguments: arguments.clone(),
+                    invalid: None,
                 };
                 let usage = Usage::new(input_tokens, 5);
                 let message = AssistantMessage {

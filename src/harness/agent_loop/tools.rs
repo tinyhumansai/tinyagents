@@ -146,6 +146,30 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
 
         self.middleware.run_before_tool(ctx, state, call).await?;
 
+        // The provider marked this call's arguments unparseable (a small local
+        // model emitted malformed JSON). Rather than fail the run, inject a
+        // tool-error result carrying the parse detail and the raw arguments so
+        // the model can retry with corrected JSON — mirroring the schema-invalid
+        // recovery below and how mature frameworks (LangChain `invalid_tool_calls`,
+        // the AI SDK's invalid dynamic tool parts) surface the failure to the
+        // model. This consumed one tool-call budget slot above, bounding the loop,
+        // and always resolves the call so a stalled/never-resolving tool cannot
+        // hang the loop. Applied unconditionally (not gated by `InvalidArgsPolicy`,
+        // which governs *schema* validation of well-formed args): a call the
+        // provider could not even parse is a transport-level defect.
+        if let Some(detail) = call.invalid.clone() {
+            let call_id = CallId::new(call.id.clone());
+            let record = ctx.emit(AgentEvent::InvalidToolArgs {
+                call_id,
+                tool_name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                error: detail.clone(),
+                recovery: "tool_error".to_string(),
+            });
+            status.set_last_event(record.id);
+            return Ok(ResolvedToolCall::ErrorMessage(detail));
+        }
+
         let tool = match self.tools.get(&call.name) {
             Some(tool) => tool,
             None => {

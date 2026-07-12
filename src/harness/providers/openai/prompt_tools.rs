@@ -134,6 +134,7 @@ fn parse_one(inner: &str, index: usize) -> Option<ToolCall> {
         id: format!("call_{index}"),
         name,
         arguments,
+        invalid: None,
     })
 }
 

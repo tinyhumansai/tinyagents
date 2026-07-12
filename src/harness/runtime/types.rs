@@ -178,6 +178,24 @@ pub struct RunPolicy {
     /// rely on empty finals; opt in to turn a silent blank success into a typed
     /// error the caller can re-prompt on.
     pub error_on_empty_response: bool,
+    /// Number of automatic retries when a model call returns a *truncated
+    /// empty* completion — `finish_reason == "length"` with no visible text, no
+    /// tool calls, and no structured output.
+    ///
+    /// This is the failure mode of local reasoning models (for example
+    /// `qwen3` via Ollama) that intermittently spend the entire token budget on
+    /// the hidden reasoning channel and emit nothing usable. Because such a
+    /// response is useless to *every* caller and the failure is stochastic,
+    /// retrying — with a doubled token budget when the request set one (capped
+    /// at 4x the original), or a plain retry when it did not — is strictly
+    /// better than surfacing a blank success.
+    ///
+    /// The retry runs *before* [`Self::error_on_empty_response`]; only once
+    /// these retries are exhausted does that guard (if enabled) apply.
+    ///
+    /// Defaults to `1` (one retry, two attempts total). Set to `0` to disable
+    /// for exact-replay callers that must not re-issue a call.
+    pub truncated_empty_retries: u32,
 }
 
 impl Default for RunPolicy {
@@ -198,6 +216,10 @@ impl Default for RunPolicy {
             },
             // Opt-in: preserve the historical blank-final behavior by default.
             error_on_empty_response: false,
+            // On by default: a truncated-empty completion is useless to every
+            // caller, so one stochastic-failure retry is strictly better than a
+            // blank final.
+            truncated_empty_retries: 1,
         }
     }
 }

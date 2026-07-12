@@ -26,16 +26,44 @@ pub(super) struct ToolCallBuild {
 pub(super) struct OpenAiStreamAcc {
     id: Option<String>,
     text: String,
-    /// Accumulated reasoning/thinking fragments, preserved on the final
-    /// message as a leading [`ContentBlock::Thinking`] block (unsigned — the
-    /// OpenAI-compatible path has no provider signature).
+    /// Accumulated **side-channel** reasoning/thinking fragments
+    /// (`reasoning_content` / `reasoning`), preserved on the final message as a
+    /// leading [`ContentBlock::Thinking`] block (unsigned — the
+    /// OpenAI-compatible path has no provider signature). Inline `<think>` tag
+    /// reasoning is not accumulated here; it is recomputed from `text` in
+    /// [`into_response`](Self::into_response) so the terminal response matches
+    /// the non-streaming path exactly.
     reasoning: String,
     tool_calls: Vec<ToolCallBuild>,
     usage: Option<Usage>,
     finish_reason: Option<String>,
+    /// Inline `<think>` extraction config (`None` disables it). Applied to the
+    /// terminal response via [`extract_reasoning`].
+    reasoning_tags: Option<ReasoningTagExtraction>,
+    /// Live per-delta inline-tag splitter, so streamed content deltas route
+    /// chain-of-thought onto the reasoning channel instead of leaking it.
+    extractor: Option<ReasoningTagStream>,
+    /// Wire `index` → current accumulator slot. Normally the identity mapping,
+    /// but when a backend reuses one index for several parallel calls (Ollama's
+    /// `/v1` bug, ollama/ollama#15457) the conflict handling in
+    /// [`resolve_slot`](Self::resolve_slot) repoints the index at the freshly
+    /// opened slot, so id-less argument continuations for that index keep
+    /// following the call most recently opened there.
+    index_slots: std::collections::HashMap<u32, usize>,
 }
 
 impl OpenAiStreamAcc {
+    /// Builds an accumulator with the given inline reasoning-tag extraction
+    /// config (`None` disables inline extraction).
+    pub(super) fn new(reasoning_tags: Option<ReasoningTagExtraction>) -> Self {
+        let extractor = reasoning_tags.as_ref().map(ReasoningTagStream::new);
+        Self {
+            reasoning_tags,
+            extractor,
+            ..Self::default()
+        }
+    }
+
     /// Folds one parsed chunk into the accumulator and pushes the corresponding
     /// neutral [`ModelStreamItem`]s onto `pending`.
     fn ingest(&mut self, chunk: ChatCompletionChunk, pending: &mut VecDeque<ModelStreamItem>) {
@@ -63,12 +91,40 @@ impl OpenAiStreamAcc {
                 }));
             }
             if let Some(content) = choice.delta.content.filter(|c| !c.is_empty()) {
+                // Retain the raw content so the terminal response can recompute
+                // an authoritative inline-tag split (see `into_response`).
                 self.text.push_str(&content);
-                pending.push_back(ModelStreamItem::MessageDelta(MessageDelta {
-                    text: content,
-                    reasoning: String::new(),
-                    tool_call: None,
-                }));
+                match self.extractor.as_mut() {
+                    // Inline extraction on: scan this delta, holding back any
+                    // trailing partial tag, and route the split onto the two
+                    // channels as separate deltas.
+                    Some(extractor) => {
+                        let mut visible = String::new();
+                        let mut reasoning = String::new();
+                        extractor.push(&content, &mut visible, &mut reasoning);
+                        if !reasoning.is_empty() {
+                            pending.push_back(ModelStreamItem::MessageDelta(MessageDelta {
+                                text: String::new(),
+                                reasoning,
+                                tool_call: None,
+                            }));
+                        }
+                        if !visible.is_empty() {
+                            pending.push_back(ModelStreamItem::MessageDelta(MessageDelta {
+                                text: visible,
+                                reasoning: String::new(),
+                                tool_call: None,
+                            }));
+                        }
+                    }
+                    None => {
+                        pending.push_back(ModelStreamItem::MessageDelta(MessageDelta {
+                            text: content,
+                            reasoning: String::new(),
+                            tool_call: None,
+                        }));
+                    }
+                }
             }
             for fragment in choice.delta.tool_calls {
                 let idx = self.resolve_slot(&fragment);
@@ -106,13 +162,45 @@ impl OpenAiStreamAcc {
     /// carrying a known id reuses that slot, and an id-less continuation fragment
     /// (arguments only) appends to the most recent slot — so parallel calls no
     /// longer all collapse onto slot 0.
+    ///
+    /// One exception guards Ollama's `/v1` parallel-tool-call bug
+    /// (ollama/ollama#15457), where every parallel call arrives with `index: 0`:
+    /// when an explicit index carries a non-empty id that *conflicts* with the id
+    /// already recorded at that slot, the fragment is a distinct new call, not a
+    /// continuation, so it opens a fresh slot (or reuses an existing slot already
+    /// opened for that id) instead of silently merging two calls onto one. The
+    /// index is then repointed at that slot, so subsequent id-less argument
+    /// continuations arriving under the same reused index follow the call most
+    /// recently opened there instead of the original occupant.
     fn resolve_slot(&mut self, fragment: &ToolCallChunkWire) -> usize {
         if let Some(index) = fragment.index {
             let idx = index as usize;
             while self.tool_calls.len() <= idx {
                 self.tool_calls.push(ToolCallBuild::default());
             }
-            return idx;
+            let current = *self.index_slots.entry(index).or_insert(idx);
+            if let Some(id) = fragment.id.as_deref().filter(|id| !id.is_empty()) {
+                let occupant = &self.tool_calls[current];
+                if !occupant.id.is_empty() && occupant.id != id {
+                    // Conflict: a second distinct call reusing index 0. Reuse a
+                    // slot already opened for this id if one exists (so its later
+                    // continuation fragments still land correctly), else open a
+                    // fresh slot rather than overwriting the occupant. Either
+                    // way, repoint the index cursor so id-less argument
+                    // continuations for this index follow the call most
+                    // recently opened here rather than the original occupant.
+                    let slot = match self.tool_calls.iter().position(|slot| slot.id == id) {
+                        Some(pos) => pos,
+                        None => {
+                            self.tool_calls.push(ToolCallBuild::default());
+                            self.tool_calls.len() - 1
+                        }
+                    };
+                    self.index_slots.insert(index, slot);
+                    return slot;
+                }
+            }
+            return current;
         }
         if let Some(id) = fragment.id.as_deref().filter(|id| !id.is_empty()) {
             if let Some(pos) = self.tool_calls.iter().position(|slot| slot.id == id) {
@@ -128,18 +216,40 @@ impl OpenAiStreamAcc {
     }
 
     /// Consumes the accumulator into the final, merged [`ModelResponse`].
-    fn into_response(self) -> Result<ModelResponse> {
+    ///
+    /// Infallible: a tool call whose reassembled arguments cannot be parsed is
+    /// surfaced as an [`ToolCall::invalid`] call (raw arguments preserved) rather
+    /// than failing the whole stream, so the agent loop can feed the error back
+    /// to the model and the call still resolves instead of stalling the loop.
+    fn into_response(self) -> ModelResponse {
         let mut content = Vec::new();
-        // Reasoning streamed on the side channel leads the final message as a
-        // `Thinking` block so it survives persistence and provider replay.
-        if !self.reasoning.is_empty() {
+        // Recompute the inline-tag split over the raw accumulated content so the
+        // terminal response is byte-identical to the non-streaming path, then
+        // combine it with side-channel reasoning. Both feed one leading
+        // `Thinking` block (side-channel leads) so it survives persistence and
+        // provider replay.
+        let (visible_text, reasoning) = match &self.reasoning_tags {
+            Some(config) => {
+                let (visible, inline) = extract_reasoning(config, &self.text);
+                let mut reasoning = self.reasoning.clone();
+                if !inline.is_empty() {
+                    if !reasoning.is_empty() {
+                        reasoning.push_str(config.separator());
+                    }
+                    reasoning.push_str(&inline);
+                }
+                (visible, reasoning)
+            }
+            None => (self.text.clone(), self.reasoning.clone()),
+        };
+        if !reasoning.is_empty() {
             content.push(ContentBlock::Thinking {
-                text: self.reasoning,
+                text: reasoning,
                 signature: None,
             });
         }
-        if !self.text.is_empty() {
-            content.push(ContentBlock::Text(self.text));
+        if !visible_text.is_empty() {
+            content.push(ContentBlock::Text(visible_text));
         }
         // Enumerate over the full slot vector *before* filtering so the synthetic
         // fallback id (`tool-{idx}`) matches the one streamed in `ToolCallDelta`
@@ -150,28 +260,21 @@ impl OpenAiStreamAcc {
             .into_iter()
             .enumerate()
             .filter(|(_, b)| !b.name.is_empty() || !b.args.is_empty())
-            .map(|(idx, b)| {
-                let id = tool_call_id(idx, &b.id);
-                Ok(ToolCall {
-                    id: id.clone(),
-                    name: b.name.clone(),
-                    arguments: parse_tool_arguments("openai stream", &id, &b.name, &b.args)?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .map(|(idx, b)| tool_call_from_wire("openai stream", idx, &b.id, &b.name, &b.args))
+            .collect::<Vec<_>>();
         let message = AssistantMessage {
             id: self.id,
             content,
             tool_calls,
             usage: self.usage,
         };
-        Ok(ModelResponse {
+        ModelResponse {
             message,
             usage: self.usage,
             finish_reason: self.finish_reason,
             raw: None,
             resolved_model: None,
-        })
+        }
     }
 }
 
@@ -325,20 +428,11 @@ pub(super) async fn sse_next(mut state: SseState) -> Option<(ModelStreamItem, Ss
                 return None;
             }
             state.terminal_emitted = true;
-            return match std::mem::take(&mut state.acc).into_response() {
-                Ok(response) => Some((ModelStreamItem::Completed(response), state)),
-                Err(error) => {
-                    let provider_error = ProviderError {
-                        provider: state.provider.clone(),
-                        model: Some(state.model.clone()),
-                        code: Some("invalid_tool_arguments".to_string()),
-                        message: error.to_string(),
-                        retryable: false,
-                        ..ProviderError::default()
-                    };
-                    Some((ModelStreamItem::ProviderFailed(provider_error), state))
-                }
-            };
+            // Reconstruction is infallible: malformed tool arguments become an
+            // `ToolCall::invalid` call inside the response (not a stream
+            // failure), so the agent loop recovers instead of aborting the run.
+            let response = std::mem::take(&mut state.acc).into_response();
+            return Some((ModelStreamItem::Completed(response), state));
         }
         match state.bytes.next().await {
             Some(Ok(chunk)) => {

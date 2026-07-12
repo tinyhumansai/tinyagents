@@ -149,6 +149,29 @@ fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> Mod
     }
 }
 
+/// Builds a tool-call response whose arguments the provider could not parse,
+/// mirroring what the OpenAI provider produces for a small local model that
+/// emitted malformed argument JSON: the raw string is preserved and the call is
+/// marked [`ToolCall::invalid`].
+fn invalid_tool_call_response(id: &str, name: &str, raw: &str) -> ModelResponse {
+    let reason = format!(
+        "openai response contained invalid JSON arguments for tool call `{id}` (`{name}`): \
+         EOF while parsing a value; raw arguments: {raw:?}"
+    );
+    ModelResponse {
+        message: AssistantMessage {
+            id: Some(format!("msg-{id}")),
+            content: Vec::new(),
+            tool_calls: vec![ToolCall::invalid(id, name, raw, reason)],
+            usage: Some(Usage::new(7, 3)),
+        },
+        usage: Some(Usage::new(7, 3)),
+        finish_reason: Some("tool_calls".to_string()),
+        raw: None,
+        resolved_model: None,
+    }
+}
+
 /// Builds a plain-text assistant response with explicit usage.
 fn text_response(text: &str, input: u64, output: u64) -> ModelResponse {
     ModelResponse {
@@ -160,6 +183,26 @@ fn text_response(text: &str, input: u64, output: u64) -> ModelResponse {
         },
         usage: Some(Usage::new(input, output)),
         finish_reason: Some("stop".to_string()),
+        raw: None,
+        resolved_model: None,
+    }
+}
+
+/// Builds a *truncated empty* completion: `finish_reason == "length"` with no
+/// text, no tool calls, and no structured output — the failure mode of a local
+/// reasoning model that burned its whole token budget on the hidden reasoning
+/// channel. `reasoning_tokens` is folded into `output_tokens` so the usage
+/// mirrors a real length-truncated response.
+fn truncated_empty_response(reasoning_tokens: u64) -> ModelResponse {
+    ModelResponse {
+        message: AssistantMessage {
+            id: None,
+            content: Vec::new(),
+            tool_calls: Vec::new(),
+            usage: Some(Usage::new(4, reasoning_tokens)),
+        },
+        usage: Some(Usage::new(4, reasoning_tokens)),
+        finish_reason: Some("length".to_string()),
         raw: None,
         resolved_model: None,
     }
@@ -457,6 +500,166 @@ async fn empty_response_terminates_normally_when_guard_disabled() {
         .expect("run succeeds with a blank final by default");
     assert_eq!(run.model_calls, 1);
     assert_eq!(run.text(), Some(String::new()));
+}
+
+#[tokio::test]
+async fn truncated_empty_response_retries_then_succeeds() {
+    // A local reasoning model burns its whole token budget on the hidden
+    // reasoning channel and returns finish_reason="length" with empty content.
+    // The loop must recover automatically: retry the call with a doubled token
+    // budget and finish on the second, usable response.
+    let model = Arc::new(crate::harness::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+        text_response("recovered", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+
+    use crate::harness::testkit::EventRecorder;
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(
+        RunConfig::new("truncated-retry").with_max_turn_output_tokens(2048),
+        (),
+    )
+    .with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("the truncated-empty response should be retried, not surfaced");
+
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert_eq!(
+        run.model_calls, 2,
+        "the retry counts as a second model call"
+    );
+    assert!(
+        recorder
+            .events()
+            .iter()
+            .any(|e| matches!(e, AgentEvent::RetryScheduled { attempt: 1, .. })),
+        "the retry should be observable; got kinds {:?}",
+        recorder.kinds()
+    );
+    // The first attempt sent the configured 2048 cap; the retry doubled it.
+    let sent: Vec<Option<u32>> = model.requests().iter().map(|r| r.max_tokens).collect();
+    assert_eq!(
+        sent,
+        vec![Some(2048), Some(4096)],
+        "the retried request should carry double the original token budget"
+    );
+}
+
+#[tokio::test]
+async fn truncated_empty_retry_budget_stays_unset_when_request_had_none() {
+    // With no per-turn token cap the budget cannot be doubled, but the retry is
+    // still worthwhile because the failure is stochastic. The retried request
+    // simply carries `None` again.
+    let model = Arc::new(crate::harness::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(64),
+        text_response("recovered", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("a plain retry still recovers a stochastic truncation");
+
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert_eq!(run.model_calls, 2);
+    let sent: Vec<Option<u32>> = model.requests().iter().map(|r| r.max_tokens).collect();
+    assert_eq!(sent, vec![None, None]);
+}
+
+#[tokio::test]
+async fn truncated_empty_retries_exhausted_returns_blank_by_default() {
+    // When every attempt truncates, the retry budget is exhausted and the
+    // historical behavior applies: a blank final success (the empty-response
+    // guard is off by default).
+    let model = Arc::new(crate::harness::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+        truncated_empty_response(4096),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+
+    let ctx = RunContext::new(
+        RunConfig::new("truncated-exhausted").with_max_turn_output_tokens(2048),
+        (),
+    );
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("exhausted retries fall back to the blank-final behavior");
+
+    assert_eq!(run.text(), Some(String::new()));
+    assert_eq!(run.model_calls, 2, "one original attempt plus one retry");
+}
+
+#[tokio::test]
+async fn truncated_empty_retries_exhausted_errors_when_guard_enabled() {
+    // With the empty-response guard on, exhausting the retries surfaces the
+    // typed EmptyResponse error rather than a blank success.
+    let model = Arc::new(crate::harness::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+        truncated_empty_response(4096),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+    harness.with_policy(RunPolicy {
+        error_on_empty_response: true,
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("exhausted retries with the guard on should fail");
+    assert!(
+        matches!(err, TinyAgentsError::EmptyResponse),
+        "expected EmptyResponse, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn truncated_empty_retry_disabled_by_zero_policy() {
+    // truncated_empty_retries=0 restores exact-replay behavior: no retry, a
+    // single model call, blank final.
+    let model = Arc::new(crate::harness::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+    harness.with_policy(RunPolicy {
+        truncated_empty_retries: 0,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("with retries disabled the blank final is returned");
+    assert_eq!(run.model_calls, 1);
+    assert_eq!(run.text(), Some(String::new()));
+}
+
+#[tokio::test]
+async fn length_finish_with_text_is_not_treated_as_truncated_empty() {
+    // A length-truncated response that still carries visible text is a real
+    // answer and must not trigger the retry.
+    let mut partial = text_response("partial answer", 4, 2048);
+    partial.finish_reason = Some("length".to_string());
+    let model = Arc::new(crate::harness::testkit::ScriptedModel::new(vec![partial]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("a length response with text is a normal final");
+    assert_eq!(run.model_calls, 1);
+    assert_eq!(run.text(), Some("partial answer".to_string()));
 }
 
 #[tokio::test]
@@ -758,6 +961,64 @@ async fn invalid_tool_arguments_return_tool_error_recovers() {
     assert!(
         injected,
         "recovery message should be injected into the transcript"
+    );
+}
+
+#[tokio::test]
+async fn malformed_tool_arguments_recover_as_error_tool_result() {
+    // A small local model emitted arguments the provider could not parse, so the
+    // response carries a `ToolCall::invalid` call. The loop must feed the parse
+    // error back to the model as a tool result and continue — *without* running
+    // the tool and *without* failing the run — so it can retry. This holds under
+    // the default `InvalidArgsPolicy::Fail` (which governs schema validation of
+    // well-formed args, not unparseable ones), proving the leniency is
+    // unconditional.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            invalid_tool_call_response("call-x", "strict_lookup", "{\"query\":"),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StrictLookupTool {
+        calls: Arc::clone(&calls),
+    }));
+
+    use crate::harness::testkit::EventRecorder;
+    let recorder = EventRecorder::new();
+    let ctx =
+        RunContext::new(RunConfig::new("malformed-args-run"), ()).with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("lookup")])
+        .await
+        .expect("malformed args recover without failing the run");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "the tool implementation must not run on unparseable arguments"
+    );
+    // The injected tool-error message carries the parse detail so the model can
+    // self-correct on the next turn.
+    let injected = run
+        .messages
+        .iter()
+        .any(|m| format!("{m:?}").contains("invalid JSON arguments"));
+    assert!(
+        injected,
+        "an error tool result should be injected into the transcript"
+    );
+    // The recovery is surfaced as an `InvalidToolArgs` event.
+    assert!(
+        recorder
+            .events()
+            .iter()
+            .any(|e| matches!(e, AgentEvent::InvalidToolArgs { .. })),
+        "an InvalidToolArgs event should be emitted; got kinds {:?}",
+        recorder.kinds()
     );
 }
 

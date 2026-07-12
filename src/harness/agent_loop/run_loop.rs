@@ -47,6 +47,15 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         status.mark_running(HarnessPhase::Middleware);
         self.middleware.run_before_agent(ctx, state).await?;
 
+        // Truncated-empty recovery state (see `RunPolicy::truncated_empty_retries`).
+        // These persist across the retry `continue` within a single logical turn:
+        // `boosted_max_tokens` overrides the next request's cap, `truncation_base`
+        // records the original cap so growth stays clamped at 4x, and the counter
+        // bounds how many times we re-issue the call.
+        let mut truncated_empty_retries_used: u32 = 0;
+        let mut boosted_max_tokens: Option<u32> = None;
+        let mut truncation_base: Option<u32> = None;
+
         loop {
             // Safe cancellation checkpoint: if an orchestrator requested
             // cooperative cancellation, stop before doing any further work
@@ -96,6 +105,15 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             if let Some(cap) = ctx.config.max_turn_output_tokens {
                 request.max_tokens =
                     Some(request.max_tokens.map_or(cap, |current| current.min(cap)));
+            }
+            // Truncated-empty recovery: a prior attempt this turn exhausted its
+            // token budget on the (hidden) reasoning channel and returned no
+            // usable content, so re-issue the call with a larger cap. The boost
+            // deliberately wins over the per-turn cap above — that cap is what
+            // truncated the response — and was already clamped to 4x the
+            // original budget when it was computed below.
+            if let Some(boost) = boosted_max_tokens {
+                request.max_tokens = Some(boost);
             }
 
             status.mark_running(HarnessPhase::Middleware);
@@ -197,6 +215,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 .capture
                 .model_io
                 .then(|| serde_json::to_value(&request.messages).unwrap_or(Value::Null));
+            // Snapshot the effective token cap before `request` moves into the
+            // model-wrap onion, so truncated-empty recovery can compute the next
+            // (doubled) budget from what was actually sent.
+            let attempt_max_tokens = request.max_tokens;
             let mut response = self
                 .middleware
                 .run_wrapped_model(ctx, state, request, &base)
@@ -225,7 +247,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 .model_io
                 .then(|| serde_json::to_value(&response.message).unwrap_or(Value::Null));
             let record = ctx.emit(AgentEvent::ModelCompleted {
-                call_id,
+                call_id: call_id.clone(),
                 started_at_ms: Some(model_started_at_ms),
                 usage: response.usage,
                 input: captured_input,
@@ -272,6 +294,45 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             );
 
             if tool_calls.is_empty() || structured_tool_hit {
+                // Truncated-empty recovery (runs before structured extraction,
+                // which would otherwise fail on the empty completion). A local
+                // reasoning model can burn the whole token budget on its hidden
+                // reasoning channel and return `finish_reason == "length"` with
+                // no visible text, no tool calls, and no structured output — a
+                // result useless to every caller. Retry the call (bumping the
+                // token budget when one was set) instead of surfacing the blank.
+                // A structured tool hit carries a real payload, so it is never
+                // treated as truncated-empty.
+                let truncated_empty = tool_calls.is_empty()
+                    && response.finish_reason.as_deref() == Some("length")
+                    && response.text().trim().is_empty();
+                if truncated_empty
+                    && truncated_empty_retries_used < self.policy.truncated_empty_retries
+                {
+                    // Drop the useless empty assistant row appended above so the
+                    // retry re-sends the identical transcript.
+                    messages.pop();
+                    truncated_empty_retries_used += 1;
+                    // Grow the token budget when the request set one: double it,
+                    // clamped at 4x the original cap. An unset budget stays unset
+                    // (a plain retry is still worthwhile — the failure is
+                    // stochastic).
+                    if let Some(sent) = attempt_max_tokens {
+                        let base = *truncation_base.get_or_insert(sent);
+                        let next = boosted_max_tokens
+                            .unwrap_or(sent)
+                            .saturating_mul(2)
+                            .min(base.saturating_mul(4));
+                        boosted_max_tokens = Some(next);
+                    }
+                    let record = ctx.emit(AgentEvent::RetryScheduled {
+                        call_id: call_id.clone(),
+                        attempt: truncated_empty_retries_used as usize,
+                    });
+                    status.set_last_event(record.id);
+                    continue;
+                }
+
                 // Final response: optionally extract structured output using the
                 // resolved plan (provider-native schema or tool-call arguments).
                 if let Some((strategy, name, schema)) = &structured_plan {

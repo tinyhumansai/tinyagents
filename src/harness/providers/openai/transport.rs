@@ -54,6 +54,18 @@ pub struct OpenAiModel {
     /// the `system` role is dropped — for OpenAI-compatible endpoints that reject
     /// a `system` role. `false` by default (system messages pass through).
     merge_system_into_user: bool,
+    /// Whether the endpoint accepts a **named** `tool_choice`
+    /// (`{"type":"function","function":{"name":…}}`). `true` by default. When
+    /// `false`, a [`ToolChoice::Tool`] request is degraded to
+    /// `tool_choice:"required"` with the `tools` array filtered to the named tool
+    /// — some local runtimes (LM Studio, llama.cpp server) 400 on the object form.
+    /// See [`Self::with_named_tool_choice`].
+    named_tool_choice_supported: bool,
+    /// Whether the endpoint accepts `response_format:{"type":"json_object"}`.
+    /// `true` by default. When `false`, a [`ResponseFormat::JsonObject`] request is
+    /// degraded to a permissive `json_schema` wire form — some local runtimes 400
+    /// on `json_object`. See [`Self::with_json_object_format`].
+    json_object_format_supported: bool,
     /// Default model id used when a request does not override it.
     model: String,
     /// Provider family identifier used in profiles and normalized errors.
@@ -81,6 +93,19 @@ pub struct OpenAiModel {
     /// A `User-Agent` header override (e.g. the Codex CLI UA). `None` uses
     /// reqwest's default. See [`Self::with_user_agent`].
     user_agent: Option<String>,
+    /// Inline `<think>…</think>` reasoning-tag extraction config. `Some` moves
+    /// inline chain-of-thought onto the reasoning channel; `None` passes content
+    /// through untouched. Until [`Self::with_reasoning_tag_extraction`] is
+    /// called (`reasoning_tags_overridden == false`) this default only takes
+    /// effect for non-hosted base URLs — see
+    /// [`Self::effective_reasoning_tags`].
+    reasoning_tags: Option<ReasoningTagExtraction>,
+    /// Whether [`Self::with_reasoning_tag_extraction`] was called explicitly.
+    /// When `false`, extraction auto-enables only for OpenAI-compatible
+    /// endpoints (`base_url != DEFAULT_BASE_URL`): hosted OpenAI never emits
+    /// inline `<think>` reasoning, and unconditional extraction would silently
+    /// strip legitimate content that mentions a literal `<think>` tag.
+    reasoning_tags_overridden: bool,
 }
 
 /// The auth headers `(name, value)` for a given [`AuthStyle`] + credential.
@@ -288,6 +313,8 @@ impl OpenAiModel {
             temperature_unsupported: Vec::new(),
             temperature_override: None,
             merge_system_into_user: false,
+            named_tool_choice_supported: true,
+            json_object_format_supported: true,
             model: DEFAULT_MODEL.to_string(),
             provider: "openai".to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
@@ -297,6 +324,13 @@ impl OpenAiModel {
             responses_omit_max_output_tokens: false,
             extra_query_params: Vec::new(),
             user_agent: None,
+            // Inline `<think>` extraction defaults ON, but until overridden it
+            // only takes effect for non-hosted base URLs (see
+            // `effective_reasoning_tags`): unhandled leakage is the common
+            // local-model failure, while hosted OpenAI never emits inline
+            // `<think>` and must not strip literal mentions of the tag.
+            reasoning_tags: Some(ReasoningTagExtraction::default()),
+            reasoning_tags_overridden: false,
         }
     }
 
@@ -376,6 +410,69 @@ impl OpenAiModel {
     pub fn with_merge_system_into_user(mut self) -> Self {
         self.merge_system_into_user = true;
         self
+    }
+
+    /// Declares whether the endpoint accepts a **named** `tool_choice`
+    /// (`{"type":"function","function":{"name":…}}`). `true` by default.
+    ///
+    /// Pass `false` for local OpenAI-compatible runtimes (LM Studio, llama.cpp
+    /// server, and others) that only accept the string forms `none`/`auto`/
+    /// `required` and 400 on the object form. A [`ToolChoice::Tool`] request is
+    /// then degraded to `tool_choice:"required"` with the wire `tools` array
+    /// filtered down to just the named tool, preserving the "must call *this*
+    /// tool" semantics. Independent of this flag, a 400 whose body implicates
+    /// `tool_choice` triggers the same degraded retry automatically (once).
+    pub fn with_named_tool_choice(mut self, supported: bool) -> Self {
+        self.named_tool_choice_supported = supported;
+        self
+    }
+
+    /// Declares whether the endpoint accepts
+    /// `response_format:{"type":"json_object"}`. `true` by default.
+    ///
+    /// Pass `false` for local OpenAI-compatible runtimes that only accept
+    /// `json_schema`/`text` and 400 on `json_object`. A
+    /// [`ResponseFormat::JsonObject`] request is then degraded to a permissive
+    /// `json_schema` wire form (an empty object schema with `strict:false`).
+    /// Independent of this flag, a 400 whose body implicates `response_format`
+    /// triggers the same degraded retry automatically (once).
+    pub fn with_json_object_format(mut self, supported: bool) -> Self {
+        self.json_object_format_supported = supported;
+        self
+    }
+
+    /// Configures inline `<think>…</think>` reasoning-tag extraction for
+    /// OpenAI-compatible reasoning models that embed chain-of-thought in the
+    /// visible `content` string (qwen3, deepseek-r1 distills via Ollama `/v1`,
+    /// LM Studio, llama.cpp) rather than on the `reasoning_content` /
+    /// `reasoning` side-channel.
+    ///
+    /// Until this method is called, extraction defaults ON with the plain
+    /// `think` tag for **non-hosted base URLs only** (hosted OpenAI never emits
+    /// inline `<think>` reasoning, and extraction there would silently strip
+    /// legitimate content that mentions a literal tag). Pass `None` to disable
+    /// it everywhere (content passes through verbatim), or `Some(config)` to
+    /// force it on — including for the hosted base URL — and customize the tag
+    /// name, separator, or DeepSeek-R1 template mode via
+    /// [`ReasoningTagExtraction`]. Extracted reasoning surfaces as a leading
+    /// [`ContentBlock::Thinking`](crate::harness::message::ContentBlock::Thinking)
+    /// block on both the unary and streamed paths, consistent with the
+    /// side-channel normalization.
+    pub fn with_reasoning_tag_extraction(mut self, config: Option<ReasoningTagExtraction>) -> Self {
+        self.reasoning_tags = config;
+        self.reasoning_tags_overridden = true;
+        self
+    }
+
+    /// The reasoning-tag extraction config in effect for a call: the explicit
+    /// [`Self::with_reasoning_tag_extraction`] override when one was given,
+    /// otherwise the built-in `think` default gated to OpenAI-compatible
+    /// endpoints (`base_url != DEFAULT_BASE_URL`).
+    pub(super) fn effective_reasoning_tags(&self) -> Option<&ReasoningTagExtraction> {
+        if !self.reasoning_tags_overridden && self.base_url == DEFAULT_BASE_URL {
+            return None;
+        }
+        self.reasoning_tags.as_ref()
     }
 
     /// Overrides whether this model advertises **native** tool calling on its
@@ -678,12 +775,37 @@ impl OpenAiModel {
         &self.base_url
     }
 
+    /// The baseline request-shape degradations to apply for this instance,
+    /// derived from its capability knobs. A `true` field means "degrade this
+    /// shape on the wire".
+    pub(super) fn baseline_degrade(&self) -> Degrade {
+        Degrade {
+            named_tool_choice: !self.named_tool_choice_supported,
+            json_object: !self.json_object_format_supported,
+        }
+    }
+
     /// Translates a provider-neutral [`ModelRequest`] into the OpenAI wire
-    /// request body. The per-request `model` override wins over the instance
-    /// default.
+    /// request body, applying this instance's baseline request-shape
+    /// degradations (see [`Self::baseline_degrade`]).
+    ///
+    /// Test-only: production paths go through [`Self::build_chat_body`] /
+    /// [`Self::post_chat_with_degrade`], which thread an explicit [`Degrade`].
+    #[cfg(test)]
     pub(super) fn translate_request(
         &self,
         request: &ModelRequest,
+    ) -> Result<ChatCompletionRequest> {
+        self.translate_request_with(request, self.baseline_degrade())
+    }
+
+    /// Translates a provider-neutral [`ModelRequest`] into the OpenAI wire
+    /// request body, applying the given request-shape `degrade`. The per-request
+    /// `model` override wins over the instance default.
+    pub(super) fn translate_request_with(
+        &self,
+        request: &ModelRequest,
+        degrade: Degrade,
     ) -> Result<ChatCompletionRequest> {
         // Prompt-guided tools: a model without native tool calling that is still
         // handed tools gets the tool protocol embedded in its system prompt and no
@@ -713,7 +835,7 @@ impl OpenAiModel {
             .map(translate_message)
             .collect::<Result<Vec<_>>>()?;
 
-        let tools: Vec<ToolWire> = if prompt_guided_tools {
+        let mut tools: Vec<ToolWire> = if prompt_guided_tools {
             Vec::new()
         } else {
             request
@@ -733,14 +855,32 @@ impl OpenAiModel {
         // tool_choice is only meaningful when tools are declared.
         let tool_choice = if tools.is_empty() {
             None
+        } else if let (true, ToolChoice::Tool(name)) =
+            (degrade.named_tool_choice, &request.tool_choice)
+        {
+            // The endpoint rejects a named `tool_choice` object. Preserve the
+            // "must call *this* tool" semantics by sending `"required"` and, when
+            // the named tool is actually declared, filtering the wire `tools`
+            // down to just it so the model has no other tool to pick. If the named
+            // tool is absent, leave `tools` intact (mirrors the un-degraded path,
+            // which would also send an unmatched name) and still send "required".
+            if tools.iter().any(|t| t.function.name == *name) {
+                tools.retain(|t| t.function.name == *name);
+            }
+            Some(json!("required"))
         } else {
             Some(translate_tool_choice(&request.tool_choice))
         };
 
-        let response_format = request
-            .response_format
-            .as_ref()
-            .and_then(translate_response_format);
+        let response_format = request.response_format.as_ref().and_then(|format| {
+            if degrade.json_object && matches!(format, ResponseFormat::JsonObject) {
+                // The endpoint rejects `{"type":"json_object"}`; use a permissive
+                // `json_schema` that still guarantees a JSON object.
+                Some(degraded_json_object_format())
+            } else {
+                translate_response_format(format)
+            }
+        });
 
         let model = request.model.clone().unwrap_or_else(|| self.model.clone());
         // The o-series reasoning models reject `max_tokens` and require
@@ -931,6 +1071,57 @@ impl OpenAiModel {
         self.send_checked(builder, what, &url).await
     }
 
+    /// Builds the chat-completions wire body for `request` under the given
+    /// `degrade`, setting the streaming fields when `streaming` is `true`.
+    fn build_chat_body(
+        &self,
+        request: &ModelRequest,
+        degrade: Degrade,
+        streaming: bool,
+    ) -> Result<ChatCompletionRequest> {
+        let mut body = self.translate_request_with(request, degrade)?;
+        if streaming {
+            body.stream = true;
+            body.stream_options = Some(json!({ "include_usage": true }));
+        }
+        Ok(body)
+    }
+
+    /// Posts a chat-completions request with automatic single-shot degraded
+    /// retry for local-server request-shape rejections.
+    ///
+    /// The first attempt applies this instance's baseline degradations. If it
+    /// fails with an HTTP 400 whose body implicates a named `tool_choice` or a
+    /// `json_object` `response_format` that the request actually used — and that
+    /// shape was not already degraded — the request is rebuilt with that shape
+    /// degraded and sent exactly once more. Any other error (or a request that
+    /// used neither shape) surfaces unchanged. Shared by [`Self::invoke`] and
+    /// [`Self::stream`], so the retry covers the streaming path too.
+    async fn post_chat_with_degrade(
+        &self,
+        request: &ModelRequest,
+        streaming: bool,
+        what: &str,
+    ) -> Result<reqwest::Response> {
+        let baseline = self.baseline_degrade();
+        let body = self.build_chat_body(request, baseline, streaming)?;
+        match self
+            .post_json(&body, request.timeout_ms, streaming, what)
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(TinyAgentsError::Provider(err))
+                if err.status == Some(400)
+                    && let Some(degrade) = degrade_for_400(&err.message, request, baseline) =>
+            {
+                let retry = self.build_chat_body(request, degrade, streaming)?;
+                self.post_json(&retry, request.timeout_ms, streaming, what)
+                    .await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     fn provider_error(
         &self,
         message: impl Into<String>,
@@ -990,6 +1181,57 @@ impl OpenAiModel {
             .map(str::to_string);
         self.provider_error(message, Some(status), code, raw)
     }
+}
+
+/// Request-shape degradations to apply when building an OpenAI wire body.
+///
+/// Each field, when `true`, replaces a request shape that some local
+/// OpenAI-compatible servers reject with an equivalent one they accept. The
+/// baseline comes from the instance's capability knobs
+/// ([`OpenAiModel::baseline_degrade`]) from the instance's capability knobs; a
+/// 400 whose error body implicates one of these shapes turns the corresponding
+/// field on for a single degraded retry (see [`degrade_for_400`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Degrade {
+    /// Degrade a named `tool_choice` to `"required"` + a filtered `tools` array.
+    pub named_tool_choice: bool,
+    /// Degrade `response_format:{"type":"json_object"}` to a permissive
+    /// `json_schema`.
+    pub json_object: bool,
+}
+
+/// Computes the additional degradation to apply after an HTTP 400, or `None`
+/// when the failure is not an auto-degradable request-shape rejection.
+///
+/// Returns `Some(degrade)` only when the 400 error body implicates a shape the
+/// request actually used *and* that shape was not already degraded on the
+/// original attempt — so a degraded retry is issued at most once and only when
+/// it could plausibly help. The returned [`Degrade`] is the union of `already`
+/// and the newly implicated shape, so the retry keeps any baseline degradations.
+///
+/// Pure, so the 400-detection policy is unit-testable without a network call.
+pub(super) fn degrade_for_400(
+    message: &str,
+    request: &ModelRequest,
+    already: Degrade,
+) -> Option<Degrade> {
+    let lower = message.to_ascii_lowercase();
+    let mut degrade = already;
+
+    if !already.named_tool_choice
+        && lower.contains("tool_choice")
+        && matches!(request.tool_choice, ToolChoice::Tool(_))
+    {
+        degrade.named_tool_choice = true;
+    }
+    if !already.json_object
+        && lower.contains("response_format")
+        && matches!(request.response_format, Some(ResponseFormat::JsonObject))
+    {
+        degrade.json_object = true;
+    }
+
+    (degrade != already).then_some(degrade)
 }
 
 /// Resolves the per-request timeout to apply to an outbound HTTP call.
@@ -1091,10 +1333,8 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         if self.responses_api_primary {
             return self.invoke_responses(&request).await;
         }
-        let body = self.translate_request(&request)?;
-
         let response = self
-            .post_json(&body, request.timeout_ms, false, "request")
+            .post_chat_with_degrade(&request, false, "request")
             .await?;
 
         let text = response.text().await.map_err(|e| {
@@ -1102,7 +1342,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         })?;
 
         let value: Value = serde_json::from_str(&text)?;
-        let response = parse_response(value)?;
+        let response = parse_chat_response(value, self.effective_reasoning_tags())?;
         // Prompt-guided tools: recover the model's `<tool_call>` blocks into
         // `message.tool_calls` when native tool calling was suppressed.
         if !self.profile.tool_calling && !request.tools.is_empty() {
@@ -1149,12 +1389,8 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             ];
             return Ok(Box::pin(futures::stream::iter(items)));
         }
-        let mut body = self.translate_request(&request)?;
-        body.stream = true;
-        body.stream_options = Some(json!({ "include_usage": true }));
-
         let response = self
-            .post_json(&body, request.timeout_ms, true, "stream request")
+            .post_chat_with_degrade(&request, true, "stream request")
             .await?;
 
         // Leniency: some OpenAI-compatible endpoints (and test mocks) ignore
@@ -1174,7 +1410,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
                 TinyAgentsError::Model(format!("openai non-stream stream-body read failed: {e}"))
             })?;
             let value: Value = serde_json::from_str(&text)?;
-            let mut parsed = parse_response(value)?;
+            let mut parsed = parse_chat_response(value, self.effective_reasoning_tags())?;
             if !self.profile.tool_calling && !request.tools.is_empty() {
                 parsed = prompt_tools::apply_to_response(parsed);
             }
@@ -1203,7 +1439,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             bytes: Box::pin(bytes),
             buf: Vec::new(),
             pending: VecDeque::new(),
-            acc: OpenAiStreamAcc::default(),
+            acc: OpenAiStreamAcc::new(self.effective_reasoning_tags().cloned()),
             provider: self.provider.clone(),
             model: self.model.clone(),
             started: false,

@@ -148,6 +148,26 @@ pub(super) fn translate_tool_choice(choice: &ToolChoice) -> Value {
     }
 }
 
+/// The degraded `response_format` wire form for a [`ResponseFormat::JsonObject`]
+/// request against a server that rejects `{"type":"json_object"}` (LM Studio,
+/// and likely other local OpenAI-compatible runtimes).
+///
+/// Maps to a permissive `json_schema` that constrains output to *some* JSON
+/// object without pinning its shape: an empty object schema with `strict:false`,
+/// so the model is free to choose keys. Verified accepted by LM Studio; a strict
+/// or fully-specified schema would over-constrain the free-form "just JSON"
+/// intent that [`ResponseFormat::JsonObject`] expresses.
+pub(super) fn degraded_json_object_format() -> Value {
+    json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "json_object",
+            "schema": { "type": "object" },
+            "strict": false,
+        }
+    })
+}
+
 /// Translates a [`ResponseFormat`] into the OpenAI `response_format` JSON value.
 ///
 /// Returns `None` for [`ResponseFormat::Text`] so the field is omitted entirely.
@@ -182,7 +202,24 @@ pub(super) fn translate_response_format(format: &ResponseFormat) -> Option<Value
 /// Returns [`TinyAgentsError::Serialization`] if the value does not match the
 /// expected response shape, or [`TinyAgentsError::Model`] when no choices are
 /// present.
+/// Test-only shorthand for [`parse_chat_response`] with inline extraction off.
+/// The production paths call [`parse_chat_response`] directly with the model's
+/// configured [`ReasoningTagExtraction`].
+#[cfg(test)]
 pub(super) fn parse_response(value: Value) -> Result<ModelResponse> {
+    parse_chat_response(value, None)
+}
+
+/// Like [`parse_response`], but also normalizes reasoning into a leading
+/// [`ContentBlock::Thinking`] block. Side-channel reasoning
+/// (`reasoning_content` / `reasoning`) is always extracted; inline
+/// `<think>…</think>` tags in the visible content are extracted only when
+/// `reasoning_tags` is `Some`. When both are present, side-channel reasoning
+/// leads and inline reasoning follows, joined by the configured separator.
+pub(super) fn parse_chat_response(
+    value: Value,
+    reasoning_tags: Option<&ReasoningTagExtraction>,
+) -> Result<ModelResponse> {
     let parsed: ChatCompletionResponse = serde_json::from_value(value.clone())?;
 
     let choice = parsed.choices.into_iter().next().ok_or_else(|| {
@@ -190,29 +227,66 @@ pub(super) fn parse_response(value: Value) -> Result<ModelResponse> {
     })?;
 
     let mut content = Vec::new();
-    if let Some(text) = choice.message.content.filter(|t| !t.is_empty()) {
-        content.push(ContentBlock::Text(text));
+
+    // Side-channel reasoning first, normalized the same way as the stream path.
+    let mut reasoning = String::new();
+    for value in [choice.message.reasoning_content, choice.message.reasoning]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(fragment) = reasoning_value_text(value) {
+            reasoning.push_str(&fragment);
+        }
+    }
+
+    // Inline `<think>` extraction on the visible content, when enabled.
+    let visible = match (
+        choice.message.content.filter(|t| !t.is_empty()),
+        reasoning_tags,
+    ) {
+        (Some(text), Some(config)) => {
+            let (visible, inline) = extract_reasoning(config, &text);
+            if !inline.is_empty() {
+                if !reasoning.is_empty() {
+                    reasoning.push_str(config.separator());
+                }
+                reasoning.push_str(&inline);
+            }
+            visible
+        }
+        (Some(text), None) => text,
+        (None, _) => String::new(),
+    };
+
+    if !reasoning.is_empty() {
+        content.push(ContentBlock::Thinking {
+            text: reasoning,
+            signature: None,
+        });
+    }
+    if !visible.is_empty() {
+        content.push(ContentBlock::Text(visible));
     }
 
     let tool_calls = choice
         .message
         .tool_calls
         .into_iter()
-        .map(|call| {
-            Ok(ToolCall {
-                id: call.id.clone(),
-                name: call.function.name.clone(),
-                // Tool arguments arrive as a JSON string. Invalid JSON is a
-                // provider/model error, not an empty/default argument payload.
-                arguments: parse_tool_arguments(
-                    "openai response",
-                    &call.id,
-                    &call.function.name,
-                    &call.function.arguments,
-                )?,
-            })
+        .enumerate()
+        .map(|(index, call)| {
+            // Local servers routinely omit `id`; synthesize the same
+            // `tool-{index}` fallback the streaming path uses so the agent loop
+            // can still correlate the tool result back to this call. An empty
+            // id is treated as absent.
+            tool_call_from_wire(
+                "openai response",
+                index,
+                &call.id,
+                &call.function.name,
+                &call.function.arguments,
+            )
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Vec<_>>();
 
     let usage = parsed.usage.map(convert_usage);
 
@@ -243,12 +317,47 @@ pub(super) fn tool_call_id(slot: usize, id: &str) -> String {
     }
 }
 
-pub(super) fn parse_tool_arguments(
+/// Builds a provider-neutral [`ToolCall`] from the wire fields, tolerating the
+/// defects small local models produce.
+///
+/// `slot` is the tool call's position in the response (used to synthesize a
+/// stable `tool-{slot}` id when the provider omits one — Ollama did so until
+/// v0.12.11). When the arguments cannot be parsed even after repair, the call is
+/// marked [`ToolCall::invalid`] with the raw arguments preserved rather than
+/// failing the whole model call: the agent loop feeds the error back to the
+/// model as a tool result so it can retry (mirroring LangChain and the AI SDK),
+/// and — because the call still resolves — a malformed argument blob can never
+/// become a never-resolving tool call that stalls the loop.
+pub(super) fn tool_call_from_wire(
     context: &str,
-    call_id: &str,
+    slot: usize,
+    id: &str,
     name: &str,
     raw: &str,
-) -> Result<Value> {
+) -> ToolCall {
+    let call_id = tool_call_id(slot, id);
+    match parse_tool_arguments(raw) {
+        Ok(arguments) => ToolCall {
+            id: call_id,
+            name: name.to_string(),
+            arguments,
+            invalid: None,
+        },
+        Err(detail) => {
+            let reason = format!(
+                "{context} contained invalid JSON arguments for tool call `{call_id}` (`{name}`): {detail}; raw arguments: {raw:?}"
+            );
+            ToolCall::invalid(call_id, name, raw, reason)
+        }
+    }
+}
+
+/// Parses a tool-call arguments string into JSON, returning `Err(detail)` with a
+/// short human-readable reason when the string cannot be recovered.
+///
+/// This never fails the model call itself; the caller
+/// ([`tool_call_from_wire`]) turns an `Err` into an [`ToolCall::invalid`] call.
+pub(super) fn parse_tool_arguments(raw: &str) -> std::result::Result<Value, String> {
     // Some OpenAI-compatible backends emit an empty arguments string for a
     // zero-argument tool call. That is a well-formed "no arguments" payload, not
     // malformed JSON, so map it to an empty object instead of failing the call.
@@ -270,13 +379,7 @@ pub(super) fn parse_tool_arguments(
             if let Some(value) = recover_tool_arguments(raw) {
                 return Ok(value);
             }
-            // Still unparseable after repair: fail fast with a clear,
-            // non-retryable error. Surfacing the failure keeps the malformed
-            // call from becoming a never-resolving tool call that stalls the
-            // agent loop (and the parent's join/reduce) indefinitely.
-            Err(TinyAgentsError::Model(format!(
-                "{context} contained invalid JSON arguments for tool call `{call_id}` (`{name}`): {err}; raw arguments: {raw:?}"
-            )))
+            Err(err.to_string())
         }
     }
 }

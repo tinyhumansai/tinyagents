@@ -446,6 +446,7 @@ fn structured_output_supports_provider_schema_and_tool_fallbacks() {
                 id: "tool-1".into(),
                 name: "score".into(),
                 arguments: json!({ "score": 7 }),
+                invalid: None,
             }],
             usage: None,
         },

@@ -193,6 +193,7 @@ fn translates_assistant_tool_calls_to_stringified_arguments() {
                 id: "call-1".to_string(),
                 name: "get_weather".to_string(),
                 arguments: json!({ "city": "Paris" }),
+                invalid: None,
             }],
             usage: None,
         }),
@@ -289,7 +290,11 @@ fn parses_openai_response_with_content_tool_call_and_usage() {
 }
 
 #[test]
-fn parse_response_errors_on_invalid_tool_argument_json() {
+fn parse_response_marks_invalid_tool_argument_json_instead_of_failing() {
+    // Malformed argument JSON must not fail the whole model call (which made
+    // small local models appear "broken"). Instead the call is surfaced as an
+    // `invalid` ToolCall with the raw arguments preserved so the agent loop can
+    // feed the error back to the model.
     let body = json!({
         "id": "chatcmpl-badargs",
         "choices": [
@@ -312,12 +317,81 @@ fn parse_response_errors_on_invalid_tool_argument_json() {
         ]
     });
 
-    let err = parse_response(body).expect_err("invalid arguments must fail");
-    let message = err.to_string();
-    assert!(matches!(err, TinyAgentsError::Model(_)));
-    assert!(message.contains("call-bad"), "{message}");
-    assert!(message.contains("lookup"), "{message}");
-    assert!(message.contains("raw arguments"), "{message}");
+    let response = parse_response(body).expect("malformed args must not fail the call");
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "call-bad");
+    assert_eq!(calls[0].name, "lookup");
+    // Raw arguments preserved verbatim as a JSON string value.
+    assert_eq!(calls[0].arguments, json!("{\"q\":"));
+    let reason = calls[0].invalid.as_deref().expect("call marked invalid");
+    assert!(reason.contains("call-bad"), "{reason}");
+    assert!(reason.contains("lookup"), "{reason}");
+    assert!(reason.contains("raw arguments"), "{reason}");
+}
+
+#[test]
+fn parses_id_less_tool_call_with_synthesized_fallback_id() {
+    // Ollama's /v1 endpoint omitted the tool-call `id` entirely until v0.12.11,
+    // and some servers omit `type`. Neither may fail deserialization; a
+    // missing/empty id gets the same `tool-{index}` fallback the streaming path
+    // uses so the agent loop can still correlate the result.
+    let body = json!({
+        "id": "chatcmpl-noid",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "tool_calls": [
+                    // No `id`, no `type`.
+                    { "function": { "name": "ping", "arguments": "{}" } },
+                    // Explicit empty id is treated as absent.
+                    { "id": "", "type": "function", "function": { "name": "pong", "arguments": "{\"n\":1}" } }
+                ]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    let response = parse_response(body).unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].id, "tool-0");
+    assert_eq!(calls[0].name, "ping");
+    assert_eq!(calls[0].arguments, json!({}));
+    assert_eq!(calls[1].id, "tool-1");
+    assert_eq!(calls[1].name, "pong");
+    assert_eq!(calls[1].arguments, json!({ "n": 1 }));
+}
+
+#[test]
+fn parses_object_form_tool_arguments() {
+    // Some OpenAI-compatible servers send `function.arguments` as a JSON object
+    // instead of the OpenAI-standard stringified JSON. It must normalize to the
+    // same parsed arguments, not fail the response.
+    let body = json!({
+        "id": "chatcmpl-obj",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call-obj",
+                    "type": "function",
+                    "function": { "name": "get_weather", "arguments": { "city": "Paris" } }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    let response = parse_response(body).unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "get_weather");
+    assert_eq!(calls[0].arguments, json!({ "city": "Paris" }));
+    assert!(
+        calls[0].invalid.is_none(),
+        "object args are valid, not invalid"
+    );
 }
 
 #[test]
@@ -454,6 +528,39 @@ fn parse_error_body_classifies_retryability_by_http_status() {
 
     let server_error = m.parse_error_body(500, r#"{"error":{"message":"internal error"}}"#);
     assert!(server_error.retryable, "5xx must be retryable");
+}
+
+#[test]
+fn reasoning_tag_extraction_defaults_off_for_hosted_openai_only() {
+    // Hosted OpenAI never emits inline `<think>` reasoning; unconditional
+    // extraction there would silently strip legitimate content mentioning a
+    // literal tag. The built-in default therefore only takes effect for
+    // non-hosted base URLs, while an explicit override always wins.
+    let hosted = OpenAiModel::new("k");
+    assert!(
+        hosted.effective_reasoning_tags().is_none(),
+        "hosted default must not extract inline tags"
+    );
+
+    let local = OpenAiModel::compatible("k", "http://localhost:1234/v1", "m");
+    assert!(
+        local.effective_reasoning_tags().is_some(),
+        "compat endpoints get extraction by default"
+    );
+    assert!(OpenAiModel::ollama().effective_reasoning_tags().is_some());
+
+    let forced = OpenAiModel::new("k")
+        .with_reasoning_tag_extraction(Some(ReasoningTagExtraction::default()));
+    assert!(
+        forced.effective_reasoning_tags().is_some(),
+        "explicit override forces extraction on for the hosted base URL"
+    );
+
+    let disabled = OpenAiModel::ollama().with_reasoning_tag_extraction(None);
+    assert!(
+        disabled.effective_reasoning_tags().is_none(),
+        "explicit None disables extraction everywhere"
+    );
 }
 
 #[test]
@@ -669,52 +776,43 @@ async fn sse_stream_preserves_reasoning_content_as_side_channel() {
 }
 
 #[tokio::test]
-async fn sse_stream_invalid_tool_argument_json_fails_terminally() {
-    use futures::StreamExt;
-
+async fn sse_stream_invalid_tool_argument_json_reconstructs_as_invalid_call() {
+    // A streamed tool call whose reassembled arguments are malformed must not
+    // fail the stream terminally: it reconstructs as an `invalid` ToolCall (raw
+    // arguments preserved) so the agent loop can feed the error back to the
+    // model and the call still resolves instead of stalling the loop.
     let raw: Vec<Vec<u8>> = vec![
         b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-bad\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\"}}]}}]}\n\n".to_vec(),
         b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
         b"data: [DONE]\n\n".to_vec(),
     ];
-    let bytes = futures::stream::iter(
-        raw.into_iter()
-            .map(|v| Ok::<bytes::Bytes, TinyAgentsError>(bytes::Bytes::from(v))),
+
+    let items = collect_sse(raw).await;
+
+    // No terminal failure is emitted; the stream completes normally.
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, ModelStreamItem::ProviderFailed(_))),
+        "malformed args must not emit ProviderFailed"
     );
-
-    let state = SseState {
-        bytes: Box::pin(bytes),
-        buf: Vec::new(),
-        pending: std::collections::VecDeque::new(),
-        acc: OpenAiStreamAcc::default(),
-        provider: "openai".to_string(),
-        model: "gpt-4.1-mini".to_string(),
-        started: false,
-        finished: false,
-        terminal_emitted: false,
-    };
-    let items: Vec<ModelStreamItem> = futures::stream::unfold(state, sse_next).collect().await;
-
-    let failed = items
-        .iter()
-        .find_map(|item| match item {
-            ModelStreamItem::ProviderFailed(error) => Some(error),
-            _ => None,
-        })
-        .expect("invalid arguments should emit ProviderFailed");
-    assert_eq!(failed.code.as_deref(), Some("invalid_tool_arguments"));
-    assert!(!failed.retryable);
-    assert!(failed.message.contains("call-bad"), "{}", failed.message);
-    assert!(failed.message.contains("lookup"), "{}", failed.message);
+    assert!(matches!(items.last(), Some(ModelStreamItem::Completed(_))));
 
     let mut merged = StreamAccumulator::new();
     for item in &items {
         merged.push(item);
     }
-    let err = merged
+    let response = merged
         .finish()
-        .expect_err("provider failure must reach accumulator");
-    assert!(err.to_string().contains("invalid_tool_arguments"));
+        .expect("stream must reconstruct an invalid call, not fail");
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "call-bad");
+    assert_eq!(calls[0].name, "lookup");
+    assert_eq!(calls[0].arguments, json!("{\"q\":"));
+    let reason = calls[0].invalid.as_deref().expect("call marked invalid");
+    assert!(reason.contains("call-bad"), "{reason}");
+    assert!(reason.contains("lookup"), "{reason}");
 }
 
 /// Drives an SSE byte stream through the parser and returns every item.
@@ -737,6 +835,220 @@ async fn collect_sse(raw: Vec<Vec<u8>>) -> Vec<ModelStreamItem> {
         terminal_emitted: false,
     };
     futures::stream::unfold(state, sse_next).collect().await
+}
+
+/// Like [`collect_sse`], but with a specific inline reasoning-tag extraction
+/// config (`None` disables inline extraction).
+async fn collect_sse_with(
+    raw: Vec<Vec<u8>>,
+    reasoning_tags: Option<ReasoningTagExtraction>,
+) -> Vec<ModelStreamItem> {
+    use futures::StreamExt;
+
+    let bytes = futures::stream::iter(
+        raw.into_iter()
+            .map(|v| Ok::<bytes::Bytes, TinyAgentsError>(bytes::Bytes::from(v))),
+    );
+    let state = SseState {
+        bytes: Box::pin(bytes),
+        buf: Vec::new(),
+        pending: std::collections::VecDeque::new(),
+        acc: OpenAiStreamAcc::new(reasoning_tags),
+        provider: "openai".to_string(),
+        model: "gpt-4.1-mini".to_string(),
+        started: false,
+        finished: false,
+        terminal_emitted: false,
+    };
+    futures::stream::unfold(state, sse_next).collect().await
+}
+
+/// Concatenates the reasoning fragments across every streamed `MessageDelta`.
+fn stream_reasoning(items: &[ModelStreamItem]) -> String {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta.reasoning.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Concatenates the text of every leading `Thinking` block on a response.
+fn response_reasoning(response: &ModelResponse) -> String {
+    response
+        .message
+        .content
+        .iter()
+        .filter_map(|block| block.as_thinking().map(|(text, _)| text.to_string()))
+        .collect()
+}
+
+/// Concatenates the visible-text fragments across every streamed `MessageDelta`.
+fn stream_text(items: &[ModelStreamItem]) -> String {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            ModelStreamItem::MessageDelta(delta) => Some(delta.text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Builds a one-content-delta SSE body carrying `content`, then a stop chunk.
+fn content_chunks(deltas: &[&str]) -> Vec<Vec<u8>> {
+    let mut raw: Vec<Vec<u8>> = deltas
+        .iter()
+        .map(|d| {
+            format!(
+                "data: {}\n\n",
+                json!({ "choices": [{ "delta": { "content": d } }] })
+            )
+            .into_bytes()
+        })
+        .collect();
+    raw.push(b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n".to_vec());
+    raw.push(b"data: [DONE]\n\n".to_vec());
+    raw
+}
+
+#[tokio::test]
+async fn sse_stream_extracts_inline_think_tags() {
+    let items = collect_sse_with(
+        content_chunks(&["<think>reasoning here</think>", "the answer"]),
+        Some(ReasoningTagExtraction::default()),
+    )
+    .await;
+
+    // Live deltas keep chain-of-thought off the visible channel.
+    assert_eq!(stream_reasoning(&items), "reasoning here");
+    assert_eq!(stream_text(&items), "the answer");
+
+    // The terminal response carries a leading Thinking block + clean text.
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "the answer");
+    assert_eq!(response_reasoning(&response), "reasoning here");
+    assert_eq!(
+        response.message.content.first(),
+        Some(&crate::harness::message::ContentBlock::Thinking {
+            text: "reasoning here".into(),
+            signature: None,
+        })
+    );
+}
+
+#[tokio::test]
+async fn sse_stream_inline_think_tag_split_across_deltas() {
+    // The opening tag is split across three network chunks: `<th`, `ink`, `>`.
+    let items = collect_sse_with(
+        content_chunks(&["before<th", "ink", ">secret</think>after"]),
+        Some(ReasoningTagExtraction::default()),
+    )
+    .await;
+
+    assert_eq!(stream_reasoning(&items), "secret");
+    assert_eq!(stream_text(&items), "beforeafter");
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "beforeafter");
+    assert_eq!(response_reasoning(&response), "secret");
+}
+
+#[tokio::test]
+async fn sse_stream_disabled_extraction_leaks_think_tags() {
+    // With extraction disabled the inline tags pass straight through — the
+    // documented opt-out behavior.
+    let items = collect_sse_with(content_chunks(&["<think>cot</think>answer"]), None).await;
+
+    assert_eq!(stream_text(&items), "<think>cot</think>answer");
+    assert_eq!(stream_reasoning(&items), "");
+}
+
+#[tokio::test]
+async fn sse_stream_side_channel_and_inline_reasoning_combine() {
+    // A response carrying BOTH a side-channel reasoning fragment and an inline
+    // <think> section: side-channel leads, inline follows, joined by the
+    // configured separator.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"side\"}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"<think>inline</think>done\"},\"finish_reason\":\"stop\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let items = collect_sse_with(raw, Some(ReasoningTagExtraction::default())).await;
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "done");
+    assert_eq!(response_reasoning(&response), "side\ninline");
+}
+
+#[tokio::test]
+async fn sse_stream_start_with_reasoning_deepseek_template() {
+    // DeepSeek-R1 template: output begins mid-reasoning, only a closing tag.
+    let items = collect_sse_with(
+        content_chunks(&["chain of thought", "</think>final"]),
+        Some(ReasoningTagExtraction::default().with_start_with_reasoning(true)),
+    )
+    .await;
+
+    assert_eq!(stream_reasoning(&items), "chain of thought");
+    assert_eq!(stream_text(&items), "final");
+
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    assert_eq!(response.text(), "final");
+    assert_eq!(response_reasoning(&response), "chain of thought");
+}
+
+#[test]
+fn parse_chat_response_extracts_inline_think_and_side_channel() {
+    let body = json!({
+        "id": "chatcmpl-think",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "side",
+                    "content": "<think>inline</think>\n\nThe answer is 42."
+                },
+                "finish_reason": "stop"
+            }
+        ]
+    });
+
+    let cfg = ReasoningTagExtraction::default();
+    let response = parse_chat_response(body, Some(&cfg)).unwrap();
+    assert_eq!(response.text(), "The answer is 42.");
+    // Side-channel leads, inline follows, separator-joined.
+    assert_eq!(response_reasoning(&response), "side\ninline");
+}
+
+#[test]
+fn parse_chat_response_without_config_leaves_inline_tags_in_text() {
+    let body = json!({
+        "id": "chatcmpl-plain",
+        "choices": [
+            { "message": { "role": "assistant", "content": "<think>x</think>y" }, "finish_reason": "stop" }
+        ]
+    });
+
+    let response = parse_chat_response(body, None).unwrap();
+    assert_eq!(response.text(), "<think>x</think>y");
+    assert_eq!(response_reasoning(&response), "");
 }
 
 #[tokio::test]
@@ -898,6 +1210,101 @@ async fn sse_stream_correlates_indexless_parallel_tool_calls_by_id() {
     assert_eq!(calls[1].id, "call-b");
     assert_eq!(calls[1].name, "beta");
     assert_eq!(calls[1].arguments, json!({ "y": 2 }));
+}
+
+#[tokio::test]
+async fn sse_stream_index_zero_parallel_tool_calls_do_not_merge() {
+    // Ollama's /v1 endpoint emitted parallel tool calls all carrying `index: 0`
+    // (ollama/ollama#15457). Two distinct ids at the same index must open two
+    // separate slots instead of silently merging into one. Interleaved
+    // continuation fragments (still `index: 0`, carrying the id) must route back
+    // to the correct already-open slot rather than the occupant of slot 0.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"function\":{\"name\":\"alpha\",\"arguments\":\"{\\\"x\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-b\",\"function\":{\"name\":\"beta\",\"arguments\":\"{\\\"y\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"function\":{\"arguments\":\"1}\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-b\",\"function\":{\"arguments\":\"2}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "index-0 parallel calls must not merge: {calls:?}"
+    );
+    assert_eq!(calls[0].id, "call-a");
+    assert_eq!(calls[0].name, "alpha");
+    assert_eq!(calls[0].arguments, json!({ "x": 1 }));
+    assert_eq!(calls[1].id, "call-b");
+    assert_eq!(calls[1].name, "beta");
+    assert_eq!(calls[1].arguments, json!({ "y": 2 }));
+}
+
+#[tokio::test]
+async fn sse_stream_index_zero_id_less_continuations_follow_latest_call() {
+    // Worst-case combination of two local-server defects: parallel calls all
+    // reuse `index: 0` (ollama/ollama#15457) AND continuation fragments carry
+    // no id (the standard OpenAI streaming shape). An id-less continuation
+    // under a reused index must follow the call most recently opened at that
+    // index — not the original occupant of slot 0.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"function\":{\"name\":\"alpha\",\"arguments\":\"{\\\"x\\\":1}\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-b\",\"function\":{\"name\":\"beta\",\"arguments\":\"{\\\"y\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"2}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 2, "expected two distinct calls: {calls:?}");
+    assert_eq!(calls[0].id, "call-a");
+    assert_eq!(calls[0].arguments, json!({ "x": 1 }));
+    assert!(calls[0].invalid.is_none(), "call-a must stay valid");
+    assert_eq!(calls[1].id, "call-b");
+    assert_eq!(
+        calls[1].arguments,
+        json!({ "y": 2 }),
+        "id-less continuation must land on call-b, the latest call at index 0"
+    );
+    assert!(calls[1].invalid.is_none(), "call-b must stay valid");
+}
+
+#[tokio::test]
+async fn sse_stream_empty_name_continuation_never_overwrites_recorded_name() {
+    // LM Studio (lmstudio-bug-tracker#649) can send a later tool-call fragment
+    // whose `function.name` is an empty string. It must never clobber the name
+    // already recorded from the call-opening fragment.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\"}}]}}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"\",\"arguments\":\"1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+    let mut merged = StreamAccumulator::new();
+    for item in &items {
+        merged.push(item);
+    }
+    let response = merged.finish().unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].name, "lookup",
+        "an empty-name continuation must not overwrite the recorded name"
+    );
+    assert_eq!(calls[0].arguments, json!({ "q": 1 }));
 }
 
 #[tokio::test]
@@ -1331,18 +1738,21 @@ fn recovers_first_call_when_fragments_are_concatenated() {
 }
 
 #[test]
-fn still_fails_fast_on_genuinely_malformed_tool_args() {
+fn marks_genuinely_malformed_tool_args_invalid_instead_of_hanging() {
     // The exact corruption seen in the wild carries a stray `]` *inside* the
-    // JSON — not just a leaked delimiter — so it cannot be safely repaired. It
-    // must fail fast (a clear, non-retryable model error) rather than hang.
-    let err = parse_response(tool_call_body(
+    // JSON — not just a leaked delimiter — so it cannot be safely repaired.
+    // Rather than fail the call (or hang on a never-resolving one), it is
+    // surfaced as an `invalid` ToolCall the agent loop can bounce back to the
+    // model with a clear error.
+    let response = parse_response(tool_call_body(
         r#"{"arguments":{"body":"hi"]}}<tool_call|>"#,
     ))
-    .expect_err("unrepairable args must fail closed");
-    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
-    let message = err.to_string();
-    assert!(message.contains("call-1"), "{message}");
-    assert!(message.contains("raw arguments"), "{message}");
+    .expect("unrepairable args must resolve as an invalid call, not fail");
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    let reason = calls[0].invalid.as_deref().expect("call marked invalid");
+    assert!(reason.contains("call-1"), "{reason}");
+    assert!(reason.contains("raw arguments"), "{reason}");
 }
 
 #[test]
@@ -1473,5 +1883,182 @@ fn merge_provider_options_prefers_overrides_and_handles_nulls() {
     assert_eq!(
         merge_provider_options(&defaults, &json!(["top_k", 40])),
         json!(["top_k", 40])
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Local-server request-shape degradation (named tool_choice, json_object)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn degrades_named_tool_choice_to_required_and_filters_tools() {
+    // The endpoint rejects the object form: send `"required"` and drop every
+    // tool except the named one so the model has no other tool to pick.
+    let model = OpenAiModel::new("k")
+        .with_model("m")
+        .with_named_tool_choice(false);
+    let request = ModelRequest::new(vec![Message::user("hi")])
+        .with_tools(vec![
+            ToolSchema::new("get_weather", "w", json!({})),
+            ToolSchema::new("get_time", "t", json!({})),
+        ])
+        .with_tool_choice(ToolChoice::Tool("get_weather".to_string()));
+
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+
+    assert_eq!(value["tool_choice"], json!("required"));
+    let tools = value["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["function"]["name"], json!("get_weather"));
+}
+
+#[test]
+fn degraded_named_tool_choice_keeps_tools_when_named_tool_absent() {
+    // Named tool not in the list: leave `tools` intact but still send "required".
+    let model = OpenAiModel::new("k")
+        .with_model("m")
+        .with_named_tool_choice(false);
+    let request = ModelRequest::new(vec![Message::user("hi")])
+        .with_tools(vec![ToolSchema::new("get_time", "t", json!({}))])
+        .with_tool_choice(ToolChoice::Tool("missing".to_string()));
+
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+
+    assert_eq!(value["tool_choice"], json!("required"));
+    let tools = value["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["function"]["name"], json!("get_time"));
+}
+
+#[test]
+fn degrades_json_object_to_permissive_json_schema() {
+    let model = OpenAiModel::new("k")
+        .with_model("m")
+        .with_json_object_format(false);
+    let request = ModelRequest::new(vec![Message::user("hi")])
+        .with_response_format(ResponseFormat::JsonObject);
+
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+
+    assert_eq!(
+        value["response_format"],
+        json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "json_object",
+                "schema": { "type": "object" },
+                "strict": false,
+            }
+        })
+    );
+}
+
+#[test]
+fn baseline_knobs_default_to_supported_wire_shapes() {
+    // Default knobs preserve the hosted-OpenAI object/json_object wire shapes, so
+    // an accidental default flip would fail here.
+    let model = model();
+    assert_eq!(model.baseline_degrade(), Degrade::default());
+
+    let request = ModelRequest::new(vec![Message::user("hi")])
+        .with_tools(vec![ToolSchema::new("t", "d", json!({}))])
+        .with_tool_choice(ToolChoice::Tool("t".to_string()))
+        .with_response_format(ResponseFormat::JsonObject);
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+
+    assert_eq!(
+        value["tool_choice"],
+        json!({ "type": "function", "function": { "name": "t" } })
+    );
+    assert_eq!(value["response_format"], json!({ "type": "json_object" }));
+}
+
+#[test]
+fn degrade_for_400_targets_only_the_shape_the_request_used() {
+    let named = ModelRequest::new(vec![Message::user("hi")])
+        .with_tools(vec![ToolSchema::new("t", "d", json!({}))])
+        .with_tool_choice(ToolChoice::Tool("t".to_string()));
+    assert_eq!(
+        degrade_for_400(
+            "Invalid tool_choice type: 'object'. Supported string values: none, auto, required",
+            &named,
+            Degrade::default(),
+        ),
+        Some(Degrade {
+            named_tool_choice: true,
+            json_object: false,
+        })
+    );
+
+    let json = ModelRequest::new(vec![Message::user("hi")])
+        .with_response_format(ResponseFormat::JsonObject);
+    assert_eq!(
+        degrade_for_400(
+            "'response_format.type' must be 'json_schema' or 'text'",
+            &json,
+            Degrade::default(),
+        ),
+        Some(Degrade {
+            named_tool_choice: false,
+            json_object: true,
+        })
+    );
+}
+
+#[test]
+fn degrade_for_400_ignores_unrelated_or_already_degraded_failures() {
+    let named = ModelRequest::new(vec![Message::user("hi")])
+        .with_tools(vec![ToolSchema::new("t", "d", json!({}))])
+        .with_tool_choice(ToolChoice::Tool("t".to_string()));
+
+    // A tool_choice message but the request used `Required` (not a named tool):
+    // there is nothing to degrade, so no retry.
+    let required = ModelRequest::new(vec![Message::user("hi")])
+        .with_tools(vec![ToolSchema::new("t", "d", json!({}))])
+        .with_tool_choice(ToolChoice::Required);
+    assert_eq!(
+        degrade_for_400("Invalid tool_choice type", &required, Degrade::default()),
+        None
+    );
+
+    // An unrelated 400 never triggers a degraded retry.
+    assert_eq!(
+        degrade_for_400("context length exceeded", &named, Degrade::default()),
+        None
+    );
+
+    // Already degraded on the first attempt -> no repeat (prevents a retry loop).
+    assert_eq!(
+        degrade_for_400(
+            "Invalid tool_choice type",
+            &named,
+            Degrade {
+                named_tool_choice: true,
+                json_object: false,
+            },
+        ),
+        None
+    );
+}
+
+#[test]
+fn degrade_for_400_unions_with_existing_baseline_degrade() {
+    // A json_object 400 while the named-tool-choice degrade is already baked on
+    // keeps that baseline flag set for the retry.
+    let json = ModelRequest::new(vec![Message::user("hi")])
+        .with_response_format(ResponseFormat::JsonObject);
+    assert_eq!(
+        degrade_for_400(
+            "response_format must be json_schema",
+            &json,
+            Degrade {
+                named_tool_choice: true,
+                json_object: false,
+            },
+        ),
+        Some(Degrade {
+            named_tool_choice: true,
+            json_object: true,
+        })
     );
 }
