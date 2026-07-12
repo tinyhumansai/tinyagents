@@ -94,13 +94,15 @@ impl EmbeddingModel for CohereEmbeddingModel {
         }
 
         let url = format!("{}/v2/embed", self.base_url);
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "texts": texts,
             "input_type": if self.query_mode { "search_query" } else { "search_document" },
             "embedding_types": ["float"],
-            "output_dimension": self.dimensions,
         });
+        if self.model.to_ascii_lowercase().contains("v4") && self.dimensions > 0 {
+            body["output_dimension"] = serde_json::json!(self.dimensions);
+        }
 
         let mut response = None;
         for attempt in 0..=MAX_RETRIES {

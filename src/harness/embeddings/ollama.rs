@@ -257,6 +257,11 @@ impl EmbeddingModel for OllamaEmbeddingModel {
         if live.is_empty() {
             return Ok(vec![Vec::new(); texts.len()]);
         }
+        if live.len() != texts.len() {
+            return Err(TinyAgentsError::Validation(
+                "Ollama embedding batches must not mix blank and nonblank inputs".into(),
+            ));
+        }
         let input = live
             .iter()
             .map(|(_, text)| text.clone())
