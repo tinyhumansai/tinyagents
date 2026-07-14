@@ -255,3 +255,45 @@ async fn retriever_accessors_expose_collaborators() {
     assert_eq!(retriever.model().dimensions(), 8);
     let _ = retriever.store();
 }
+#[test]
+fn embedding_identity_signature_is_stable() {
+    let model = MockEmbeddingModel::new(8);
+    assert_eq!(model.name(), "mock");
+    assert_eq!(model.model_id(), "deterministic-hash");
+    assert_eq!(
+        model.signature(),
+        "provider=mock;model=deterministic-hash;dims=8"
+    );
+    assert_eq!(
+        format_embedding_signature("openai", "text-embedding-3-small", 1536),
+        "provider=openai;model=text-embedding-3-small;dims=1536"
+    );
+}
+
+#[tokio::test]
+async fn voyage_and_noop_identity_match_host_contract() {
+    let voyage = VoyageEmbeddingModel::new("test-key");
+    assert_eq!(voyage.name(), "voyage");
+    assert_eq!(voyage.model_id(), VOYAGE_DEFAULT_MODEL);
+    assert_eq!(
+        voyage.signature(),
+        "provider=voyage;model=voyage-3-large;dims=1024"
+    );
+
+    let noop = NoopEmbeddingModel;
+    assert_eq!(noop.signature(), "provider=none;model=none;dims=0");
+    assert_eq!(
+        noop.embed(&["first".into(), "second".into()])
+            .await
+            .unwrap(),
+        vec![Vec::<f32>::new(), Vec::<f32>::new()]
+    );
+}
+
+#[test]
+fn gemini_openai_compatible_model_id_is_not_rewritten() {
+    let model = OpenAiEmbeddingModel::new("test-key")
+        .with_base_url("https://generativelanguage.googleapis.com/v1beta/openai")
+        .with_model("gemini-embedding-001");
+    assert_eq!(model.model(), "gemini-embedding-001");
+}

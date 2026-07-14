@@ -39,13 +39,38 @@ use crate::error::Result;
 ///   deterministic implementations such as [`MockEmbeddingModel`].
 #[async_trait]
 pub trait EmbeddingModel: Send + Sync {
+    /// Stable provider identifier, such as `"openai"` or `"ollama"`.
+    fn name(&self) -> &str;
+
+    /// Stable model identifier within the provider.
+    fn model_id(&self) -> &str;
+
     /// Embeds a batch of texts, returning one vector per input in input order.
     ///
     /// Returning an empty `Vec` for empty input is valid.
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
 
+    /// Embeds a retrieval query. Asymmetric providers can override this;
+    /// symmetric models reuse [`Self::embed`].
+    async fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
+        let mut vectors = self.embed(&[query.to_owned()]).await?;
+        Ok(vectors.pop().unwrap_or_default())
+    }
+
     /// Returns the fixed dimensionality of every vector this model produces.
     fn dimensions(&self) -> usize;
+
+    /// Stable embedding-space identity used to partition persisted vectors.
+    fn signature(&self) -> String {
+        format_embedding_signature(self.name(), self.model_id(), self.dimensions())
+    }
+}
+
+/// Format the canonical embedding-space signature.
+///
+/// This must remain byte-identical to OpenHuman's persisted signature contract.
+pub fn format_embedding_signature(name: &str, model_id: &str, dimensions: usize) -> String {
+    format!("provider={name};model={model_id};dims={dimensions}")
 }
 
 // ── MockEmbeddingModel ────────────────────────────────────────────────────────
@@ -115,6 +140,14 @@ impl MockEmbeddingModel {
 
 #[async_trait]
 impl EmbeddingModel for MockEmbeddingModel {
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    fn model_id(&self) -> &str {
+        "deterministic-hash"
+    }
+
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         Ok(texts.iter().map(|t| self.embed_one(t)).collect())
     }

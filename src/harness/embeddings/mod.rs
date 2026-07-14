@@ -267,15 +267,39 @@ impl Retriever {
     /// with a different embedding model. An empty store never errors: it
     /// answers every query with no hits.
     pub async fn retrieve(&self, query: &str, top_k: usize) -> Result<Vec<ScoredDoc>> {
-        let mut vectors = self.model.embed(&[query.to_string()]).await?;
-        let query_vector = vectors.pop().unwrap_or_default();
+        let query_vector = self.model.embed_query(query).await?;
         self.store.query(&query_vector, top_k).await
     }
 }
 
+mod cloud;
+mod cohere;
+mod noop;
+mod ollama;
 mod openai;
+mod rate_limit;
+mod retry_after;
+mod voyage;
 
+pub use noop::NoopEmbeddingModel;
+pub use ollama::{
+    DEFAULT_OLLAMA_DIMENSIONS, DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL, OllamaEmbeddingModel,
+};
 pub use openai::OpenAiEmbeddingModel;
+pub use rate_limit::{DEFAULT_REQUESTS_PER_MINUTE, acquire, rate_limit, set_rate_limit};
+pub use retry_after::{
+    BASE_BACKOFF_MS, MAX_BACKOFF_MS, MAX_RETRIES, backoff_ms_for_attempt, parse_retry_after_ms,
+};
+pub use types::format_embedding_signature;
+pub use voyage::{
+    VOYAGE_API_BASE, VOYAGE_DEFAULT_DIMENSIONS, VOYAGE_DEFAULT_MODEL, VoyageEmbeddingModel,
+};
 
 #[cfg(test)]
 mod test;
+pub use cloud::{
+    BearerResolver, CloudEmbeddingModel, DEFAULT_CLOUD_DIMENSIONS, DEFAULT_CLOUD_MODEL,
+};
+pub use cohere::{
+    COHERE_API_BASE, COHERE_DEFAULT_DIMENSIONS, COHERE_DEFAULT_MODEL, CohereEmbeddingModel,
+};
