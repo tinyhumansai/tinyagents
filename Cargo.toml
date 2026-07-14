@@ -1,6 +1,6 @@
 [package]
 name = "tinyagents"
-version = "1.9.0"
+version = "2.0.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "A recursive language-model (RLM) harness for Rust."
