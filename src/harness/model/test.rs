@@ -120,6 +120,7 @@ fn context_window_patterns_cover_common_provider_families() {
 
 #[test]
 fn o1_o3_context_patterns_require_segment_boundaries() {
+    // Canonical o-series ids still resolve to the 200K reasoning window.
     assert_eq!(context_window_for_model_id("o1"), Some(200_000));
     assert_eq!(context_window_for_model_id("o1-mini"), Some(200_000));
     assert_eq!(context_window_for_model_id("o3-mini"), Some(200_000));
@@ -128,13 +129,22 @@ fn o1_o3_context_patterns_require_segment_boundaries() {
         Some(200_000)
     );
 
+    // A bounded o1/o3 token embedded mid-name resolves too: it is delimited by
+    // non-alphanumeric boundaries on both sides.
+    assert_eq!(
+        context_window_for_model_id("ollama/mistral-for-o1-benchmark"),
+        Some(200_000)
+    );
+    assert_eq!(
+        context_window_for_model_id("vllm/qwen-o3-eval.bench"),
+        Some(200_000)
+    );
+
+    // The boundary guard keeps o1/o3 substrings from over-matching.
     assert_eq!(context_window_for_model_id("solo1-7b"), None);
     assert_eq!(context_window_for_model_id("proto3-chat"), None);
     assert_eq!(context_window_for_model_id("octo3thing"), None);
-    assert_eq!(
-        context_window_for_model_id("ollama/mistral-for-o1-benchmark"),
-        None
-    );
+    assert_eq!(context_window_for_model_id("totally-unknown-model"), None);
 }
 
 #[test]
