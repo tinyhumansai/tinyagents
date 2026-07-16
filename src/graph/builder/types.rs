@@ -222,6 +222,9 @@ pub struct GraphBuilder<State, Update> {
     /// Barrier/waiting edges: target node -> set of predecessor nodes that must
     /// all have completed (across steps) before the target activates.
     pub(crate) waiting: HashMap<NodeId, HashSet<NodeId>>,
+    /// Mixed fan-in barrier relief registrations; see
+    /// [`super::BarrierRelief`].
+    pub(crate) barrier_reliefs: Vec<super::BarrierRelief>,
     pub(crate) reducer: Option<Arc<dyn StateReducer<State, Update>>>,
     pub(crate) recursion_limit: usize,
     /// When true, active nodes in a superstep run concurrently (fan-out).

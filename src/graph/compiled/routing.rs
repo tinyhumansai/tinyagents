@@ -59,6 +59,38 @@ where
                 }
             }
         }
+
+        // Mixed fan-in barrier relief: a waiting/barrier node normally
+        // activates only once every registered predecessor has arrived. When
+        // one of those predecessors is reachable only via a conditional
+        // branch, and the brancher routed elsewhere this superstep, that
+        // predecessor will never arrive on its own — register a phantom
+        // arrival on its behalf so the barrier can still clear on the
+        // predecessors that actually ran, instead of deadlocking forever.
+        for relief in self.barrier_reliefs.iter() {
+            let source_completed = completed.iter().any(|a| a.node == relief.source);
+            if !source_completed || next_seen.contains(&relief.relief_node) {
+                continue;
+            }
+            let Some(required) = self.waiting.get(&relief.barrier_node) else {
+                continue;
+            };
+            let arrived = barrier_arrivals
+                .entry(relief.barrier_node.clone())
+                .or_default();
+            arrived.insert(relief.relief_node.clone());
+            if !required.is_subset(arrived) {
+                continue;
+            }
+            barrier_arrivals.remove(&relief.barrier_node);
+            if next_seen.insert(relief.barrier_node.clone()) {
+                next.push(Activation {
+                    node: relief.barrier_node.clone(),
+                    send_arg: None,
+                });
+            }
+        }
+
         Ok(next)
     }
 

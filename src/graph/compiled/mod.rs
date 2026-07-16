@@ -78,7 +78,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use crate::graph::builder::{
-    Branch, BuilderNode, END, ForkId, NodeContext, NodeFuture, NodeHandler, NodeMeta, START,
+    BarrierRelief, Branch, BuilderNode, END, ForkId, NodeContext, NodeFuture, NodeHandler,
+    NodeMeta, START,
 };
 use crate::graph::checkpoint::{
     BarrierArrivals, Checkpoint, CheckpointConfig, CheckpointTuple, Checkpointer, DurabilityMode,
@@ -253,6 +254,7 @@ impl<State, Update> CompiledGraph<State, Update> {
         max_concurrency: Option<usize>,
         node_timeout: Option<Duration>,
         node_meta: HashMap<NodeId, NodeMeta>,
+        barrier_reliefs: Vec<BarrierRelief>,
     ) -> Self {
         Self {
             graph_id,
@@ -262,6 +264,7 @@ impl<State, Update> CompiledGraph<State, Update> {
             branches: Arc::new(branches),
             command_nodes: Arc::new(command_nodes),
             waiting: Arc::new(waiting),
+            barrier_reliefs: Arc::new(barrier_reliefs),
             node_meta: Arc::new(node_meta),
             entry,
             reducer,
