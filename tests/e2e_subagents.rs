@@ -46,6 +46,7 @@ fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> Mod
         finish_reason: Some("tool_calls".to_string()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 
@@ -62,6 +63,7 @@ fn text_response(text: &str) -> ModelResponse {
         finish_reason: Some("stop".to_string()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 

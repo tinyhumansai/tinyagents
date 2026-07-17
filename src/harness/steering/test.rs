@@ -42,6 +42,7 @@ fn text_response(text: &str) -> ModelResponse {
         finish_reason: Some("stop".to_string()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 
@@ -82,6 +83,7 @@ impl ChatModel<()> for RecordingModel {
                 finish_reason: Some("tool_calls".to_string()),
                 raw: None,
                 resolved_model: None,
+                continue_turn: None,
             })
         } else {
             Ok(text_response("done"))

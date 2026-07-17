@@ -199,6 +199,7 @@ pub(super) fn parse_responses_response(value: Value) -> ModelResponse {
         finish_reason: Some("stop".to_string()),
         raw: Some(value),
         resolved_model: None,
+        continue_turn: None,
     }
 }
 

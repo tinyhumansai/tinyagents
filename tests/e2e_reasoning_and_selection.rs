@@ -45,6 +45,7 @@ fn text_response(text: &str) -> ModelResponse {
         finish_reason: Some("stop".into()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 

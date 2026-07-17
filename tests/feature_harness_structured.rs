@@ -61,6 +61,7 @@ fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> Mod
         finish_reason: Some("tool_calls".into()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 
@@ -161,6 +162,7 @@ async fn tool_call_strategy_reads_named_tool_arguments() {
         finish_reason: Some("tool_calls".into()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     };
 
     let output = extractor
@@ -334,6 +336,7 @@ async fn provider_schema_reads_text_content_blocks() {
         finish_reason: Some("stop".into()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     };
 
     let parsed: Answer = extractor

@@ -454,6 +454,7 @@ fn structured_output_supports_provider_schema_and_tool_fallbacks() {
         finish_reason: Some("tool_calls".into()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     };
     let tool_output = StructuredExtractor::new(StructuredStrategy::ToolCall, "score", schema)
         .extract(&tool_response)

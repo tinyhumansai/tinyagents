@@ -333,6 +333,21 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     continue;
                 }
 
+                // The model says it is not finished (`ModelResponse::continue_turn`).
+                // Hand the floor back and ask for another reply instead of taking
+                // this response as the turn's answer. Checked after truncated-empty
+                // recovery — a truncated response is broken, not a deliberate
+                // continue — and before structured extraction, which would treat it
+                // as terminal.
+                //
+                // The assistant row is already on `messages` (appended above), so
+                // only the nudge is needed. `max_model_calls` bounds the resulting
+                // loop exactly as it bounds a tool-calling one.
+                if !structured_tool_hit && let Some(nudge) = response.continue_turn.clone() {
+                    messages.push(Message::user(nudge));
+                    continue;
+                }
+
                 // Final response: optionally extract structured output using the
                 // resolved plan (provider-native schema or tool-call arguments).
                 if let Some((strategy, name, schema)) = &structured_plan {
