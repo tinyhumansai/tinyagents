@@ -1244,6 +1244,71 @@ async fn barrier_arrivals_survive_interrupt_and_resume() {
 }
 
 #[tokio::test]
+async fn barrier_relief_fires_when_source_skips_relief_node() {
+    // Mixed fan-in: `m` waits on both `a` and `c`. `condition` never routes to
+    // `a` — it always takes the `skip` route to END, simulating an untaken
+    // conditional branch — so without a barrier relief `m` would deadlock
+    // forever waiting on a predecessor that never runs.
+    // `add_barrier_relief("condition", "a", "m")` registers `a`'s phantom
+    // arrival at `m` whenever `condition` completes without activating `a`,
+    // so `m` still fires once `c`'s real arrival lands.
+    let graph = GraphBuilder::<Vec<String>, String>::new()
+        .with_parallel(true)
+        .set_reducer(ClosureStateReducer::new(|mut s: Vec<String>, u: String| {
+            s.push(u);
+            Ok(s)
+        }))
+        .add_node("start", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Command(
+                Command::default().with_goto(["condition", "c"]),
+            ))
+        })
+        .add_node("condition", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Update("condition".to_string()))
+        })
+        .add_node("a", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Update("a".to_string()))
+        })
+        .add_node("c", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Update("c".to_string()))
+        })
+        .add_node("m", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Update("m".to_string()))
+        })
+        .set_entry("start")
+        .mark_command_routing("start")
+        // `condition` always takes the `skip` route to END — `a` is never
+        // reached via a real edge.
+        .add_conditional_edges(
+            "condition",
+            |_s: &Vec<String>| "skip".to_string(),
+            [("skip", END)],
+        )
+        .add_waiting_edge("a", "m")
+        .add_waiting_edge("c", "m")
+        .add_barrier_relief("condition", "a", "m")
+        .set_finish("m")
+        .compile()
+        .unwrap();
+
+    let run = graph.run(Vec::new()).await.unwrap();
+
+    assert!(
+        run.visited.iter().any(|n| n.as_str() == "m"),
+        "m must activate via the barrier relief even though `a` never ran"
+    );
+    assert!(
+        !run.visited.iter().any(|n| n.as_str() == "a"),
+        "a must never have run (condition always skipped it)"
+    );
+    assert_eq!(
+        run.state,
+        vec!["condition".to_string(), "c".to_string(), "m".to_string()],
+        "m fires off condition+c's real contributions, with no phantom `a` update"
+    );
+}
+
+#[tokio::test]
 async fn reducer_error_at_boundary_transitions_run_to_failed() {
     // A reducer error raised at the step boundary (after the node ran) must
     // still fail the run — emit RunFailed / a Failed status — rather than

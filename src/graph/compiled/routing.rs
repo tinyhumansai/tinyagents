@@ -21,9 +21,16 @@ where
     ) -> Result<Vec<Activation>> {
         let mut next: Vec<Activation> = Vec::new();
         let mut next_seen: HashSet<NodeId> = HashSet::new();
+        // Resolved targets per activation index, captured once here and
+        // reused by the barrier-relief pass below instead of calling
+        // `self.route` a second time — a router closure is only guaranteed
+        // pure/idempotent per the `route`/`add_conditional_edges` contract,
+        // not safe to invoke twice for the same activation.
+        let mut resolved: Vec<Vec<RouteTarget>> = Vec::with_capacity(completed.len());
         for (index, activation) in completed.iter().enumerate() {
             let node_id = &activation.node;
             let targets = self.route(node_id, goto_map.get(&index).map(Vec::as_slice), state)?;
+            resolved.push(targets.clone());
             for target in targets {
                 let tnode = target.node().clone();
                 if tnode.as_str() == END {
@@ -59,7 +66,110 @@ where
                 }
             }
         }
+
+        // Mixed fan-in barrier relief: a waiting/barrier node normally
+        // activates only once every registered predecessor has arrived. When
+        // one of those predecessors is reachable only via a conditional
+        // branch, and the *taken* branch does not lead toward it, that
+        // predecessor will never arrive on its own — register a phantom
+        // arrival on its behalf so the barrier can still clear on the
+        // predecessors that actually ran, instead of deadlocking forever.
+        //
+        // The check is keyed on `source`'s *resolved routing target* this
+        // step (via `reaches_deterministically`), not on whether
+        // `relief_node` is freshly scheduled into `next` this same
+        // superstep. A same-superstep check is wrong for a multi-hop
+        // conditional predecessor (`source --branch--> x --main-->
+        // relief_node`, `x` a plain pass-through): `relief_node` would not
+        // yet be in `next` on the step `source` itself completes — even on
+        // the *taken* branch, where `relief_node` WILL run once `x` does —
+        // so a same-superstep check would fire a premature phantom arrival
+        // and let the barrier clear before the real predecessor's data
+        // commits, reintroducing the exact data-loss bug this primitive
+        // exists to prevent. Resolving `source`'s actual target and walking
+        // it forward through deterministic (non-branching) edges is correct
+        // for both direct and multi-hop cases because it answers "was the
+        // branch leading to `relief_node` taken", not "did `relief_node`
+        // happen to run in lockstep with `source`".
+        for relief in self.barrier_reliefs.iter() {
+            let source_indices: Vec<usize> = completed
+                .iter()
+                .enumerate()
+                .filter(|(_, activation)| activation.node == relief.source)
+                .map(|(index, _)| index)
+                .collect();
+            if source_indices.is_empty() {
+                continue;
+            }
+            let branch_taken = source_indices.iter().any(|index| {
+                resolved[*index].iter().any(|target| {
+                    self.reaches_deterministically(
+                        target.node(),
+                        &relief.relief_node,
+                        &relief.barrier_node,
+                    )
+                })
+            });
+            // A relief_node freshly scheduled into `next` this step (a
+            // direct, single-hop predecessor) is also proof the branch was
+            // taken; kept as a defensive fallback alongside the resolved-
+            // target check above.
+            if branch_taken || next_seen.contains(&relief.relief_node) {
+                continue;
+            }
+            let Some(required) = self.waiting.get(&relief.barrier_node) else {
+                continue;
+            };
+            let arrived = barrier_arrivals
+                .entry(relief.barrier_node.clone())
+                .or_default();
+            arrived.insert(relief.relief_node.clone());
+            if !required.is_subset(arrived) {
+                continue;
+            }
+            barrier_arrivals.remove(&relief.barrier_node);
+            if next_seen.insert(relief.barrier_node.clone()) {
+                next.push(Activation {
+                    node: relief.barrier_node.clone(),
+                    send_arg: None,
+                });
+            }
+        }
+
         Ok(next)
+    }
+
+    /// Whether `to` is reachable from `from` by following only deterministic
+    /// static routing — plain/waiting edges (`self.edges`), which resolve to
+    /// exactly one successor with no runtime decision — without ever
+    /// expanding through `stop`.
+    ///
+    /// This is what makes barrier-relief evaluation correct for a
+    /// multi-hop conditional predecessor: once a brancher's routing decision
+    /// for this step is resolved to a concrete target, whether that target
+    /// eventually leads to a barrier's conditional predecessor is a static
+    /// property of the compiled topology for any chain of plain pass-through
+    /// nodes — it does not depend on when each hop happens to run. A further
+    /// conditional/command node along the way (no `self.edges` entry) is a
+    /// second runtime decision this walk cannot resolve ahead of time, so it
+    /// conservatively reports unreachable there (falling back to the
+    /// same-superstep check).
+    fn reaches_deterministically(&self, from: &NodeId, to: &NodeId, stop: &NodeId) -> bool {
+        if from == to {
+            return true;
+        }
+        let mut current = from;
+        let mut seen: HashSet<&NodeId> = HashSet::new();
+        while let Some(next) = self.edges.get(current) {
+            if next == to {
+                return true;
+            }
+            if next == stop || !seen.insert(next) {
+                return false;
+            }
+            current = next;
+        }
+        false
     }
 
     /// Resolves the next routing targets for `node_id`.

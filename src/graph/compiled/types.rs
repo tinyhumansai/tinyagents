@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::graph::builder::START;
-use crate::graph::builder::{Branch, BuilderNode, NodeMeta};
+use crate::graph::builder::{BarrierRelief, Branch, BuilderNode, NodeMeta};
 use crate::graph::checkpoint::{
     CheckpointConfig, CheckpointMetadata, Checkpointer, DurabilityMode,
 };
@@ -32,6 +32,8 @@ pub struct CompiledGraph<State, Update> {
     /// Barrier/waiting edges: target -> the predecessor set that must all
     /// complete (across steps) before the target activates.
     pub(crate) waiting: Arc<HashMap<NodeId, HashSet<NodeId>>>,
+    /// Mixed fan-in barrier relief registrations; see [`BarrierRelief`].
+    pub(crate) barrier_reliefs: Arc<Vec<BarrierRelief>>,
     /// Behavior-free per-node markers/metadata surfaced by the topology export.
     pub(crate) node_meta: Arc<HashMap<NodeId, NodeMeta>>,
     pub(crate) entry: NodeId,
@@ -106,6 +108,7 @@ impl<State, Update> Clone for CompiledGraph<State, Update> {
             branches: self.branches.clone(),
             command_nodes: self.command_nodes.clone(),
             waiting: self.waiting.clone(),
+            barrier_reliefs: self.barrier_reliefs.clone(),
             node_meta: self.node_meta.clone(),
             entry: self.entry.clone(),
             reducer: self.reducer.clone(),

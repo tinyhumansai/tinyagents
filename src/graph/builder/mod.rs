@@ -29,6 +29,32 @@ use crate::graph::reducer::{OverwriteStateReducer, StateReducer};
 use crate::harness::ids::{GraphId, NodeId};
 use crate::{Result, TinyAgentsError};
 
+/// A relief registration for a mixed fan-in barrier.
+///
+/// A waiting/barrier node (see [`GraphBuilder::add_waiting_edge`]) normally
+/// activates only once *every* registered predecessor has arrived. When one
+/// of those predecessors (`relief_node`) is only reachable via a conditional
+/// branch out of `source`, and `source` routes elsewhere instead, that
+/// predecessor never runs and the barrier would wait forever.
+///
+/// A [`BarrierRelief`] fixes that without weakening the barrier into a plain
+/// edge (which would let a *taken* branch's downstream data race the merge
+/// and get silently dropped): when `source` completes a superstep without
+/// routing to `relief_node`, the executor registers a phantom arrival of
+/// `relief_node` at `barrier_node`, so the barrier can still clear on the
+/// predecessors that actually ran.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BarrierRelief {
+    /// The brancher node whose conditional routing determines whether
+    /// `relief_node` runs.
+    pub source: NodeId,
+    /// The conditional-only predecessor of `barrier_node` that `source` may
+    /// or may not route to.
+    pub relief_node: NodeId,
+    /// The mixed fan-in (all-waiting) node gated on `relief_node`'s arrival.
+    pub barrier_node: NodeId,
+}
+
 impl<State, Update> Default for GraphBuilder<State, Update>
 where
     State: Clone + Send + Sync + 'static,
@@ -55,6 +81,7 @@ where
             branches: HashMap::new(),
             command_nodes: HashSet::new(),
             waiting: HashMap::new(),
+            barrier_reliefs: Vec::new(),
             reducer: None,
             recursion_limit: 50,
             parallel: false,
@@ -198,6 +225,35 @@ where
         let to = to.into();
         self.edges.insert(from.clone(), to.clone());
         self.waiting.entry(to).or_default().insert(from);
+        self
+    }
+
+    /// Registers a barrier relief for a mixed fan-in barrier.
+    ///
+    /// When `source` completes a superstep without routing to `relief_node`
+    /// — because `relief_node` sits behind a conditional branch `source` did
+    /// not take this run — this records a phantom arrival of `relief_node`
+    /// at `barrier_node`'s waiting-edge barrier (registered separately via
+    /// [`Self::add_waiting_edge`]), so an all-waiting merge downstream of a
+    /// mixed fan-in (one unconditionally reachable predecessor plus one
+    /// reachable only via a conditional branch) can still clear on its
+    /// remaining predecessors instead of deadlocking on a branch that will
+    /// never run.
+    ///
+    /// `relief_node` must be one of `barrier_node`'s registered waiting
+    /// predecessors; a relief for a barrier with no matching waiting
+    /// registration is a no-op at execution time.
+    pub fn add_barrier_relief(
+        mut self,
+        source: impl Into<NodeId>,
+        relief_node: impl Into<NodeId>,
+        barrier_node: impl Into<NodeId>,
+    ) -> Self {
+        self.barrier_reliefs.push(BarrierRelief {
+            source: source.into(),
+            relief_node: relief_node.into(),
+            barrier_node: barrier_node.into(),
+        });
         self
     }
 
@@ -406,6 +462,7 @@ where
             max_concurrency,
             node_timeout,
             node_meta,
+            barrier_reliefs,
         } = self;
 
         Ok(CompiledGraph::from_parts(
@@ -423,6 +480,7 @@ where
             max_concurrency,
             node_timeout,
             node_meta,
+            barrier_reliefs,
         ))
     }
 
