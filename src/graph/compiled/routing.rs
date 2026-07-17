@@ -21,9 +21,16 @@ where
     ) -> Result<Vec<Activation>> {
         let mut next: Vec<Activation> = Vec::new();
         let mut next_seen: HashSet<NodeId> = HashSet::new();
+        // Resolved targets per activation index, captured once here and
+        // reused by the barrier-relief pass below instead of calling
+        // `self.route` a second time — a router closure is only guaranteed
+        // pure/idempotent per the `route`/`add_conditional_edges` contract,
+        // not safe to invoke twice for the same activation.
+        let mut resolved: Vec<Vec<RouteTarget>> = Vec::with_capacity(completed.len());
         for (index, activation) in completed.iter().enumerate() {
             let node_id = &activation.node;
             let targets = self.route(node_id, goto_map.get(&index).map(Vec::as_slice), state)?;
+            resolved.push(targets.clone());
             for target in targets {
                 let tnode = target.node().clone();
                 if tnode.as_str() == END {
@@ -94,24 +101,15 @@ where
             if source_indices.is_empty() {
                 continue;
             }
-            let mut branch_taken = false;
-            for index in &source_indices {
-                let targets = self.route(
-                    &relief.source,
-                    goto_map.get(index).map(Vec::as_slice),
-                    state,
-                )?;
-                if targets.iter().any(|target| {
+            let branch_taken = source_indices.iter().any(|index| {
+                resolved[*index].iter().any(|target| {
                     self.reaches_deterministically(
                         target.node(),
                         &relief.relief_node,
                         &relief.barrier_node,
                     )
-                }) {
-                    branch_taken = true;
-                    break;
-                }
-            }
+                })
+            });
             // A relief_node freshly scheduled into `next` this step (a
             // direct, single-hop predecessor) is also proof the branch was
             // taken; kept as a defensive fallback alongside the resolved-
