@@ -93,6 +93,12 @@ pub enum InvalidArgsPolicy {
     /// tool's expected parameter schema) back into the transcript and continue
     /// the loop, letting the model retry with corrected arguments.
     ReturnToolError,
+    /// First normalize common provider-shape defects, then apply
+    /// [`Self::ReturnToolError`] if the resulting arguments still fail schema
+    /// validation. Normalization decodes a JSON object emitted as a string
+    /// (including a markdown-fenced string) and coerces a non-object to `{}`
+    /// only when the tool schema declares no required fields.
+    NormalizeThenReturnToolError,
 }
 
 /// Controls whether the agent loop captures model and tool **payloads**

@@ -965,6 +965,92 @@ async fn invalid_tool_arguments_return_tool_error_recovers() {
 }
 
 #[tokio::test]
+async fn normalized_json_string_arguments_execute_registered_tool() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response(
+                "call-1",
+                "strict_lookup",
+                json!("```json\n{\"query\":\"rust\"}\n```"),
+            ),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StrictLookupTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("a fenced JSON object should be normalized before validation");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn normalized_non_object_executes_tool_without_required_fields() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "permissive", json!(null)),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let tool = Arc::new(FakeTool::new("permissive", "ok"));
+    harness.register_tool(tool.clone());
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("run")])
+        .await
+        .expect("a non-object should become an empty object for a permissive schema");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*tool.calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn normalization_preserves_required_field_validation_errors() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "strict_lookup", json!(null)),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StrictLookupTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("required-field validation should remain recoverable");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    assert_eq!(*calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
 async fn malformed_tool_arguments_recover_as_error_tool_result() {
     // A small local model emitted arguments the provider could not parse, so the
     // response carries a `ToolCall::invalid` call. The loop must feed the parse

@@ -224,7 +224,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 }
             }
         };
-        if let Err(err) = tool.schema().validate_call(call) {
+        let schema = tool.schema();
+        if matches!(
+            self.policy.invalid_args,
+            InvalidArgsPolicy::NormalizeThenReturnToolError
+        ) {
+            normalize_tool_arguments(call, &schema.parameters);
+        }
+        if let Err(err) = schema.validate_call(call) {
             // The model called a registered tool with schema-invalid arguments.
             // Apply the run's `InvalidArgsPolicy` instead of unconditionally
             // aborting the turn (mirrors the unknown-tool recovery above).
@@ -237,7 +244,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // tool-call budget slot above, bounding the loop.
             let call_id = CallId::new(call.id.clone());
             let detail = err.to_string();
-            let schema_repr = serde_json::to_string(&tool.schema().parameters)
+            let schema_repr = serde_json::to_string(&schema.parameters)
                 .unwrap_or_else(|_| "<unserializable>".to_string());
             let message = format!(
                 "invalid arguments for tool `{}`: {detail}; expected schema: {schema_repr}",
@@ -455,4 +462,53 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         }
         Ok(())
     }
+}
+
+/// Repairs provider-neutral argument shape defects before schema validation.
+///
+/// Object arguments are already in the canonical shape. A string is decoded
+/// only when it contains a JSON object, optionally inside a markdown code
+/// fence. Other non-object values become an empty object only for schemas that
+/// declare no required fields; required-field schemas retain the original value
+/// so the validation error remains precise and model-visible.
+fn normalize_tool_arguments(call: &mut ToolCall, parameters: &Value) {
+    if call.arguments.is_object() {
+        return;
+    }
+
+    if let Some(raw) = call.arguments.as_str() {
+        let candidate = strip_markdown_code_fence(raw);
+        if let Ok(value) = serde_json::from_str::<Value>(candidate) {
+            if value.is_object() {
+                call.arguments = value;
+                return;
+            }
+        }
+    }
+
+    let has_required_fields = parameters
+        .get("required")
+        .and_then(Value::as_array)
+        .is_some_and(|required| required.iter().any(Value::is_string));
+    if !has_required_fields {
+        call.arguments = serde_json::json!({});
+    }
+}
+
+fn strip_markdown_code_fence(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    let Some(after_open) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let body = match after_open.find('\n') {
+        Some(newline)
+            if after_open[..newline]
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric()) =>
+        {
+            &after_open[newline + 1..]
+        }
+        _ => after_open,
+    };
+    body.trim().strip_suffix("```").unwrap_or(body).trim()
 }
