@@ -187,7 +187,7 @@ pub fn trim_messages_to_token_budget_with(
 ) -> Vec<Message> {
     let estimates: Vec<u64> = messages.iter().map(estimate).collect();
     let mut total: u64 = estimates.iter().copied().sum();
-    if total <= policy.limit {
+    if total <= policy.limit && !policy.drop_leading_orphan_tools {
         return messages.to_vec();
     }
 

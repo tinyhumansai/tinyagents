@@ -153,6 +153,22 @@ mod smoke {
     }
 
     #[test]
+    fn token_budget_trim_drops_orphan_tool_results_when_under_budget() {
+        let messages = vec![
+            Message::system("policy"),
+            Message::tool("call-1", "orphan"),
+            Message::user("new"),
+        ];
+        let policy = TokenTrimPolicy::strict(100).drop_leading_orphan_tools();
+        let trimmed = trim_messages_to_token_budget_with(&messages, policy, |_| 1);
+
+        assert_eq!(
+            trimmed,
+            vec![Message::system("policy"), Message::user("new")]
+        );
+    }
+
+    #[test]
     fn trim_max_tokens_drops_oldest_non_system_first() {
         // Each user message ~ "aaaaaaaa" (8 chars) → 2 tokens. System "ssss" (4) → 1 token.
         let msgs = vec![
