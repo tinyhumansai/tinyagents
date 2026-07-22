@@ -1327,8 +1327,12 @@ async fn normalization_preserves_decoded_invalid_object_for_validation() {
         ..RunPolicy::default()
     });
 
+    use crate::harness::testkit::EventRecorder;
+    let recorder = EventRecorder::new();
+    let ctx =
+        RunContext::new(RunConfig::new("decoded-invalid-args"), ()).with_events(recorder.sink());
     let run = harness
-        .invoke_default(&(), vec![Message::user("lookup")])
+        .invoke_in_context(&(), ctx, vec![Message::user("lookup")])
         .await
         .expect("the decoded schema error should be recoverable");
 
@@ -1339,6 +1343,14 @@ async fn normalization_preserves_decoded_invalid_object_for_validation() {
             matches!(message, Message::Tool(_)) && message.text().contains("extra is not allowed")
         }),
         "validation must report the decoded invalid field instead of executing with an empty object"
+    );
+    assert!(
+        recorder.events().iter().any(|event| matches!(
+            event,
+            AgentEvent::InvalidToolArgs { arguments, .. }
+                if arguments == &json!("{\"extra\":true}")
+        )),
+        "the invalid-args event must retain the raw model-supplied JSON string"
     );
 }
 

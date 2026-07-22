@@ -225,6 +225,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             }
         };
         let schema = tool.schema();
+        let raw_arguments = call.arguments.clone();
         if matches!(
             self.policy.invalid_args,
             InvalidArgsPolicy::NormalizeThenReturnToolError
@@ -253,7 +254,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             let record = ctx.emit(AgentEvent::InvalidToolArgs {
                 call_id,
                 tool_name: call.name.clone(),
-                arguments: call.arguments.clone(),
+                arguments: raw_arguments,
                 error: detail,
                 recovery: "tool_error".to_string(),
             });
