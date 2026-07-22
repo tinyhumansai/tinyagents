@@ -284,6 +284,7 @@ mod voyage;
 pub use noop::NoopEmbeddingModel;
 pub use ollama::{
     DEFAULT_OLLAMA_DIMENSIONS, DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL, OllamaEmbeddingModel,
+    RECOMMENDED_OLLAMA_CONTEXT_TOKENS,
 };
 pub use openai::OpenAiEmbeddingModel;
 pub use rate_limit::{DEFAULT_REQUESTS_PER_MINUTE, acquire, rate_limit, set_rate_limit};
