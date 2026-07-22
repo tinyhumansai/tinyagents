@@ -10,8 +10,8 @@
 mod smoke {
     use crate::harness::message::Message;
     use crate::harness::summarization::{
-        ConcatSummarizer, SummarizationPolicy, Summarizer, TrimStrategy, estimate_tokens,
-        trim_messages,
+        ConcatSummarizer, SummarizationPolicy, Summarizer, TokenTrimPolicy, TrimStrategy,
+        estimate_tokens, trim_messages, trim_messages_to_token_budget_with,
     };
 
     /// Verify that `estimate_tokens` produces a non-zero value for a non-empty
@@ -109,6 +109,47 @@ mod smoke {
         let trimmed = trim_messages(&msgs, &TrimStrategy::KeepLast(5));
         assert_eq!(trimmed.len(), 1);
         assert_eq!(trimmed[0].text(), "only");
+    }
+
+    #[test]
+    fn token_budget_trim_preserves_order_and_system_messages() {
+        let messages = vec![
+            Message::user("old"),
+            Message::system("late-system"),
+            Message::assistant("new"),
+        ];
+        let policy = TokenTrimPolicy::strict(2).preserve_system();
+        let trimmed = trim_messages_to_token_budget_with(&messages, policy, |_| 2);
+
+        assert_eq!(trimmed, vec![Message::system("late-system")]);
+    }
+
+    #[test]
+    fn token_budget_trim_uses_caller_estimator() {
+        let messages = vec![Message::user("large-image"), Message::user("small")];
+        let policy = TokenTrimPolicy::strict(2);
+        let trimmed = trim_messages_to_token_budget_with(&messages, policy, |message| {
+            if message.text() == "large-image" {
+                10
+            } else {
+                2
+            }
+        });
+
+        assert_eq!(trimmed, vec![Message::user("small")]);
+    }
+
+    #[test]
+    fn token_budget_trim_drops_leading_orphan_tool_results() {
+        let messages = vec![
+            Message::assistant("old"),
+            Message::tool("call-1", "result"),
+            Message::user("new"),
+        ];
+        let policy = TokenTrimPolicy::strict(2).drop_leading_orphan_tools();
+        let trimmed = trim_messages_to_token_budget_with(&messages, policy, |_| 1);
+
+        assert_eq!(trimmed, vec![Message::user("new")]);
     }
 
     #[test]

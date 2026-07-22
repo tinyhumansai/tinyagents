@@ -58,6 +58,45 @@ pub enum TrimStrategy {
     MaxTokens(u64),
 }
 
+/// Options for order-preserving token-budget trimming with a caller-supplied
+/// message estimator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TokenTrimPolicy {
+    /// Maximum estimated tokens retained after trimming.
+    pub limit: u64,
+    /// Never evict system messages, even when they alone exceed `limit`.
+    pub preserve_system: bool,
+    /// After eviction, discard leading tool results that no longer have their
+    /// preceding assistant tool call. System messages may precede the first
+    /// retained conversational message.
+    pub drop_leading_orphan_tools: bool,
+}
+
+impl TokenTrimPolicy {
+    /// Creates a strict token-budget policy. System messages may be dropped as
+    /// a last resort and no structural cleanup is applied.
+    pub const fn strict(limit: u64) -> Self {
+        Self {
+            limit,
+            preserve_system: false,
+            drop_leading_orphan_tools: false,
+        }
+    }
+
+    /// Keeps system instructions even when they exceed the configured budget.
+    pub const fn preserve_system(mut self) -> Self {
+        self.preserve_system = true;
+        self
+    }
+
+    /// Drops tool results left at the leading conversational boundary after
+    /// their assistant tool-call message was evicted.
+    pub const fn drop_leading_orphan_tools(mut self) -> Self {
+        self.drop_leading_orphan_tools = true;
+        self
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Compression provenance
 // ---------------------------------------------------------------------------
