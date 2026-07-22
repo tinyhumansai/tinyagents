@@ -82,10 +82,11 @@ pub(super) struct Streak {
 
 /// Tracks identical assistant-output and successful tool-call batches.
 ///
-/// The two streaks are independent: output is observed before tools execute,
-/// while a call batch is recorded only after every result is known. Exempt
-/// polling batches reset their streak; a failed call batch also resets the
-/// successful-call streak so the failure ladder remains authoritative.
+/// The two streaks are independent, but their verdict timing is coordinated:
+/// output is staged before tools execute and can halt only after the matching
+/// call batch is recorded as successful and non-exempt. Exempt polling batches
+/// and failed batches reset both streaks so the failure ladder remains
+/// authoritative.
 pub struct SuccessfulRepeatTracker {
     pub(super) output_threshold: u32,
     pub(super) call_threshold: u32,

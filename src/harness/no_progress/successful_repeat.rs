@@ -57,21 +57,18 @@ impl SuccessfulRepeatTracker {
         }
     }
 
-    /// Records the canonical visible-output plus tool-call signature produced
-    /// by one assistant iteration.
+    /// Stages the canonical visible-output plus tool-call signature produced
+    /// by one assistant iteration. A threshold crossing is not reported until
+    /// [`record_call_batch`](Self::record_call_batch) confirms that the
+    /// associated batch succeeded and is not exempt.
     pub fn record_output(&self, signature: &str, exempt: bool) -> SuccessfulRepeat {
         let mut output = self.output.lock().unwrap();
         if exempt {
             output.reset();
             return SuccessfulRepeat::Continue;
         }
-        let consecutive = output.record(signature);
-        if consecutive < self.output_threshold {
-            return SuccessfulRepeat::Continue;
-        }
-        SuccessfulRepeat::Halt(format!(
-            "Stopping: the last {consecutive} iterations produced the identical response and tool call with no change; the run is stuck repeating the same step without making progress."
-        ))
+        output.record(signature);
+        SuccessfulRepeat::Continue
     }
 
     /// Records the canonical tool-name/arguments signature after the whole
@@ -82,17 +79,22 @@ impl SuccessfulRepeatTracker {
         all_successful: bool,
         exempt: bool,
     ) -> SuccessfulRepeat {
-        let mut calls = self.calls.lock().unwrap();
         if exempt || !all_successful {
-            calls.reset();
-            drop(calls);
             // Output is observed before the completed batch can be classified.
             // An exempt polling batch or a failure therefore resets both
             // trackers so its preceding output cannot leak into the next
             // progress-eligible iteration.
             self.output.lock().unwrap().reset();
+            self.calls.lock().unwrap().reset();
             return SuccessfulRepeat::Continue;
         }
+        let output_consecutive = self.output.lock().unwrap().consecutive;
+        if output_consecutive >= self.output_threshold {
+            return SuccessfulRepeat::Halt(format!(
+                "Stopping: the last {output_consecutive} iterations produced the identical response and tool call with no change; the run is stuck repeating the same step without making progress."
+            ));
+        }
+        let mut calls = self.calls.lock().unwrap();
         let consecutive = calls.record(signature);
         if consecutive < self.call_threshold {
             return SuccessfulRepeat::Continue;

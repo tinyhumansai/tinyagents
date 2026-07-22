@@ -140,17 +140,30 @@ fn identical_halt_threshold_is_clamped_above_the_nudge() {
 
 #[test]
 fn identical_output_halts_at_threshold_and_changes_reset() {
-    let tracker = SuccessfulRepeatTracker::new(3, 3);
+    let tracker = SuccessfulRepeatTracker::new(3, 10);
     assert_eq!(
         tracker.record_output("same", false),
         SuccessfulRepeat::Continue
     );
     assert_eq!(
+        tracker.record_call_batch("call-1", true, false),
+        SuccessfulRepeat::Continue
+    );
+    assert_eq!(
         tracker.record_output("same", false),
         SuccessfulRepeat::Continue
+    );
+    assert_eq!(
+        tracker.record_call_batch("call-2", true, false),
+        SuccessfulRepeat::Continue
+    );
+    assert_eq!(
+        tracker.record_output("same", false),
+        SuccessfulRepeat::Continue,
+        "output cannot halt before its tool batch is classified"
     );
     assert!(matches!(
-        tracker.record_output("same", false),
+        tracker.record_call_batch("call-3", true, false),
         SuccessfulRepeat::Halt(message) if message.contains("3 iterations")
     ));
     assert_eq!(
@@ -188,7 +201,16 @@ fn failed_call_batches_reset_output_repeats() {
         SuccessfulRepeat::Continue
     );
     assert_eq!(
-        tracker.record_call_batch("same-call", false, false),
+        tracker.record_call_batch("first-call", true, false),
+        SuccessfulRepeat::Continue
+    );
+    assert_eq!(
+        tracker.record_output("same", false),
+        SuccessfulRepeat::Continue,
+        "a threshold crossing is pending until batch success is known"
+    );
+    assert_eq!(
+        tracker.record_call_batch("failed-call", false, false),
         SuccessfulRepeat::Continue
     );
     assert_eq!(
@@ -232,10 +254,10 @@ fn exempt_batches_reset_both_streaks() {
 #[test]
 fn zero_thresholds_are_fail_safe() {
     let tracker = SuccessfulRepeatTracker::new(0, 0);
-    assert!(matches!(
+    assert_eq!(
         tracker.record_output("same", false),
-        SuccessfulRepeat::Halt(_)
-    ));
+        SuccessfulRepeat::Continue
+    );
     assert!(matches!(
         tracker.record_call_batch("same", true, false),
         SuccessfulRepeat::Halt(_)
