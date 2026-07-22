@@ -52,7 +52,9 @@ pub use model::{
     collect_model_stream, context_window_for_model_id,
 };
 pub use no_progress::{
-    DEFAULT_IDENTICAL_HALT_THRESHOLD, NoProgress, NoProgressTracker, ToolAttempt,
+    DEFAULT_IDENTICAL_HALT_THRESHOLD, DEFAULT_REPEAT_CALL_THRESHOLD,
+    DEFAULT_REPEAT_OUTPUT_THRESHOLD, NoProgress, NoProgressTracker, SuccessfulRepeat,
+    SuccessfulRepeatTracker, ToolAttempt,
 };
 pub use tool::{
     Tool as HarnessTool, ToolCall as HarnessToolCall, ToolFormat, ToolRegistry,

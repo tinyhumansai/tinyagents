@@ -19,8 +19,13 @@
 //! and turns the returned [`NoProgress`] verdict into a steering nudge
 //! (`Nudge`) or a halt (`Halt`).
 
+mod successful_repeat;
 mod types;
 
+pub use successful_repeat::{
+    DEFAULT_REPEAT_CALL_THRESHOLD, DEFAULT_REPEAT_OUTPUT_THRESHOLD, SuccessfulRepeat,
+    SuccessfulRepeatTracker,
+};
 use types::LadderState;
 pub use types::{NoProgress, NoProgressTracker, ToolAttempt};
 
