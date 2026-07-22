@@ -70,6 +70,36 @@ pub fn with_prompt_tool_instructions(messages: &[Message], tools: &[ToolSchema])
     out
 }
 
+/// Convert native tool-result messages into prompt-guided user turns.
+///
+/// Models without native tool calling cannot consume a provider `tool` role.
+/// Consecutive results are therefore folded into one `[Tool results]` user
+/// message while every non-tool message keeps its original order and type.
+pub fn coalesce_prompt_tool_results(messages: &[Message]) -> Vec<Message> {
+    let mut out = Vec::with_capacity(messages.len());
+    let mut pending = Vec::new();
+
+    fn flush(out: &mut Vec<Message>, pending: &mut Vec<String>) {
+        if !pending.is_empty() {
+            out.push(Message::user(format!(
+                "[Tool results]\n{}",
+                std::mem::take(pending).join("\n")
+            )));
+        }
+    }
+
+    for message in messages {
+        if matches!(message, Message::Tool(_)) {
+            pending.push(message.text());
+        } else {
+            flush(&mut out, &mut pending);
+            out.push(message.clone());
+        }
+    }
+    flush(&mut out, &mut pending);
+    out
+}
+
 /// Extract `<tool_call>…</tool_call>` blocks from `text`, parsing each inner JSON
 /// object (`{"name":…,"arguments":…}`) into a [`ToolCall`]. Returns the text with
 /// the blocks removed (trimmed) plus the parsed calls, in order.
@@ -191,6 +221,32 @@ mod test {
     fn empty_tools_leaves_messages_unchanged() {
         let msgs = vec![Message::user("hi")];
         assert_eq!(with_prompt_tool_instructions(&msgs, &[]), msgs);
+    }
+
+    #[test]
+    fn coalesces_consecutive_tool_results_into_one_user_turn() {
+        let messages = vec![
+            Message::user("question"),
+            Message::assistant("calling tools"),
+            Message::tool("call-1", "first"),
+            Message::tool("call-2", "second"),
+            Message::assistant("done"),
+        ];
+
+        let out = coalesce_prompt_tool_results(&messages);
+
+        assert_eq!(out.len(), 4);
+        assert!(matches!(out[0], Message::User(_)));
+        assert!(matches!(out[1], Message::Assistant(_)));
+        assert!(matches!(out[2], Message::User(_)));
+        assert_eq!(out[2].text(), "[Tool results]\nfirst\nsecond");
+        assert!(matches!(out[3], Message::Assistant(_)));
+    }
+
+    #[test]
+    fn coalescing_without_tool_results_is_identity() {
+        let messages = vec![Message::system("system"), Message::user("question")];
+        assert_eq!(coalesce_prompt_tool_results(&messages), messages);
     }
 
     #[test]
