@@ -114,6 +114,10 @@ struct ObjectArrayTool {
     calls: Arc<Mutex<usize>>,
 }
 
+struct OptionalStrictObjectTool {
+    calls: Arc<Mutex<usize>>,
+}
+
 #[async_trait]
 impl Tool<()> for StringEchoTool {
     fn name(&self) -> &str {
@@ -221,6 +225,34 @@ impl Tool<()> for ObjectArrayTool {
             self.name(),
             call.arguments.to_string(),
         ))
+    }
+}
+
+#[async_trait]
+impl Tool<()> for OptionalStrictObjectTool {
+    fn name(&self) -> &str {
+        "optional_strict_object"
+    }
+
+    fn description(&self) -> &str {
+        "accepts only an optional query field"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "optional_strict_object",
+            self.description(),
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": { "query": { "type": "string" } }
+            }),
+        )
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(call.id, self.name(), "unexpected"))
     }
 }
 
@@ -1269,6 +1301,44 @@ async fn normalization_preserves_decoded_array_union_arguments() {
             .iter()
             .any(|message| matches!(message, Message::Tool(_)) && message.text() == "[1,2]"),
         "the tool result must contain the decoded array instead of an empty object"
+    );
+}
+
+#[tokio::test]
+async fn normalization_preserves_decoded_invalid_object_for_validation() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response(
+                "call-1",
+                "optional_strict_object",
+                json!("{\"extra\":true}"),
+            ),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(OptionalStrictObjectTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("the decoded schema error should be recoverable");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    assert_eq!(*calls.lock().unwrap(), 0);
+    assert!(
+        run.messages.iter().any(|message| {
+            matches!(message, Message::Tool(_)) && message.text().contains("extra is not allowed")
+        }),
+        "validation must report the decoded invalid field instead of executing with an empty object"
     );
 }
 

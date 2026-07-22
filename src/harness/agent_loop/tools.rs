@@ -499,10 +499,11 @@ fn normalize_tool_arguments(call: &mut ToolCall, schema: &ToolSchema) {
         if let Ok(value) = serde_json::from_str::<Value>(candidate) {
             let mut normalized = call.clone();
             normalized.arguments = value;
-            if schema.validate_call(&normalized).is_ok() {
-                call.arguments = normalized.arguments;
-                return;
-            }
+            // Decoding must be lossless even when the decoded value is still
+            // schema-invalid. Preserve it so the validation below reports the
+            // actual bad field/type instead of silently replacing it with `{}`.
+            call.arguments = normalized.arguments;
+            return;
         }
     }
 
