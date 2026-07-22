@@ -478,11 +478,11 @@ fn normalize_tool_arguments(call: &mut ToolCall, parameters: &Value) {
 
     if let Some(raw) = call.arguments.as_str() {
         let candidate = strip_markdown_code_fence(raw);
-        if let Ok(value) = serde_json::from_str::<Value>(candidate) {
-            if value.is_object() {
-                call.arguments = value;
-                return;
-            }
+        if let Ok(value) = serde_json::from_str::<Value>(candidate)
+            && value.is_object()
+        {
+            call.arguments = value;
+            return;
         }
     }
 
