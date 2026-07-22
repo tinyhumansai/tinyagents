@@ -11,6 +11,7 @@
 //! [`ToolRegistry`] logic for registering and looking up tools by name.
 
 mod schema;
+mod timeout;
 mod types;
 
 use std::sync::Arc;
@@ -20,6 +21,7 @@ use serde_json::Value;
 use crate::error::{Result, TinyAgentsError};
 
 pub use schema::*;
+pub use timeout::*;
 pub use types::*;
 
 impl ToolSchema {
@@ -542,3 +544,6 @@ fn json_value_kind(value: &Value) -> &'static str {
 mod schema_test;
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod timeout_test;

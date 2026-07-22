@@ -8,6 +8,11 @@
 //! workflows recurse on one consistent set of capabilities rather than spinning
 //! up disjoint engines.
 //!
+//! Per-tool deadlines are enabled separately from [`RunPolicy`] through
+//! [`AgentHarness::with_tool_timeout_settings`]. Expiry becomes a recoverable
+//! tool-error result so the model can repair its plan, while the run wall-clock
+//! limit remains the outer hard abort.
+//!
 //! Owns the high-level [`AgentHarness`] builder and the [`RunPolicy`] bundle
 //! that wires registries, middleware, and run policy into a single ergonomic
 //! entry point. The agent loop driven by this facade lives in the sibling
@@ -29,7 +34,7 @@ use std::sync::Arc;
 use crate::harness::cache::ResponseCache;
 use crate::harness::middleware::{Middleware, MiddlewareStack, ModelMiddleware, ToolMiddleware};
 use crate::harness::model::{ChatModel, ModelRegistry};
-use crate::harness::tool::{Tool, ToolRegistry};
+use crate::harness::tool::{Tool, ToolRegistry, ToolTimeoutSettings};
 
 impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// Creates an empty harness with default policy and no models, tools, or
@@ -40,6 +45,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             tools: ToolRegistry::new(),
             middleware: MiddlewareStack::new(),
             policy: RunPolicy::default(),
+            tool_timeouts: None,
             response_cache: None,
         }
     }
@@ -103,6 +109,20 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     pub fn with_policy(&mut self, policy: RunPolicy) -> &mut Self {
         self.policy = policy;
         self
+    }
+
+    /// Installs the shared resolver used for per-tool timeout policies.
+    ///
+    /// Keeping this runtime concern on the harness leaves [`RunPolicy`]
+    /// source-compatible for callers that construct it with struct literals.
+    pub fn with_tool_timeout_settings(&mut self, settings: ToolTimeoutSettings) -> &mut Self {
+        self.tool_timeouts = Some(settings);
+        self
+    }
+
+    /// Returns the installed per-tool timeout settings, if any.
+    pub fn tool_timeout_settings(&self) -> Option<&ToolTimeoutSettings> {
+        self.tool_timeouts.as_ref()
     }
 
     /// Attaches a [`ResponseCache`] shared across every run this harness drives.

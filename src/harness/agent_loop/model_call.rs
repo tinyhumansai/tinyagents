@@ -446,6 +446,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> ModelBaseCall<State, Ctx>
 /// invocation.
 pub(super) struct ToolCallBase<State: Send + Sync> {
     pub(super) tool: Arc<dyn Tool<State>>,
+    pub(super) timeout_settings: Option<crate::harness::tool::ToolTimeoutSettings>,
 }
 
 impl<State: Send + Sync, Ctx: Send + Sync> ToolBaseCall<State, Ctx> for ToolCallBase<State> {
@@ -456,13 +457,23 @@ impl<State: Send + Sync, Ctx: Send + Sync> ToolBaseCall<State, Ctx> for ToolCall
         call: ToolCall,
     ) -> BoxToolFuture<'a> {
         Box::pin(async move {
-            self.tool
-                .call_with_context(
-                    state,
-                    call,
-                    crate::harness::tool::ToolExecutionContext::from_run_context(ctx),
-                )
-                .await
+            let timeout = self
+                .timeout_settings
+                .as_ref()
+                .map(|settings| settings.resolve(self.tool.timeout_policy(&call)));
+            let timeout_result = super::tools::timeout_result(&call, timeout);
+            let future = self.tool.call_with_context(
+                state,
+                call,
+                crate::harness::tool::ToolExecutionContext::from_run_context(ctx),
+            );
+            match timeout.and_then(|resolved| resolved.deadline) {
+                Some(deadline) => match tokio::time::timeout(deadline, future).await {
+                    Ok(result) => result,
+                    Err(_) => Ok(timeout_result),
+                },
+                None => future.await,
+            }
         })
     }
 }

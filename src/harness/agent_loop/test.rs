@@ -29,7 +29,9 @@ use crate::harness::model::{
 use crate::harness::providers::MockModel;
 use crate::harness::retry::{FallbackPolicy, RetryPolicy};
 use crate::harness::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy, UnknownToolPolicy};
-use crate::harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
+use crate::harness::tool::{
+    Tool, ToolCall, ToolResult, ToolSchema, ToolTimeout, ToolTimeoutSettings,
+};
 use crate::harness::usage::Usage;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -89,6 +91,47 @@ impl Tool<()> for SlowTool {
     async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
         tokio::time::sleep(self.delay).await;
         Ok(ToolResult::text(call.id, "slow", "too late"))
+    }
+}
+
+/// A slow tool with an explicit timeout policy, used to prove the runtime
+/// consumes the crate timeout vocabulary rather than only the run deadline.
+struct PolicySlowTool {
+    name: &'static str,
+    delay: std::time::Duration,
+    timeout: ToolTimeout,
+}
+
+#[async_trait]
+impl Tool<()> for PolicySlowTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        "policy-bounded slow tool"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            self.name,
+            "policy-bounded slow tool",
+            json!({"type": "object"}),
+        )
+    }
+    fn timeout_policy(&self, call: &ToolCall) -> ToolTimeout {
+        if call
+            .arguments
+            .get("unbounded")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            ToolTimeout::Unbounded
+        } else {
+            self.timeout
+        }
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        tokio::time::sleep(self.delay).await;
+        Ok(ToolResult::text(call.id, self.name, "too late"))
     }
 }
 
@@ -373,6 +416,27 @@ impl ToolMiddleware<()> for StampToolWrap {
         let mut result = next.run(ctx, state, call).await?.into_result();
         result.content = format!("[wrapped] {}", result.content);
         Ok(result.into())
+    }
+}
+
+/// Rewrites the call to opt out of the inherited timeout, proving timeout
+/// resolution observes the call that actually reaches the tool.
+struct UnboundToolWrap;
+
+#[async_trait]
+impl ToolMiddleware<()> for UnboundToolWrap {
+    fn name(&self) -> &str {
+        "unbound_tool"
+    }
+    async fn wrap_tool(
+        &self,
+        ctx: &mut RunContext<()>,
+        state: &(),
+        mut call: ToolCall,
+        next: ToolHandler<'_, (), ()>,
+    ) -> Result<MiddlewareToolOutcome> {
+        call.arguments["unbounded"] = json!(true);
+        next.run(ctx, state, call).await
     }
 }
 
@@ -1897,6 +1961,133 @@ async fn slow_tool_call_is_timed_out_by_remaining_budget() {
         .expect_err("a tool call slower than the budget must time out");
 
     assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn inherited_tool_timeout_is_enforced_without_a_run_deadline() {
+    use std::time::Duration;
+
+    let settings = ToolTimeoutSettings::new(20, 1, 1_000, 0);
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.with_tool_timeout_settings(settings.clone());
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "policy_slow", json!({})),
+            text_response("recovered", 2, 1),
+        ])),
+    );
+    harness.register_tool(Arc::new(PolicySlowTool {
+        name: "policy_slow",
+        delay: Duration::from_millis(200),
+        timeout: ToolTimeout::Inherit,
+    }));
+
+    let run = harness
+        .invoke(
+            &(),
+            (),
+            RunConfig::new("inherited-tool-timeout-run"),
+            vec![Message::user("go")],
+        )
+        .await
+        .expect("a per-tool timeout should be recoverable by the model");
+
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert!(run.messages[2].text().contains("timed out after 20 ms"));
+
+    settings.set_inherited_timeout_ms(5);
+    assert_eq!(settings.inherited_timeout(), Some(Duration::from_millis(5)));
+}
+
+#[tokio::test]
+async fn tool_timeout_unwinds_wrap_middleware() {
+    use std::time::Duration;
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.with_tool_timeout_settings(ToolTimeoutSettings::new(10, 1, 1_000, 0));
+    harness.push_tool_middleware(Arc::new(StampToolWrap));
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "policy_slow", json!({})),
+            text_response("recovered", 2, 1),
+        ])),
+    );
+    harness.register_tool(Arc::new(PolicySlowTool {
+        name: "policy_slow",
+        delay: Duration::from_millis(200),
+        timeout: ToolTimeout::Inherit,
+    }));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("middleware should unwind after the inner tool times out");
+
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert!(run.messages[2].text().starts_with("[wrapped]"));
+    assert!(run.messages[2].text().contains("timed out after 10 ms"));
+}
+
+#[tokio::test]
+async fn tool_timeout_resolves_after_wrap_middleware_mutation() {
+    use std::time::Duration;
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.with_tool_timeout_settings(ToolTimeoutSettings::new(10, 1, 1_000, 0));
+    harness.push_tool_middleware(Arc::new(UnboundToolWrap));
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "policy_slow", json!({})),
+            text_response("done", 2, 1),
+        ])),
+    );
+    harness.register_tool(Arc::new(PolicySlowTool {
+        name: "policy_slow",
+        delay: Duration::from_millis(30),
+        timeout: ToolTimeout::Inherit,
+    }));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("the middleware-mutated unbounded policy should reach the tool");
+
+    assert_eq!(run.text(), Some("done".to_string()));
+    assert_eq!(run.messages[2].text(), "too late");
+}
+
+#[tokio::test]
+async fn parallel_tool_timeouts_return_ordered_recoverable_errors() {
+    use std::time::Duration;
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.with_tool_timeout_settings(ToolTimeoutSettings::new(10, 1, 1_000, 0));
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            multi_tool_call_response(vec![("call-a", "slow_a"), ("call-b", "slow_b")]),
+            text_response("recovered", 2, 1),
+        ])),
+    );
+    for name in ["slow_a", "slow_b"] {
+        harness.register_tool(Arc::new(PolicySlowTool {
+            name,
+            delay: Duration::from_millis(200),
+            timeout: ToolTimeout::Inherit,
+        }));
+    }
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("parallel tool timeouts should be recoverable");
+
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert!(run.messages[2].text().contains("slow_a"));
+    assert!(run.messages[3].text().contains("slow_b"));
 }
 
 // ── Response caching ──────────────────────────────────────────────────────────
