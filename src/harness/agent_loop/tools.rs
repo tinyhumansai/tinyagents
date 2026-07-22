@@ -485,7 +485,11 @@ fn normalize_tool_arguments(call: &mut ToolCall, schema: &ToolSchema) {
                 .as_array()
                 .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("object")))
     }) || parameters.get("properties").is_some()
-        || parameters.get("required").is_some();
+        || parameters.get("required").is_some()
+        || parameters
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(Value::is_object));
     if !accepts_object {
         return;
     }

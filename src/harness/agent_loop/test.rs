@@ -106,6 +106,10 @@ struct RequiredOnlyTool {
     calls: Arc<Mutex<usize>>,
 }
 
+struct ObjectEnumTool {
+    calls: Arc<Mutex<usize>>,
+}
+
 #[async_trait]
 impl Tool<()> for StringEchoTool {
     fn name(&self) -> &str {
@@ -158,6 +162,30 @@ impl Tool<()> for RequiredOnlyTool {
     async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
         *self.calls.lock().unwrap() += 1;
         Ok(ToolResult::text(call.id, self.name(), "required-output"))
+    }
+}
+
+#[async_trait]
+impl Tool<()> for ObjectEnumTool {
+    fn name(&self) -> &str {
+        "object_enum"
+    }
+
+    fn description(&self) -> &str {
+        "accepts one enumerated object"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "object_enum",
+            self.description(),
+            json!({ "enum": [{ "query": "rust" }] }),
+        )
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(call.id, self.name(), "enum-output"))
     }
 }
 
@@ -1111,6 +1139,12 @@ async fn normalization_preserves_valid_primitive_arguments() {
 
     assert_eq!(run.final_response.unwrap().text(), "done");
     assert_eq!(*calls.lock().unwrap(), 1);
+    assert!(
+        run.messages
+            .iter()
+            .any(|message| matches!(message, Message::Tool(_)) && message.text() == "\"hello\""),
+        "the tool result must contain the original primitive instead of a rewritten object"
+    );
 }
 
 #[tokio::test]
@@ -1136,6 +1170,34 @@ async fn normalization_decodes_required_only_object_schema() {
         .invoke_default(&(), vec![Message::user("lookup")])
         .await
         .expect("a required-only object schema should normalize a JSON string");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn normalization_decodes_object_valued_enum_schema() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "object_enum", json!("{\"query\":\"rust\"}")),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(ObjectEnumTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("an object-valued enum should normalize a matching JSON string");
 
     assert_eq!(run.final_response.unwrap().text(), "done");
     assert_eq!(*calls.lock().unwrap(), 1);
