@@ -120,7 +120,10 @@ impl Tool<()> for StringEchoTool {
         ToolSchema::new(
             "string_echo",
             "echo a string",
-            json!({ "type": ["object", "string"] }),
+            json!({
+                "type": ["object", "string"],
+                "properties": { "value": { "type": "string" } }
+            }),
         )
     }
 
