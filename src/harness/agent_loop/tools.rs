@@ -508,6 +508,13 @@ fn normalize_tool_arguments(call: &mut ToolCall, schema: &ToolSchema) {
         }
     }
 
+    // A provider-native object is already the shape normalization is trying to
+    // recover. If its contents violate the schema, preserve them so the model
+    // sees the real validation error instead of executing with an empty object.
+    if call.arguments.is_object() {
+        return;
+    }
+
     let has_required_fields = parameters
         .get("required")
         .and_then(Value::as_array)

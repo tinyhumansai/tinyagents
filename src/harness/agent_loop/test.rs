@@ -1343,6 +1343,40 @@ async fn normalization_preserves_decoded_invalid_object_for_validation() {
 }
 
 #[tokio::test]
+async fn normalization_preserves_direct_invalid_object_for_validation() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "optional_strict_object", json!({"extra": true})),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(OptionalStrictObjectTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("the direct schema error should be recoverable");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    assert_eq!(*calls.lock().unwrap(), 0);
+    assert!(
+        run.messages.iter().any(|message| {
+            matches!(message, Message::Tool(_)) && message.text().contains("extra is not allowed")
+        }),
+        "validation must report the direct invalid field instead of executing with an empty object"
+    );
+}
+
+#[tokio::test]
 async fn normalization_preserves_required_field_validation_errors() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model(
