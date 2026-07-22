@@ -102,6 +102,10 @@ struct StringEchoTool {
     calls: Arc<Mutex<usize>>,
 }
 
+struct RequiredOnlyTool {
+    calls: Arc<Mutex<usize>>,
+}
+
 #[async_trait]
 impl Tool<()> for StringEchoTool {
     fn name(&self) -> &str {
@@ -113,7 +117,11 @@ impl Tool<()> for StringEchoTool {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("string_echo", "echo a string", json!({ "type": "string" }))
+        ToolSchema::new(
+            "string_echo",
+            "echo a string",
+            json!({ "type": ["object", "string"] }),
+        )
     }
 
     async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
@@ -123,6 +131,30 @@ impl Tool<()> for StringEchoTool {
             self.name(),
             call.arguments.to_string(),
         ))
+    }
+}
+
+#[async_trait]
+impl Tool<()> for RequiredOnlyTool {
+    fn name(&self) -> &str {
+        "required_only"
+    }
+
+    fn description(&self) -> &str {
+        "accepts an implicitly object-shaped schema"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "required_only",
+            self.description(),
+            json!({ "required": ["query"] }),
+        )
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(call.id, self.name(), "required-output"))
     }
 }
 
@@ -1073,6 +1105,34 @@ async fn normalization_preserves_valid_primitive_arguments() {
         .invoke_default(&(), vec![Message::user("echo")])
         .await
         .expect("a schema-valid primitive must not be rewritten to an object");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn normalization_decodes_required_only_object_schema() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "required_only", json!("{\"query\":\"rust\"}")),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(RequiredOnlyTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("a required-only object schema should normalize a JSON string");
 
     assert_eq!(run.final_response.unwrap().text(), "done");
     assert_eq!(*calls.lock().unwrap(), 1);

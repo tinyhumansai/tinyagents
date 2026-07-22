@@ -229,7 +229,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             self.policy.invalid_args,
             InvalidArgsPolicy::NormalizeThenReturnToolError
         ) {
-            normalize_tool_arguments(call, &schema.parameters);
+            normalize_tool_arguments(call, &schema);
         }
         if let Err(err) = schema.validate_call(call) {
             // The model called a registered tool with schema-invalid arguments.
@@ -471,17 +471,21 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
 /// fence. Other non-object values become an empty object only for schemas that
 /// declare no required fields; required-field schemas retain the original value
 /// so the validation error remains precise and model-visible.
-fn normalize_tool_arguments(call: &mut ToolCall, parameters: &Value) {
-    if call.arguments.is_object() {
+fn normalize_tool_arguments(call: &mut ToolCall, schema: &ToolSchema) {
+    // Never rewrite a value the declared schema already accepts. In
+    // particular, an object-capable union may validly accept a primitive too.
+    if schema.validate_call(call).is_ok() {
         return;
     }
 
+    let parameters = &schema.parameters;
     let accepts_object = parameters.get("type").is_some_and(|kind| {
         kind.as_str() == Some("object")
             || kind
                 .as_array()
                 .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("object")))
-    }) || parameters.get("properties").is_some();
+    }) || parameters.get("properties").is_some()
+        || parameters.get("required").is_some();
     if !accepts_object {
         return;
     }
