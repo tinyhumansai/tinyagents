@@ -10,9 +10,9 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 
-/// Identical assistant-output batches allowed before halting.
+/// Consecutive identical assistant-output batches required to halt.
 pub const DEFAULT_REPEAT_OUTPUT_THRESHOLD: u32 = 4;
-/// Identical successful tool-call batches allowed before halting.
+/// Consecutive identical successful tool-call batches required to halt.
 pub const DEFAULT_REPEAT_CALL_THRESHOLD: u32 = 3;
 
 /// Verdict returned after recording a successful-repeat signal.
@@ -113,6 +113,10 @@ impl SuccessfulRepeatTracker {
         let mut calls = self.calls.lock().unwrap();
         if exempt || !all_successful {
             calls.reset();
+            drop(calls);
+            if !all_successful {
+                self.output.lock().unwrap().reset();
+            }
             return SuccessfulRepeat::Continue;
         }
         let consecutive = calls.record(signature);
@@ -174,6 +178,24 @@ mod tests {
         assert_eq!(
             tracker.record_call_batch("tool:args", true, false),
             SuccessfulRepeat::Continue
+        );
+    }
+
+    #[test]
+    fn failed_call_batches_reset_output_repeats() {
+        let tracker = SuccessfulRepeatTracker::new(2, 2);
+        assert_eq!(
+            tracker.record_output("same", false),
+            SuccessfulRepeat::Continue
+        );
+        assert_eq!(
+            tracker.record_call_batch("same-call", false, false),
+            SuccessfulRepeat::Continue
+        );
+        assert_eq!(
+            tracker.record_output("same", false),
+            SuccessfulRepeat::Continue,
+            "a failed prior batch must not count toward a successful output loop"
         );
     }
 
