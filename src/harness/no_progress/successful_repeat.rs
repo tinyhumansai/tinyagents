@@ -8,28 +8,13 @@
 //! signatures and deciding which polling tools are exempt.
 
 use std::hash::{Hash, Hasher};
-use std::sync::Mutex;
+
+use super::types::{Streak, SuccessfulRepeat, SuccessfulRepeatTracker};
 
 /// Consecutive identical assistant-output batches required to halt.
 pub const DEFAULT_REPEAT_OUTPUT_THRESHOLD: u32 = 4;
 /// Consecutive identical successful tool-call batches required to halt.
 pub const DEFAULT_REPEAT_CALL_THRESHOLD: u32 = 3;
-
-/// Verdict returned after recording a successful-repeat signal.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SuccessfulRepeat {
-    /// The signature changed, is exempt, failed, or remains below its threshold.
-    Continue,
-    /// The same successful action has repeated enough times to be considered
-    /// stuck. The message is suitable for steering or a halt summary.
-    Halt(String),
-}
-
-#[derive(Default)]
-struct Streak {
-    last_hash: Option<u64>,
-    consecutive: u32,
-}
 
 impl Streak {
     fn record(&mut self, signature: &str) -> u32 {
@@ -50,19 +35,6 @@ impl Streak {
     }
 }
 
-/// Tracks identical assistant-output and successful tool-call batches.
-///
-/// The two streaks are independent: output is observed before tools execute,
-/// while a call batch is recorded only after every result is known. Exempt
-/// polling batches reset their streak; a failed call batch also resets the
-/// successful-call streak so the failure ladder remains authoritative.
-pub struct SuccessfulRepeatTracker {
-    output_threshold: u32,
-    call_threshold: u32,
-    output: Mutex<Streak>,
-    calls: Mutex<Streak>,
-}
-
 impl Default for SuccessfulRepeatTracker {
     fn default() -> Self {
         Self::new(
@@ -80,8 +52,8 @@ impl SuccessfulRepeatTracker {
         Self {
             output_threshold: output_threshold.max(1),
             call_threshold: call_threshold.max(1),
-            output: Mutex::new(Streak::default()),
-            calls: Mutex::new(Streak::default()),
+            output: std::sync::Mutex::new(Streak::default()),
+            calls: std::sync::Mutex::new(Streak::default()),
         }
     }
 

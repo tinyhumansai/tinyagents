@@ -22,12 +22,11 @@
 mod successful_repeat;
 mod types;
 
-pub use successful_repeat::{
-    DEFAULT_REPEAT_CALL_THRESHOLD, DEFAULT_REPEAT_OUTPUT_THRESHOLD, SuccessfulRepeat,
-    SuccessfulRepeatTracker,
-};
+pub use successful_repeat::{DEFAULT_REPEAT_CALL_THRESHOLD, DEFAULT_REPEAT_OUTPUT_THRESHOLD};
 use types::LadderState;
-pub use types::{NoProgress, NoProgressTracker, ToolAttempt};
+pub use types::{
+    NoProgress, NoProgressTracker, SuccessfulRepeat, SuccessfulRepeatTracker, ToolAttempt,
+};
 
 use std::sync::Mutex;
 
