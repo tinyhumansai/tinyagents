@@ -402,7 +402,7 @@ const TOOL_CALL_TEMPLATE_MARKERS: &[&str] = &[
 /// Attempts to recover a usable arguments object from a tool-call arguments
 /// string that failed to parse as JSON.
 ///
-/// Two conservative strategies, tried in order; the caller only invokes this
+/// Three conservative strategies, tried in order; the caller only invokes this
 /// *after* the raw string has already failed `serde_json::from_str`, so this can
 /// never rewrite arguments that were already valid:
 ///
@@ -412,11 +412,16 @@ const TOOL_CALL_TEMPLATE_MARKERS: &[&str] = &[
 /// 2. Take the first complete JSON *object* from the front of the (marker-stripped)
 ///    string — recovers a valid leading call followed by trailing template noise
 ///    or a second concatenated fragment (e.g. `{"a":1}<tool_call|>{"b":2}`).
+/// 3. Repair the relaxed / malformed JSON small local models emit — unquoted
+///    object keys (`{tool:…}`), redundant wrapping braces (`{{…}}`, escalating
+///    as the model retries a bounced call), and leaked quote tokens
+///    (`[<|">discord<|">]`). Conservative and object-only; see [`super::relaxed_json`].
 ///
 /// Restricting strategy 2 to a leading `Value::Object` keeps it from accepting a
 /// bare number/string scraped out of surrounding noise as if it were the call's
-/// arguments. Returns `None` when neither strategy yields valid object-shaped JSON,
-/// so the caller still fails fast on genuinely malformed input.
+/// arguments; strategy 3 likewise accepts only a strictly-parseable object.
+/// Returns `None` when no strategy yields valid object-shaped JSON, so the caller
+/// still fails fast on genuinely malformed input.
 fn recover_tool_arguments(raw: &str) -> Option<Value> {
     let stripped = strip_tool_call_markers(raw);
     let candidate = stripped.as_deref().unwrap_or(raw);
@@ -431,10 +436,15 @@ fn recover_tool_arguments(raw: &str) -> Option<Value> {
     // Strategy 2: recover the first complete JSON value if it is an object.
     let mut values =
         serde_json::Deserializer::from_str(candidate.trim_start()).into_iter::<Value>();
-    match values.next() {
-        Some(Ok(value @ Value::Object(_))) => Some(value),
-        _ => None,
+    if let Some(Ok(value @ Value::Object(_))) = values.next() {
+        return Some(value);
     }
+
+    // Strategy 3: repair relaxed/malformed JSON (unquoted keys, redundant
+    // wrapping braces, leaked quote tokens). Without it these calls never parse,
+    // are marked `invalid`, and the model loops adding braces until the step
+    // budget is exhausted.
+    super::relaxed_json::recover_relaxed_object(candidate)
 }
 
 /// Removes any [`TOOL_CALL_TEMPLATE_MARKERS`] found in `raw` and trims the
