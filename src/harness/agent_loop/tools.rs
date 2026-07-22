@@ -496,11 +496,13 @@ fn normalize_tool_arguments(call: &mut ToolCall, schema: &ToolSchema) {
 
     if let Some(raw) = call.arguments.as_str() {
         let candidate = strip_markdown_code_fence(raw);
-        if let Ok(value) = serde_json::from_str::<Value>(candidate)
-            && value.is_object()
-        {
-            call.arguments = value;
-            return;
+        if let Ok(value) = serde_json::from_str::<Value>(candidate) {
+            let mut normalized = call.clone();
+            normalized.arguments = value;
+            if schema.validate_call(&normalized).is_ok() {
+                call.arguments = normalized.arguments;
+                return;
+            }
         }
     }
 

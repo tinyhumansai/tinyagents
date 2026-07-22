@@ -110,6 +110,10 @@ struct ObjectEnumTool {
     calls: Arc<Mutex<usize>>,
 }
 
+struct ObjectArrayTool {
+    calls: Arc<Mutex<usize>>,
+}
+
 #[async_trait]
 impl Tool<()> for StringEchoTool {
     fn name(&self) -> &str {
@@ -186,6 +190,37 @@ impl Tool<()> for ObjectEnumTool {
     async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
         *self.calls.lock().unwrap() += 1;
         Ok(ToolResult::text(call.id, self.name(), "enum-output"))
+    }
+}
+
+#[async_trait]
+impl Tool<()> for ObjectArrayTool {
+    fn name(&self) -> &str {
+        "object_array"
+    }
+
+    fn description(&self) -> &str {
+        "accepts an object or array"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "object_array",
+            self.description(),
+            json!({
+                "type": ["object", "array"],
+                "properties": { "value": { "type": "string" } }
+            }),
+        )
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(
+            call.id,
+            self.name(),
+            call.arguments.to_string(),
+        ))
     }
 }
 
@@ -1201,6 +1236,40 @@ async fn normalization_decodes_object_valued_enum_schema() {
 
     assert_eq!(run.final_response.unwrap().text(), "done");
     assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn normalization_preserves_decoded_array_union_arguments() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "object_array", json!("[1,2]")),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(ObjectArrayTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("an object/array union should preserve a decoded array");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert!(
+        run.messages
+            .iter()
+            .any(|message| matches!(message, Message::Tool(_)) && message.text() == "[1,2]"),
+        "the tool result must contain the decoded array instead of an empty object"
+    );
 }
 
 #[tokio::test]
