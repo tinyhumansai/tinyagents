@@ -70,13 +70,15 @@ pub fn with_prompt_tool_instructions(messages: &[Message], tools: &[ToolSchema])
     out
 }
 
-/// Convert native tool-result messages into prompt-guided user turns.
+/// Convert structured assistant tool calls and native tool-result messages into
+/// prompt-guided turns.
 ///
-/// Models without native tool calling cannot consume a provider `tool` role.
-/// Consecutive results are therefore folded into one `[Tool results]` user
-/// message, with each result wrapped in the `<tool_result>` protocol advertised
-/// by [`prompt_tool_instructions`]. Every non-tool message keeps its original
-/// order and type.
+/// Models without native tool calling cannot consume provider assistant
+/// `tool_calls` fields or a `tool` role. Assistant calls are rendered back into
+/// `<tool_call>` blocks and cleared from the structured field; consecutive
+/// results are folded into one `[Tool results]` user message with each result
+/// wrapped in the advertised `<tool_result>` protocol. Other messages keep
+/// their original order and type.
 pub fn coalesce_prompt_tool_results(messages: &[Message]) -> Vec<Message> {
     let mut out = Vec::with_capacity(messages.len());
     let mut pending = Vec::new();
@@ -91,11 +93,33 @@ pub fn coalesce_prompt_tool_results(messages: &[Message]) -> Vec<Message> {
     }
 
     for message in messages {
-        if matches!(message, Message::Tool(_)) {
-            pending.push(format!("<tool_result>\n{}\n</tool_result>", message.text()));
-        } else {
-            flush(&mut out, &mut pending);
-            out.push(message.clone());
+        match message {
+            Message::Tool(_) => {
+                pending.push(format!("<tool_result>\n{}\n</tool_result>", message.text()));
+            }
+            Message::Assistant(assistant) if !assistant.tool_calls.is_empty() => {
+                flush(&mut out, &mut pending);
+                let mut assistant = assistant.clone();
+                let mut rendered = String::new();
+                if !assistant.content.is_empty() && !message.text().trim().is_empty() {
+                    rendered.push('\n');
+                }
+                for call in &assistant.tool_calls {
+                    let body = serde_json::json!({
+                        "name": &call.name,
+                        "arguments": &call.arguments,
+                    });
+                    let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
+                    let _ = writeln!(rendered, "{OPEN_TAG}{body}{CLOSE_TAG}");
+                }
+                assistant.content.push(ContentBlock::Text(rendered));
+                assistant.tool_calls.clear();
+                out.push(Message::Assistant(assistant));
+            }
+            _ => {
+                flush(&mut out, &mut pending);
+                out.push(message.clone());
+            }
         }
     }
     flush(&mut out, &mut pending);

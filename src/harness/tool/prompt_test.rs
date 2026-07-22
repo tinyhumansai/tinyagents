@@ -85,6 +85,52 @@ fn prompt_result_coalescing_without_tools_is_identity() {
 }
 
 #[test]
+fn prompt_replay_renders_assistant_calls_before_results() {
+    let mut assistant = Message::assistant("I will inspect both files.");
+    let Message::Assistant(message) = &mut assistant else {
+        unreachable!()
+    };
+    message.tool_calls = vec![
+        ToolCall::new("call-1", "read_file", serde_json::json!({"path":"a.txt"})),
+        ToolCall::new("call-2", "read_file", serde_json::json!({"path":"b.txt"})),
+    ];
+    let messages = vec![
+        Message::user("compare them"),
+        assistant,
+        Message::tool("call-1", "first"),
+        Message::tool("call-2", "second"),
+    ];
+
+    let out = coalesce_prompt_tool_results(&messages);
+
+    let Message::Assistant(replayed) = &out[1] else {
+        panic!("assistant call turn should remain an assistant turn")
+    };
+    assert!(replayed.tool_calls.is_empty());
+    assert!(out[1].text().contains("I will inspect both files."));
+    assert!(
+        out[1].text().contains(
+            r#"<tool_call>{"arguments":{"path":"a.txt"},"name":"read_file"}</tool_call>"#
+        )
+    );
+    assert!(
+        out[1].text().contains(
+            r#"<tool_call>{"arguments":{"path":"b.txt"},"name":"read_file"}</tool_call>"#
+        )
+    );
+    assert!(
+        out[2]
+            .text()
+            .contains("<tool_result>\nfirst\n</tool_result>")
+    );
+    assert!(
+        out[2]
+            .text()
+            .contains("<tool_result>\nsecond\n</tool_result>")
+    );
+}
+
+#[test]
 fn prompt_parser_extracts_single_tool_call() {
     let text = r#"Let me read it.
 <tool_call>

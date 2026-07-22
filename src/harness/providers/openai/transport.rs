@@ -812,10 +812,12 @@ impl OpenAiModel {
         // native `tools` on the wire (many local runtimes 400 on `tools`). The
         // model's `<tool_call>` blocks are parsed back in [`Self::invoke`]/stream.
         let prompt_guided_tools = !self.profile.tool_calling && !request.tools.is_empty();
+        let prompt_messages;
         let instructed_messages;
         let base_messages: &[Message] = if prompt_guided_tools {
+            prompt_messages = crate::harness::tool::coalesce_prompt_tool_results(&request.messages);
             instructed_messages = crate::harness::tool::with_prompt_tool_instructions(
-                &request.messages,
+                &prompt_messages,
                 &request.tools,
             );
             &instructed_messages
