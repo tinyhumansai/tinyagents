@@ -71,7 +71,10 @@ fn prompt_results_coalesce_consecutive_tool_messages() {
     assert!(matches!(out[0], Message::User(_)));
     assert!(matches!(out[1], Message::Assistant(_)));
     assert!(matches!(out[2], Message::User(_)));
-    assert_eq!(out[2].text(), "[Tool results]\nfirst\nsecond");
+    assert_eq!(
+        out[2].text(),
+        "[Tool results]\n<tool_result>\nfirst\n</tool_result>\n<tool_result>\nsecond\n</tool_result>"
+    );
     assert!(matches!(out[3], Message::Assistant(_)));
 }
 

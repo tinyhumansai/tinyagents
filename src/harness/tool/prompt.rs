@@ -74,7 +74,9 @@ pub fn with_prompt_tool_instructions(messages: &[Message], tools: &[ToolSchema])
 ///
 /// Models without native tool calling cannot consume a provider `tool` role.
 /// Consecutive results are therefore folded into one `[Tool results]` user
-/// message while every non-tool message keeps its original order and type.
+/// message, with each result wrapped in the `<tool_result>` protocol advertised
+/// by [`prompt_tool_instructions`]. Every non-tool message keeps its original
+/// order and type.
 pub fn coalesce_prompt_tool_results(messages: &[Message]) -> Vec<Message> {
     let mut out = Vec::with_capacity(messages.len());
     let mut pending = Vec::new();
@@ -90,7 +92,7 @@ pub fn coalesce_prompt_tool_results(messages: &[Message]) -> Vec<Message> {
 
     for message in messages {
         if matches!(message, Message::Tool(_)) {
-            pending.push(message.text());
+            pending.push(format!("<tool_result>\n{}\n</tool_result>", message.text()));
         } else {
             flush(&mut out, &mut pending);
             out.push(message.clone());
