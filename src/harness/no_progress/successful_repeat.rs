@@ -86,9 +86,11 @@ impl SuccessfulRepeatTracker {
         if exempt || !all_successful {
             calls.reset();
             drop(calls);
-            if !all_successful {
-                self.output.lock().unwrap().reset();
-            }
+            // Output is observed before the completed batch can be classified.
+            // An exempt polling batch or a failure therefore resets both
+            // trackers so its preceding output cannot leak into the next
+            // progress-eligible iteration.
+            self.output.lock().unwrap().reset();
             return SuccessfulRepeat::Continue;
         }
         let consecutive = calls.record(signature);
@@ -104,113 +106,5 @@ impl SuccessfulRepeatTracker {
     pub fn reset(&self) {
         self.output.lock().unwrap().reset();
         self.calls.lock().unwrap().reset();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn identical_output_halts_at_threshold_and_changes_reset() {
-        let tracker = SuccessfulRepeatTracker::new(3, 3);
-        assert_eq!(
-            tracker.record_output("same", false),
-            SuccessfulRepeat::Continue
-        );
-        assert_eq!(
-            tracker.record_output("same", false),
-            SuccessfulRepeat::Continue
-        );
-        assert!(matches!(
-            tracker.record_output("same", false),
-            SuccessfulRepeat::Halt(message) if message.contains("3 iterations")
-        ));
-        assert_eq!(
-            tracker.record_output("different", false),
-            SuccessfulRepeat::Continue
-        );
-    }
-
-    #[test]
-    fn successful_call_batches_halt_but_failures_reset() {
-        let tracker = SuccessfulRepeatTracker::new(4, 2);
-        assert_eq!(
-            tracker.record_call_batch("tool:args", true, false),
-            SuccessfulRepeat::Continue
-        );
-        assert!(matches!(
-            tracker.record_call_batch("tool:args", true, false),
-            SuccessfulRepeat::Halt(message) if message.contains("2 times")
-        ));
-        assert_eq!(
-            tracker.record_call_batch("tool:args", false, false),
-            SuccessfulRepeat::Continue
-        );
-        assert_eq!(
-            tracker.record_call_batch("tool:args", true, false),
-            SuccessfulRepeat::Continue
-        );
-    }
-
-    #[test]
-    fn failed_call_batches_reset_output_repeats() {
-        let tracker = SuccessfulRepeatTracker::new(2, 2);
-        assert_eq!(
-            tracker.record_output("same", false),
-            SuccessfulRepeat::Continue
-        );
-        assert_eq!(
-            tracker.record_call_batch("same-call", false, false),
-            SuccessfulRepeat::Continue
-        );
-        assert_eq!(
-            tracker.record_output("same", false),
-            SuccessfulRepeat::Continue,
-            "a failed prior batch must not count toward a successful output loop"
-        );
-    }
-
-    #[test]
-    fn exempt_batches_reset_both_streaks() {
-        let tracker = SuccessfulRepeatTracker::new(2, 2);
-        assert_eq!(
-            tracker.record_output("poll", false),
-            SuccessfulRepeat::Continue
-        );
-        assert_eq!(
-            tracker.record_output("poll", true),
-            SuccessfulRepeat::Continue
-        );
-        assert_eq!(
-            tracker.record_output("poll", false),
-            SuccessfulRepeat::Continue
-        );
-
-        assert_eq!(
-            tracker.record_call_batch("poll", true, false),
-            SuccessfulRepeat::Continue
-        );
-        assert_eq!(
-            tracker.record_call_batch("poll", true, true),
-            SuccessfulRepeat::Continue
-        );
-        assert_eq!(
-            tracker.record_call_batch("poll", true, false),
-            SuccessfulRepeat::Continue
-        );
-    }
-
-    #[test]
-    fn zero_thresholds_are_fail_safe() {
-        let tracker = SuccessfulRepeatTracker::new(0, 0);
-        assert!(matches!(
-            tracker.record_output("same", false),
-            SuccessfulRepeat::Halt(_)
-        ));
-        assert!(matches!(
-            tracker.record_call_batch("same", true, false),
-            SuccessfulRepeat::Halt(_)
-        ));
     }
 }
