@@ -541,6 +541,8 @@ fn json_value_kind(value: &Value) -> &'static str {
 }
 
 #[cfg(test)]
+mod prompt_test;
+#[cfg(test)]
 mod schema_test;
 #[cfg(test)]
 mod test;
