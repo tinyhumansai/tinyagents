@@ -98,6 +98,34 @@ struct StrictLookupTool {
     calls: Arc<Mutex<usize>>,
 }
 
+struct StringEchoTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl Tool<()> for StringEchoTool {
+    fn name(&self) -> &str {
+        "string_echo"
+    }
+
+    fn description(&self) -> &str {
+        "echo a string"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new("string_echo", "echo a string", json!({ "type": "string" }))
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(
+            call.id,
+            self.name(),
+            call.arguments.to_string(),
+        ))
+    }
+}
+
 #[async_trait]
 impl Tool<()> for StrictLookupTool {
     fn name(&self) -> &str {
@@ -1020,6 +1048,34 @@ async fn normalized_non_object_executes_tool_without_required_fields() {
 
     assert_eq!(run.final_response.unwrap().text(), "done");
     assert_eq!(*tool.calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn normalization_preserves_valid_primitive_arguments() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "string_echo", json!("hello")),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StringEchoTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("echo")])
+        .await
+        .expect("a schema-valid primitive must not be rewritten to an object");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
 }
 
 #[tokio::test]

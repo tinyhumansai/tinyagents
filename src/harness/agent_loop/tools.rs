@@ -476,6 +476,16 @@ fn normalize_tool_arguments(call: &mut ToolCall, parameters: &Value) {
         return;
     }
 
+    let accepts_object = parameters.get("type").is_some_and(|kind| {
+        kind.as_str() == Some("object")
+            || kind
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("object")))
+    }) || parameters.get("properties").is_some();
+    if !accepts_object {
+        return;
+    }
+
     if let Some(raw) = call.arguments.as_str() {
         let candidate = strip_markdown_code_fence(raw);
         if let Ok(value) = serde_json::from_str::<Value>(candidate)
