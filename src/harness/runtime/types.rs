@@ -95,9 +95,10 @@ pub enum InvalidArgsPolicy {
     ReturnToolError,
     /// First normalize common provider-shape defects, then apply
     /// [`Self::ReturnToolError`] if the resulting arguments still fail schema
-    /// validation. Normalization decodes a JSON object emitted as a string
-    /// (including a markdown-fenced string) and coerces a non-object to `{}`
-    /// only when the tool schema declares no required fields.
+    /// validation. Normalization decodes valid JSON emitted as a string
+    /// (including a markdown-fenced string), preserving decoded values for
+    /// precise validation, and coerces an undecodable/non-string value to `{}`
+    /// only when an object-capable tool schema declares no required fields.
     NormalizeThenReturnToolError,
 }
 

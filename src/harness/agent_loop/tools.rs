@@ -466,11 +466,12 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
 
 /// Repairs provider-neutral argument shape defects before schema validation.
 ///
-/// Object arguments are already in the canonical shape. A string is decoded
-/// only when it contains a JSON object, optionally inside a markdown code
-/// fence. Other non-object values become an empty object only for schemas that
-/// declare no required fields; required-field schemas retain the original value
-/// so the validation error remains precise and model-visible.
+/// Schema-valid arguments are already canonical. A string containing valid
+/// JSON is decoded, optionally through a markdown code fence, and the decoded
+/// value is preserved for validation even when it remains invalid. Undecodable
+/// or non-string values become an empty object only for object-capable schemas
+/// that declare no required fields; required-field schemas retain the original
+/// value so the validation error remains precise and model-visible.
 fn normalize_tool_arguments(call: &mut ToolCall, schema: &ToolSchema) {
     // Never rewrite a value the declared schema already accepts. In
     // particular, an object-capable union may validly accept a primitive too.
