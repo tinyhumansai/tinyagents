@@ -1,12 +1,10 @@
-//! Prompt-guided (text-mode) tool calling for models without native tool support.
+//! Provider-neutral prompt-guided (text-mode) tool calling for models without native tool support.
 //!
-//! Many self-hosted / local OpenAI-compatible runtimes reject the OpenAI `tools`
-//! parameter (HTTP 400) or simply ignore it. For those models
-//! ([`OpenAiModel`](super::OpenAiModel) built [`with_native_tool_calling(false)`](super::OpenAiModel::with_native_tool_calling)),
-//! the wire client embeds the tool specs **in the system prompt** as a small
-//! protocol and parses the model's `<tool_call>…</tool_call>` blocks back into
+//! Provider adapters whose model profile has `tool_calling = false` can use these
+//! helpers to embed tool specs **in the system prompt** as a small protocol and
+//! parse the model's `<tool_call>…</tool_call>` blocks back into
 //! [`ToolCall`]s — so the agent loop sees tool calls identically to the native
-//! path, without any harness change.
+//! path, without changing the harness loop.
 //!
 //! The `<tool_call>{"name":…,"arguments":…}</tool_call>` convention matches the
 //! long-standing OpenHuman host format so models already prompted for it behave
@@ -27,7 +25,7 @@ const CLOSE_TAG: &str = "</tool_call>";
 /// Build the tool-use protocol block appended to the system prompt when native
 /// tool calling is unavailable. Describes the `<tool_call>` convention and lists
 /// each tool's name, description, and JSON-Schema parameters.
-pub(super) fn tool_instructions(tools: &[ToolSchema]) -> String {
+pub fn prompt_tool_instructions(tools: &[ToolSchema]) -> String {
     let mut out = String::new();
     out.push_str("## Tool Use Protocol\n\n");
     out.push_str("To use a tool, wrap a JSON object in <tool_call></tool_call> tags:\n\n");
@@ -54,11 +52,11 @@ pub(super) fn tool_instructions(tools: &[ToolSchema]) -> String {
 /// the instructions are added as a trailing block on the first system message, or
 /// a new leading system message when the request carries none. `tools` empty →
 /// `messages` is returned unchanged (cloned).
-pub(super) fn with_tool_instructions(messages: &[Message], tools: &[ToolSchema]) -> Vec<Message> {
+pub fn with_prompt_tool_instructions(messages: &[Message], tools: &[ToolSchema]) -> Vec<Message> {
     if tools.is_empty() {
         return messages.to_vec();
     }
-    let block = tool_instructions(tools);
+    let block = prompt_tool_instructions(tools);
     let mut out = messages.to_vec();
     if let Some(Message::System(system)) = out.iter_mut().find(|m| matches!(m, Message::System(_)))
     {
@@ -79,7 +77,7 @@ pub(super) fn with_tool_instructions(messages: &[Message], tools: &[ToolSchema])
 /// Robust to noise: a block whose inner text is not a JSON object with a string
 /// `name` is dropped; a dangling `<tool_call>` with no close is left verbatim in
 /// the returned text.
-pub(super) fn parse_tool_calls_from_text(text: &str) -> (String, Vec<ToolCall>) {
+pub fn parse_prompt_tool_calls_from_text(text: &str) -> (String, Vec<ToolCall>) {
     let mut calls = Vec::new();
     let mut cleaned = String::new();
     let mut rest = text;
@@ -105,11 +103,11 @@ pub(super) fn parse_tool_calls_from_text(text: &str) -> (String, Vec<ToolCall>) 
 /// Extract prompt-guided `<tool_call>` blocks from a completed [`ModelResponse`]'s
 /// text into `message.tool_calls`, replacing the message content with the cleaned
 /// prose. No-op when the text carries no blocks — so a plain text answer is
-/// untouched. Applied by [`OpenAiModel`](super::OpenAiModel) after a non-native
-/// tool call completes (unary + terminal stream item).
-pub(super) fn apply_to_response(mut response: ModelResponse) -> ModelResponse {
+/// untouched. Provider adapters should apply this to each completed response after
+/// using [`with_prompt_tool_instructions`].
+pub fn apply_prompt_tool_calls(mut response: ModelResponse) -> ModelResponse {
     let text = response.text();
-    let (cleaned, calls) = parse_tool_calls_from_text(&text);
+    let (cleaned, calls) = parse_prompt_tool_calls_from_text(&text);
     if calls.is_empty() {
         return response;
     }
@@ -153,7 +151,7 @@ mod test {
 
     #[test]
     fn instructions_list_each_tool() {
-        let text = tool_instructions(&[schema("read_file"), schema("write_file")]);
+        let text = prompt_tool_instructions(&[schema("read_file"), schema("write_file")]);
         assert!(text.contains("## Tool Use Protocol"));
         assert!(text.contains("<tool_call>"));
         assert!(text.contains("**read_file**"));
@@ -163,7 +161,7 @@ mod test {
     #[test]
     fn with_tool_instructions_appends_to_system() {
         let msgs = vec![Message::system("You are helpful."), Message::user("hi")];
-        let out = with_tool_instructions(&msgs, &[schema("read_file")]);
+        let out = with_prompt_tool_instructions(&msgs, &[schema("read_file")]);
         assert_eq!(out.len(), 2);
         let Message::System(sys) = &out[0] else {
             panic!("first message should stay system")
@@ -184,7 +182,7 @@ mod test {
     #[test]
     fn with_tool_instructions_inserts_system_when_absent() {
         let msgs = vec![Message::user("hi")];
-        let out = with_tool_instructions(&msgs, &[schema("read_file")]);
+        let out = with_prompt_tool_instructions(&msgs, &[schema("read_file")]);
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], Message::System(_)));
     }
@@ -192,7 +190,7 @@ mod test {
     #[test]
     fn empty_tools_leaves_messages_unchanged() {
         let msgs = vec![Message::user("hi")];
-        assert_eq!(with_tool_instructions(&msgs, &[]), msgs);
+        assert_eq!(with_prompt_tool_instructions(&msgs, &[]), msgs);
     }
 
     #[test]
@@ -201,7 +199,7 @@ mod test {
 <tool_call>
 {"name": "read_file", "arguments": {"path": "a.txt"}}
 </tool_call>"#;
-        let (cleaned, calls) = parse_tool_calls_from_text(text);
+        let (cleaned, calls) = parse_prompt_tool_calls_from_text(text);
         assert_eq!(cleaned, "Let me read it.");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "read_file");
@@ -212,7 +210,7 @@ mod test {
     #[test]
     fn parses_multiple_calls_and_keeps_prose() {
         let text = r#"a<tool_call>{"name":"one","arguments":{}}</tool_call>b<tool_call>{"name":"two","arguments":{"x":1}}</tool_call>c"#;
-        let (cleaned, calls) = parse_tool_calls_from_text(text);
+        let (cleaned, calls) = parse_prompt_tool_calls_from_text(text);
         assert_eq!(cleaned, "abc");
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].name, "one");
@@ -222,14 +220,16 @@ mod test {
 
     #[test]
     fn missing_arguments_defaults_to_empty_object() {
-        let (_, calls) = parse_tool_calls_from_text(r#"<tool_call>{"name":"noargs"}</tool_call>"#);
+        let (_, calls) =
+            parse_prompt_tool_calls_from_text(r#"<tool_call>{"name":"noargs"}</tool_call>"#);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].arguments, serde_json::json!({}));
     }
 
     #[test]
     fn malformed_block_is_dropped() {
-        let (cleaned, calls) = parse_tool_calls_from_text("<tool_call>not json</tool_call>done");
+        let (cleaned, calls) =
+            parse_prompt_tool_calls_from_text("<tool_call>not json</tool_call>done");
         assert!(calls.is_empty());
         assert_eq!(cleaned, "done");
     }
@@ -237,14 +237,14 @@ mod test {
     #[test]
     fn unterminated_block_kept_as_text() {
         let text = "text <tool_call>{\"name\":\"x\"}";
-        let (cleaned, calls) = parse_tool_calls_from_text(text);
+        let (cleaned, calls) = parse_prompt_tool_calls_from_text(text);
         assert!(calls.is_empty());
         assert_eq!(cleaned, "text <tool_call>{\"name\":\"x\"}");
     }
 
     #[test]
     fn no_blocks_returns_text_verbatim() {
-        let (cleaned, calls) = parse_tool_calls_from_text("just a normal answer");
+        let (cleaned, calls) = parse_prompt_tool_calls_from_text("just a normal answer");
         assert!(calls.is_empty());
         assert_eq!(cleaned, "just a normal answer");
     }
