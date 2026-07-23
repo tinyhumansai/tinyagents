@@ -12,6 +12,7 @@
 
 mod prompt;
 mod schema;
+mod timeout;
 mod types;
 
 use std::sync::Arc;
@@ -22,6 +23,7 @@ use crate::error::{Result, TinyAgentsError};
 
 pub use prompt::*;
 pub use schema::*;
+pub use timeout::*;
 pub use types::*;
 
 impl ToolSchema {
@@ -546,3 +548,6 @@ mod prompt_test;
 mod schema_test;
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod timeout_test;

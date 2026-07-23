@@ -83,6 +83,36 @@ struct PreparedToolCall {
 }
 
 impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
+    /// Resolves this tool's own timeout policy. The separate run wall-clock
+    /// budget remains the outer hard deadline: a per-tool timeout becomes a
+    /// recoverable tool-error result, while exhausting the run budget aborts.
+    fn resolved_tool_timeout(
+        &self,
+        tool: &dyn Tool<State>,
+        call: &ToolCall,
+    ) -> Option<crate::harness::tool::ResolvedToolTimeout> {
+        self.tool_timeouts
+            .as_ref()
+            .map(|settings| settings.resolve(tool.timeout_policy(call)))
+    }
+
+    async fn with_tool_policy_timeout<T, F>(
+        timeout: Option<crate::harness::tool::ResolvedToolTimeout>,
+        timeout_value: T,
+        fut: F,
+    ) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        match timeout.and_then(|resolved| resolved.deadline) {
+            Some(deadline) => match tokio::time::timeout(deadline, fut).await {
+                Ok(result) => result,
+                Err(_) => Ok(timeout_value),
+            },
+            None => fut.await,
+        }
+    }
+
     /// Executes one assistant turn's requested tool calls, appending each
     /// result to `messages` in the calls' original order.
     ///
@@ -365,14 +395,17 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // The real tool call is the innermost base of the tool-wrap
             // onion (same before -> wrap -> after ordering as the model
             // path): lifecycle `before_tool` ran in admission, the wrap onion
-            // runs here, and lifecycle `after_tool` runs in the fold. Bounded
-            // by the same remaining wall-clock budget as a model call, so a
-            // hanging tool cannot block the run past its deadline either.
-            let base = ToolCallBase { tool };
-            let remaining = self.call_budget(ctx);
+            // runs here, and lifecycle `after_tool` runs in the fold. The
+            // crate-owned tool policy returns a recoverable tool error; the
+            // outer run budget still aborts when the whole run is exhausted.
+            let run_budget = self.call_budget(ctx);
+            let base = ToolCallBase {
+                tool,
+                timeout_settings: self.tool_timeouts.clone(),
+            };
             let run_id = ctx.run_id().as_str().to_string();
             let fut = self.middleware.run_wrapped_tool(ctx, state, call, &base);
-            let result = Self::with_call_budget(remaining, &run_id, "tool call", fut)
+            let result = Self::with_call_budget(run_budget, &run_id, "tool call", fut)
                 .await?
                 .into_result();
 
@@ -417,17 +450,20 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             prepared.push(self.start_tool_call(ctx, status, &call));
             slots.push(ToolSlot::Execute);
 
-            // Each call is individually bounded by the run's remaining
-            // wall-clock budget *at admission*, mirroring the serial path.
+            // Each call is bounded by its recoverable tool policy inside the
+            // run's hard remaining wall-clock budget, mirroring serial mode.
             // The future owns everything it needs (tool Arc, call, a
             // non-generic `ToolExecutionContext` snapshot), so it does not
             // borrow the `RunContext` and can run alongside its siblings.
-            let remaining = self.call_budget(ctx);
+            let tool_timeout = self.resolved_tool_timeout(tool.as_ref(), &call);
+            let timeout_result = timeout_result(&call, tool_timeout);
+            let run_budget = self.call_budget(ctx);
             let run_id = ctx.run_id().as_str().to_string();
             let exec_ctx = ToolExecutionContext::from_run_context(ctx);
             futures.push(async move {
                 let fut = tool.call_with_context(state, call, exec_ctx);
-                Self::with_call_budget(remaining, &run_id, "tool call", fut).await
+                let fut = Self::with_tool_policy_timeout(tool_timeout, timeout_result, fut);
+                Self::with_call_budget(run_budget, &run_id, "tool call", fut).await
             });
         }
 
@@ -455,4 +491,20 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         }
         Ok(())
     }
+}
+
+pub(super) fn timeout_result(
+    call: &ToolCall,
+    timeout: Option<crate::harness::tool::ResolvedToolTimeout>,
+) -> crate::harness::tool::ToolResult {
+    let budget_ms = timeout.map_or(0, |resolved| resolved.budget_ms);
+    let mut result = crate::harness::tool::ToolResult::error(
+        call.id.clone(),
+        call.name.clone(),
+        format!("tool `{}` timed out after {budget_ms} ms", call.name),
+    );
+    result.elapsed_ms = timeout
+        .and_then(|resolved| resolved.deadline)
+        .map_or(0, |deadline| deadline.as_millis() as u64);
+    result
 }
