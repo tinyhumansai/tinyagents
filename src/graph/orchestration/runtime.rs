@@ -133,6 +133,42 @@ where
         snapshots
     }
 
+    /// Snapshots one task after enforcing ownership.
+    pub fn snapshot(
+        &self,
+        task_id: &TaskId,
+        owner_id: &str,
+    ) -> std::result::Result<DetachedTaskSnapshot<Metadata, Status>, DetachedTaskRegistryError>
+    {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| DetachedTaskRegistryError::Unknown)?;
+        let entry = guard
+            .get(task_id)
+            .ok_or(DetachedTaskRegistryError::Unknown)?;
+        if entry.owner_id != owner_id {
+            return Err(DetachedTaskRegistryError::NotOwned);
+        }
+        Ok(Self::snapshot_entry(task_id, entry))
+    }
+
+    /// Trusted-control variant of [`Self::snapshot`] without an owner check.
+    pub fn snapshot_trusted(
+        &self,
+        task_id: &TaskId,
+    ) -> std::result::Result<DetachedTaskSnapshot<Metadata, Status>, DetachedTaskRegistryError>
+    {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| DetachedTaskRegistryError::Unknown)?;
+        let entry = guard
+            .get(task_id)
+            .ok_or(DetachedTaskRegistryError::Unknown)?;
+        Ok(Self::snapshot_entry(task_id, entry))
+    }
+
     /// Returns a live steering handle after enforcing ownership and terminal
     /// status. The handle is looked up in the supplied [`SteeringRegistry`], so
     /// executors may register it independently when their run starts.
@@ -205,7 +241,10 @@ where
                 self.remove(task_id);
                 Ok(DetachedTaskWaitOutcome::Terminal(terminal))
             }
-            Ok(Err(error)) => Err(error),
+            Ok(Err(error)) => {
+                self.remove(task_id);
+                Err(error)
+            }
             Err(_) => Ok(DetachedTaskWaitOutcome::TimedOut(status.borrow().clone())),
         }
     }
@@ -351,6 +390,18 @@ where
             guard.remove(task_id);
         }
         self.steering.deregister(task_id);
+    }
+
+    fn snapshot_entry(
+        task_id: &TaskId,
+        entry: &DetachedTaskEntry<Metadata, Status>,
+    ) -> DetachedTaskSnapshot<Metadata, Status> {
+        DetachedTaskSnapshot {
+            task_id: task_id.clone(),
+            owner_id: entry.owner_id.clone(),
+            metadata: entry.metadata.clone(),
+            status: entry.status.borrow().clone(),
+        }
     }
 
     fn lock(

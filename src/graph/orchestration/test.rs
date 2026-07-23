@@ -78,6 +78,15 @@ async fn detached_registry_enforces_owner_and_waits_for_terminal_status() {
         .unwrap();
 
     assert_eq!(
+        registry.snapshot(&task_id, "parent-b").unwrap_err(),
+        DetachedTaskRegistryError::NotOwned
+    );
+    assert_eq!(
+        registry.snapshot(&task_id, "parent-a").unwrap().metadata,
+        "researcher"
+    );
+
+    assert_eq!(
         registry
             .wait(&task_id, "parent-b", std::time::Duration::from_millis(1))
             .await,
