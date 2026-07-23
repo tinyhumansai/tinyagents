@@ -194,6 +194,7 @@ pub use graph::{
 
 // --- Graph: orchestration tools (ordinary harness Tool implementations) ---
 pub use graph::{
+    DetachedTaskRegistry, DetachedTaskRegistryError, DetachedTaskSnapshot, DetachedTaskWaitOutcome,
     InMemoryTaskStore, JsonlTaskStore, OrchestrationControlOutcome, OrchestrationTaskFilter,
     OrchestrationTaskKind, OrchestrationTaskRecord, OrchestrationTaskResult, OrchestrationTaskSpec,
     OrchestrationTaskStatus, OrchestrationTool, OrchestrationToolKind, SteeringRegistry, TaskStore,

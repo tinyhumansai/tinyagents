@@ -75,6 +75,7 @@ pub use observability::{
     StoreGraphEventJournal,
 };
 pub use orchestration::{
+    DetachedTaskRegistry, DetachedTaskRegistryError, DetachedTaskSnapshot, DetachedTaskWaitOutcome,
     InMemoryTaskStore, JsonlTaskStore, OrchestrationControlOutcome, OrchestrationTaskFilter,
     OrchestrationTaskKind, OrchestrationTaskRecord, OrchestrationTaskResult, OrchestrationTaskSpec,
     OrchestrationTaskStatus, OrchestrationTool, OrchestrationToolKind, SteeringRegistry, TaskStore,
