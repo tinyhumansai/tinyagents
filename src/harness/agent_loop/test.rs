@@ -141,6 +141,164 @@ struct StrictLookupTool {
     calls: Arc<Mutex<usize>>,
 }
 
+struct StringEchoTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+struct RequiredOnlyTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+struct ObjectEnumTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+struct ObjectArrayTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+struct OptionalStrictObjectTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl Tool<()> for StringEchoTool {
+    fn name(&self) -> &str {
+        "string_echo"
+    }
+
+    fn description(&self) -> &str {
+        "echo a string"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "string_echo",
+            "echo a string",
+            json!({
+                "type": ["object", "string"],
+                "properties": { "value": { "type": "string" } }
+            }),
+        )
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(
+            call.id,
+            self.name(),
+            call.arguments.to_string(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool<()> for RequiredOnlyTool {
+    fn name(&self) -> &str {
+        "required_only"
+    }
+
+    fn description(&self) -> &str {
+        "accepts an implicitly object-shaped schema"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "required_only",
+            self.description(),
+            json!({ "required": ["query"] }),
+        )
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(call.id, self.name(), "required-output"))
+    }
+}
+
+#[async_trait]
+impl Tool<()> for ObjectEnumTool {
+    fn name(&self) -> &str {
+        "object_enum"
+    }
+
+    fn description(&self) -> &str {
+        "accepts one enumerated object"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "object_enum",
+            self.description(),
+            json!({ "enum": [{ "query": "rust" }] }),
+        )
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(call.id, self.name(), "enum-output"))
+    }
+}
+
+#[async_trait]
+impl Tool<()> for ObjectArrayTool {
+    fn name(&self) -> &str {
+        "object_array"
+    }
+
+    fn description(&self) -> &str {
+        "accepts an object or array"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "object_array",
+            self.description(),
+            json!({
+                "type": ["object", "array"],
+                "properties": { "value": { "type": "string" } }
+            }),
+        )
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(
+            call.id,
+            self.name(),
+            call.arguments.to_string(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool<()> for OptionalStrictObjectTool {
+    fn name(&self) -> &str {
+        "optional_strict_object"
+    }
+
+    fn description(&self) -> &str {
+        "accepts only an optional query field"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "optional_strict_object",
+            self.description(),
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": { "query": { "type": "string" } }
+            }),
+        )
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(call.id, self.name(), "unexpected"))
+    }
+}
+
 #[async_trait]
 impl Tool<()> for StrictLookupTool {
     fn name(&self) -> &str {
@@ -1030,6 +1188,300 @@ async fn invalid_tool_arguments_return_tool_error_recovers() {
         injected,
         "recovery message should be injected into the transcript"
     );
+}
+
+#[tokio::test]
+async fn normalized_json_string_arguments_execute_registered_tool() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response(
+                "call-1",
+                "strict_lookup",
+                json!("```json\n{\"query\":\"rust\"}\n```"),
+            ),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StrictLookupTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("a fenced JSON object should be normalized before validation");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn normalized_non_object_executes_tool_without_required_fields() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "permissive", json!(null)),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let tool = Arc::new(FakeTool::new("permissive", "ok"));
+    harness.register_tool(tool.clone());
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("run")])
+        .await
+        .expect("a non-object should become an empty object for a permissive schema");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*tool.calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn normalization_preserves_valid_primitive_arguments() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "string_echo", json!("hello")),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StringEchoTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("echo")])
+        .await
+        .expect("a schema-valid primitive must not be rewritten to an object");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert!(
+        run.messages
+            .iter()
+            .any(|message| matches!(message, Message::Tool(_)) && message.text() == "\"hello\""),
+        "the tool result must contain the original primitive instead of a rewritten object"
+    );
+}
+
+#[tokio::test]
+async fn normalization_decodes_required_only_object_schema() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "required_only", json!("{\"query\":\"rust\"}")),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(RequiredOnlyTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("a required-only object schema should normalize a JSON string");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn normalization_decodes_object_valued_enum_schema() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "object_enum", json!("{\"query\":\"rust\"}")),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(ObjectEnumTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("an object-valued enum should normalize a matching JSON string");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn normalization_preserves_decoded_array_union_arguments() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "object_array", json!("[1,2]")),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(ObjectArrayTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("an object/array union should preserve a decoded array");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert!(
+        run.messages
+            .iter()
+            .any(|message| matches!(message, Message::Tool(_)) && message.text() == "[1,2]"),
+        "the tool result must contain the decoded array instead of an empty object"
+    );
+}
+
+#[tokio::test]
+async fn normalization_preserves_decoded_invalid_object_for_validation() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response(
+                "call-1",
+                "optional_strict_object",
+                json!("{\"extra\":true}"),
+            ),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(OptionalStrictObjectTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    use crate::harness::testkit::EventRecorder;
+    let recorder = EventRecorder::new();
+    let ctx =
+        RunContext::new(RunConfig::new("decoded-invalid-args"), ()).with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("lookup")])
+        .await
+        .expect("the decoded schema error should be recoverable");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    assert_eq!(*calls.lock().unwrap(), 0);
+    assert!(
+        run.messages.iter().any(|message| {
+            matches!(message, Message::Tool(_)) && message.text().contains("extra is not allowed")
+        }),
+        "validation must report the decoded invalid field instead of executing with an empty object"
+    );
+    assert!(
+        recorder.events().iter().any(|event| matches!(
+            event,
+            AgentEvent::InvalidToolArgs { arguments, .. }
+                if arguments == &json!("{\"extra\":true}")
+        )),
+        "the invalid-args event must retain the raw model-supplied JSON string"
+    );
+}
+
+#[tokio::test]
+async fn normalization_preserves_direct_invalid_object_for_validation() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "optional_strict_object", json!({"extra": true})),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(OptionalStrictObjectTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("the direct schema error should be recoverable");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    assert_eq!(*calls.lock().unwrap(), 0);
+    assert!(
+        run.messages.iter().any(|message| {
+            matches!(message, Message::Tool(_)) && message.text().contains("extra is not allowed")
+        }),
+        "validation must report the direct invalid field instead of executing with an empty object"
+    );
+}
+
+#[tokio::test]
+async fn normalization_preserves_required_field_validation_errors() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "strict_lookup", json!(null)),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StrictLookupTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("required-field validation should remain recoverable");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    assert_eq!(*calls.lock().unwrap(), 0);
 }
 
 #[tokio::test]

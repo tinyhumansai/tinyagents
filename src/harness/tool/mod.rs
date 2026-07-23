@@ -443,37 +443,46 @@ fn validate_schema_value(schema: &Value, value: &Value, path: &str) -> Result<()
     // check under `properties` would let such schemas fail open, silently
     // accepting calls that omit required arguments.
     if let Some(required) = schema.get("required").and_then(Value::as_array) {
-        let object = value.as_object().ok_or_else(|| {
-            TinyAgentsError::Validation(format!("{path} must be an object with declared fields"))
-        })?;
-        for field in required.iter().filter_map(Value::as_str) {
-            if !object.contains_key(field) {
-                return Err(TinyAgentsError::Validation(format!(
-                    "{path}.{field} is required"
-                )));
+        if let Some(object) = value.as_object() {
+            for field in required.iter().filter_map(Value::as_str) {
+                if !object.contains_key(field) {
+                    return Err(TinyAgentsError::Validation(format!(
+                        "{path}.{field} is required"
+                    )));
+                }
             }
+        } else if schema.get("type").is_none() {
+            // Preserve the crate's required-only shorthand: without an
+            // explicit type, `required` declares an object schema. With a
+            // union type, JSON Schema object keywords apply only to object
+            // instances; a value accepted by another arm remains valid.
+            return Err(TinyAgentsError::Validation(format!(
+                "{path} must be an object with declared fields"
+            )));
         }
     }
 
     if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-        let object = value.as_object().ok_or_else(|| {
-            TinyAgentsError::Validation(format!("{path} must be an object with declared fields"))
-        })?;
-
-        if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
-            for field in object.keys() {
-                if !properties.contains_key(field) {
-                    return Err(TinyAgentsError::Validation(format!(
-                        "{path}.{field} is not allowed"
-                    )));
+        if let Some(object) = value.as_object() {
+            if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
+                for field in object.keys() {
+                    if !properties.contains_key(field) {
+                        return Err(TinyAgentsError::Validation(format!(
+                            "{path}.{field} is not allowed"
+                        )));
+                    }
                 }
             }
-        }
 
-        for (field, field_schema) in properties {
-            if let Some(field_value) = object.get(field) {
-                validate_schema_value(field_schema, field_value, &format!("{path}.{field}"))?;
+            for (field, field_schema) in properties {
+                if let Some(field_value) = object.get(field) {
+                    validate_schema_value(field_schema, field_value, &format!("{path}.{field}"))?;
+                }
             }
+        } else if schema.get("type").is_none() {
+            return Err(TinyAgentsError::Validation(format!(
+                "{path} must be an object with declared fields"
+            )));
         }
     }
 

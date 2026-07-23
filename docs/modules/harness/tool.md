@@ -263,6 +263,11 @@ are handled separately:
   governed by `RunPolicy::invalid_args: InvalidArgsPolicy`. `Fail` (default,
   historical) aborts the turn; `ReturnToolError` injects a repairable tool-error
   message (carrying the validation detail and the expected schema) and continues.
+  `NormalizeThenReturnToolError` first repairs common object-schema transport
+  shapes (a JSON object encoded as a string, including markdown fences, or a
+  non-object for an object schema with no required fields), then returns any
+  remaining validation failure as a tool error. Schemas that accept top-level
+  primitives or arrays are left untouched.
 - **Unparseable** (malformed JSON the provider could not parse into arguments at
   all) is surfaced by the provider as a `ToolCall` with `invalid: Some(reason)`
   and the raw string preserved in `arguments`. Small local models (Ollama, LM
