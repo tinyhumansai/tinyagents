@@ -32,9 +32,11 @@ pub use types::*;
 enum ContextPatternMatch {
     /// Pattern may appear anywhere in the lowercased model id.
     Substring,
-    /// Pattern must be a complete segment delimited by common provider/id
-    /// separators. This avoids false positives for short model ids such as
-    /// `o1` and `o3`.
+    /// Pattern must appear as a bounded segment: delimited by a non-alphanumeric
+    /// boundary (or the string start/end) on both sides. This lets short o-series
+    /// ids such as `o1` and `o3` resolve even when embedded mid-name (e.g.
+    /// `ollama/mistral-for-o1-benchmark`) while avoiding false positives for
+    /// substrings such as `solo1-7b`, `proto3-chat`, or `octo3thing`.
     Segment,
 }
 
@@ -75,11 +77,20 @@ fn matches_context_pattern(lower: &str, pattern: &str, mode: ContextPatternMatch
     match mode {
         ContextPatternMatch::Substring => lower.contains(pattern),
         ContextPatternMatch::Segment => {
-            let model_name = lower.rsplit(['/', ':']).next().unwrap_or(lower);
-            model_name
-                .split(['-', '_', '.'])
-                .next()
-                .is_some_and(|segment| segment == pattern)
+            // Match `pattern` as a bounded segment: every occurrence is accepted
+            // only when the byte before it and the byte after it are both
+            // non-alphanumeric (or absent at the string edge). Scanning the whole
+            // id — not just the final `/`- or `:`-delimited component — lets a
+            // token embedded mid-name (`ollama/mistral-for-o1-benchmark`) resolve,
+            // while the boundary guard keeps substrings like `solo1-7b`,
+            // `proto3-chat`, and `octo3thing` unmatched.
+            let bytes = lower.as_bytes();
+            lower.match_indices(pattern).any(|(start, matched)| {
+                let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+                let end = start + matched.len();
+                let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+                before_ok && after_ok
+            })
         }
     }
 }
