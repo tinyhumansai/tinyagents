@@ -214,6 +214,18 @@ Feature ownership:
 - `workspace`: per-agent filesystem/sandbox isolation, allowed-root descriptors,
   and fail-closed path enforcement for tools that touch real files.
 
+### Tool timeout policy
+
+Hosts enable per-tool deadlines with
+`AgentHarness::with_tool_timeout_settings(ToolTimeoutSettings)`. The setting is
+shared and dynamically updateable. Each tool supplies `ToolTimeout::Inherit`
+(the default), `Millis(budget)`, or `Unbounded`; resolution happens at the
+innermost tool call after wrap middleware has had a chance to rewrite its
+arguments. On expiry the loop appends a recoverable tool-error result and keeps
+running, allowing model repair. The independent run wall-clock limit remains a
+hard error. See [`tool.md`](tool.md) for the tool contract and
+[`runtime.md`](runtime.md) for harness assembly.
+
 Continued specification: [runtime.md](runtime.md) (tool registry, agent loop,
 middleware, memory/stores) and
 [observability-overview.md](observability-overview.md) (structured output,

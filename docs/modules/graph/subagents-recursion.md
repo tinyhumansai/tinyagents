@@ -112,6 +112,21 @@ Every steering event must include root run id, parent run id, child run id when
 available, task id when graph-backed, namespace, actor, command kind, policy id,
 correlation id, and checkpoint id when available.
 
+## Detached Task Runtime Registry
+
+`DetachedTaskRegistry<Metadata, Status>` complements the durable `TaskStore`
+with process-local executor handles. Applications register a task's owner,
+metadata, status watch receiver, cancellation token, and abort handle, while
+the task's live `SteeringHandle` remains addressable through the shared
+`SteeringRegistry`.
+
+The registry enforces owner checks for wait and steering, keeps timed-out waits
+registered, prunes terminal waits, cancels cooperatively before hard-aborting,
+and sweeps terminal entries when its soft cap is reached. It never evicts live
+work to satisfy the cap and does not duplicate durable lifecycle records.
+After a restart, applications reconcile live `TaskStore` records that have no
+matching runtime entry according to their executor policy.
+
 ## Listing Orchestration Tasks {#orchestrate-list}
 
 The model-facing `orchestrate_list` tool enumerates managed tasks visible to the

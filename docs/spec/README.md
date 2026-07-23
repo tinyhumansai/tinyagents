@@ -127,6 +127,13 @@ output, observability, and testability), and
 [`docs/modules/harness/README.md`](../modules/harness/README.md) for the
 per-topic implementation docs.
 
+Per-tool deadlines are opt-in at the harness boundary through
+`AgentHarness::with_tool_timeout_settings`. A tool's `ToolTimeout` policy is
+resolved from the final post-middleware call: `Inherit` uses the shared dynamic
+default, `Millis` is clamped and padded with configured grace, and `Unbounded`
+has no per-tool deadline. Expiry is a recoverable tool result returned to the
+model; only the enclosing run wall-clock deadline aborts the run.
+
 ## Module 2: Graph
 
 The graph is the durable, typed state-graph runtime: `START`/`END`, nodes,

@@ -24,7 +24,7 @@ use crate::harness::limits::RunLimits;
 use crate::harness::middleware::MiddlewareStack;
 use crate::harness::model::{ModelRegistry, ResponseFormat};
 use crate::harness::retry::{FallbackPolicy, RetryPolicy};
-use crate::harness::tool::ToolRegistry;
+use crate::harness::tool::{ToolRegistry, ToolTimeoutSettings};
 
 /// Declarative, run-scoped policy shared by every invocation of an
 /// [`AgentHarness`].
@@ -265,6 +265,8 @@ pub struct AgentHarness<State: Send + Sync, Ctx: Send + Sync = ()> {
     pub(crate) middleware: MiddlewareStack<State, Ctx>,
     /// Cross-cutting run policy (limits, retry, fallback, response format).
     pub(crate) policy: RunPolicy,
+    /// Optional per-tool timeout resolver shared across harness runs.
+    pub(crate) tool_timeouts: Option<ToolTimeoutSettings>,
     /// Optional local response cache shared across runs of this harness.
     ///
     /// When set, the agent loop consults it before each provider call (subject

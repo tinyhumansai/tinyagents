@@ -9,6 +9,8 @@ use crate::error::{Result, TinyAgentsError};
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 pub const DEFAULT_OLLAMA_MODEL: &str = "bge-m3";
 pub const DEFAULT_OLLAMA_DIMENSIONS: usize = 1024;
+/// Context and batch window recommended for long-document embedding models.
+pub const RECOMMENDED_OLLAMA_CONTEXT_TOKENS: u32 = 8192;
 
 #[derive(Debug)]
 pub struct OllamaEmbeddingModel {
@@ -16,6 +18,7 @@ pub struct OllamaEmbeddingModel {
     base_url: String,
     model: String,
     dimensions: usize,
+    options: Option<OllamaOptions>,
 }
 
 impl OllamaEmbeddingModel {
@@ -29,6 +32,7 @@ impl OllamaEmbeddingModel {
             } else {
                 dimensions
             },
+            options: None,
         })
     }
 
@@ -38,6 +42,19 @@ impl OllamaEmbeddingModel {
 
     pub fn with_client(mut self, client: reqwest::Client) -> Self {
         self.client = client;
+        self
+    }
+
+    /// Request an explicit context and batch window from Ollama.
+    ///
+    /// This is useful for long-document embedding models such as `bge-m3`:
+    /// Ollama otherwise may load them with a smaller default context or batch
+    /// size and silently truncate or reject inputs that the model supports.
+    pub fn with_context_options(mut self, num_ctx: u32, num_batch: u32) -> Self {
+        self.options = Some(OllamaOptions {
+            num_ctx: num_ctx.max(1),
+            num_batch: num_batch.max(1),
+        });
         self
     }
 
@@ -59,6 +76,7 @@ impl OllamaEmbeddingModel {
             .json(&OllamaRequest {
                 model: self.model.clone(),
                 input,
+                options: self.options,
             })
             .send()
             .await
@@ -85,7 +103,12 @@ impl OllamaEmbeddingModel {
                     "Ollama could not encode input without NaN values".into(),
                 ));
             }
-            return Err(ollama_http_error(status, &body));
+            return Err(ollama_http_error(
+                status,
+                &body,
+                &self.base_url,
+                &self.model,
+            ));
         }
         let payload = parse_response(response).await?;
         if payload.embeddings.len() != 1 {
@@ -137,6 +160,14 @@ impl Default for OllamaEmbeddingModel {
 struct OllamaRequest {
     model: String,
     input: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<OllamaOptions>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct OllamaOptions {
+    num_ctx: u32,
+    num_batch: u32,
 }
 
 #[derive(Deserialize)]
@@ -151,8 +182,22 @@ async fn parse_response(response: reqwest::Response) -> Result<OllamaResponse> {
     })
 }
 
-fn ollama_http_error(status: reqwest::StatusCode, body: &str) -> TinyAgentsError {
+fn ollama_http_error(
+    status: reqwest::StatusCode,
+    body: &str,
+    base_url: &str,
+    model: &str,
+) -> TinyAgentsError {
     let detail = body.trim();
+    let normalized = detail.to_ascii_lowercase();
+    if status == reqwest::StatusCode::NOT_FOUND
+        && normalized.contains("model")
+        && normalized.contains("not found")
+    {
+        return TinyAgentsError::Embedding(format!(
+            "Ollama embedding model `{model}` is not installed at {base_url}. Run `ollama pull {model}` or choose an installed embedding model"
+        ));
+    }
     TinyAgentsError::Embedding(format!(
         "ollama embed failed with status {status}{}",
         if detail.is_empty() {
@@ -284,7 +329,12 @@ impl EmbeddingModel for OllamaEmbeddingModel {
                 }
                 return self.embed_per_text(texts.len(), &live).await;
             }
-            return Err(ollama_http_error(status, &body));
+            return Err(ollama_http_error(
+                status,
+                &body,
+                &self.base_url,
+                &self.model,
+            ));
         }
 
         let payload = parse_response(response).await?;
@@ -337,5 +387,30 @@ mod tests {
     fn recognizes_only_nan_encoding_failures() {
         assert!(is_nan_encode_error("unsupported value: NaN"));
         assert!(!is_nan_encode_error("model crashed"));
+    }
+
+    #[test]
+    fn context_options_are_clamped_and_serialized() {
+        let model = OllamaEmbeddingModel::new("http://localhost:11434", "bge-m3", 1024)
+            .with_context_options(0, 8192);
+        let body = serde_json::to_value(OllamaRequest {
+            model: model.model.clone(),
+            input: vec!["hello".into()],
+            options: model.options,
+        })
+        .unwrap();
+        assert_eq!(body["options"]["num_ctx"], 1);
+        assert_eq!(body["options"]["num_batch"], 8192);
+    }
+
+    #[test]
+    fn missing_model_error_has_remediation() {
+        let error = ollama_http_error(
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"error":"model not found"}"#,
+            "http://localhost:11434",
+            "bge-m3",
+        );
+        assert!(error.to_string().contains("ollama pull bge-m3"));
     }
 }

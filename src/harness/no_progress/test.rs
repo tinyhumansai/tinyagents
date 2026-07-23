@@ -137,3 +137,129 @@ fn identical_halt_threshold_is_clamped_above_the_nudge() {
         NoProgress::Halt(_)
     ));
 }
+
+#[test]
+fn identical_output_halts_at_threshold_and_changes_reset() {
+    let tracker = SuccessfulRepeatTracker::new(3, 10);
+    assert_eq!(
+        tracker.record_output("same", false),
+        SuccessfulRepeat::Continue
+    );
+    assert_eq!(
+        tracker.record_call_batch("call-1", true, false),
+        SuccessfulRepeat::Continue
+    );
+    assert_eq!(
+        tracker.record_output("same", false),
+        SuccessfulRepeat::Continue
+    );
+    assert_eq!(
+        tracker.record_call_batch("call-2", true, false),
+        SuccessfulRepeat::Continue
+    );
+    assert_eq!(
+        tracker.record_output("same", false),
+        SuccessfulRepeat::Continue,
+        "output cannot halt before its tool batch is classified"
+    );
+    assert!(matches!(
+        tracker.record_call_batch("call-3", true, false),
+        SuccessfulRepeat::Halt(message) if message.contains("3 iterations")
+    ));
+    assert_eq!(
+        tracker.record_output("different", false),
+        SuccessfulRepeat::Continue
+    );
+}
+
+#[test]
+fn successful_call_batches_halt_but_failures_reset() {
+    let tracker = SuccessfulRepeatTracker::new(4, 2);
+    assert_eq!(
+        tracker.record_call_batch("tool:args", true, false),
+        SuccessfulRepeat::Continue
+    );
+    assert!(matches!(
+        tracker.record_call_batch("tool:args", true, false),
+        SuccessfulRepeat::Halt(message) if message.contains("2 times")
+    ));
+    assert_eq!(
+        tracker.record_call_batch("tool:args", false, false),
+        SuccessfulRepeat::Continue
+    );
+    assert_eq!(
+        tracker.record_call_batch("tool:args", true, false),
+        SuccessfulRepeat::Continue
+    );
+}
+
+#[test]
+fn failed_call_batches_reset_output_repeats() {
+    let tracker = SuccessfulRepeatTracker::new(2, 2);
+    assert_eq!(
+        tracker.record_output("same", false),
+        SuccessfulRepeat::Continue
+    );
+    assert_eq!(
+        tracker.record_call_batch("first-call", true, false),
+        SuccessfulRepeat::Continue
+    );
+    assert_eq!(
+        tracker.record_output("same", false),
+        SuccessfulRepeat::Continue,
+        "a threshold crossing is pending until batch success is known"
+    );
+    assert_eq!(
+        tracker.record_call_batch("failed-call", false, false),
+        SuccessfulRepeat::Continue
+    );
+    assert_eq!(
+        tracker.record_output("same", false),
+        SuccessfulRepeat::Continue,
+        "a failed prior batch must not count toward a successful output loop"
+    );
+}
+
+#[test]
+fn exempt_batches_reset_both_streaks() {
+    let tracker = SuccessfulRepeatTracker::new(2, 2);
+    assert_eq!(
+        tracker.record_output("poll", false),
+        SuccessfulRepeat::Continue
+    );
+    assert_eq!(
+        tracker.record_call_batch("poll", true, true),
+        SuccessfulRepeat::Continue
+    );
+    assert_eq!(
+        tracker.record_output("poll", false),
+        SuccessfulRepeat::Continue,
+        "an exempt completed batch must clear its already-recorded output"
+    );
+
+    assert_eq!(
+        tracker.record_call_batch("poll", true, false),
+        SuccessfulRepeat::Continue
+    );
+    assert_eq!(
+        tracker.record_call_batch("poll", true, true),
+        SuccessfulRepeat::Continue
+    );
+    assert_eq!(
+        tracker.record_call_batch("poll", true, false),
+        SuccessfulRepeat::Continue
+    );
+}
+
+#[test]
+fn zero_thresholds_are_fail_safe() {
+    let tracker = SuccessfulRepeatTracker::new(0, 0);
+    assert_eq!(
+        tracker.record_output("same", false),
+        SuccessfulRepeat::Continue
+    );
+    assert!(matches!(
+        tracker.record_call_batch("same", true, false),
+        SuccessfulRepeat::Halt(_)
+    ));
+}

@@ -422,6 +422,34 @@ pub struct ModelResponse {
     /// Model selected by the harness/registry for this response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model: Option<ResolvedModel>,
+    /// When set, this response does **not** end the turn.
+    ///
+    /// A response carrying tool calls always continues the turn — the loop runs
+    /// them and asks for another reply. A response *without* tool calls is
+    /// otherwise the turn's final answer. This field lets a model adapter say
+    /// "not done" anyway: the loop appends the carried string as the next user
+    /// turn and requests another reply.
+    ///
+    /// `None` (the default) is the historical behaviour, so every existing
+    /// caller is unaffected.
+    ///
+    /// **Why it exists.** Text-mode protocols encode tool calls as prose, and a
+    /// model that wants to say something *before* acting has no tool call to
+    /// ride. Without this the loop ends its turn on the first sentence, so such
+    /// a protocol cannot narrate — it must either stay silent until the work is
+    /// done, or fake a tool call purely to keep the floor.
+    ///
+    /// The carried string is the nudge to hand back (e.g. `"(next)"`). It is a
+    /// string rather than a `bool` because most chat APIs reject two assistant
+    /// turns in a row, so *something* must be appended; letting the adapter
+    /// choose keeps the protocol's vocabulary out of the harness.
+    ///
+    /// A continuing turn stays bounded by
+    /// [`RunLimits::max_model_calls`](crate::harness::runtime::RunLimits) — it
+    /// costs one model call per continue, like any other loop iteration — so
+    /// this needs no cap of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_turn: Option<String>,
 }
 
 /// An incremental streamed chunk of a model response.

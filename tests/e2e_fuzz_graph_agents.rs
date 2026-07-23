@@ -261,6 +261,7 @@ fn tool_call_response(calls: Vec<ToolCall>) -> ModelResponse {
         finish_reason: Some("tool_calls".to_string()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 
@@ -276,6 +277,7 @@ fn text_response(text: impl Into<String>) -> ModelResponse {
         finish_reason: Some("stop".to_string()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 

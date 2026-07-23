@@ -58,6 +58,7 @@ fn tool_call_response(id: &str, name: &str, input: u64, output: u64) -> ModelRes
         finish_reason: Some("tool_calls".into()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 
@@ -74,6 +75,7 @@ fn text_response(text: &str, input: u64, output: u64) -> ModelResponse {
         finish_reason: Some("stop".into()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 
@@ -290,6 +292,7 @@ async fn cost_pricing_records_and_enforces_money_budget() {
             requested: None,
             source: ModelResolutionSource::RegistryDefault,
         }),
+        continue_turn: None,
     };
 
     stack
@@ -515,6 +518,7 @@ async fn cached_input_budget_blocks_next_call() {
         finish_reason: Some("stop".into()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     };
     stack
         .run_after_model(&mut ctx, &(), &mut resp)

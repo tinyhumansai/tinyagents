@@ -227,6 +227,7 @@ impl<State: Send + Sync> ChatModel<State> for MockModel {
                     finish_reason: Some("tool_calls".to_string()),
                     raw: None,
                     resolved_model: None,
+                    continue_turn: None,
                 }
             }
 
@@ -327,6 +328,7 @@ impl MockModel {
             finish_reason: Some("stop".to_string()),
             raw: None,
             resolved_model: None,
+            continue_turn: None,
         }
     }
 }

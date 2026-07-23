@@ -180,6 +180,28 @@ export OPENAI_API_KEY=...
 cargo run --example openai_chat
 ```
 
+Bound individual tool calls by installing shared timeout settings on the
+harness. Tools return `ToolTimeout::Inherit` by default; they may instead opt
+out with `Unbounded` or request a clamped explicit `Millis` budget:
+
+```rust
+use tinyagents::{AgentHarness, ToolTimeoutSettings};
+
+let mut harness: AgentHarness<()> = AgentHarness::new();
+harness.with_tool_timeout_settings(ToolTimeoutSettings::new(
+    120_000, // inherited default
+    1_000,   // minimum explicit budget
+    3_600_000,
+    5_000,   // scheduling grace for explicit budgets
+));
+```
+
+A per-tool deadline produces a recoverable tool-error message and the agent
+loop continues, so the model can retry or choose another tool. The run's
+wall-clock deadline remains the outer hard abort. Clones of the settings share
+their inherited value, allowing a host to update it without rebuilding a
+harness.
+
 Export durable harness observations to Langfuse with the embedded client:
 
 ```rust

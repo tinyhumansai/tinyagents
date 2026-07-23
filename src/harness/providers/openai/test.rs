@@ -1768,6 +1768,61 @@ fn valid_tool_args_containing_marker_substring_are_left_intact() {
     );
 }
 
+#[test]
+fn recovers_relaxed_json_in_structured_tool_args() {
+    // Small local models emit a relaxed JSON dialect for arguments — unquoted
+    // keys and redundant wrapping braces (`{{…}}`, escalating on each bounced
+    // retry). Strict parse rejects them; the relaxed-JSON repair recovers an
+    // executable call instead of looping.
+    let response = parse_response(tool_call_body(
+        r#"{{tool:"DISCORD_LIST_CHANNELS",arguments:{"guild_id":"1"}}}"#,
+    ))
+    .expect("relaxed structured args must recover");
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].invalid.is_none(), "{:?}", calls[0].invalid);
+    assert_eq!(
+        calls[0].arguments,
+        json!({ "tool": "DISCORD_LIST_CHANNELS", "arguments": { "guild_id": "1" } })
+    );
+}
+
+#[test]
+fn recovers_leaked_quote_tokens_in_structured_tool_args() {
+    // A gateway leaked the model's string-delimiter token as literal `<|">` in
+    // place of `"`, so every value arrived wrapped in it. Combined with unquoted
+    // keys this looped forever; it must recover as an executable call.
+    let response = parse_response(tool_call_body(
+        r#"{arguments:{guild_id:<|">1470856511193616498<|">},tool:<|">DISCORD_GET_GUILD_CHANNELS<|">}"#,
+    ))
+    .expect("leaked quote-token args must recover");
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].invalid.is_none(), "{:?}", calls[0].invalid);
+    assert_eq!(
+        calls[0].arguments,
+        json!({
+            "arguments": { "guild_id": "1470856511193616498" },
+            "tool": "DISCORD_GET_GUILD_CHANNELS"
+        })
+    );
+}
+
+#[test]
+fn keyless_nested_object_still_resolves_invalid_not_fabricated() {
+    // The one relaxed shape deliberately NOT repaired: a value with no key
+    // (`{tool:"X",{…}}`) is genuinely broken and must resolve as an `invalid`
+    // call the model can retry — never a fabricated best-guess object.
+    let response = parse_response(tool_call_body(r#"{tool:"X",{guild_id:"Y"}}"#))
+        .expect("unrepairable args resolve as invalid, not a hard failure");
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].invalid.is_some(),
+        "keyless nested object must not be silently fabricated into args"
+    );
+}
+
 #[tokio::test]
 async fn sse_stream_recovers_tool_args_with_leaked_template_marker() {
     // The streaming reduce (`OpenAiStreamAcc::into_response`) shares
@@ -1814,6 +1869,50 @@ fn with_native_tool_calling_false_clears_tool_profile_flags() {
         .with_native_tool_calling(false)
         .with_native_tool_calling(true);
     assert!(profile_of(&re).tool_calling);
+}
+
+#[test]
+fn prompt_guided_request_replays_calls_and_results_as_text() {
+    let model = OpenAiModel::new("k")
+        .with_model("qwen2.5")
+        .with_native_tool_calling(false);
+    let mut assistant = Message::assistant("");
+    let Message::Assistant(message) = &mut assistant else {
+        unreachable!()
+    };
+    message.tool_calls = vec![crate::harness::tool::ToolCall::new(
+        "call-1",
+        "lookup",
+        json!({"q":"weather"}),
+    )];
+    let request = ModelRequest::new(vec![
+        Message::user("look it up"),
+        assistant,
+        Message::tool("call-1", "sunny"),
+    ])
+    .with_tools(vec![ToolSchema::new(
+        "lookup",
+        "look something up",
+        json!({"type":"object"}),
+    )]);
+
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+    assert_eq!(value["messages"][2]["role"], "assistant");
+    assert!(
+        value["messages"][2]["content"]
+            .as_str()
+            .unwrap()
+            .contains("<tool_call>")
+    );
+    assert!(value["messages"][2].get("tool_calls").is_none());
+    assert_eq!(value["messages"][3]["role"], "user");
+    assert!(
+        value["messages"][3]["content"]
+            .as_str()
+            .unwrap()
+            .contains("<tool_result>\nsunny\n</tool_result>")
+    );
+    assert!(value.get("tools").is_none());
 }
 
 #[test]

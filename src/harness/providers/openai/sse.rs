@@ -274,6 +274,7 @@ impl OpenAiStreamAcc {
             finish_reason: self.finish_reason,
             raw: None,
             resolved_model: None,
+            continue_turn: None,
         }
     }
 }

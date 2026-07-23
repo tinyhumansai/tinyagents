@@ -194,11 +194,13 @@ pub use graph::{
 
 // --- Graph: orchestration tools (ordinary harness Tool implementations) ---
 pub use graph::{
-    InMemoryTaskStore, JsonlTaskStore, OrchestrationControlOutcome, OrchestrationTaskFilter,
-    OrchestrationTaskKind, OrchestrationTaskRecord, OrchestrationTaskResult, OrchestrationTaskSpec,
-    OrchestrationTaskStatus, OrchestrationTool, OrchestrationToolKind, SteeringRegistry, TaskStore,
-    orchestration_tool_schema, orchestration_tool_schemas, orchestration_tools,
-    orchestration_tools_with_steering, register_orchestration_tools,
+    CancelledDetachedTask, DetachedTaskRegistry, DetachedTaskRegistryError, DetachedTaskSnapshot,
+    DetachedTaskWaitOutcome, InMemoryTaskStore, JsonlTaskStore, OrchestrationControlOutcome,
+    OrchestrationTaskFilter, OrchestrationTaskKind, OrchestrationTaskRecord,
+    OrchestrationTaskResult, OrchestrationTaskSpec, OrchestrationTaskStatus, OrchestrationTool,
+    OrchestrationToolKind, SteeringRegistry, TaskStore, orchestration_tool_schema,
+    orchestration_tool_schemas, orchestration_tools, orchestration_tools_with_steering,
+    register_orchestration_tools,
 };
 
 // --- Graph: per-thread goal (durable objective + graph-native continuation) ---

@@ -63,3 +63,33 @@ pub struct NoProgressTracker {
     pub(super) identical_halt_threshold: usize,
     pub(super) state: Mutex<LadderState>,
 }
+
+/// Verdict returned after recording a successful-repeat signal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SuccessfulRepeat {
+    /// The signature changed, is exempt, failed, or remains below its threshold.
+    Continue,
+    /// The same successful action has repeated enough times to be considered
+    /// stuck. The message is suitable for steering or a halt summary.
+    Halt(String),
+}
+
+#[derive(Default)]
+pub(super) struct Streak {
+    pub(super) last_hash: Option<u64>,
+    pub(super) consecutive: u32,
+}
+
+/// Tracks identical assistant-output and successful tool-call batches.
+///
+/// The two streaks are independent, but their verdict timing is coordinated:
+/// output is staged before tools execute and can halt only after the matching
+/// call batch is recorded as successful and non-exempt. Exempt polling batches
+/// and failed batches reset both streaks so the failure ladder remains
+/// authoritative.
+pub struct SuccessfulRepeatTracker {
+    pub(super) output_threshold: u32,
+    pub(super) call_threshold: u32,
+    pub(super) output: Mutex<Streak>,
+    pub(super) calls: Mutex<Streak>,
+}
