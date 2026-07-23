@@ -528,6 +528,42 @@ fn parse_error_body_classifies_retryability_by_http_status() {
 
     let server_error = m.parse_error_body(500, r#"{"error":{"message":"internal error"}}"#);
     assert!(server_error.retryable, "5xx must be retryable");
+
+    // A 400 with "Stream must be set to true" — the common proxy-enforced
+    // streaming check that triggers the invoke -> stream fallback.
+    let stream_required = m.parse_error_body(
+        400,
+        r#"{"detail":"Stream must be set to true"}"#,
+    );
+    assert_eq!(stream_required.status, Some(400));
+    assert!(
+        stream_required.message.contains("Stream must be set to true"),
+        "error message must contain the trigger phrase: got {}",
+        stream_required.message
+    );
+}
+
+#[test]
+fn requires_streaming_flag_skips_non_streaming_attempt() {
+    // The flag is `false` by default for all built-in presets.
+    let default = OpenAiModel::new("k");
+    assert!(!default.requires_streaming(), "default must be false");
+    let ollama = OpenAiModel::ollama();
+    assert!(!ollama.requires_streaming(), "ollama default must be false");
+
+    // When the flag is set, `invoke` should skip the non-streaming wire
+    // call. We verify the flag value and that it round-trips through
+    // the builder.
+    let flagged = OpenAiModel::new("k").with_requires_streaming(true);
+    assert!(
+        flagged.requires_streaming(),
+        "with_requires_streaming(true) must set the field"
+    );
+    let unflagged = flagged.with_requires_streaming(false);
+    assert!(
+        !unflagged.requires_streaming(),
+        "with_requires_streaming(false) must clear the field"
+    );
 }
 
 #[test]

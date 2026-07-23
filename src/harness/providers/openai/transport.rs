@@ -7,6 +7,8 @@
 use super::responses;
 use super::*;
 
+use crate::harness::model::StreamAccumulator;
+
 /// How the provider expects the API credential to be sent on each request.
 ///
 /// OpenAI-compatible endpoints diverge on auth: hosted OpenAI and most gateways
@@ -106,6 +108,11 @@ pub struct OpenAiModel {
     /// inline `<think>` reasoning, and unconditional extraction would silently
     /// strip legitimate content that mentions a literal `<think>` tag.
     reasoning_tags_overridden: bool,
+    /// When `true`, the unary [`ChatModel::invoke`] path sends `stream: true`
+    /// on the wire and folds the server-sent-events stream into a single
+    /// [`ModelResponse`] internally — for providers that reject a
+    /// `stream: false` body with an HTTP 400. `false` by default.
+    requires_streaming: bool,
 }
 
 /// The auth headers `(name, value)` for a given [`AuthStyle`] + credential.
@@ -331,7 +338,21 @@ impl OpenAiModel {
             // `<think>` and must not strip literal mentions of the tag.
             reasoning_tags: Some(ReasoningTagExtraction::default()),
             reasoning_tags_overridden: false,
+            requires_streaming: false,
         }
+    }
+
+    /// When the provider requires `stream: true` for every request, routes
+    /// unary [`invoke`](ChatModel::invoke) through the streaming path internally.
+    pub fn with_requires_streaming(mut self, enabled: bool) -> Self {
+        self.requires_streaming = enabled;
+        self
+    }
+
+    /// Returns whether the provider requires streaming for all calls.
+    #[cfg(test)]
+    pub(super) fn requires_streaming(&self) -> bool {
+        self.requires_streaming
     }
 
     /// Routes calls to the OpenAI **Responses API** (`/v1/responses`) instead of
@@ -1328,6 +1349,11 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
     /// Invokes the OpenAI Chat Completions endpoint and maps the response into a
     /// [`ModelResponse`].
     ///
+    /// When the provider requires streaming
+    /// ([`Self::requires_streaming`] or a 400 with `"Stream must be set to
+    /// true"`), the call is degraded to the streaming path internally and the
+    /// SSE stream is folded into a single response.
+    ///
     /// # Errors
     ///
     /// Returns [`TinyAgentsError::Model`] on transport failure or a non-2xx
@@ -1337,9 +1363,39 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         if self.responses_api_primary {
             return self.invoke_responses(&request).await;
         }
-        let response = self
+
+        // Short-circuit: providers that require `stream: true` on every call
+        // skip the non-streaming attempt entirely to avoid a guaranteed 400.
+        if self.requires_streaming {
+            tracing::info!(
+                provider = self.provider,
+                model = %self.model,
+                "[openai] requires_streaming is set; folding stream into unary response"
+            );
+            return invoke_with_streaming(self, request).await;
+        }
+
+        let response = match self
             .post_chat_with_degrade(&request, false, "request")
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(TinyAgentsError::Provider(err))
+                if err.status == Some(400)
+                    && err.message.contains("Stream must be set to true") =>
+            {
+                // The provider rejects `stream: false`. Fall back to the
+                // streaming path and fold the SSE stream into a response.
+                tracing::info!(
+                    provider = %err.provider,
+                    model = %err.model.as_deref().unwrap_or("?"),
+                    "[openai] provider rejected non-streaming request; \
+                     falling back to streaming path"
+                );
+                return invoke_with_streaming(self, request).await;
+            }
+            Err(e) => return Err(e),
+        };
 
         let text = response.text().await.map_err(|e| {
             TinyAgentsError::Model(format!("openai response body read failed: {e}"))
@@ -1465,4 +1521,27 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         }
         Ok(Box::pin(stream))
     }
+}
+
+/// Folds a streaming OpenAI call into a single [`ModelResponse`].
+///
+/// Issues the request with `stream: true`, reads the SSE body, and folds
+/// every [`ModelStreamItem`] through [`StreamAccumulator`].
+///
+/// The state parameter is ignored — [`OpenAiModel`] does not use it for
+/// streaming: it is passed only to satisfy the trait method signature.
+/// This is safe because `OpenAiModel` ignores the state argument in its
+/// `ChatModel` impl (the stream method never reads it).
+async fn invoke_with_streaming(
+    model: &OpenAiModel,
+    request: ModelRequest,
+) -> Result<ModelResponse> {
+    let mut stream = model.stream(&(), request).await?;
+    let mut acc = StreamAccumulator::new();
+
+    while let Some(item) = stream.next().await {
+        acc.push(&item);
+    }
+
+    acc.finish()
 }
