@@ -6,7 +6,7 @@
 //! hard-abort handles, ownership checks, and live steering lookup.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -28,6 +28,9 @@ struct DetachedTaskEntry<Metadata, Status> {
     cancellation: CancellationToken,
     abort: AbortHandle,
 }
+
+type RegistryGuard<'a, Metadata, Status> =
+    MutexGuard<'a, HashMap<TaskId, DetachedTaskEntry<Metadata, Status>>>;
 
 /// Ownership-aware registry for live detached task executors.
 ///
@@ -82,10 +85,10 @@ where
         cancellation: CancellationToken,
         abort: AbortHandle,
     ) -> Result<()> {
-        if self.len() >= self.soft_cap {
-            self.sweep_terminal();
+        if self.len().map_err(Self::tinyagents_error)? >= self.soft_cap {
+            self.sweep_terminal().map_err(Self::tinyagents_error)?;
         }
-        let mut guard = self.lock()?;
+        let mut guard = self.lock().map_err(Self::tinyagents_error)?;
         if guard.contains_key(&task_id) {
             return Err(TinyAgentsError::DuplicateComponent(format!(
                 "detached task runtime `{task_id}`"
@@ -105,20 +108,22 @@ where
     }
 
     /// Number of process-local task runtimes currently registered.
-    pub fn len(&self) -> usize {
-        self.inner.lock().map(|guard| guard.len()).unwrap_or(0)
+    pub fn len(&self) -> std::result::Result<usize, DetachedTaskRegistryError> {
+        Ok(self.lock()?.len())
     }
 
     /// Whether no process-local task runtimes are registered.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    pub fn is_empty(&self) -> std::result::Result<bool, DetachedTaskRegistryError> {
+        Ok(self.len()? == 0)
     }
 
     /// Snapshots every registered task, optionally filtering by owner.
-    pub fn snapshots(&self, owner_id: Option<&str>) -> Vec<DetachedTaskSnapshot<Metadata, Status>> {
-        let Ok(guard) = self.inner.lock() else {
-            return Vec::new();
-        };
+    pub fn snapshots(
+        &self,
+        owner_id: Option<&str>,
+    ) -> std::result::Result<Vec<DetachedTaskSnapshot<Metadata, Status>>, DetachedTaskRegistryError>
+    {
+        let guard = self.lock()?;
         let mut snapshots: Vec<_> = guard
             .iter()
             .filter(|(_, entry)| owner_id.is_none_or(|owner| entry.owner_id == owner))
@@ -130,7 +135,7 @@ where
             })
             .collect();
         snapshots.sort_by(|left, right| left.task_id.as_str().cmp(right.task_id.as_str()));
-        snapshots
+        Ok(snapshots)
     }
 
     /// Snapshots one task after enforcing ownership.
@@ -140,10 +145,7 @@ where
         owner_id: &str,
     ) -> std::result::Result<DetachedTaskSnapshot<Metadata, Status>, DetachedTaskRegistryError>
     {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|_| DetachedTaskRegistryError::Unknown)?;
+        let guard = self.lock()?;
         let entry = guard
             .get(task_id)
             .ok_or(DetachedTaskRegistryError::Unknown)?;
@@ -159,10 +161,7 @@ where
         task_id: &TaskId,
     ) -> std::result::Result<DetachedTaskSnapshot<Metadata, Status>, DetachedTaskRegistryError>
     {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|_| DetachedTaskRegistryError::Unknown)?;
+        let guard = self.lock()?;
         let entry = guard
             .get(task_id)
             .ok_or(DetachedTaskRegistryError::Unknown)?;
@@ -204,10 +203,7 @@ where
         timeout: Duration,
     ) -> std::result::Result<DetachedTaskWaitOutcome<Status>, DetachedTaskRegistryError> {
         let mut status = {
-            let guard = self
-                .inner
-                .lock()
-                .map_err(|_| DetachedTaskRegistryError::Unknown)?;
+            let guard = self.lock()?;
             let entry = guard
                 .get(task_id)
                 .ok_or(DetachedTaskRegistryError::Unknown)?;
@@ -219,7 +215,7 @@ where
 
         let current = status.borrow_and_update().clone();
         if (self.is_terminal)(&current) {
-            self.remove(task_id);
+            self.remove(task_id)?;
             return Ok(DetachedTaskWaitOutcome::Terminal(current));
         }
 
@@ -238,11 +234,11 @@ where
 
         match tokio::time::timeout(timeout, waited).await {
             Ok(Ok(terminal)) => {
-                self.remove(task_id);
+                self.remove(task_id)?;
                 Ok(DetachedTaskWaitOutcome::Terminal(terminal))
             }
             Ok(Err(error)) => {
-                self.remove(task_id);
+                self.remove(task_id)?;
                 Err(error)
             }
             Err(_) => Ok(DetachedTaskWaitOutcome::TimedOut(status.borrow().clone())),
@@ -273,35 +269,32 @@ where
     pub fn cancel_where(
         &self,
         predicate: impl Fn(&Metadata) -> bool,
-    ) -> Vec<CancelledDetachedTask<Metadata, Status>> {
+    ) -> std::result::Result<Vec<CancelledDetachedTask<Metadata, Status>>, DetachedTaskRegistryError>
+    {
         let task_ids: Vec<TaskId> = self
-            .inner
-            .lock()
-            .map(|guard| {
-                guard
-                    .iter()
-                    .filter(|(_, entry)| predicate(&entry.metadata))
-                    .map(|(task_id, _)| task_id.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        task_ids
+            .lock()?
+            .iter()
+            .filter(|(_, entry)| predicate(&entry.metadata))
+            .map(|(task_id, _)| task_id.clone())
+            .collect();
+        Ok(task_ids
             .into_iter()
             .filter_map(|task_id| self.cancel_trusted(&task_id).ok())
-            .collect()
+            .collect())
     }
 
     /// Cancels and removes every registered detached task.
-    pub fn cancel_all(&self) -> Vec<CancelledDetachedTask<Metadata, Status>> {
+    pub fn cancel_all(
+        &self,
+    ) -> std::result::Result<Vec<CancelledDetachedTask<Metadata, Status>>, DetachedTaskRegistryError>
+    {
         self.cancel_where(|_| true)
     }
 
     /// Prunes every entry whose latest watched status is terminal.
-    pub fn sweep_terminal(&self) -> usize {
+    pub fn sweep_terminal(&self) -> std::result::Result<usize, DetachedTaskRegistryError> {
         let removed = {
-            let Ok(mut guard) = self.inner.lock() else {
-                return 0;
-            };
+            let mut guard = self.lock()?;
             let task_ids: Vec<_> = guard
                 .iter()
                 .filter(|(_, entry)| (self.is_terminal)(&entry.status.borrow()))
@@ -315,7 +308,7 @@ where
         for task_id in &removed {
             self.steering.deregister(task_id);
         }
-        removed.len()
+        Ok(removed.len())
     }
 
     fn ensure_live_owned(
@@ -323,10 +316,7 @@ where
         task_id: &TaskId,
         owner_id: &str,
     ) -> std::result::Result<(), DetachedTaskRegistryError> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|_| DetachedTaskRegistryError::Unknown)?;
+        let guard = self.lock()?;
         let entry = guard
             .get(task_id)
             .ok_or(DetachedTaskRegistryError::Unknown)?;
@@ -340,10 +330,7 @@ where
     }
 
     fn ensure_live(&self, task_id: &TaskId) -> std::result::Result<(), DetachedTaskRegistryError> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|_| DetachedTaskRegistryError::Unknown)?;
+        let guard = self.lock()?;
         let entry = guard
             .get(task_id)
             .ok_or(DetachedTaskRegistryError::Unknown)?;
@@ -360,10 +347,7 @@ where
     ) -> std::result::Result<CancelledDetachedTask<Metadata, Status>, DetachedTaskRegistryError>
     {
         let entry = {
-            let mut guard = self
-                .inner
-                .lock()
-                .map_err(|_| DetachedTaskRegistryError::Unknown)?;
+            let mut guard = self.lock()?;
             let entry = guard
                 .get(task_id)
                 .ok_or(DetachedTaskRegistryError::Unknown)?;
@@ -385,11 +369,10 @@ where
         })
     }
 
-    fn remove(&self, task_id: &TaskId) {
-        if let Ok(mut guard) = self.inner.lock() {
-            guard.remove(task_id);
-        }
+    fn remove(&self, task_id: &TaskId) -> std::result::Result<(), DetachedTaskRegistryError> {
+        self.lock()?.remove(task_id);
         self.steering.deregister(task_id);
+        Ok(())
     }
 
     fn snapshot_entry(
@@ -406,10 +389,13 @@ where
 
     fn lock(
         &self,
-    ) -> Result<std::sync::MutexGuard<'_, HashMap<TaskId, DetachedTaskEntry<Metadata, Status>>>>
-    {
-        self.inner.lock().map_err(|_| {
-            TinyAgentsError::Graph("detached task runtime registry lock poisoned".into())
-        })
+    ) -> std::result::Result<RegistryGuard<'_, Metadata, Status>, DetachedTaskRegistryError> {
+        self.inner
+            .lock()
+            .map_err(|_| DetachedTaskRegistryError::LockPoisoned)
+    }
+
+    fn tinyagents_error(error: DetachedTaskRegistryError) -> TinyAgentsError {
+        TinyAgentsError::Graph(error.to_string())
     }
 }
