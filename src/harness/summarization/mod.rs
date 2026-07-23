@@ -166,6 +166,76 @@ pub fn trim_messages(messages: &[Message], strategy: &TrimStrategy) -> Vec<Messa
     }
 }
 
+/// Trim messages to a token budget while preserving their original order.
+///
+/// `estimate` lets callers account for provider-specific payloads without
+/// teaching the harness about their wire representation. The built-in
+/// [`Message::estimated_char_weight`] already assigns a flat weight to native
+/// image blocks; hosts may additionally recognize inline image markers or use a
+/// real tokenizer. Oldest non-system messages are evicted first. System
+/// messages are either retained unconditionally or evicted oldest-first only
+/// after all other messages, according to [`TokenTrimPolicy::preserve_system`].
+///
+/// When `drop_leading_orphan_tools` is enabled, leading tool-result messages are
+/// removed after budget eviction so the retained transcript starts on a valid
+/// provider turn boundary. The returned messages always retain their original
+/// relative order.
+pub fn trim_messages_to_token_budget_with(
+    messages: &[Message],
+    policy: TokenTrimPolicy,
+    estimate: impl Fn(&Message) -> u64,
+) -> Vec<Message> {
+    let estimates: Vec<u64> = messages.iter().map(estimate).collect();
+    let mut total: u64 = estimates.iter().copied().sum();
+    if total <= policy.limit && !policy.drop_leading_orphan_tools {
+        return messages.to_vec();
+    }
+
+    let mut retained = vec![true; messages.len()];
+    for (index, message) in messages.iter().enumerate() {
+        if total <= policy.limit {
+            break;
+        }
+        if !matches!(message, Message::System(_)) {
+            retained[index] = false;
+            total = total.saturating_sub(estimates[index]);
+        }
+    }
+
+    if !policy.preserve_system && total > policy.limit {
+        for (index, message) in messages.iter().enumerate() {
+            if total <= policy.limit {
+                break;
+            }
+            if matches!(message, Message::System(_)) && retained[index] {
+                retained[index] = false;
+                total = total.saturating_sub(estimates[index]);
+            }
+        }
+    }
+
+    let mut result: Vec<Message> = messages
+        .iter()
+        .zip(retained)
+        .filter(|(_, keep)| *keep)
+        .map(|(message, _)| message.clone())
+        .collect();
+
+    if policy.drop_leading_orphan_tools {
+        while let Some(index) = result
+            .iter()
+            .position(|message| !matches!(message, Message::System(_)))
+        {
+            if matches!(result[index], Message::Tool(_)) {
+                result.remove(index);
+            } else {
+                break;
+            }
+        }
+    }
+    result
+}
+
 // ---------------------------------------------------------------------------
 // ConcatSummarizer
 // ---------------------------------------------------------------------------
