@@ -488,6 +488,8 @@ pub enum DetachedTaskWaitOutcome<Status> {
 /// Why a detached task runtime control could not be completed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DetachedTaskRegistryError {
+    /// The process-local registry mutex was poisoned by a panicking operation.
+    LockPoisoned,
     /// No process-local runtime is registered for the task id.
     Unknown,
     /// The supplied owner id does not own the task.
@@ -503,6 +505,7 @@ pub enum DetachedTaskRegistryError {
 impl std::fmt::Display for DetachedTaskRegistryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
+            Self::LockPoisoned => "detached task runtime registry lock poisoned",
             Self::Unknown => "detached task is not registered",
             Self::NotOwned => "detached task is owned by another parent",
             Self::AlreadyDone => "detached task already reached a terminal status",

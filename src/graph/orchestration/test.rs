@@ -100,7 +100,7 @@ async fn detached_registry_enforces_owner_and_waits_for_terminal_status() {
             .unwrap(),
         DetachedTaskWaitOutcome::Terminal(RuntimeStatus::Completed("done".into()))
     );
-    assert!(registry.is_empty());
+    assert!(registry.is_empty().unwrap());
     join.abort();
 }
 
@@ -127,7 +127,7 @@ async fn detached_registry_timeout_keeps_task_registered() {
             .unwrap(),
         DetachedTaskWaitOutcome::TimedOut(RuntimeStatus::Running)
     );
-    assert_eq!(registry.len(), 1);
+    assert_eq!(registry.len().unwrap(), 1);
     join.abort();
 }
 
@@ -151,7 +151,7 @@ async fn detached_registry_cancel_is_cooperative_then_aborts_and_returns_metadat
     assert_eq!(cancelled.metadata, "worker-meta");
     assert!(cancellation.is_cancelled());
     assert!(join.await.unwrap_err().is_cancelled());
-    assert!(registry.is_empty());
+    assert!(registry.is_empty().unwrap());
 }
 
 #[tokio::test]
@@ -192,11 +192,50 @@ async fn detached_registry_uses_shared_steering_and_sweeps_terminal_at_soft_cap(
         )
         .unwrap();
 
-    assert_eq!(registry.len(), 1);
+    assert_eq!(registry.len().unwrap(), 1);
     assert!(steering.get(&first).is_none());
-    assert_eq!(registry.snapshots(Some("parent"))[0].task_id, second);
+    assert_eq!(
+        registry.snapshots(Some("parent")).unwrap()[0].task_id,
+        second
+    );
     first_join.abort();
     second_join.abort();
+}
+
+#[derive(Debug)]
+struct PanickingMetadata;
+
+impl Clone for PanickingMetadata {
+    fn clone(&self) -> Self {
+        panic!("poison registry lock during metadata clone")
+    }
+}
+
+#[tokio::test]
+async fn detached_registry_reports_a_poisoned_lock() {
+    let registry =
+        DetachedTaskRegistry::new(SteeringRegistry::new(), 2, |status: &RuntimeStatus| {
+            matches!(status, RuntimeStatus::Completed(_))
+        });
+    let task_id = TaskId::new("detached-poison");
+    let (_tx, rx, cancellation, join) = detached_handles();
+    registry
+        .register(
+            task_id,
+            "parent",
+            PanickingMetadata,
+            rx,
+            cancellation,
+            join.abort_handle(),
+        )
+        .unwrap();
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = registry.snapshots(None);
+    }));
+    assert!(panic.is_err());
+    assert_eq!(registry.len(), Err(DetachedTaskRegistryError::LockPoisoned));
+    join.abort();
 }
 
 fn unique_log_path(tag: &str) -> std::path::PathBuf {
