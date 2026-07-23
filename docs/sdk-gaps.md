@@ -340,6 +340,10 @@ TinyAgents has sub-agent and steering primitives, but OpenHuman still owns
 session reuse, wait handles, detached run tracking, user-facing cancellation,
 early-exit handling, and parent-child progress aggregation.
 
+The generic `DetachedTaskRegistry` now owns process-local owner checks,
+wait/timeout, cooperative-cancel-before-abort, steering lookup, and bounded
+terminal cleanup. Reusable durable child sessions and product projections remain.
+
 Implement:
 
 - First-class detached sub-agent sessions.
@@ -467,4 +471,3 @@ Acceptance criteria:
 7. Remove OpenHuman-specific compatibility shims once the SDK behavior is
    equivalent.
 8. Implement conformance and regression tests last.
-
