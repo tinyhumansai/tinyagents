@@ -436,6 +436,7 @@ impl ModelResponse {
             finish_reason: None,
             raw: None,
             resolved_model: None,
+            continue_turn: None,
         }
     }
 
@@ -862,6 +863,7 @@ impl StreamAccumulator {
             finish_reason: None,
             raw: None,
             resolved_model: None,
+            continue_turn: None,
         })
     }
 }

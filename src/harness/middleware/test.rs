@@ -38,6 +38,7 @@ fn response_with_usage(usage: Usage) -> ModelResponse {
         finish_reason: None,
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 
@@ -997,6 +998,7 @@ fn response_text(text: &str) -> ModelResponse {
         finish_reason: None,
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 

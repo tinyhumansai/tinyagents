@@ -303,6 +303,7 @@ pub(super) fn parse_chat_response(
         finish_reason: choice.finish_reason,
         raw: Some(value),
         resolved_model: None,
+        continue_turn: None,
     })
 }
 

@@ -189,6 +189,7 @@ fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> Mod
         finish_reason: Some("tool_calls".to_string()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 
@@ -212,6 +213,7 @@ fn invalid_tool_call_response(id: &str, name: &str, raw: &str) -> ModelResponse 
         finish_reason: Some("tool_calls".to_string()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 
@@ -228,6 +230,7 @@ fn text_response(text: &str, input: u64, output: u64) -> ModelResponse {
         finish_reason: Some("stop".to_string()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 
@@ -248,6 +251,7 @@ fn truncated_empty_response(reasoning_tokens: u64) -> ModelResponse {
         finish_reason: Some("length".to_string()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 
@@ -2537,6 +2541,7 @@ fn multi_tool_call_response(calls: Vec<(&str, &str)>) -> ModelResponse {
         finish_reason: Some("tool_calls".to_string()),
         raw: None,
         resolved_model: None,
+        continue_turn: None,
     }
 }
 
@@ -3032,4 +3037,92 @@ async fn tool_completed_event_carries_outcome() {
     );
     assert!(duration_ms.is_some(), "wall-clock duration present");
     assert_eq!(output_bytes, Some(4), "\"nope\".len() == 4");
+}
+
+// ── `ModelResponse::continue_turn` ───────────────────────────────────────────
+
+/// A tool-less response that keeps the floor by carrying `nudge`.
+fn continuing(text: &str, nudge: &str) -> ModelResponse {
+    let mut response = ModelResponse::assistant(text.to_string());
+    response.continue_turn = Some(nudge.to_string());
+    response
+}
+
+/// A tool-less response normally ends the turn. `continue_turn` overrides that:
+/// the loop appends the carried nudge as the next user turn and asks for another
+/// reply — which is what lets a model speak before it acts.
+#[tokio::test]
+async fn continue_turn_keeps_the_floor_and_appends_the_nudge() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            continuing("let me look that up", "(next)"),
+            ModelResponse::assistant("found it".to_string()),
+        ])),
+    );
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(
+        run.model_calls, 2,
+        "the continuing reply must not end the turn"
+    );
+    assert_eq!(run.text(), Some("found it".to_string()));
+    // user, assistant(continuing), user(nudge), assistant(final)
+    assert_eq!(run.messages.len(), 4);
+    assert_eq!(run.messages[2].text(), "(next)");
+}
+
+/// The default is `None`, which must leave the historical behaviour byte-for-byte
+/// intact: the first tool-less reply ends the turn.
+#[tokio::test]
+async fn no_continue_turn_ends_on_the_first_tool_less_reply() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            ModelResponse::assistant("done".to_string()),
+            ModelResponse::assistant("never reached".to_string()),
+        ])),
+    );
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(run.model_calls, 1);
+    assert_eq!(run.text(), Some("done".to_string()));
+}
+
+/// Continuing needs no cap of its own: each continue costs one model call, so a
+/// model that never stops is already bounded by `max_model_calls`.
+#[tokio::test]
+async fn an_endless_continue_is_bounded_by_max_model_calls() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            continuing("still going", "(next)"),
+            continuing("still going", "(next)"),
+            continuing("still going", "(next)"),
+            continuing("still going", "(next)"),
+            continuing("still going", "(next)"),
+        ])),
+    );
+
+    let config = RunConfig::new("continue-cap").with_max_model_calls(3);
+    let err = harness
+        .invoke_in_context(&(), RunContext::new(config, ()), vec![Message::user("hi")])
+        .await
+        .expect_err("an endless continue must hit the model-call cap");
+
+    assert!(
+        err.to_string().contains("max model calls"),
+        "expected the model-call cap to stop it, got: {err}"
+    );
 }

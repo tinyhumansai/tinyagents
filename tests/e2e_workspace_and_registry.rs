@@ -231,6 +231,7 @@ async fn harness_run_threads_workspace_and_enforces_out_of_root() {
             finish_reason: Some("tool_calls".into()),
             raw: None,
             resolved_model: None,
+            continue_turn: None,
         }
     }
     fn text_response(text: &str) -> ModelResponse {
@@ -245,6 +246,7 @@ async fn harness_run_threads_workspace_and_enforces_out_of_root() {
             finish_reason: Some("stop".into()),
             raw: None,
             resolved_model: None,
+            continue_turn: None,
         }
     }
 
