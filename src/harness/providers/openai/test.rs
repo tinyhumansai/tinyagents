@@ -1817,6 +1817,50 @@ fn with_native_tool_calling_false_clears_tool_profile_flags() {
 }
 
 #[test]
+fn prompt_guided_request_replays_calls_and_results_as_text() {
+    let model = OpenAiModel::new("k")
+        .with_model("qwen2.5")
+        .with_native_tool_calling(false);
+    let mut assistant = Message::assistant("");
+    let Message::Assistant(message) = &mut assistant else {
+        unreachable!()
+    };
+    message.tool_calls = vec![crate::harness::tool::ToolCall::new(
+        "call-1",
+        "lookup",
+        json!({"q":"weather"}),
+    )];
+    let request = ModelRequest::new(vec![
+        Message::user("look it up"),
+        assistant,
+        Message::tool("call-1", "sunny"),
+    ])
+    .with_tools(vec![ToolSchema::new(
+        "lookup",
+        "look something up",
+        json!({"type":"object"}),
+    )]);
+
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+    assert_eq!(value["messages"][2]["role"], "assistant");
+    assert!(
+        value["messages"][2]["content"]
+            .as_str()
+            .unwrap()
+            .contains("<tool_call>")
+    );
+    assert!(value["messages"][2].get("tool_calls").is_none());
+    assert_eq!(value["messages"][3]["role"], "user");
+    assert!(
+        value["messages"][3]["content"]
+            .as_str()
+            .unwrap()
+            .contains("<tool_result>\nsunny\n</tool_result>")
+    );
+    assert!(value.get("tools").is_none());
+}
+
+#[test]
 fn with_vision_toggles_image_in_modality() {
     let off = OpenAiModel::new("k")
         .with_model("qwen2.5")

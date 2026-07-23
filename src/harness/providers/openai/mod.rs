@@ -75,7 +75,6 @@ const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 600;
 
 mod convert;
-mod prompt_tools;
 mod reasoning_tags;
 mod responses;
 mod sse;

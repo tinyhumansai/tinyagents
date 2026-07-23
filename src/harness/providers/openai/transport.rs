@@ -812,10 +812,14 @@ impl OpenAiModel {
         // native `tools` on the wire (many local runtimes 400 on `tools`). The
         // model's `<tool_call>` blocks are parsed back in [`Self::invoke`]/stream.
         let prompt_guided_tools = !self.profile.tool_calling && !request.tools.is_empty();
+        let prompt_messages;
         let instructed_messages;
         let base_messages: &[Message] = if prompt_guided_tools {
-            instructed_messages =
-                prompt_tools::with_tool_instructions(&request.messages, &request.tools);
+            prompt_messages = crate::harness::tool::coalesce_prompt_tool_results(&request.messages);
+            instructed_messages = crate::harness::tool::with_prompt_tool_instructions(
+                &prompt_messages,
+                &request.tools,
+            );
             &instructed_messages
         } else {
             &request.messages
@@ -1346,7 +1350,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         // Prompt-guided tools: recover the model's `<tool_call>` blocks into
         // `message.tool_calls` when native tool calling was suppressed.
         if !self.profile.tool_calling && !request.tools.is_empty() {
-            return Ok(prompt_tools::apply_to_response(response));
+            return Ok(crate::harness::tool::apply_prompt_tool_calls(response));
         }
         Ok(response)
     }
@@ -1412,7 +1416,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             let value: Value = serde_json::from_str(&text)?;
             let mut parsed = parse_chat_response(value, self.effective_reasoning_tags())?;
             if !self.profile.tool_calling && !request.tools.is_empty() {
-                parsed = prompt_tools::apply_to_response(parsed);
+                parsed = crate::harness::tool::apply_prompt_tool_calls(parsed);
             }
             let delta = crate::harness::message::MessageDelta {
                 text: parsed.text(),
@@ -1453,9 +1457,9 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         // still carry the raw markup — cleaning them mid-stream is a follow-up).
         if !self.profile.tool_calling && !request.tools.is_empty() {
             return Ok(Box::pin(stream.map(|item| match item {
-                ModelStreamItem::Completed(response) => {
-                    ModelStreamItem::Completed(prompt_tools::apply_to_response(response))
-                }
+                ModelStreamItem::Completed(response) => ModelStreamItem::Completed(
+                    crate::harness::tool::apply_prompt_tool_calls(response),
+                ),
                 other => other,
             })));
         }

@@ -10,6 +10,7 @@
 //! See [`types`] for definitions. This module provides constructors and the
 //! [`ToolRegistry`] logic for registering and looking up tools by name.
 
+mod prompt;
 mod schema;
 mod types;
 
@@ -19,6 +20,7 @@ use serde_json::Value;
 
 use crate::error::{Result, TinyAgentsError};
 
+pub use prompt::*;
 pub use schema::*;
 pub use types::*;
 
@@ -538,6 +540,8 @@ fn json_value_kind(value: &Value) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod prompt_test;
 #[cfg(test)]
 mod schema_test;
 #[cfg(test)]
