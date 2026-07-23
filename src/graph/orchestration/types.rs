@@ -445,3 +445,74 @@ pub struct OrchestrationControlOutcome {
     /// Human/model-readable summary.
     pub message: String,
 }
+
+/// A read-only snapshot of one process-local detached task runtime.
+///
+/// Durable lifecycle state belongs in a [`TaskStore`](super::TaskStore). This
+/// snapshot carries only the live executor metadata and status needed by a
+/// supervisor while the current process still owns the task.
+#[derive(Clone, Debug)]
+pub struct DetachedTaskSnapshot<Metadata, Status> {
+    /// Stable task id shared with the orchestration task store.
+    pub task_id: TaskId,
+    /// Application-defined owner id used for parent/tenant isolation.
+    pub owner_id: String,
+    /// Application metadata retained with the live executor handle.
+    pub metadata: Metadata,
+    /// Latest value published on the task's status watch channel.
+    pub status: Status,
+}
+
+/// Metadata returned when a detached task is cancelled and removed.
+#[derive(Clone, Debug)]
+pub struct CancelledDetachedTask<Metadata, Status> {
+    /// Stable task id shared with the orchestration task store.
+    pub task_id: TaskId,
+    /// Application-defined owner id.
+    pub owner_id: String,
+    /// Application metadata retained with the live executor handle.
+    pub metadata: Metadata,
+    /// Last status observed before cancellation.
+    pub status: Status,
+}
+
+/// Result of waiting on a process-local detached task.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DetachedTaskWaitOutcome<Status> {
+    /// The task published a terminal status. Its runtime entry was pruned.
+    Terminal(Status),
+    /// The deadline elapsed first. The runtime entry remains registered.
+    TimedOut(Status),
+}
+
+/// Why a detached task runtime control could not be completed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetachedTaskRegistryError {
+    /// No process-local runtime is registered for the task id.
+    Unknown,
+    /// The supplied owner id does not own the task.
+    NotOwned,
+    /// The task has already published a terminal status.
+    AlreadyDone,
+    /// The task has no live steering handle registered.
+    NoSteeringHandle,
+    /// The status sender closed without publishing a terminal value.
+    StatusChannelClosed,
+}
+
+impl std::fmt::Display for DetachedTaskRegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::Unknown => "detached task is not registered",
+            Self::NotOwned => "detached task is owned by another parent",
+            Self::AlreadyDone => "detached task already reached a terminal status",
+            Self::NoSteeringHandle => "detached task has no registered steering handle",
+            Self::StatusChannelClosed => {
+                "detached task status channel closed before a terminal update"
+            }
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for DetachedTaskRegistryError {}

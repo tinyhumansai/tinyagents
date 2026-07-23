@@ -10,10 +10,12 @@
 //! [`register_orchestration_tools`] to insert them into a
 //! [`crate::harness::tool::ToolRegistry`] alongside any other tools.
 
+mod runtime;
 mod store;
 mod tool;
 mod types;
 
+pub use runtime::DetachedTaskRegistry;
 pub use store::{InMemoryTaskStore, JsonlTaskStore, TaskStore};
 pub use tool::{
     OrchestrationTool, SteeringRegistry, orchestration_tool_schema, orchestration_tool_schemas,
