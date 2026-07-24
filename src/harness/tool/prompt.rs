@@ -22,6 +22,19 @@ use crate::harness::tool::{ToolCall, ToolSchema};
 const OPEN_TAG: &str = "<tool_call>";
 const CLOSE_TAG: &str = "</tool_call>";
 
+/// Prefix of the opening delimiter, matched tolerantly so the attribute form
+/// (`<tool_call id="call_0">`, as emitted by Hermes / DeepSeek chat templates)
+/// and the pipe variant (`<tool_call|>`) are recognized — not just the bare
+/// `<tool_call>` literal. The scanner matches this prefix, verifies the tag name
+/// is properly delimited, and then consumes up to the tag's closing `>`.
+const OPEN_PREFIX: &str = "<tool_call";
+
+/// DeepSeek-R1 native tool-call delimiters, emitted verbatim as text by some
+/// OpenAI-compatible routes. Matched as an alternative open/close pair so the
+/// body between them is parsed (or dropped) instead of leaking to the caller.
+const DS_OPEN: &str = "<｜tool▁call▁begin｜>";
+const DS_CLOSE: &str = "<｜tool▁call▁end｜>";
+
 /// Build the tool-use protocol block appended to the system prompt when native
 /// tool calling is unavailable. Describes the `<tool_call>` convention and lists
 /// each tool's name, description, and JSON-Schema parameters.
@@ -130,30 +143,258 @@ pub fn coalesce_prompt_tool_results(messages: &[Message]) -> Vec<Message> {
 /// object (`{"name":…,"arguments":…}`) into a [`ToolCall`]. Returns the text with
 /// the blocks removed (trimmed) plus the parsed calls, in order.
 ///
+/// The opening delimiter is matched tolerantly: the bare `<tool_call>` literal,
+/// the attribute form `<tool_call id="…">` and pipe variant `<tool_call|>`
+/// emitted by Hermes / DeepSeek chat templates, and the DeepSeek
+/// `<｜tool▁call▁begin｜>` delimiter all open a block.
+///
 /// Robust to noise: a block whose inner text is not a JSON object with a string
-/// `name` is dropped; a dangling `<tool_call>` with no close is left verbatim in
-/// the returned text.
+/// `name` is dropped (its raw markup never leaks back into the text); a dangling
+/// open tag with no close is left verbatim in the returned text; a prose mention
+/// of `<tool_call` with no closing `>` (or the plural `<tool_calls>`) is not
+/// treated as an opening tag.
 pub fn parse_prompt_tool_calls_from_text(text: &str) -> (String, Vec<ToolCall>) {
     let mut calls = Vec::new();
     let mut cleaned = String::new();
     let mut rest = text;
 
-    while let Some(start) = rest.find(OPEN_TAG) {
-        cleaned.push_str(&rest[..start]);
-        let after_open = &rest[start + OPEN_TAG.len()..];
-        let Some(end) = after_open.find(CLOSE_TAG) else {
+    while let Some(open) = next_open(rest) {
+        cleaned.push_str(&rest[..open.start]);
+        let after_open = &rest[open.body_start..];
+        let Some(end) = after_open.find(open.close) else {
             // Unterminated block: keep it (and everything after) as plain text.
-            cleaned.push_str(&rest[start..]);
+            cleaned.push_str(&rest[open.start..]);
             return (cleaned.trim().to_string(), calls);
         };
         let inner = after_open[..end].trim();
         if let Some(call) = parse_one(inner, calls.len() + 1) {
             calls.push(call);
         }
-        rest = &after_open[end + CLOSE_TAG.len()..];
+        rest = &after_open[end + open.close.len()..];
     }
     cleaned.push_str(rest);
     (cleaned.trim().to_string(), calls)
+}
+
+/// A located opening tool-call delimiter.
+struct OpenMatch {
+    /// Byte offset of the opening `<`.
+    start: usize,
+    /// Byte offset where the inner body begins (just past the opening tag's `>`
+    /// for the `<tool_call …>` family, or past the DeepSeek open delimiter).
+    body_start: usize,
+    /// Closing delimiter that terminates this block.
+    close: &'static str,
+}
+
+/// Find the earliest opening tool-call delimiter in `text`, tolerant of the
+/// attribute form (`<tool_call id="…">`), the pipe variant (`<tool_call|>`), and
+/// the DeepSeek `<｜tool▁call▁begin｜>` delimiter. Returns `None` when no complete
+/// opening tag is present. A bare `<tool_call` mention with no closing `>` (prose)
+/// is not treated as an opening tag.
+fn next_open(text: &str) -> Option<OpenMatch> {
+    let mut best: Option<OpenMatch> = None;
+
+    // DeepSeek native delimiter (literal open/close pair).
+    if let Some(start) = text.find(DS_OPEN) {
+        best = Some(OpenMatch {
+            start,
+            body_start: start + DS_OPEN.len(),
+            close: DS_CLOSE,
+        });
+    }
+
+    // `<tool_call …>` family: the first prefix occurrence whose tag name is
+    // properly delimited (`>`, whitespace, or `|` — so `<tool_calls>` /
+    // `<tool_callable>` do not match) and is closed by a `>`.
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(OPEN_PREFIX) {
+        let start = from + rel;
+        let after_prefix = &text[start + OPEN_PREFIX.len()..];
+        let delimited = match after_prefix.chars().next() {
+            Some('>') | Some('|') => true,
+            Some(c) => c.is_whitespace(),
+            None => false,
+        };
+        if delimited && let Some(gt) = after_prefix.find('>') {
+            let candidate = OpenMatch {
+                start,
+                body_start: start + OPEN_PREFIX.len() + gt + 1,
+                close: CLOSE_TAG,
+            };
+            best = match best {
+                Some(b) if b.start <= candidate.start => Some(b),
+                _ => Some(candidate),
+            };
+            break;
+        }
+        // Not a usable open tag here (prose mention, or no closing `>`): keep
+        // scanning past this occurrence. Advances by a non-zero amount.
+        from = start + OPEN_PREFIX.len();
+    }
+
+    best
+}
+
+/// Byte index in `buf` from which the trailing bytes must be held back because
+/// they could still grow into a tool-call open delimiter once more text arrives.
+/// Returns `buf.len()` when the whole buffer is provably safe to surface now.
+///
+/// Two shapes are held: an in-progress `<tool_call …` open tag whose closing `>`
+/// has not arrived yet (so [`next_open`] cannot see it), and a trailing byte run
+/// that is a proper prefix of an open delimiter (`<tool_cal`, a partial DeepSeek
+/// `<｜tool▁`, or a lone `<`). A complete open delimiter is never reported here —
+/// [`next_open`] handles that case.
+fn hold_from(buf: &str) -> usize {
+    // In-progress `<tool_call …` tag: the last openable prefix occurrence whose
+    // `>` has not yet arrived. `<tool_calls>` (name not delimited) is not openable.
+    let mut from = 0;
+    let mut incomplete: Option<usize> = None;
+    while let Some(rel) = buf[from..].find(OPEN_PREFIX) {
+        let start = from + rel;
+        let after = &buf[start + OPEN_PREFIX.len()..];
+        let openable = match after.chars().next() {
+            None => true,
+            Some('>') | Some('|') => true,
+            Some(c) => c.is_whitespace(),
+        };
+        if openable && !after.contains('>') {
+            incomplete = Some(start);
+        }
+        from = start + OPEN_PREFIX.len();
+    }
+    if let Some(start) = incomplete {
+        return start;
+    }
+
+    // Trailing proper prefix of an open delimiter (a full delimiter would have
+    // been reported by `next_open` or the in-progress branch above).
+    let len = buf.len();
+    for marker in [OPEN_PREFIX, DS_OPEN] {
+        // A held tail can be as long as the whole buffer when the buffer is
+        // shorter than the marker, so the range is inclusive of `max`.
+        let max = marker.len().min(len);
+        for k in (1..=max).rev() {
+            if marker.is_char_boundary(k)
+                && buf.is_char_boundary(len - k)
+                && buf[len - k..] == marker[..k]
+            {
+                return len - k;
+            }
+        }
+    }
+    len
+}
+
+/// Streaming counterpart to [`parse_prompt_tool_calls_from_text`]: strips
+/// `<tool_call>…</tool_call>` markup from a text stream *as fragments arrive*.
+///
+/// The terminal-response recovery ([`apply_prompt_tool_calls`]) only cleans the
+/// aggregated answer, so a consumer that renders live [`MessageDelta`] text would
+/// still see raw markup stream through. This scrubber closes that gap: it emits
+/// only the text that is provably not part of a tool-call block, holding back any
+/// tail that could still become one (a partial `<tool_call`, an open tag whose
+/// `>` or matching close has not arrived, or a partial DeepSeek delimiter) until
+/// more input resolves it.
+///
+/// It is stateful across fragments — feed each fragment through [`feed`](Self::feed)
+/// and call [`flush`](Self::flush) once when the stream ends to drain the final
+/// safe remainder. Only the visible-text channel is scrubbed; reasoning and
+/// structured tool-call channels are unaffected.
+#[derive(Debug, Default)]
+pub struct ToolCallStreamScrubber {
+    buf: String,
+}
+
+impl ToolCallStreamScrubber {
+    /// Creates an empty scrubber.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feeds the next text fragment and returns the portion that is safe to emit
+    /// now. Complete `<tool_call>` blocks are dropped; text that could still be
+    /// the start of one is buffered for a later fragment.
+    pub fn feed(&mut self, fragment: &str) -> String {
+        self.buf.push_str(fragment);
+        let mut out = String::new();
+        loop {
+            match next_open(&self.buf) {
+                Some(open) => {
+                    let after_open = &self.buf[open.body_start..];
+                    if let Some(end) = after_open.find(open.close) {
+                        // Complete block: the prefix before it is safe; drop the
+                        // block and keep scanning the remainder.
+                        out.push_str(&self.buf[..open.start]);
+                        let next = open.body_start + end + open.close.len();
+                        self.buf.drain(..next);
+                        continue;
+                    }
+                    // Open delimiter located but not yet closed: emit the prefix,
+                    // hold the unterminated block for later fragments.
+                    out.push_str(&self.buf[..open.start]);
+                    self.buf.drain(..open.start);
+                    break;
+                }
+                None => {
+                    // No complete open delimiter: emit everything except the tail
+                    // that could still grow into one.
+                    let hold = hold_from(&self.buf);
+                    out.push_str(&self.buf[..hold]);
+                    self.buf.drain(..hold);
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// Drains the final safe remainder once no more fragments will arrive. A
+    /// complete tool-call block still buffered is dropped; a dangling partial
+    /// delimiter is surfaced verbatim (with the stream ended it was never a real
+    /// call). Unlike [`parse_prompt_tool_calls_from_text`], the remainder is not
+    /// trimmed — streamed whitespace is preserved.
+    pub fn flush(&mut self) -> String {
+        let mut out = String::new();
+        loop {
+            match next_open(&self.buf) {
+                Some(open) => {
+                    let after_open = &self.buf[open.body_start..];
+                    if let Some(end) = after_open.find(open.close) {
+                        out.push_str(&self.buf[..open.start]);
+                        let next = open.body_start + end + open.close.len();
+                        self.buf.drain(..next);
+                        continue;
+                    }
+                    // Unterminated at end of stream: real text, emit verbatim.
+                    out.push_str(&self.buf);
+                    break;
+                }
+                None => {
+                    out.push_str(&self.buf);
+                    break;
+                }
+            }
+        }
+        self.buf.clear();
+        out
+    }
+}
+
+/// Whether text-mode `<tool_call>` recovery should run over a completed response.
+///
+/// * Prompt-guided models (`native == false`) always recover — the whole point of
+///   the mode is that tool calls arrive as text.
+/// * Native models recover only as a **fallback**: when they were offered tools
+///   but returned an empty structured `tool_calls` array, some OpenAI-compatible
+///   routes (Hermes / DeepSeek chat templates via OpenRouter) emit the call as
+///   `<tool_call>…</tool_call>` text instead of the structured field — recovering
+///   it keeps the raw markup from leaking to the caller as assistant content.
+/// * When native tool calls came back structured (`structured_calls > 0`),
+///   recovery is skipped so the native path stays byte-for-byte unchanged.
+/// * When no tools were offered, there is nothing to recover.
+pub fn should_recover(native: bool, has_tools: bool, structured_calls: usize) -> bool {
+    has_tools && (!native || structured_calls == 0)
 }
 
 /// Extract prompt-guided `<tool_call>` blocks from a completed [`ModelResponse`]'s
