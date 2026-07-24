@@ -280,7 +280,7 @@ fn should_recover_gating_matrix() {
 fn should_recover_skips_native_response_with_structured_calls() {
     // When a real structured call is present the guard skips recovery, so the
     // native path is left byte-for-byte unchanged.
-    let calls = vec![ToolCall {
+    let calls = [ToolCall {
         id: "call_1".to_string(),
         name: "real".to_string(),
         arguments: serde_json::json!({}),
