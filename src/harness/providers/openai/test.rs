@@ -2196,3 +2196,78 @@ fn degrade_for_400_unions_with_existing_baseline_degrade() {
         })
     );
 }
+
+#[test]
+fn stream_cleanup_scrubs_leaked_markup_from_live_deltas() {
+    use crate::harness::message::{AssistantMessage, ContentBlock, MessageDelta};
+    use crate::harness::model::ModelResponse;
+    use crate::harness::tool::ToolCallStreamScrubber;
+
+    // A native model (tools offered) that leaked its call as `<tool_call>` text,
+    // streamed across deltas that split the open marker and the close — the exact
+    // SSE scenario the terminal-only recovery left leaking to live consumers.
+    let deltas = [
+        "Sure, ",
+        "looking that up.",
+        "<tool_", // partial open marker — must be held, never surfaced
+        "call>{\"name\":\"lookup\",",
+        "\"arguments\":{\"q\":1}}</tool_call>",
+        " done",
+    ];
+    let mut scrubber = ToolCallStreamScrubber::new();
+    let mut emitted = String::new();
+    for d in deltas {
+        for item in super::transport::clean_stream_item(
+            ModelStreamItem::MessageDelta(MessageDelta::text(d)),
+            &mut scrubber,
+            true, // native
+        ) {
+            if let ModelStreamItem::MessageDelta(delta) = item {
+                assert!(
+                    !delta.text.contains("<tool_call"),
+                    "raw markup leaked in a live delta: {:?}",
+                    delta.text
+                );
+                emitted.push_str(&delta.text);
+            }
+        }
+    }
+
+    // Terminal native-fallback response (no structured calls) carrying the same
+    // leaked markup in its text: recovery lifts it into `tool_calls`.
+    let response = ModelResponse {
+        message: AssistantMessage {
+            id: None,
+            content: vec![ContentBlock::Text(
+                "Sure, looking that up.<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":1}}</tool_call> done"
+                    .to_string(),
+            )],
+            tool_calls: Vec::new(),
+            usage: None,
+        },
+        usage: None,
+        finish_reason: None,
+        raw: None,
+        resolved_model: None,
+        continue_turn: None,
+    };
+    let terminal = super::transport::clean_stream_item(
+        ModelStreamItem::Completed(response),
+        &mut scrubber,
+        true,
+    );
+    let completed = terminal
+        .iter()
+        .find_map(|i| match i {
+            ModelStreamItem::Completed(r) => Some(r),
+            _ => None,
+        })
+        .expect("a Completed item is forwarded");
+
+    // Live deltas rendered clean prose only; the recovered call is off the text
+    // and present as a structured tool call on the terminal response.
+    assert_eq!(emitted, "Sure, looking that up. done");
+    assert!(!completed.text().contains("<tool_call"));
+    assert_eq!(completed.tool_calls().len(), 1);
+    assert_eq!(completed.tool_calls()[0].name, "lookup");
+}

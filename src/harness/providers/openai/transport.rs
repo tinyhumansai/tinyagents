@@ -1519,33 +1519,81 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         };
 
         let stream = futures::stream::unfold(state, sse_next);
-        // Recover `<tool_call>` blocks from the terminal `Completed` response into
-        // `message.tool_calls`: always for prompt-guided models, and as a fallback
-        // for native models whose terminal response carried no structured
-        // `tool_calls` (the streamed text deltas still carry the raw markup —
-        // cleaning them mid-stream is a follow-up). Native responses with
-        // structured calls pass through unchanged; with no tools offered the
-        // stream is forwarded untouched.
+        // Recover `<tool_call>` blocks into `message.tool_calls`: always for
+        // prompt-guided models, and as a fallback for native models whose terminal
+        // response carried no structured `tool_calls` (some OpenAI-compatible
+        // routes leak the call as `<tool_call>` text instead). Two surfaces are
+        // cleaned so nothing leaks:
+        //   * the terminal `Completed` response (the aggregated answer), and
+        //   * each streamed `MessageDelta`, via `ToolCallStreamScrubber`, so a
+        //     consumer rendering live text never sees raw markup mid-stream.
+        // With no tools offered the stream is forwarded untouched. When native
+        // structured calls came back the terminal response passes through
+        // unchanged (`should_recover` is false); delta text is re-chunked but its
+        // concatenation is byte-identical, since a structured-call response has no
+        // `<tool_call>` markup for the scrubber to remove.
         if request.tools.is_empty() {
             return Ok(Box::pin(stream));
         }
         let native = self.profile.tool_calling;
-        Ok(Box::pin(stream.map(move |item| match item {
-            ModelStreamItem::Completed(response) => {
-                if crate::harness::tool::should_recover(
-                    native,
-                    true,
-                    response.message.tool_calls.len(),
-                ) {
-                    ModelStreamItem::Completed(crate::harness::tool::apply_prompt_tool_calls(
-                        response,
-                    ))
-                } else {
-                    ModelStreamItem::Completed(response)
-                }
-            }
-            other => other,
+        let mut scrubber = crate::harness::tool::ToolCallStreamScrubber::new();
+        Ok(Box::pin(stream.flat_map(move |item| {
+            futures::stream::iter(clean_stream_item(item, &mut scrubber, native))
         })))
+    }
+}
+
+/// Applies text-mode tool-call cleanup to one streamed item, in the
+/// recovery-eligible path (tools were offered).
+///
+/// * A [`MessageDelta`](ModelStreamItem::MessageDelta) has its visible text run
+///   through `scrubber` so raw `<tool_call>` markup never reaches a consumer
+///   rendering live deltas; a delta the scrubber emptied entirely (and that
+///   carries no reasoning or tool-call chunk) is dropped.
+/// * The terminal [`Completed`](ModelStreamItem::Completed) response first emits
+///   any text the scrubber was holding as a final delta (so delta-rebuilt text
+///   matches the cleaned response), then recovers `<tool_call>` blocks per
+///   [`should_recover`](crate::harness::tool::should_recover) — a native response
+///   with structured calls passes through unchanged.
+///
+/// Returns the item(s) to forward; stateful across a stream via `scrubber`.
+pub(super) fn clean_stream_item(
+    item: ModelStreamItem,
+    scrubber: &mut crate::harness::tool::ToolCallStreamScrubber,
+    native: bool,
+) -> Vec<ModelStreamItem> {
+    match item {
+        ModelStreamItem::MessageDelta(mut delta) => {
+            if !delta.text.is_empty() {
+                delta.text = scrubber.feed(&delta.text);
+            }
+            if delta.text.is_empty() && delta.reasoning.is_empty() && delta.tool_call.is_none() {
+                Vec::new()
+            } else {
+                vec![ModelStreamItem::MessageDelta(delta)]
+            }
+        }
+        ModelStreamItem::Completed(response) => {
+            let mut out = Vec::new();
+            let tail = scrubber.flush();
+            if !tail.is_empty() {
+                out.push(ModelStreamItem::MessageDelta(
+                    crate::harness::message::MessageDelta::text(tail),
+                ));
+            }
+            let recovered = if crate::harness::tool::should_recover(
+                native,
+                true,
+                response.message.tool_calls.len(),
+            ) {
+                crate::harness::tool::apply_prompt_tool_calls(response)
+            } else {
+                response
+            };
+            out.push(ModelStreamItem::Completed(recovered));
+            out
+        }
+        other => vec![other],
     }
 }
 
