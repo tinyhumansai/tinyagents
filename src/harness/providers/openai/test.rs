@@ -531,13 +531,12 @@ fn parse_error_body_classifies_retryability_by_http_status() {
 
     // A 400 with "Stream must be set to true" — the common proxy-enforced
     // streaming check that triggers the invoke -> stream fallback.
-    let stream_required = m.parse_error_body(
-        400,
-        r#"{"detail":"Stream must be set to true"}"#,
-    );
+    let stream_required = m.parse_error_body(400, r#"{"detail":"Stream must be set to true"}"#);
     assert_eq!(stream_required.status, Some(400));
     assert!(
-        stream_required.message.contains("Stream must be set to true"),
+        stream_required
+            .message
+            .contains("Stream must be set to true"),
         "error message must contain the trigger phrase: got {}",
         stream_required.message
     );
