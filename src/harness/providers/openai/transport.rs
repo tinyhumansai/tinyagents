@@ -1403,9 +1403,16 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
 
         let value: Value = serde_json::from_str(&text)?;
         let response = parse_chat_response(value, self.effective_reasoning_tags())?;
-        // Prompt-guided tools: recover the model's `<tool_call>` blocks into
-        // `message.tool_calls` when native tool calling was suppressed.
-        if !self.profile.tool_calling && !request.tools.is_empty() {
+        // Recover the model's `<tool_call>` blocks into `message.tool_calls` for
+        // prompt-guided models, and as a fallback for native models that emitted
+        // the call as text despite being flagged native (empty structured
+        // `tool_calls`). Native responses that already carry structured calls are
+        // returned unchanged.
+        if crate::harness::tool::should_recover(
+            self.profile.tool_calling,
+            !request.tools.is_empty(),
+            response.message.tool_calls.len(),
+        ) {
             return Ok(crate::harness::tool::apply_prompt_tool_calls(response));
         }
         Ok(response)
@@ -1471,7 +1478,11 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             })?;
             let value: Value = serde_json::from_str(&text)?;
             let mut parsed = parse_chat_response(value, self.effective_reasoning_tags())?;
-            if !self.profile.tool_calling && !request.tools.is_empty() {
+            if crate::harness::tool::should_recover(
+                self.profile.tool_calling,
+                !request.tools.is_empty(),
+                parsed.message.tool_calls.len(),
+            ) {
                 parsed = crate::harness::tool::apply_prompt_tool_calls(parsed);
             }
             let delta = crate::harness::message::MessageDelta {
@@ -1508,18 +1519,33 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         };
 
         let stream = futures::stream::unfold(state, sse_next);
-        // Prompt-guided tools: recover `<tool_call>` blocks from the terminal
-        // `Completed` response into `message.tool_calls` (the streamed text deltas
-        // still carry the raw markup — cleaning them mid-stream is a follow-up).
-        if !self.profile.tool_calling && !request.tools.is_empty() {
-            return Ok(Box::pin(stream.map(|item| match item {
-                ModelStreamItem::Completed(response) => ModelStreamItem::Completed(
-                    crate::harness::tool::apply_prompt_tool_calls(response),
-                ),
-                other => other,
-            })));
+        // Recover `<tool_call>` blocks from the terminal `Completed` response into
+        // `message.tool_calls`: always for prompt-guided models, and as a fallback
+        // for native models whose terminal response carried no structured
+        // `tool_calls` (the streamed text deltas still carry the raw markup —
+        // cleaning them mid-stream is a follow-up). Native responses with
+        // structured calls pass through unchanged; with no tools offered the
+        // stream is forwarded untouched.
+        if request.tools.is_empty() {
+            return Ok(Box::pin(stream));
         }
-        Ok(Box::pin(stream))
+        let native = self.profile.tool_calling;
+        Ok(Box::pin(stream.map(move |item| match item {
+            ModelStreamItem::Completed(response) => {
+                if crate::harness::tool::should_recover(
+                    native,
+                    true,
+                    response.message.tool_calls.len(),
+                ) {
+                    ModelStreamItem::Completed(crate::harness::tool::apply_prompt_tool_calls(
+                        response,
+                    ))
+                } else {
+                    ModelStreamItem::Completed(response)
+                }
+            }
+            other => other,
+        })))
     }
 }
 
