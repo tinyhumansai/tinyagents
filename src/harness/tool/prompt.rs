@@ -236,6 +236,151 @@ fn next_open(text: &str) -> Option<OpenMatch> {
     best
 }
 
+/// Byte index in `buf` from which the trailing bytes must be held back because
+/// they could still grow into a tool-call open delimiter once more text arrives.
+/// Returns `buf.len()` when the whole buffer is provably safe to surface now.
+///
+/// Two shapes are held: an in-progress `<tool_call …` open tag whose closing `>`
+/// has not arrived yet (so [`next_open`] cannot see it), and a trailing byte run
+/// that is a proper prefix of an open delimiter (`<tool_cal`, a partial DeepSeek
+/// `<｜tool▁`, or a lone `<`). A complete open delimiter is never reported here —
+/// [`next_open`] handles that case.
+fn hold_from(buf: &str) -> usize {
+    // In-progress `<tool_call …` tag: the last openable prefix occurrence whose
+    // `>` has not yet arrived. `<tool_calls>` (name not delimited) is not openable.
+    let mut from = 0;
+    let mut incomplete: Option<usize> = None;
+    while let Some(rel) = buf[from..].find(OPEN_PREFIX) {
+        let start = from + rel;
+        let after = &buf[start + OPEN_PREFIX.len()..];
+        let openable = match after.chars().next() {
+            None => true,
+            Some('>') | Some('|') => true,
+            Some(c) => c.is_whitespace(),
+        };
+        if openable && !after.contains('>') {
+            incomplete = Some(start);
+        }
+        from = start + OPEN_PREFIX.len();
+    }
+    if let Some(start) = incomplete {
+        return start;
+    }
+
+    // Trailing proper prefix of an open delimiter (a full delimiter would have
+    // been reported by `next_open` or the in-progress branch above).
+    let len = buf.len();
+    for marker in [OPEN_PREFIX, DS_OPEN] {
+        // A held tail can be as long as the whole buffer when the buffer is
+        // shorter than the marker, so the range is inclusive of `max`.
+        let max = marker.len().min(len);
+        for k in (1..=max).rev() {
+            if marker.is_char_boundary(k)
+                && buf.is_char_boundary(len - k)
+                && buf[len - k..] == marker[..k]
+            {
+                return len - k;
+            }
+        }
+    }
+    len
+}
+
+/// Streaming counterpart to [`parse_prompt_tool_calls_from_text`]: strips
+/// `<tool_call>…</tool_call>` markup from a text stream *as fragments arrive*.
+///
+/// The terminal-response recovery ([`apply_prompt_tool_calls`]) only cleans the
+/// aggregated answer, so a consumer that renders live [`MessageDelta`] text would
+/// still see raw markup stream through. This scrubber closes that gap: it emits
+/// only the text that is provably not part of a tool-call block, holding back any
+/// tail that could still become one (a partial `<tool_call`, an open tag whose
+/// `>` or matching close has not arrived, or a partial DeepSeek delimiter) until
+/// more input resolves it.
+///
+/// It is stateful across fragments — feed each fragment through [`feed`](Self::feed)
+/// and call [`flush`](Self::flush) once when the stream ends to drain the final
+/// safe remainder. Only the visible-text channel is scrubbed; reasoning and
+/// structured tool-call channels are unaffected.
+#[derive(Debug, Default)]
+pub struct ToolCallStreamScrubber {
+    buf: String,
+}
+
+impl ToolCallStreamScrubber {
+    /// Creates an empty scrubber.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feeds the next text fragment and returns the portion that is safe to emit
+    /// now. Complete `<tool_call>` blocks are dropped; text that could still be
+    /// the start of one is buffered for a later fragment.
+    pub fn feed(&mut self, fragment: &str) -> String {
+        self.buf.push_str(fragment);
+        let mut out = String::new();
+        loop {
+            match next_open(&self.buf) {
+                Some(open) => {
+                    let after_open = &self.buf[open.body_start..];
+                    if let Some(end) = after_open.find(open.close) {
+                        // Complete block: the prefix before it is safe; drop the
+                        // block and keep scanning the remainder.
+                        out.push_str(&self.buf[..open.start]);
+                        let next = open.body_start + end + open.close.len();
+                        self.buf.drain(..next);
+                        continue;
+                    }
+                    // Open delimiter located but not yet closed: emit the prefix,
+                    // hold the unterminated block for later fragments.
+                    out.push_str(&self.buf[..open.start]);
+                    self.buf.drain(..open.start);
+                    break;
+                }
+                None => {
+                    // No complete open delimiter: emit everything except the tail
+                    // that could still grow into one.
+                    let hold = hold_from(&self.buf);
+                    out.push_str(&self.buf[..hold]);
+                    self.buf.drain(..hold);
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// Drains the final safe remainder once no more fragments will arrive. A
+    /// complete tool-call block still buffered is dropped; a dangling partial
+    /// delimiter is surfaced verbatim (with the stream ended it was never a real
+    /// call). Unlike [`parse_prompt_tool_calls_from_text`], the remainder is not
+    /// trimmed — streamed whitespace is preserved.
+    pub fn flush(&mut self) -> String {
+        let mut out = String::new();
+        loop {
+            match next_open(&self.buf) {
+                Some(open) => {
+                    let after_open = &self.buf[open.body_start..];
+                    if let Some(end) = after_open.find(open.close) {
+                        out.push_str(&self.buf[..open.start]);
+                        let next = open.body_start + end + open.close.len();
+                        self.buf.drain(..next);
+                        continue;
+                    }
+                    // Unterminated at end of stream: real text, emit verbatim.
+                    out.push_str(&self.buf);
+                    break;
+                }
+                None => {
+                    out.push_str(&self.buf);
+                    break;
+                }
+            }
+        }
+        self.buf.clear();
+        out
+    }
+}
+
 /// Whether text-mode `<tool_call>` recovery should run over a completed response.
 ///
 /// * Prompt-guided models (`native == false`) always recover — the whole point of

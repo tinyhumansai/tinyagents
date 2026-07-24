@@ -288,3 +288,109 @@ fn should_recover_skips_native_response_with_structured_calls() {
     }];
     assert!(!should_recover(true, true, calls.len()));
 }
+
+/// Feeds every fragment through the scrubber and appends the flush, returning the
+/// full text a delta consumer would render.
+fn scrub_all(fragments: &[&str]) -> String {
+    let mut s = ToolCallStreamScrubber::new();
+    let mut out = String::new();
+    for f in fragments {
+        out.push_str(&s.feed(f));
+    }
+    out.push_str(&s.flush());
+    out
+}
+
+#[test]
+fn scrubber_passes_plain_text_through_unchanged() {
+    // No markup: the concatenated emissions equal the input exactly.
+    assert_eq!(scrub_all(&["hello ", "world", " done"]), "hello world done");
+}
+
+#[test]
+fn scrubber_drops_a_complete_block_in_one_fragment() {
+    let out = scrub_all(&[r#"before <tool_call>{"name":"x","arguments":{}}</tool_call> after"#]);
+    assert_eq!(out, "before  after");
+}
+
+#[test]
+fn scrubber_suppresses_markup_split_across_fragments() {
+    // The open tag, body, and close arrive in separate fragments — no raw markup
+    // may appear in any emission, and the surrounding prose survives.
+    let out = scrub_all(&[
+        "answer: ",
+        "<tool_",
+        "call>{\"name\":\"x\",",
+        "\"arguments\":{}}</tool",
+        "_call> end",
+    ]);
+    assert_eq!(out, "answer:  end");
+    assert!(!out.contains("<tool_call"));
+}
+
+#[test]
+fn scrubber_never_emits_partial_open_marker_mid_stream() {
+    // A fragment ending in a partial open marker must not surface it; it is held
+    // until the next fragment resolves the block.
+    let mut s = ToolCallStreamScrubber::new();
+    let first = s.feed("value <tool");
+    assert_eq!(first, "value ", "partial `<tool` must be held, not emitted");
+    let second = s.feed("_call>{\"name\":\"x\",\"arguments\":{}}</tool_call>!");
+    assert_eq!(second, "!");
+    assert_eq!(s.flush(), "");
+}
+
+#[test]
+fn scrubber_handles_attribute_open_form_split() {
+    // The Hermes/DeepSeek attribute form `<tool_call id="...">` split mid-tag.
+    let out = scrub_all(&[
+        "ok ",
+        "<tool_call id=\"call_0\"",
+        ">{\"name\":\"x\",\"arguments\":{}}</tool_call>",
+    ]);
+    assert_eq!(out, "ok ");
+}
+
+#[test]
+fn scrubber_handles_deepseek_delimiters_split() {
+    let out = scrub_all(&[
+        "r ",
+        "<｜tool▁call▁be",
+        "gin｜>{\"name\":\"x\",\"arguments\":{}}<｜tool▁call▁end｜>",
+        " s",
+    ]);
+    assert_eq!(out, "r  s");
+    assert!(!out.contains("tool▁call"));
+}
+
+#[test]
+fn scrubber_does_not_hold_plural_tool_calls_prose() {
+    // `<tool_calls>` (name not delimiter-terminated) is prose, not an open tag.
+    assert_eq!(
+        scrub_all(&["see <tool_calls> below"]),
+        "see <tool_calls> below"
+    );
+}
+
+#[test]
+fn scrubber_flush_surfaces_a_dangling_open_verbatim_untrimmed() {
+    // A `<tool_call` with no close is real text once the stream ends; leading and
+    // trailing whitespace is preserved (flush does not trim).
+    let mut s = ToolCallStreamScrubber::new();
+    let mid = s.feed("  a <tool_call ");
+    assert_eq!(mid, "  a ", "the in-progress open tag is held");
+    assert_eq!(s.flush(), "<tool_call ");
+}
+
+#[test]
+fn scrubber_matches_batch_parser_on_the_visible_text() {
+    // Property: scrubbing a fragmented stream yields the same visible text as the
+    // batch parser produces (modulo the batch parser's trim) for the same input.
+    let full = r#"lead <tool_call>{"name":"a","arguments":{}}</tool_call> mid <tool_call>{"name":"b","arguments":{"k":1}}</tool_call> tail"#;
+    let (batch, calls) = parse_prompt_tool_calls_from_text(full);
+    assert_eq!(calls.len(), 2);
+    // Fragment the input into single-byte-ish chunks at char boundaries.
+    let frags: Vec<String> = full.chars().map(|c| c.to_string()).collect();
+    let refs: Vec<&str> = frags.iter().map(String::as_str).collect();
+    assert_eq!(scrub_all(&refs).trim(), batch);
+}
