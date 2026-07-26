@@ -129,12 +129,29 @@ impl ToolResult {
     /// Advisory: the crate carries the flag to [`super::super::message::ToolMessage`]
     /// via [`crate::harness::message::Message::tool_from_result`]; honouring it
     /// is the host's job.
-    pub fn mark_trusted_verbatim(&mut self) {
+    /// # Returns
+    ///
+    /// `true` when the request was recorded. `false` when [`Self::raw`] already
+    /// holds a **non-object** value (a string, array, or number): the flag lives
+    /// under a key in `raw`, and a scalar has nowhere to put a key. The crate
+    /// will not clobber a value the tool deliberately set, so the request is
+    /// refused rather than silently lost — make room by moving that value under
+    /// a key of its own, then call this again.
+    ///
+    /// `#[must_use]` precisely because the failure is otherwise invisible:
+    /// [`Self::is_trusted_verbatim`] would keep answering `false` with no
+    /// diagnostic, and the caller would believe the opt-in took effect.
+    #[must_use = "returns false when `raw` holds a non-object value and the request was refused"]
+    pub fn mark_trusted_verbatim(&mut self) -> bool {
         let raw = self
             .raw
             .get_or_insert_with(|| Value::Object(Default::default()));
-        if let Some(map) = raw.as_object_mut() {
-            map.insert(TRUSTED_VERBATIM_KEY.to_string(), Value::Bool(true));
+        match raw.as_object_mut() {
+            Some(map) => {
+                map.insert(TRUSTED_VERBATIM_KEY.to_string(), Value::Bool(true));
+                true
+            }
+            None => false,
         }
     }
 

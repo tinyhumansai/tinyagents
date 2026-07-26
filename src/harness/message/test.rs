@@ -239,7 +239,7 @@ fn tool_from_result_carries_trusted_verbatim_and_tool_does_not() {
     // Folding a marked result carries the request across, which is the whole
     // point: without it the host cannot tell this content apart from output it
     // may freely summarise or re-frame.
-    result.mark_trusted_verbatim();
+    assert!(result.mark_trusted_verbatim());
     let Message::Tool(marked) = Message::tool_from_result(&result) else {
         panic!("expected a tool message");
     };
@@ -256,4 +256,24 @@ fn a_transcript_stored_before_the_flag_existed_still_deserializes() {
     let msg: ToolMessage = serde_json::from_value(legacy).unwrap();
     assert_eq!(msg.tool_call_id, "call-1");
     assert!(!msg.trusted_verbatim);
+}
+
+#[test]
+fn an_unset_flag_is_omitted_from_the_wire() {
+    // The opt-in must cost nothing for the messages that never use it: a tool
+    // message without the flag serializes exactly as it did before the field
+    // existed, matching how the rest of the crate omits unset fields.
+    let plain = Message::tool("call-1", "ok");
+    let wire = serde_json::to_value(&plain).unwrap();
+    assert_eq!(
+        wire,
+        json!({ "tool": { "tool_call_id": "call-1", "content": [{ "text": "ok" }] } })
+    );
+
+    let Message::Tool(mut msg) = plain else {
+        panic!("expected a tool message");
+    };
+    msg.trusted_verbatim = true;
+    let wire = serde_json::to_value(Message::Tool(msg)).unwrap();
+    assert_eq!(wire["tool"]["trusted_verbatim"], json!(true));
 }

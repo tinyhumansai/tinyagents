@@ -400,7 +400,7 @@ fn trusted_verbatim_is_opt_in_and_round_trips_through_raw() {
         "a plain result must not claim the flag"
     );
 
-    result.mark_trusted_verbatim();
+    assert!(result.mark_trusted_verbatim(), "an absent `raw` makes room");
     assert!(result.is_trusted_verbatim());
 
     // Stored under a known key in `raw`, so a host can round-trip it through its
@@ -415,7 +415,7 @@ fn trusted_verbatim_is_opt_in_and_round_trips_through_raw() {
 
     // Marking twice is idempotent and preserves unrelated metadata.
     result.raw.as_mut().unwrap()["other"] = json!("kept");
-    result.mark_trusted_verbatim();
+    assert!(result.mark_trusted_verbatim());
     assert!(result.is_trusted_verbatim());
     assert_eq!(result.raw.as_ref().unwrap()["other"], json!("kept"));
 }
@@ -445,4 +445,43 @@ fn unrelated_raw_metadata_never_sets_the_flag() {
         ..with_other
     };
     assert!(!not_an_object.is_trusted_verbatim());
+}
+
+#[test]
+fn marking_is_refused_rather_than_silently_lost_when_raw_is_not_an_object() {
+    // Regression: the flag lives under a key in `raw`, so a scalar `raw` has
+    // nowhere to put it. Clobbering a value the tool deliberately set would be
+    // worse, so the request is refused — and the caller is told, because a
+    // silent failure leaves `is_trusted_verbatim()` answering `false` forever
+    // while the author believes the opt-in took effect.
+    for raw in [json!("opaque"), json!([1, 2, 3]), json!(7)] {
+        let mut result = ToolResult {
+            call_id: "c".into(),
+            name: "t".into(),
+            content: "x".into(),
+            raw: Some(raw.clone()),
+            error: None,
+            elapsed_ms: 0,
+        };
+        assert!(
+            !result.mark_trusted_verbatim(),
+            "a non-object `raw` ({raw}) must refuse the request"
+        );
+        assert!(!result.is_trusted_verbatim());
+        // The tool's own value is left exactly as it was.
+        assert_eq!(result.raw, Some(raw));
+    }
+
+    // Once the tool makes room, the same call succeeds.
+    let mut moved = ToolResult {
+        call_id: "c".into(),
+        name: "t".into(),
+        content: "x".into(),
+        raw: Some(json!({ "value": "opaque" })),
+        error: None,
+        elapsed_ms: 0,
+    };
+    assert!(moved.mark_trusted_verbatim());
+    assert!(moved.is_trusted_verbatim());
+    assert_eq!(moved.raw.as_ref().unwrap()["value"], json!("opaque"));
 }

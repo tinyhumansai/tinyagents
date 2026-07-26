@@ -114,8 +114,10 @@ pub struct ToolMessage {
     /// host having to guess from the text.
     ///
     /// `#[serde(default)]` so transcripts persisted before this field existed
-    /// still deserialise.
-    #[serde(default)]
+    /// still deserialise, and `skip_serializing_if` so a message that never
+    /// opted in stays byte-identical on the wire — matching how the rest of the
+    /// crate omits unset fields.
+    #[serde(default, skip_serializing_if = "is_false")]
     pub trusted_verbatim: bool,
 }
 
@@ -171,4 +173,9 @@ impl MessageDelta {
             ..Self::default()
         }
     }
+}
+
+/// Serde helper: skip serializing `false` booleans.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
