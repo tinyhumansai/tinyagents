@@ -384,3 +384,65 @@ fn schema_validation_rejects_wrong_types_and_extra_fields() {
     let err = schema.validate_call(&extra).expect_err("extra field");
     assert!(err.to_string().contains("extra"));
 }
+
+#[test]
+fn trusted_verbatim_is_opt_in_and_round_trips_through_raw() {
+    let mut result = ToolResult {
+        call_id: "call-1".into(),
+        name: "read_schema".into(),
+        content: "{\n  \"a\": 1\n}".into(),
+        raw: None,
+        error: None,
+        elapsed_ms: 0,
+    };
+    assert!(
+        !result.is_trusted_verbatim(),
+        "a plain result must not claim the flag"
+    );
+
+    result.mark_trusted_verbatim();
+    assert!(result.is_trusted_verbatim());
+
+    // Stored under a known key in `raw`, so a host can round-trip it through its
+    // own serialization without a schema change.
+    assert_eq!(
+        result
+            .raw
+            .as_ref()
+            .and_then(|r| r.get(TRUSTED_VERBATIM_KEY)),
+        Some(&json!(true))
+    );
+
+    // Marking twice is idempotent and preserves unrelated metadata.
+    result.raw.as_mut().unwrap()["other"] = json!("kept");
+    result.mark_trusted_verbatim();
+    assert!(result.is_trusted_verbatim());
+    assert_eq!(result.raw.as_ref().unwrap()["other"], json!("kept"));
+}
+
+#[test]
+fn unrelated_raw_metadata_never_sets_the_flag() {
+    // The opt-in must not be trippable by a tool that happens to return raw
+    // metadata — including a value at the key that is not `true`.
+    let with_other = ToolResult {
+        call_id: "c".into(),
+        name: "t".into(),
+        content: "x".into(),
+        raw: Some(json!({ "rows": 3 })),
+        error: None,
+        elapsed_ms: 0,
+    };
+    assert!(!with_other.is_trusted_verbatim());
+
+    let wrong_type = ToolResult {
+        raw: Some(json!({ TRUSTED_VERBATIM_KEY: "yes" })),
+        ..with_other.clone()
+    };
+    assert!(!wrong_type.is_trusted_verbatim());
+
+    let not_an_object = ToolResult {
+        raw: Some(json!("opaque")),
+        ..with_other
+    };
+    assert!(!not_an_object.is_trusted_verbatim());
+}

@@ -125,10 +125,30 @@ impl Message {
     }
 
     /// Creates a tool result message for the given tool call id.
+    ///
+    /// Leaves [`ToolMessage::trusted_verbatim`] unset. Use
+    /// [`Message::tool_from_result`] to fold a real
+    /// [`crate::harness::tool::ToolResult`], which carries the flag across.
     pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Message::Tool(ToolMessage {
             tool_call_id: tool_call_id.into(),
             content: vec![ContentBlock::Text(content.into())],
+            trusted_verbatim: false,
+        })
+    }
+
+    /// Folds a [`crate::harness::tool::ToolResult`] into the transcript message
+    /// that answers its call.
+    ///
+    /// Preferred over [`Message::tool`] on the agent-loop path: a `ToolResult`
+    /// carries structured metadata the message shape would otherwise drop, and
+    /// [`ToolMessage::trusted_verbatim`] is the part a host must not lose — it
+    /// is what tells the host this content may not be reshaped.
+    pub fn tool_from_result(result: &crate::harness::tool::ToolResult) -> Self {
+        Message::Tool(ToolMessage {
+            tool_call_id: result.call_id.clone(),
+            content: vec![ContentBlock::Text(result.content.clone())],
+            trusted_verbatim: result.is_trusted_verbatim(),
         })
     }
 
