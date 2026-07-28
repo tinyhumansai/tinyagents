@@ -109,6 +109,65 @@ pub struct ToolResult {
     pub elapsed_ms: u64,
 }
 
+/// `raw` key under which [`ToolResult::mark_trusted_verbatim`] records the
+/// request that this result reach the model byte-for-byte.
+///
+/// Kept in `raw` rather than as a dedicated field so the opt-in costs nothing
+/// for the results that never use it, and so a host can round-trip the flag
+/// through its own serialisation without a schema change.
+pub const TRUSTED_VERBATIM_KEY: &str = "trusted_verbatim";
+
+impl ToolResult {
+    /// Asks hosts to deliver this result's content to the model unchanged.
+    ///
+    /// A host is free to summarise, truncate, batch, or re-frame tool output —
+    /// and usually should. This marks the results where that is not safe: an
+    /// input schema whose argument names the model must copy exactly, a
+    /// signature, a diff. Reshaping those yields content that still reads well
+    /// and is wrong.
+    ///
+    /// Advisory: the crate carries the flag to [`super::super::message::ToolMessage`]
+    /// via [`crate::harness::message::Message::tool_from_result`]; honouring it
+    /// is the host's job.
+    /// # Returns
+    ///
+    /// `true` when the request was recorded. `false` when [`Self::raw`] already
+    /// holds a **non-object** value (a string, array, or number): the flag lives
+    /// under a key in `raw`, and a scalar has nowhere to put a key. The crate
+    /// will not clobber a value the tool deliberately set, so the request is
+    /// refused rather than silently lost — make room by moving that value under
+    /// a key of its own, then call this again.
+    ///
+    /// `#[must_use]` precisely because the failure is otherwise invisible:
+    /// [`Self::is_trusted_verbatim`] would keep answering `false` with no
+    /// diagnostic, and the caller would believe the opt-in took effect.
+    #[must_use = "returns false when `raw` holds a non-object value and the request was refused"]
+    pub fn mark_trusted_verbatim(&mut self) -> bool {
+        let raw = self
+            .raw
+            .get_or_insert_with(|| Value::Object(Default::default()));
+        match raw.as_object_mut() {
+            Some(map) => {
+                map.insert(TRUSTED_VERBATIM_KEY.to_string(), Value::Bool(true));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether [`Self::mark_trusted_verbatim`] was set on this result.
+    ///
+    /// `false` when `raw` is absent, is not an object, or holds anything other
+    /// than `true` — an opt-in that cannot be tripped by unrelated metadata.
+    pub fn is_trusted_verbatim(&self) -> bool {
+        self.raw
+            .as_ref()
+            .and_then(|raw| raw.get(TRUSTED_VERBATIM_KEY))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+}
+
 /// Live run context visible to a tool invoked by an agent loop.
 ///
 /// The legacy [`Tool::call`] entry point remains available for direct calls and

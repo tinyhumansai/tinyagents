@@ -369,10 +369,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         });
         status.set_last_event(record.id);
 
-        messages.push(Message::tool(
-            result.call_id.clone(),
-            result.content.clone(),
-        ));
+        // `tool_from_result`, not `tool`: a result that asked to reach the model
+        // byte-for-byte must carry that request into the transcript, or the host
+        // has no way to tell it apart from output it may freely reshape.
+        messages.push(Message::tool_from_result(&result));
         Ok(())
     }
 

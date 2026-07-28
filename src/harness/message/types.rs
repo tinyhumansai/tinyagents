@@ -99,6 +99,26 @@ pub struct ToolMessage {
     pub tool_call_id: String,
     /// Ordered content blocks.
     pub content: Vec<ContentBlock>,
+    /// The producing tool asked for this content to reach the model
+    /// byte-for-byte, so a host that rewrites tool output must leave it alone.
+    ///
+    /// Set from [`ToolResult::is_trusted_verbatim`] by
+    /// [`Message::tool_from_result`]; `false` for every other constructor, so
+    /// nothing changes unless a tool opts in.
+    ///
+    /// A host is free to summarise, truncate, batch, or re-frame tool output —
+    /// and normally should. But some results are only useful intact: an input
+    /// schema the model must copy argument names out of, a signature, a diff.
+    /// Rewriting those silently produces content that reads fine and is wrong.
+    /// The flag lets a tool say "this one is not safe to reshape" without the
+    /// host having to guess from the text.
+    ///
+    /// `#[serde(default)]` so transcripts persisted before this field existed
+    /// still deserialise, and `skip_serializing_if` so a message that never
+    /// opted in stays byte-identical on the wire — matching how the rest of the
+    /// crate omits unset fields.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub trusted_verbatim: bool,
 }
 
 /// A structured conversation message.
@@ -153,4 +173,9 @@ impl MessageDelta {
             ..Self::default()
         }
     }
+}
+
+/// Serde helper: skip serializing `false` booleans.
+fn is_false(value: &bool) -> bool {
+    !*value
 }

@@ -208,3 +208,72 @@ fn legacy_content_without_thinking_still_parses() {
     assert_eq!(blocks[0].as_text(), Some("hello"));
     assert!(!blocks[1].is_reasoning());
 }
+
+#[test]
+fn tool_from_result_carries_trusted_verbatim_and_tool_does_not() {
+    use crate::harness::tool::ToolResult;
+
+    let mut result = ToolResult {
+        call_id: "call-7".into(),
+        name: "read_schema".into(),
+        content: "verbatim body".into(),
+        raw: None,
+        error: None,
+        elapsed_ms: 0,
+    };
+
+    // The plain constructor never claims the flag — nothing changes for the
+    // callers that do not opt in.
+    let Message::Tool(plain) = Message::tool("call-7", "verbatim body") else {
+        panic!("expected a tool message");
+    };
+    assert!(!plain.trusted_verbatim);
+
+    // Folding an unmarked result matches the plain constructor.
+    let Message::Tool(unmarked) = Message::tool_from_result(&result) else {
+        panic!("expected a tool message");
+    };
+    assert!(!unmarked.trusted_verbatim);
+    assert_eq!(unmarked, plain);
+
+    // Folding a marked result carries the request across, which is the whole
+    // point: without it the host cannot tell this content apart from output it
+    // may freely summarise or re-frame.
+    assert!(result.mark_trusted_verbatim());
+    let Message::Tool(marked) = Message::tool_from_result(&result) else {
+        panic!("expected a tool message");
+    };
+    assert!(marked.trusted_verbatim);
+    assert_eq!(marked.tool_call_id, "call-7");
+    assert_eq!(marked.content, plain.content);
+}
+
+#[test]
+fn a_transcript_stored_before_the_flag_existed_still_deserializes() {
+    // Additive field: `#[serde(default)]` keeps older persisted transcripts
+    // loadable, and they read as not-trusted rather than failing.
+    let legacy = json!({ "tool_call_id": "call-1", "content": [{ "text": "ok" }] });
+    let msg: ToolMessage = serde_json::from_value(legacy).unwrap();
+    assert_eq!(msg.tool_call_id, "call-1");
+    assert!(!msg.trusted_verbatim);
+}
+
+#[test]
+fn an_unset_flag_is_omitted_from_the_wire() {
+    // The opt-in must cost nothing for the messages that never use it: a tool
+    // message without the flag serializes exactly as it did before the field
+    // existed, matching how the rest of the crate omits unset fields.
+    let plain = Message::tool("call-1", "ok");
+    let wire = serde_json::to_value(&plain).unwrap();
+    assert_eq!(
+        wire,
+        json!({ "tool": { "tool_call_id": "call-1", "content": [{ "text": "ok" }] } })
+    );
+
+    let Message::Tool(mut msg) = plain else {
+        panic!("expected a tool message");
+    };
+    msg.trusted_verbatim = true;
+    let wire = serde_json::to_value(Message::Tool(msg)).unwrap();
+    assert_eq!(wire["tool"]["trusted_verbatim"], json!(true));
+}
