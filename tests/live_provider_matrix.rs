@@ -740,7 +740,7 @@ fn groups_variables_into_one_entry_per_provider() {
         r#"
 PROVIDER_CEREBRAS_BASE_URL=https://api.cerebras.ai/v1
 PROVIDER_CEREBRAS_API_KEY=key
-PROVIDER_CEREBRAS_MODEL=llama3.1-8b
+PROVIDER_CEREBRAS_MODEL=gpt-oss-120b
 PROVIDER_GROQ_PRESET=groq
 UNRELATED_VARIABLE=1
 PROVIDER_GROQ_UNKNOWN_FIELD=ignored
@@ -756,7 +756,7 @@ PROVIDER_GROQ_UNKNOWN_FIELD=ignored
         cerebras.base_url.as_deref(),
         Some("https://api.cerebras.ai/v1")
     );
-    assert_eq!(cerebras.model.as_deref(), Some("llama3.1-8b"));
+    assert_eq!(cerebras.model.as_deref(), Some("gpt-oss-120b"));
     assert_eq!(cerebras.api_key.as_deref(), Some("key"));
     assert_eq!(cerebras.preset, None);
 }
@@ -784,7 +784,7 @@ fn resolves_a_base_url_provider_as_openai_compatible() {
     let entry = ProviderEntry {
         slug: "CEREBRAS".to_string(),
         base_url: Some("https://api.cerebras.ai/v1/".to_string()),
-        model: Some("llama3.1-8b".to_string()),
+        model: Some("gpt-oss-120b".to_string()),
         api_key: Some("key".to_string()),
         ..ProviderEntry::default()
     };
@@ -796,7 +796,7 @@ fn resolves_a_base_url_provider_as_openai_compatible() {
     assert_eq!(resolved.spec.provider, "cerebras");
     // Trailing slashes are normalised away by ProviderSpec::with_base_url.
     assert_eq!(resolved.spec.base_url, "https://api.cerebras.ai/v1");
-    assert_eq!(resolved.spec.model, "llama3.1-8b");
+    assert_eq!(resolved.spec.model, "gpt-oss-120b");
 }
 
 #[test]

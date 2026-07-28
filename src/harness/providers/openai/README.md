@@ -72,7 +72,7 @@ config rather than a code change:
 PROVIDER_GROQ_PRESET=groq                                # a built-in preset, OR
 PROVIDER_CEREBRAS_BASE_URL=https://api.cerebras.ai/v1    # any compatible endpoint
 PROVIDER_CEREBRAS_API_KEY=                               # blank => SKIP, never dialled
-PROVIDER_CEREBRAS_MODEL=llama3.1-8b                      # required without a preset
+PROVIDER_CEREBRAS_MODEL=gpt-oss-120b                     # required without a preset
 ```
 
 An exported `PROVIDER_*` variable overrides the file (a blank one never does),
