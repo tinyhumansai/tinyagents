@@ -603,6 +603,19 @@ fn compatible_presets_set_base_url_and_default_model() {
 }
 
 #[test]
+fn local_runtime_presets_normalize_endpoint_and_model() {
+    let ollama = OpenAiModel::ollama_at("127.0.0.1:11434/", "qwen3:8b");
+    assert_eq!(ollama.provider(), "ollama");
+    assert_eq!(ollama.base_url(), "http://127.0.0.1:11434/v1");
+    assert_eq!(ollama.model(), "qwen3:8b");
+
+    let lm_studio = OpenAiModel::lm_studio("http://127.0.0.1:1234/v1/models", "", "local-model");
+    assert_eq!(lm_studio.provider(), "lm_studio");
+    assert_eq!(lm_studio.base_url(), "http://127.0.0.1:1234/v1");
+    assert_eq!(lm_studio.model(), "local-model");
+}
+
+#[test]
 fn provider_spec_builds_compatible_model() {
     let spec = ProviderSpec::for_kind(ProviderKind::Ollama).with_model("qwen2.5");
     let model = OpenAiModel::from_spec(spec, "ignored").unwrap();

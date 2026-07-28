@@ -755,9 +755,55 @@ impl OpenAiModel {
     }
 
     /// A local Ollama server (`http://localhost:11434/v1`), default model
-    /// `llama3.2`. Ollama ignores the API key, so a placeholder is used.
+    /// `llama3.2`.
     pub fn ollama() -> Self {
-        Self::compatible_provider("ollama", "ollama", "http://localhost:11434/v1", "llama3.2")
+        Self::ollama_at("http://localhost:11434", "llama3.2")
+    }
+
+    /// An Ollama server exposed through its OpenAI-compatible HTTP API.
+    pub fn ollama_at(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+        Self::local_runtime(
+            "ollama",
+            normalize_local_v1_base_url(base_url.into(), "http://localhost:11434"),
+            "",
+            model,
+        )
+    }
+
+    /// An LM Studio server exposed through its OpenAI-compatible HTTP API.
+    ///
+    /// Authentication is disabled when `api_key` is empty and uses a bearer
+    /// token otherwise, matching LM Studio's optional API-token mode.
+    pub fn lm_studio(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        let api_key = api_key.into();
+        let auth = if api_key.trim().is_empty() {
+            AuthStyle::None
+        } else {
+            AuthStyle::Bearer
+        };
+        Self::local_runtime(
+            "lm_studio",
+            normalize_local_v1_base_url(base_url.into(), "http://localhost:1234"),
+            api_key,
+            model,
+        )
+        .with_auth_style(auth)
+    }
+
+    fn local_runtime(
+        provider: &str,
+        base_url: String,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self::compatible_provider(provider, api_key, base_url, model)
+            .with_auth_style(AuthStyle::None)
+            .with_native_tool_calling(false)
+            .with_vision(false)
     }
 
     /// Returns the default model id this instance will request.
@@ -1184,6 +1230,26 @@ impl OpenAiModel {
             .and_then(Value::as_str)
             .map(str::to_string);
         self.provider_error(message, Some(status), code, raw)
+    }
+}
+
+fn normalize_local_v1_base_url(raw: String, default_root: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let root = if trimmed.is_empty() {
+        default_root.to_owned()
+    } else if trimmed.contains("://") {
+        trimmed.to_owned()
+    } else {
+        format!("http://{trimmed}")
+    };
+    let root = root
+        .trim_end_matches("/chat/completions")
+        .trim_end_matches("/models")
+        .trim_end_matches('/');
+    if root.ends_with("/v1") {
+        root.to_owned()
+    } else {
+        format!("{root}/v1")
     }
 }
 
