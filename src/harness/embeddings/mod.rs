@@ -21,6 +21,9 @@
 //!
 //! [`OpenAiEmbeddingModel`] adds a hosted provider backed by the OpenAI
 //! embeddings endpoint (always compiled).
+//! [`OllamaEmbeddingModel::embed_discovering_dimensions`] handles
+//! provider-managed local models whose vector width is unknown without exposing
+//! an adapter whose dimensional identity can change after construction.
 //!
 //! The design mirrors LangChain's separation of concerns: chat models generate
 //! messages, embedding models generate vectors, vector stores search vectors,

@@ -40,8 +40,7 @@ impl OllamaEmbeddingModel {
         })
     }
 
-    /// Builds a model that learns its vector width from the first response.
-    pub fn try_new_dynamic(base_url: &str, model: &str) -> Result<Self> {
+    fn try_new_unresolved(base_url: &str, model: &str) -> Result<Self> {
         Ok(Self {
             client: reqwest::Client::new(),
             base_url: normalize_base_url(base_url)?,
@@ -49,6 +48,26 @@ impl OllamaEmbeddingModel {
             dimensions: Arc::new(AtomicUsize::new(0)),
             options: None,
         })
+    }
+
+    /// Embeds text for a model whose vector width is not known in advance.
+    ///
+    /// The temporary adapter learns and validates the response width internally;
+    /// callers receive only the resolved width and vectors, so no model with an
+    /// unstable `dimensions()` or signature escapes this operation.
+    pub async fn embed_discovering_dimensions(
+        base_url: &str,
+        model: &str,
+        client: reqwest::Client,
+        texts: &[String],
+        num_ctx: u32,
+        num_batch: u32,
+    ) -> Result<(usize, Vec<Vec<f32>>)> {
+        let adapter = Self::try_new_unresolved(base_url, model)?
+            .with_client(client)
+            .with_context_options(num_ctx, num_batch);
+        let vectors = adapter.embed(texts).await?;
+        Ok((adapter.dimensions(), vectors))
     }
 
     pub fn new(base_url: &str, model: &str, dimensions: usize) -> Self {
@@ -406,8 +425,9 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_dimensions_are_learned_and_enforced() {
-        let model = OllamaEmbeddingModel::try_new_dynamic("http://host:11434", "custom").unwrap();
+    fn unresolved_dimensions_are_learned_and_enforced_internally() {
+        let model =
+            OllamaEmbeddingModel::try_new_unresolved("http://host:11434", "custom").unwrap();
         assert_eq!(model.dimensions(), 0);
         model.validate_dimensions(0, &[0.0; 7]).unwrap();
         assert_eq!(model.dimensions(), 7);
