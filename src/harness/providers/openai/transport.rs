@@ -393,6 +393,13 @@ impl OpenAiModel {
         self
     }
 
+    /// Reuses a caller-configured HTTP client, including its connection pool,
+    /// proxy settings, and request deadlines.
+    pub fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
     /// Overrides how the API credential is sent (default [`AuthStyle::Bearer`]).
     ///
     /// Use this for OpenAI-compatible endpoints that authenticate with
