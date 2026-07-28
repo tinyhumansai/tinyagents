@@ -64,6 +64,7 @@ contracts.
   - [Streaming](../modules/harness/streaming.md)
   - [Store](../modules/harness/store.md)
   - [Observability and events](../modules/harness/observability.md)
+  - [Host capability seams](../modules/harness/host.md)
   - [Testkit](../modules/harness/testkit.md)
 - [Graph module](../modules/graph/README.md)
   - [Package and core types](../modules/graph/package.md)
@@ -126,6 +127,13 @@ model/tool/message abstractions, agent loop, middleware, memory, structured
 output, observability, and testability), and
 [`docs/modules/harness/README.md`](../modules/harness/README.md) for the
 per-topic implementation docs.
+
+The capabilities the harness expects an embedding application to supply — long-
+term memory retrieval, context composition, security policy, budgets, agent
+definitions, prior-run experience, learning, progress delivery, tool-failure
+classification, and model resolution — are specified as ten traits in
+[`host-capabilities-spec.md`](host-capabilities-spec.md). Each ships an inert
+default so a host can adopt them one at a time.
 
 Per-tool deadlines are opt-in at the harness boundary through
 `AgentHarness::with_tool_timeout_settings`. A tool's `ToolTimeout` policy is

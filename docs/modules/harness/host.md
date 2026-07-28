@@ -5,6 +5,11 @@ default per trait so a host can adopt them one at a time. Source lives in
 `src/harness/host/`, one file per capability, re-exported through
 `src/harness/host/mod.rs` and again at the crate root.
 
+The accepted design record — motivation, per-trait signatures and rationale, the
+ten-trait budget, the rejected configuration alternatives, and the open questions
+— is [`docs/spec/host-capabilities-spec.md`](../../spec/host-capabilities-spec.md).
+This file covers the operational detail an implementer needs day to day.
+
 ## Why a separate module
 
 Every other harness module names a concern the crate itself implements —
