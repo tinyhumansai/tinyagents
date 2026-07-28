@@ -2,6 +2,10 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use super::EmbeddingModel;
 use crate::error::{Result, TinyAgentsError};
@@ -17,7 +21,7 @@ pub struct OllamaEmbeddingModel {
     client: reqwest::Client,
     base_url: String,
     model: String,
-    dimensions: usize,
+    dimensions: Arc<AtomicUsize>,
     options: Option<OllamaOptions>,
 }
 
@@ -27,11 +31,22 @@ impl OllamaEmbeddingModel {
             client: reqwest::Client::new(),
             base_url: normalize_base_url(base_url)?,
             model: normalize_model(model)?,
-            dimensions: if dimensions == 0 {
+            dimensions: Arc::new(AtomicUsize::new(if dimensions == 0 {
                 DEFAULT_OLLAMA_DIMENSIONS
             } else {
                 dimensions
-            },
+            })),
+            options: None,
+        })
+    }
+
+    /// Builds a model that learns its vector width from the first response.
+    pub fn try_new_dynamic(base_url: &str, model: &str) -> Result<Self> {
+        Ok(Self {
+            client: reqwest::Client::new(),
+            base_url: normalize_base_url(base_url)?,
+            model: normalize_model(model)?,
+            dimensions: Arc::new(AtomicUsize::new(0)),
             options: None,
         })
     }
@@ -135,10 +150,24 @@ impl OllamaEmbeddingModel {
     }
 
     fn validate_dimensions(&self, index: usize, vector: &[f32]) -> Result<()> {
-        if vector.len() != self.dimensions {
+        if vector.is_empty() {
+            return Err(TinyAgentsError::Embedding(format!(
+                "ollama embed returned an empty vector at index {index}"
+            )));
+        }
+        let expected = match self.dimensions.compare_exchange(
+            0,
+            vector.len(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => vector.len(),
+            Err(expected) => expected,
+        };
+        if vector.len() != expected {
             return Err(TinyAgentsError::Embedding(format!(
                 "ollama embed dimension mismatch at index {index}: expected {}, got {}",
-                self.dimensions,
+                expected,
                 vector.len()
             )));
         }
@@ -284,7 +313,7 @@ impl EmbeddingModel for OllamaEmbeddingModel {
     }
 
     fn dimensions(&self) -> usize {
-        self.dimensions
+        self.dimensions.load(Ordering::Acquire)
     }
 
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
@@ -374,6 +403,15 @@ mod tests {
         assert!(OllamaEmbeddingModel::try_new("http://host:11434/api", "m", 1).is_err());
         assert!(OllamaEmbeddingModel::try_new("http://user:p@host:11434", "m", 1).is_err());
         assert!(OllamaEmbeddingModel::try_new("http://host:11434", "local-v1", 1).is_err());
+    }
+
+    #[test]
+    fn dynamic_dimensions_are_learned_and_enforced() {
+        let model = OllamaEmbeddingModel::try_new_dynamic("http://host:11434", "custom").unwrap();
+        assert_eq!(model.dimensions(), 0);
+        model.validate_dimensions(0, &[0.0; 7]).unwrap();
+        assert_eq!(model.dimensions(), 7);
+        assert!(model.validate_dimensions(1, &[0.0; 8]).is_err());
     }
 
     #[tokio::test]
