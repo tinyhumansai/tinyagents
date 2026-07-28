@@ -526,7 +526,7 @@ impl OpenAiModel {
         self.model = model.into();
         let local_capabilities = self
             .local_capabilities_locked
-            .then(|| (self.profile.tool_calling, self.profile.modalities.image_in));
+            .then_some((self.profile.tool_calling, self.profile.modalities.image_in));
         self.profile = derive_profile(&self.provider, &self.model);
         if let Some((tool_calling, image_in)) = local_capabilities {
             self.profile.tool_calling = tool_calling;
@@ -540,7 +540,7 @@ impl OpenAiModel {
         self.provider = provider.into();
         let local_capabilities = self
             .local_capabilities_locked
-            .then(|| (self.profile.tool_calling, self.profile.modalities.image_in));
+            .then_some((self.profile.tool_calling, self.profile.modalities.image_in));
         self.profile = derive_profile(&self.provider, &self.model);
         if let Some((tool_calling, image_in)) = local_capabilities {
             self.profile.tool_calling = tool_calling;
