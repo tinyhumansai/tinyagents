@@ -545,12 +545,19 @@ impl OpenAiModel {
     /// Overrides the default model id.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
-        let local_capabilities = self
-            .local_capabilities_locked
-            .then_some((self.profile.tool_calling, self.profile.modalities.image_in));
+        let local_capabilities = self.local_capabilities_locked.then_some((
+            self.profile.tool_calling,
+            self.profile.parallel_tool_calls,
+            self.profile.streaming_tool_chunks,
+            self.profile.modalities.image_in,
+        ));
         self.profile = derive_profile(&self.provider, &self.model);
-        if let Some((tool_calling, image_in)) = local_capabilities {
+        if let Some((tool_calling, parallel_tool_calls, streaming_tool_chunks, image_in)) =
+            local_capabilities
+        {
             self.profile.tool_calling = tool_calling;
+            self.profile.parallel_tool_calls = parallel_tool_calls;
+            self.profile.streaming_tool_chunks = streaming_tool_chunks;
             self.profile.modalities.image_in = image_in;
         }
         self
@@ -559,12 +566,19 @@ impl OpenAiModel {
     /// Overrides the provider family id used in profiles and normalized errors.
     pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
         self.provider = provider.into();
-        let local_capabilities = self
-            .local_capabilities_locked
-            .then_some((self.profile.tool_calling, self.profile.modalities.image_in));
+        let local_capabilities = self.local_capabilities_locked.then_some((
+            self.profile.tool_calling,
+            self.profile.parallel_tool_calls,
+            self.profile.streaming_tool_chunks,
+            self.profile.modalities.image_in,
+        ));
         self.profile = derive_profile(&self.provider, &self.model);
-        if let Some((tool_calling, image_in)) = local_capabilities {
+        if let Some((tool_calling, parallel_tool_calls, streaming_tool_chunks, image_in)) =
+            local_capabilities
+        {
             self.profile.tool_calling = tool_calling;
+            self.profile.parallel_tool_calls = parallel_tool_calls;
+            self.profile.streaming_tool_chunks = streaming_tool_chunks;
             self.profile.modalities.image_in = image_in;
         }
         self
@@ -797,16 +811,17 @@ impl OpenAiModel {
     /// `llama3.2`.
     pub fn ollama() -> Self {
         Self::ollama_at("http://localhost:11434", "llama3.2")
+            .expect("the built-in Ollama URL is valid")
     }
 
     /// An Ollama server exposed through its OpenAI-compatible HTTP API.
-    pub fn ollama_at(base_url: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::local_runtime(
+    pub fn ollama_at(base_url: impl Into<String>, model: impl Into<String>) -> Result<Self> {
+        Ok(Self::local_runtime(
             "ollama",
-            normalize_local_v1_base_url(base_url.into(), "http://localhost:11434"),
+            normalize_local_v1_base_url(base_url.into(), "http://localhost:11434")?,
             "",
             model,
-        )
+        ))
     }
 
     /// An LM Studio server exposed through its OpenAI-compatible HTTP API.
@@ -817,20 +832,20 @@ impl OpenAiModel {
         base_url: impl Into<String>,
         api_key: impl Into<String>,
         model: impl Into<String>,
-    ) -> Self {
+    ) -> Result<Self> {
         let api_key = api_key.into();
         let auth = if api_key.trim().is_empty() {
             AuthStyle::None
         } else {
             AuthStyle::Bearer
         };
-        Self::local_runtime(
+        Ok(Self::local_runtime(
             "lm_studio",
-            normalize_local_v1_base_url(base_url.into(), "http://localhost:1234"),
+            normalize_local_v1_base_url(base_url.into(), "http://localhost:1234")?,
             api_key,
             model,
         )
-        .with_auth_style(auth)
+        .with_auth_style(auth))
     }
 
     fn local_runtime(
@@ -1278,7 +1293,7 @@ impl OpenAiModel {
     }
 }
 
-fn normalize_local_v1_base_url(raw: String, default_root: &str) -> String {
+fn normalize_local_v1_base_url(raw: String, default_root: &str) -> Result<String> {
     let trimmed = raw.trim().trim_end_matches('/');
     let root = if trimmed.is_empty() {
         default_root.to_owned()
@@ -1287,8 +1302,9 @@ fn normalize_local_v1_base_url(raw: String, default_root: &str) -> String {
     } else {
         format!("http://{trimmed}")
     };
-    let mut url =
-        reqwest::Url::parse(&root).expect("local runtime URL is normalized with a scheme");
+    let mut url = reqwest::Url::parse(&root).map_err(|error| {
+        TinyAgentsError::Validation(format!("invalid local runtime URL `{root}`: {error}"))
+    })?;
     let mut segments: Vec<&str> = url
         .path()
         .split('/')
@@ -1305,7 +1321,7 @@ fn normalize_local_v1_base_url(raw: String, default_root: &str) -> String {
     url.set_path(&format!("/{}", segments.join("/")));
     url.set_query(None);
     url.set_fragment(None);
-    url.to_string().trim_end_matches('/').to_owned()
+    Ok(url.to_string().trim_end_matches('/').to_owned())
 }
 
 /// Request-shape degradations to apply when building an OpenAI wire body.

@@ -639,29 +639,38 @@ fn compatible_presets_set_base_url_and_default_model() {
 
 #[test]
 fn local_runtime_presets_normalize_endpoint_and_model() {
-    let ollama = OpenAiModel::ollama_at("127.0.0.1:11434/", "qwen3:8b");
+    let ollama = OpenAiModel::ollama_at("127.0.0.1:11434/", "qwen3:8b").unwrap();
     assert_eq!(ollama.provider(), "ollama");
     assert_eq!(ollama.base_url(), "http://127.0.0.1:11434/v1");
     assert_eq!(ollama.model(), "qwen3:8b");
 
-    let lm_studio = OpenAiModel::lm_studio("http://127.0.0.1:1234/v1/models", "", "local-model");
+    let lm_studio =
+        OpenAiModel::lm_studio("http://127.0.0.1:1234/v1/models", "", "local-model").unwrap();
     assert_eq!(lm_studio.provider(), "lm_studio");
     assert_eq!(lm_studio.base_url(), "http://127.0.0.1:1234/v1");
     assert_eq!(lm_studio.model(), "local-model");
 
     assert_eq!(
-        OpenAiModel::ollama_at("http://models", "qwen3").base_url(),
+        OpenAiModel::ollama_at("http://models", "qwen3")
+            .unwrap()
+            .base_url(),
         "http://models/v1"
     );
     assert_eq!(
-        OpenAiModel::ollama_at("http://v1", "qwen3").base_url(),
+        OpenAiModel::ollama_at("http://v1", "qwen3")
+            .unwrap()
+            .base_url(),
         "http://v1/v1"
     );
 
     let overridden = OpenAiModel::ollama().with_model("qwen3:8b");
     let profile = <OpenAiModel as ChatModel<()>>::profile(&overridden).unwrap();
     assert!(!profile.tool_calling);
+    assert!(!profile.parallel_tool_calls);
+    assert!(!profile.streaming_tool_chunks);
     assert!(!profile.modalities.image_in);
+
+    assert!(OpenAiModel::ollama_at("http://[::1", "qwen3").is_err());
 }
 
 #[test]
