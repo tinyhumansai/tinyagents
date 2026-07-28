@@ -688,6 +688,11 @@ fn provider_spec_builds_compatible_model() {
             .as_deref(),
         Some("ollama")
     );
+    let profile = <OpenAiModel as ChatModel<()>>::profile(&model).unwrap();
+    assert!(!profile.tool_calling);
+    assert!(!profile.parallel_tool_calls);
+    assert!(!profile.streaming_tool_chunks);
+    assert!(!profile.modalities.image_in);
 }
 
 #[test]

@@ -638,6 +638,14 @@ impl OpenAiModel {
                 "provider spec base_url must not be empty".to_string(),
             ));
         }
+        if spec.kind == crate::harness::providers::ProviderKind::Ollama {
+            return Ok(Self::local_runtime(
+                &spec.provider,
+                normalize_local_v1_base_url(spec.base_url, "http://localhost:11434")?,
+                "",
+                spec.model,
+            ));
+        }
         Ok(Self::compatible_provider(
             spec.provider,
             api_key,
