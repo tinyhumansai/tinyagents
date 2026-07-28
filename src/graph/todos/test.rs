@@ -123,6 +123,11 @@ fn normalise_trims_generates_ids_and_recomputes_order() {
 
 mod store_tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use async_trait::async_trait;
+    use serde_json::Value;
+    use tokio::sync::Notify;
 
     use super::super::store;
     use super::super::types::{CardPatch, TaskBoardCard, TaskCardStatus};
@@ -169,6 +174,97 @@ mod store_tests {
         assert!(store::delete(&s, "t").await.unwrap());
         assert!(store::get(&s, "t").await.unwrap().is_none());
         assert!(!store::delete(&s, "t").await.unwrap());
+    }
+
+    struct BlockingGetStore {
+        inner: InMemoryStore,
+        armed: AtomicBool,
+        first_get_started: Notify,
+        release_first_get: Notify,
+        first_get_released: AtomicBool,
+        concurrent_get: AtomicBool,
+    }
+
+    impl BlockingGetStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryStore::default(),
+                armed: AtomicBool::new(false),
+                first_get_started: Notify::new(),
+                release_first_get: Notify::new(),
+                first_get_released: AtomicBool::new(false),
+                concurrent_get: AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Store for BlockingGetStore {
+        async fn get(&self, namespace: &str, key: &str) -> crate::error::Result<Option<Value>> {
+            let value = self.inner.get(namespace, key).await?;
+            if self.armed.swap(false, Ordering::SeqCst) {
+                self.first_get_started.notify_one();
+                self.release_first_get.notified().await;
+                self.first_get_released.store(true, Ordering::SeqCst);
+            } else if !self.first_get_released.load(Ordering::SeqCst) {
+                self.concurrent_get.store(true, Ordering::SeqCst);
+            }
+            Ok(value)
+        }
+
+        async fn put(&self, namespace: &str, key: &str, value: Value) -> crate::error::Result<()> {
+            self.inner.put(namespace, key, value).await
+        }
+
+        async fn delete(&self, namespace: &str, key: &str) -> crate::error::Result<()> {
+            self.inner.delete(namespace, key).await
+        }
+
+        async fn list(&self, namespace: &str) -> crate::error::Result<Vec<String>> {
+            self.inner.list(namespace).await
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_waits_for_an_in_flight_mutation() {
+        let concrete = Arc::new(BlockingGetStore::new());
+        let s: Arc<dyn Store> = concrete.clone();
+        let snap = store::add(&s, "t", "original", CardPatch::default())
+            .await
+            .unwrap();
+        let card_id = snap.cards[0].id.clone();
+
+        concrete.concurrent_get.store(false, Ordering::SeqCst);
+        concrete.armed.store(true, Ordering::SeqCst);
+        let edit_store = s.clone();
+        let edit = tokio::spawn(async move {
+            store::edit(
+                &edit_store,
+                "t",
+                &card_id,
+                CardPatch {
+                    content: Some("edited".into()),
+                    ..CardPatch::default()
+                },
+            )
+            .await
+        });
+        concrete.first_get_started.notified().await;
+
+        let delete_store = s.clone();
+        let delete = tokio::spawn(async move { store::delete(&delete_store, "t").await });
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !concrete.concurrent_get.load(Ordering::SeqCst),
+            "delete must not enter the store while a mutation holds the thread lock"
+        );
+
+        concrete.release_first_get.notify_one();
+        edit.await.unwrap().unwrap();
+        assert!(delete.await.unwrap().unwrap());
+        assert!(store::get(&s, "t").await.unwrap().is_none());
     }
 
     #[tokio::test]

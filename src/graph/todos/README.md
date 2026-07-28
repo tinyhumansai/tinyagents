@@ -31,13 +31,21 @@ string (dependency-free, no `chrono`).
 ## Persistence (`store.rs`)
 
 One serialized `TaskBoard` per thread under the `graph.todos` namespace of a
-`crate::harness::store::Store`, keyed by `hex(thread_id)`. Every mutation runs
-`load → mutate → normalise → put` under a per-thread async mutex (a weak-value
-`graph::thread_locks::ThreadLockMap`, so idle threads' mutexes are reclaimed
-instead of leaking) — atomic within one process (same single-process caveat as
-`graph::goals::store`). Ops:
+`crate::harness::store::Store`, keyed by `hex(thread_id)`. Normal CRUD mutations
+run `load → mutate → normalise → put` under a per-thread async mutex (a
+weak-value `graph::thread_locks::ThreadLockMap`, so idle threads' mutexes are
+reclaimed instead of leaking) — atomic within one process (same single-process
+caveat as `graph::goals::store`). Ops:
 `add` / `edit` / `update_status` / `decide_plan` / `revise_plan` / `remove` /
 `replace` / `clear` / `list` / `claim_card` / `set_session_thread`.
+
+Host integrations also have raw lifecycle operations:
+
+- `get` preserves absent versus present-empty and does not normalise.
+- `delete` removes the board value outright under the same per-thread lock.
+- `import_if_absent` writes a complete board only when no value exists, without
+  decoding or overwriting an existing value. The check and write share the
+  per-thread lock, making it suitable for one-time legacy imports.
 
 Invariants preserved from OpenHuman:
 
