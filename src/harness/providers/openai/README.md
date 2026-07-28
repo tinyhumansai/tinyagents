@@ -48,9 +48,10 @@ of the rest of the harness.
   `lm_studio(base_url, api_key, model)`. These normalize a server or
   `/v1/models` URL to its `/v1` API base and use conservative local defaults:
   no native or parallel tool calls, no streamed tool chunks, and no image
-  input. Ollama sends no authorization header; LM Studio sends a bearer token
-  only when its API key is non-empty. `ProviderSpec::Ollama` uses the same
-  defaults.
+  input. `ollama()` and `ollama_at()` send no authorization header; LM Studio
+  sends a bearer token only when its API key is non-empty.
+  `ProviderSpec::Ollama` uses the same defaults unless `requires_api_key` is
+  enabled, in which case it sends a bearer token.
 
 Accessors: `.model()`, `.provider()`, `.base_url()`.
 
