@@ -58,13 +58,52 @@ fn validate_thread_id(thread_id: &str) -> Result<String> {
 
 /// Loads the raw cards for `thread_id` (empty when the thread has no board).
 async fn load_cards(store: &Arc<dyn Store>, thread_id: &str) -> Result<Vec<TaskBoardCard>> {
-    match store.get(TODOS_NAMESPACE, &key(thread_id)).await? {
-        Some(value) => {
-            let board: TaskBoard = serde_json::from_value(value)?;
-            Ok(board.cards)
-        }
-        None => Ok(Vec::new()),
+    Ok(get(store, thread_id)
+        .await?
+        .map(|board| board.cards)
+        .unwrap_or_default())
+}
+
+/// Load a board without normalising it, preserving the distinction between an
+/// absent board and a present empty board.
+pub async fn get(store: &Arc<dyn Store>, thread_id: &str) -> Result<Option<TaskBoard>> {
+    let thread_id = validate_thread_id(thread_id)?;
+    match store.get(TODOS_NAMESPACE, &key(&thread_id)).await? {
+        Some(value) => Ok(Some(serde_json::from_value(value)?)),
+        None => Ok(None),
     }
+}
+
+/// Delete a board value outright, returning whether one was present.
+///
+/// This differs from [`clear`], which persists a present, empty board.
+pub async fn delete(store: &Arc<dyn Store>, thread_id: &str) -> Result<bool> {
+    let thread_id = validate_thread_id(thread_id)?;
+    let board_key = key(&thread_id);
+    let existed = store.get(TODOS_NAMESPACE, &board_key).await?.is_some();
+    if existed {
+        store.delete(TODOS_NAMESPACE, &board_key).await?;
+    }
+    Ok(existed)
+}
+
+/// Import a board only when its thread has no stored value.
+///
+/// The existence check and write share the normal per-thread lock. Existing
+/// values are left untouched even when they use a newer or undecodable schema,
+/// which makes this suitable for one-time legacy migrations.
+pub async fn import_if_absent(store: &Arc<dyn Store>, board: TaskBoard) -> Result<bool> {
+    let thread_id = validate_thread_id(&board.thread_id)?;
+    let lock = thread_lock(&thread_id);
+    let _guard = lock.lock().await;
+    let board_key = key(&thread_id);
+    if store.get(TODOS_NAMESPACE, &board_key).await?.is_some() {
+        return Ok(false);
+    }
+    store
+        .put(TODOS_NAMESPACE, &board_key, serde_json::to_value(board)?)
+        .await?;
+    Ok(true)
 }
 
 /// Normalises and persists `cards` for `thread_id`, returning the normalised set.

@@ -158,6 +158,32 @@ mod store_tests {
     }
 
     #[tokio::test]
+    async fn get_and_delete_preserve_absent_vs_empty() {
+        let s = store();
+        assert!(store::get(&s, " t ").await.unwrap().is_none());
+
+        store::clear(&s, "t").await.unwrap();
+        let board = store::get(&s, "t").await.unwrap().expect("present board");
+        assert!(board.cards.is_empty());
+
+        assert!(store::delete(&s, "t").await.unwrap());
+        assert!(store::get(&s, "t").await.unwrap().is_none());
+        assert!(!store::delete(&s, "t").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn import_if_absent_never_overwrites_an_existing_value() {
+        let s = store();
+        let board = super::super::types::TaskBoard::empty(" t ");
+        assert!(store::import_if_absent(&s, board).await.unwrap());
+        assert!(
+            !store::import_if_absent(&s, super::super::types::TaskBoard::empty("t"))
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
     async fn add_rejects_empty_content_and_blank_thread() {
         let s = store();
         assert!(
