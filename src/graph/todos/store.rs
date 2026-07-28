@@ -87,6 +87,25 @@ pub async fn delete(store: &Arc<dyn Store>, thread_id: &str) -> Result<bool> {
     Ok(existed)
 }
 
+/// Import a board only when its thread has no stored value.
+///
+/// The existence check and write share the normal per-thread lock. Existing
+/// values are left untouched even when they use a newer or undecodable schema,
+/// which makes this suitable for one-time legacy migrations.
+pub async fn import_if_absent(store: &Arc<dyn Store>, board: TaskBoard) -> Result<bool> {
+    let thread_id = validate_thread_id(&board.thread_id)?;
+    let lock = thread_lock(&thread_id);
+    let _guard = lock.lock().await;
+    let board_key = key(&thread_id);
+    if store.get(TODOS_NAMESPACE, &board_key).await?.is_some() {
+        return Ok(false);
+    }
+    store
+        .put(TODOS_NAMESPACE, &board_key, serde_json::to_value(board)?)
+        .await?;
+    Ok(true)
+}
+
 /// Normalises and persists `cards` for `thread_id`, returning the normalised set.
 async fn save_cards(
     store: &Arc<dyn Store>,
