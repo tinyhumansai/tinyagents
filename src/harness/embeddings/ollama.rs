@@ -40,7 +40,7 @@ impl OllamaEmbeddingModel {
         })
     }
 
-    fn try_new_unresolved(base_url: &str, model: &str) -> Result<Self> {
+    pub(super) fn try_new_unresolved(base_url: &str, model: &str) -> Result<Self> {
         Ok(Self {
             client: reqwest::Client::new(),
             base_url: normalize_base_url(base_url)?,
@@ -174,7 +174,7 @@ impl OllamaEmbeddingModel {
         Ok(output)
     }
 
-    fn validate_dimensions(&self, index: usize, vector: &[f32]) -> Result<()> {
+    pub(super) fn validate_dimensions(&self, index: usize, vector: &[f32]) -> Result<()> {
         if vector.is_empty() {
             return Err(TinyAgentsError::Embedding(format!(
                 "ollama embed returned an empty vector at index {index}"
@@ -428,31 +428,6 @@ mod tests {
         assert!(OllamaEmbeddingModel::try_new("http://host:11434/api", "m", 1).is_err());
         assert!(OllamaEmbeddingModel::try_new("http://user:p@host:11434", "m", 1).is_err());
         assert!(OllamaEmbeddingModel::try_new("http://host:11434", "local-v1", 1).is_err());
-    }
-
-    #[test]
-    fn unresolved_dimensions_are_learned_and_enforced_internally() {
-        let model =
-            OllamaEmbeddingModel::try_new_unresolved("http://host:11434", "custom").unwrap();
-        assert_eq!(model.dimensions(), 0);
-        model.validate_dimensions(0, &[0.0; 7]).unwrap();
-        assert_eq!(model.dimensions(), 7);
-        assert!(model.validate_dimensions(1, &[0.0; 8]).is_err());
-    }
-
-    #[tokio::test]
-    async fn dynamic_discovery_rejects_blank_only_batches() {
-        let error = OllamaEmbeddingModel::embed_discovering_dimensions(
-            "http://host:11434",
-            "custom",
-            reqwest::Client::new(),
-            &[" ".to_string()],
-            1,
-            1,
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("nonblank"));
     }
 
     #[tokio::test]
