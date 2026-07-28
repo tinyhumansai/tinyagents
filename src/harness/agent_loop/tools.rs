@@ -254,7 +254,15 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 }
             }
         };
-        if let Err(err) = tool.schema().validate_call(call) {
+        let schema = tool.schema();
+        let raw_arguments = call.arguments.clone();
+        if matches!(
+            self.policy.invalid_args,
+            InvalidArgsPolicy::NormalizeThenReturnToolError
+        ) {
+            normalize_tool_arguments(call, &schema);
+        }
+        if let Err(err) = schema.validate_call(call) {
             // The model called a registered tool with schema-invalid arguments.
             // Apply the run's `InvalidArgsPolicy` instead of unconditionally
             // aborting the turn (mirrors the unknown-tool recovery above).
@@ -267,7 +275,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // tool-call budget slot above, bounding the loop.
             let call_id = CallId::new(call.id.clone());
             let detail = err.to_string();
-            let schema_repr = serde_json::to_string(&tool.schema().parameters)
+            let schema_repr = serde_json::to_string(&schema.parameters)
                 .unwrap_or_else(|_| "<unserializable>".to_string());
             let message = format!(
                 "invalid arguments for tool `{}`: {detail}; expected schema: {schema_repr}",
@@ -276,7 +284,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             let record = ctx.emit(AgentEvent::InvalidToolArgs {
                 call_id,
                 tool_name: call.name.clone(),
-                arguments: call.arguments.clone(),
+                arguments: raw_arguments,
                 error: detail,
                 recovery: "tool_error".to_string(),
             });
@@ -491,6 +499,84 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         }
         Ok(())
     }
+}
+
+/// Repairs provider-neutral argument shape defects before schema validation.
+///
+/// Schema-valid arguments are already canonical. A string containing valid
+/// JSON is decoded, optionally through a markdown code fence, and the decoded
+/// value is preserved for validation even when it remains invalid. Undecodable
+/// or non-string values become an empty object only for object-capable schemas
+/// that declare no required fields; required-field schemas retain the original
+/// value so the validation error remains precise and model-visible.
+fn normalize_tool_arguments(call: &mut ToolCall, schema: &ToolSchema) {
+    // Never rewrite a value the declared schema already accepts. In
+    // particular, an object-capable union may validly accept a primitive too.
+    if schema.validate_call(call).is_ok() {
+        return;
+    }
+
+    let parameters = &schema.parameters;
+    let accepts_object = parameters.get("type").is_some_and(|kind| {
+        kind.as_str() == Some("object")
+            || kind
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("object")))
+    }) || parameters.get("properties").is_some()
+        || parameters.get("required").is_some()
+        || parameters
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(Value::is_object));
+    if !accepts_object {
+        return;
+    }
+
+    if let Some(raw) = call.arguments.as_str() {
+        let candidate = strip_markdown_code_fence(raw);
+        if let Ok(value) = serde_json::from_str::<Value>(candidate) {
+            let mut normalized = call.clone();
+            normalized.arguments = value;
+            // Decoding must be lossless even when the decoded value is still
+            // schema-invalid. Preserve it so the validation below reports the
+            // actual bad field/type instead of silently replacing it with `{}`.
+            call.arguments = normalized.arguments;
+            return;
+        }
+    }
+
+    // A provider-native object is already the shape normalization is trying to
+    // recover. If its contents violate the schema, preserve them so the model
+    // sees the real validation error instead of executing with an empty object.
+    if call.arguments.is_object() {
+        return;
+    }
+
+    let has_required_fields = parameters
+        .get("required")
+        .and_then(Value::as_array)
+        .is_some_and(|required| required.iter().any(Value::is_string));
+    if !has_required_fields {
+        call.arguments = serde_json::json!({});
+    }
+}
+
+fn strip_markdown_code_fence(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    let Some(after_open) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let body = match after_open.find('\n') {
+        Some(newline)
+            if after_open[..newline]
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric()) =>
+        {
+            &after_open[newline + 1..]
+        }
+        _ => after_open,
+    };
+    body.trim().strip_suffix("```").unwrap_or(body).trim()
 }
 
 pub(super) fn timeout_result(
