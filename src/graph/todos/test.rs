@@ -176,12 +176,11 @@ mod store_tests {
         let s = store();
         let board = super::super::types::TaskBoard::empty(" t ");
         assert!(store::import_if_absent(&s, board).await.unwrap());
-        assert!(!store::import_if_absent(
-            &s,
-            super::super::types::TaskBoard::empty("t")
-        )
-        .await
-        .unwrap());
+        assert!(
+            !store::import_if_absent(&s, super::super::types::TaskBoard::empty("t"))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
