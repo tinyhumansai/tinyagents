@@ -79,7 +79,7 @@ pub struct ChatCompletionChunk {
     #[serde(default)]
     pub id: Option<String>,
     /// Per-choice incremental deltas; the first choice is used.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub choices: Vec<ChunkChoiceWire>,
     /// Cumulative usage, sent on the final chunk when `include_usage` is set.
     #[serde(default)]
@@ -90,7 +90,7 @@ pub struct ChatCompletionChunk {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ChunkChoiceWire {
     /// The incremental delta for this choice.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub delta: ChunkDeltaWire,
     /// Finish reason, present only on the terminal content chunk.
     #[serde(default)]
@@ -111,7 +111,7 @@ pub struct ChunkDeltaWire {
     #[serde(default)]
     pub reasoning: Option<Value>,
     /// Incremental tool-call fragments, correlated by `index`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub tool_calls: Vec<ToolCallChunkWire>,
 }
 
@@ -147,6 +147,32 @@ pub struct FunctionChunkWire {
     /// to the stringified form the accumulator concatenates.
     #[serde(default, deserialize_with = "deserialize_optional_arguments")]
     pub arguments: Option<String>,
+}
+
+/// Accepts an explicit JSON `null` for any field that declares a default.
+///
+/// `#[serde(default)]` alone only covers an **absent** key — a key present with
+/// an explicit `null` still fails with `invalid type: null, expected a
+/// sequence` (or `… expected a string`, `… expected u64`), losing the *whole*
+/// response over one cosmetic field.
+///
+/// OpenAI-compatible providers do this routinely: Mistral returns
+/// `"tool_calls": null` on every plain (non-tool) chat completion, which broke
+/// unary chat against `mistral-small-latest` while its streaming and
+/// tool-calling paths worked. That is the same class of quirk as the DeepSeek
+/// and local-server shapes already normalized by [`deserialize_arguments`], so
+/// it is fixed the same way: one helper applied to **every** wire field that
+/// already declares a default, rather than a per-provider special case.
+///
+/// The rule this encodes: *a field that may be absent may equally be `null`*.
+/// Genuinely required fields (for example [`ChoiceWire::message`]) declare no
+/// default and stay strict, so a structurally broken response still errors.
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// Normalizes a tool-call `function.arguments` payload to the stringified-JSON
@@ -276,13 +302,17 @@ pub struct ToolCallWire {
     /// `/v1` endpoint omitted `id` entirely until v0.12.11. An empty string is
     /// treated as absent by the translator, which synthesizes a stable
     /// `tool-{index}` fallback so result correlation still works.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub id: String,
     /// Always `"function"`.
     ///
     /// Defaulted because some OpenAI-compatible servers omit `type`; a single
     /// missing field used to fail deserialization of the whole response.
-    #[serde(rename = "type", default)]
+    #[serde(
+        rename = "type",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
     pub kind: String,
     /// The function name and stringified-JSON arguments.
     pub function: FunctionCallWire,
@@ -292,7 +322,7 @@ pub struct ToolCallWire {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FunctionCallWire {
     /// Function name.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub name: String,
     /// Arguments encoded as a JSON **string** (OpenAI sends stringified JSON).
     ///
@@ -315,7 +345,7 @@ pub struct ChatCompletionResponse {
     #[serde(default)]
     pub id: Option<String>,
     /// Candidate completions; the first is used.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub choices: Vec<ChoiceWire>,
     /// Token usage, when reported.
     #[serde(default)]
@@ -346,7 +376,7 @@ pub struct ResponseMessageWire {
     #[serde(default)]
     pub reasoning: Option<Value>,
     /// Tool calls requested by the model.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub tool_calls: Vec<ToolCallWire>,
 }
 
@@ -354,13 +384,13 @@ pub struct ResponseMessageWire {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct UsageWire {
     /// Prompt/input tokens.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub prompt_tokens: u64,
     /// Completion/output tokens.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub completion_tokens: u64,
     /// Total tokens reported by the provider.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub total_tokens: u64,
     /// Optional input-token breakdown (carries cached tokens).
     #[serde(default)]
@@ -374,7 +404,7 @@ pub struct UsageWire {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct PromptTokensDetailsWire {
     /// Input tokens served from OpenAI's prompt cache.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub cached_tokens: u64,
 }
 
@@ -382,7 +412,7 @@ pub struct PromptTokensDetailsWire {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct CompletionTokensDetailsWire {
     /// Output tokens spent on hidden reasoning/thinking.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub reasoning_tokens: u64,
 }
 
@@ -414,6 +444,6 @@ pub struct ModelListing {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ModelListWire {
     /// The advertised models.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub data: Vec<ModelListing>,
 }

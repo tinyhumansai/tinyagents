@@ -421,6 +421,119 @@ fn parses_text_only_response_without_usage_details() {
 }
 
 #[test]
+fn parses_mistral_shaped_response_with_explicit_null_tool_calls() {
+    // Captured from `mistral-small-latest` (`POST /v1/chat/completions`, no
+    // tools declared): Mistral sends `"tool_calls": null` rather than omitting
+    // the key. `#[serde(default)]` covers only an absent key, so this failed the
+    // whole response with `invalid type: null, expected a sequence` — unary chat
+    // was dead against Mistral while its streaming and tool-calling paths
+    // worked.
+    let body = json!({
+        "id": "82c1f4b5f7f04c0f9f2a3c6b5c1d2e3f",
+        "object": "chat.completion",
+        "created": 1_753_800_000,
+        "model": "mistral-small-latest",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": null,
+                    "content": "hello"
+                },
+                "finish_reason": "stop"
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 11,
+            "completion_tokens": 2,
+            "total_tokens": 13
+        }
+    });
+
+    let response = parse_response(body).unwrap();
+    assert_eq!(response.text(), "hello");
+    assert!(response.tool_calls().is_empty());
+    assert_eq!(response.finish_reason.as_deref(), Some("stop"));
+    assert_eq!(response.usage.unwrap().input_tokens, 11);
+}
+
+#[test]
+fn explicit_nulls_are_tolerated_wherever_a_default_exists() {
+    // The Mistral fix is deliberately general: every wire field that may be
+    // absent may equally arrive as `null`. This pins the rule across the unary
+    // response — nulled containers, nulled tool-call identity fields, and nulled
+    // usage counters — so the next provider with the same habit needs no code.
+    let body = json!({
+        "id": "chatcmpl-nulls",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "id": null,
+                            "type": null,
+                            "function": { "name": "ping", "arguments": null }
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }
+        ],
+        "usage": {
+            "prompt_tokens": null,
+            "completion_tokens": null,
+            "total_tokens": null,
+            "prompt_tokens_details": { "cached_tokens": null },
+            "completion_tokens_details": { "reasoning_tokens": null }
+        }
+    });
+
+    let response = parse_response(body).unwrap();
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "ping");
+    // A nulled id still gets the synthesized positional fallback, so tool
+    // results stay correlatable.
+    assert_eq!(calls[0].id, "tool-0");
+    assert_eq!(calls[0].arguments, json!({}));
+    let usage = response.usage.unwrap();
+    assert_eq!(usage.input_tokens, 0);
+    assert_eq!(usage.output_tokens, 0);
+}
+
+#[tokio::test]
+async fn sse_stream_tolerates_explicit_null_choices_and_tool_calls() {
+    // The same quirk on the streaming seam: a keep-alive-ish chunk with
+    // `"choices": null` and a delta with `"tool_calls": null` must not kill the
+    // stream mid-flight.
+    let raw: Vec<Vec<u8>> = vec![
+        b"data: {\"choices\":null}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\",\"tool_calls\":null},\"finish_reason\":null}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":null,\"finish_reason\":\"stop\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let items = collect_sse(raw).await;
+    assert_eq!(stream_text(&items), "hi");
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, ModelStreamItem::Failed(_))),
+        "a nulled container must not fail the stream: {items:?}"
+    );
+}
+
+#[test]
+fn model_listing_tolerates_a_null_data_array() {
+    let listing: ModelListWire =
+        serde_json::from_value(json!({ "object": "list", "data": null })).unwrap();
+    assert!(listing.data.is_empty());
+}
+
+#[test]
 fn total_tokens_falls_back_to_prompt_plus_completion_when_omitted() {
     // Some OpenAI-compatible backends omit `total_tokens` entirely; it must
     // not silently deserialize to a misleading `0` when prompt/completion
