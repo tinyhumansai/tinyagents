@@ -25,9 +25,15 @@ surface; this spec captures the design contract.
 ## Persistence
 
 One serialized `TaskBoard` per thread in the `graph.todos` namespace of a
-`harness::store::Store`, keyed by `hex(thread_id)`. Each mutation runs
+`harness::store::Store`, keyed by `hex(thread_id)`. Normal CRUD mutations run
 `load → mutate → normalise → put` under a per-thread async mutex (atomic within
 one process, same caveat as `graph::goals`).
+
+Host integrations can use three raw lifecycle operations: `get` reads without
+normalising and preserves absent versus present-empty; `delete` removes the
+value outright under the thread lock; and `import_if_absent` atomically writes
+a complete board only when no value exists, leaving existing or undecodable
+values untouched for safe one-time migrations.
 
 ### Invariants
 
