@@ -63,6 +63,12 @@ impl OllamaEmbeddingModel {
         num_ctx: u32,
         num_batch: u32,
     ) -> Result<(usize, Vec<Vec<f32>>)> {
+        if !texts.iter().any(|text| !text.trim().is_empty()) {
+            return Err(TinyAgentsError::Validation(
+                "dynamic embedding dimension discovery requires at least one nonblank input"
+                    .to_string(),
+            ));
+        }
         let adapter = Self::try_new_unresolved(base_url, model)?
             .with_client(client)
             .with_context_options(num_ctx, num_batch);
@@ -432,6 +438,21 @@ mod tests {
         model.validate_dimensions(0, &[0.0; 7]).unwrap();
         assert_eq!(model.dimensions(), 7);
         assert!(model.validate_dimensions(1, &[0.0; 8]).is_err());
+    }
+
+    #[tokio::test]
+    async fn dynamic_discovery_rejects_blank_only_batches() {
+        let error = OllamaEmbeddingModel::embed_discovering_dimensions(
+            "http://host:11434",
+            "custom",
+            reqwest::Client::new(),
+            &[" ".to_string()],
+            1,
+            1,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("nonblank"));
     }
 
     #[tokio::test]
