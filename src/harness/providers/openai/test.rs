@@ -693,6 +693,14 @@ fn provider_spec_builds_compatible_model() {
     assert!(!profile.parallel_tool_calls);
     assert!(!profile.streaming_tool_chunks);
     assert!(!profile.modalities.image_in);
+
+    let mut authenticated = ProviderSpec::for_kind(ProviderKind::Ollama);
+    authenticated.requires_api_key = true;
+    let authenticated = OpenAiModel::from_spec(authenticated, "proxy-secret").unwrap();
+    assert_eq!(
+        authenticated.auth_config(),
+        ("proxy-secret", &AuthStyle::Bearer)
+    );
 }
 
 #[test]

@@ -628,6 +628,7 @@ impl OpenAiModel {
     /// Builds an OpenAI-compatible model from a provider spec and explicit API
     /// key.
     pub fn from_spec(spec: ProviderSpec, api_key: impl Into<String>) -> Result<Self> {
+        let api_key = api_key.into();
         if spec.model.trim().is_empty() {
             return Err(TinyAgentsError::Validation(
                 "provider spec model must not be empty".to_string(),
@@ -639,12 +640,18 @@ impl OpenAiModel {
             ));
         }
         if spec.kind == crate::harness::providers::ProviderKind::Ollama {
+            let auth = if spec.requires_api_key {
+                AuthStyle::Bearer
+            } else {
+                AuthStyle::None
+            };
             return Ok(Self::local_runtime(
                 &spec.provider,
                 normalize_local_v1_base_url(spec.base_url, "http://localhost:11434")?,
-                "",
+                api_key,
                 spec.model,
-            ));
+            )
+            .with_auth_style(auth));
         }
         Ok(Self::compatible_provider(
             spec.provider,
@@ -872,6 +879,11 @@ impl OpenAiModel {
     fn lock_local_capabilities(mut self) -> Self {
         self.local_capabilities_locked = true;
         self
+    }
+
+    #[cfg(test)]
+    pub(super) fn auth_config(&self) -> (&str, &AuthStyle) {
+        (&self.api_key, &self.auth)
     }
 
     /// Returns the default model id this instance will request.
