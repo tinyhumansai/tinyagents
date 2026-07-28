@@ -79,6 +79,8 @@ pub async fn get(store: &Arc<dyn Store>, thread_id: &str) -> Result<Option<TaskB
 /// This differs from [`clear`], which persists a present, empty board.
 pub async fn delete(store: &Arc<dyn Store>, thread_id: &str) -> Result<bool> {
     let thread_id = validate_thread_id(thread_id)?;
+    let lock = thread_lock(&thread_id);
+    let _guard = lock.lock().await;
     let board_key = key(&thread_id);
     let existed = store.get(TODOS_NAMESPACE, &board_key).await?.is_some();
     if existed {
