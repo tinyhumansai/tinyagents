@@ -75,6 +75,9 @@ pub struct OpenAiModel {
     /// Capability profile derived from the default model id, optionally adjusted
     /// by [`Self::with_native_tool_calling`] / [`Self::with_vision`].
     profile: ModelProfile,
+    /// Preserve conservative local-runtime tool/vision capability overrides
+    /// when callers subsequently replace the default model id.
+    local_capabilities_locked: bool,
     /// Provider-specific options baked onto every request (e.g. a local model's
     /// `{"options": {"num_ctx": 8192}}`). Merged under each request's own
     /// `provider_options`, which win on key conflicts. `Value::Null` by default
@@ -319,6 +322,7 @@ impl OpenAiModel {
             provider: "openai".to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
             profile: derive_profile("openai", DEFAULT_MODEL),
+            local_capabilities_locked: false,
             default_provider_options: Value::Null,
             responses_api_primary: false,
             responses_omit_max_output_tokens: false,
@@ -520,14 +524,28 @@ impl OpenAiModel {
     /// Overrides the default model id.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        let local_capabilities = self
+            .local_capabilities_locked
+            .then(|| (self.profile.tool_calling, self.profile.modalities.image_in));
         self.profile = derive_profile(&self.provider, &self.model);
+        if let Some((tool_calling, image_in)) = local_capabilities {
+            self.profile.tool_calling = tool_calling;
+            self.profile.modalities.image_in = image_in;
+        }
         self
     }
 
     /// Overrides the provider family id used in profiles and normalized errors.
     pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
         self.provider = provider.into();
+        let local_capabilities = self
+            .local_capabilities_locked
+            .then(|| (self.profile.tool_calling, self.profile.modalities.image_in));
         self.profile = derive_profile(&self.provider, &self.model);
+        if let Some((tool_calling, image_in)) = local_capabilities {
+            self.profile.tool_calling = tool_calling;
+            self.profile.modalities.image_in = image_in;
+        }
         self
     }
 
@@ -804,6 +822,12 @@ impl OpenAiModel {
             .with_auth_style(AuthStyle::None)
             .with_native_tool_calling(false)
             .with_vision(false)
+            .lock_local_capabilities()
+    }
+
+    fn lock_local_capabilities(mut self) -> Self {
+        self.local_capabilities_locked = true;
+        self
     }
 
     /// Returns the default model id this instance will request.
@@ -1242,15 +1266,25 @@ fn normalize_local_v1_base_url(raw: String, default_root: &str) -> String {
     } else {
         format!("http://{trimmed}")
     };
-    let root = root
-        .trim_end_matches("/chat/completions")
-        .trim_end_matches("/models")
-        .trim_end_matches('/');
-    if root.ends_with("/v1") {
-        root.to_owned()
-    } else {
-        format!("{root}/v1")
+    let mut url =
+        reqwest::Url::parse(&root).expect("local runtime URL is normalized with a scheme");
+    let mut segments: Vec<&str> = url
+        .path()
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if segments.ends_with(&["chat", "completions"]) {
+        segments.truncate(segments.len() - 2);
+    } else if segments.last() == Some(&"models") {
+        segments.pop();
     }
+    if segments.last() != Some(&"v1") {
+        segments.push("v1");
+    }
+    url.set_path(&format!("/{}", segments.join("/")));
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string().trim_end_matches('/').to_owned()
 }
 
 /// Request-shape degradations to apply when building an OpenAI wire body.
