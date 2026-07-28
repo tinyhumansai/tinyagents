@@ -39,6 +39,8 @@ pub enum AuthStyle {
 pub struct OpenAiModel {
     /// Shared HTTP client.
     client: reqwest::Client,
+    /// Whether the client was supplied by the caller and owns default deadlines.
+    caller_owned_client: bool,
     /// API credential; how it is sent is governed by [`Self::auth`].
     api_key: String,
     /// How `api_key` is attached to each request (default [`AuthStyle::Bearer`]).
@@ -317,6 +319,7 @@ impl OpenAiModel {
                 .connect_timeout(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
                 .build()
                 .expect("default reqwest client builds"),
+            caller_owned_client: false,
             api_key: api_key.into(),
             auth: AuthStyle::Bearer,
             extra_headers: Vec::new(),
@@ -397,6 +400,7 @@ impl OpenAiModel {
     /// proxy settings, and request deadlines.
     pub fn with_client(mut self, client: reqwest::Client) -> Self {
         self.client = client;
+        self.caller_owned_client = true;
         self
     }
 
@@ -1151,7 +1155,7 @@ impl OpenAiModel {
         url: &str,
     ) -> Result<reqwest::Response> {
         let mut builder = self.authorized(self.client.post(url)).json(body);
-        if let Some(timeout) = request_timeout(timeout_ms, false) {
+        if let Some(timeout) = self.effective_request_timeout(timeout_ms, false) {
             builder = builder.timeout(timeout);
         }
         self.send_checked(builder, "responses request", url).await
@@ -1202,10 +1206,22 @@ impl OpenAiModel {
     ) -> Result<reqwest::Response> {
         let url = format!("{}/chat/completions", self.base_url);
         let mut builder = self.authorized(self.client.post(&url)).json(body);
-        if let Some(timeout) = request_timeout(timeout_ms, streaming) {
+        if let Some(timeout) = self.effective_request_timeout(timeout_ms, streaming) {
             builder = builder.timeout(timeout);
         }
         self.send_checked(builder, what, &url).await
+    }
+
+    pub(super) fn effective_request_timeout(
+        &self,
+        timeout_ms: Option<u64>,
+        streaming: bool,
+    ) -> Option<Duration> {
+        if self.caller_owned_client && timeout_ms.is_none() {
+            None
+        } else {
+            request_timeout(timeout_ms, streaming)
+        }
     }
 
     /// Builds the chat-completions wire body for `request` under the given
@@ -1332,6 +1348,12 @@ fn normalize_local_v1_base_url(raw: String, default_root: &str) -> Result<String
     let mut url = reqwest::Url::parse(&root).map_err(|error| {
         TinyAgentsError::Validation(format!("invalid local runtime URL `{root}`: {error}"))
     })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(TinyAgentsError::Validation(format!(
+            "local runtime URL must use http or https, got `{}`",
+            url.scheme()
+        )));
+    }
     let mut segments: Vec<&str> = url
         .path()
         .split('/')

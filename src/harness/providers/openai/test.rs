@@ -671,6 +671,14 @@ fn local_runtime_presets_normalize_endpoint_and_model() {
     assert!(!profile.modalities.image_in);
 
     assert!(OpenAiModel::ollama_at("http://[::1", "qwen3").is_err());
+    assert!(OpenAiModel::ollama_at("ftp://host", "qwen3").is_err());
+
+    let caller_client = OpenAiModel::ollama().with_client(reqwest::Client::new());
+    assert_eq!(caller_client.effective_request_timeout(None, false), None);
+    assert_eq!(
+        caller_client.effective_request_timeout(Some(25), false),
+        Some(std::time::Duration::from_millis(25))
+    );
 }
 
 #[test]
