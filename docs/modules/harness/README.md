@@ -240,6 +240,7 @@ Feature details:
 - [Prompt feature](prompt.md)
 - [Tool feature](tool.md)
 - [Workspace isolation feature](workspace.md)
+- [Host capability seams](host.md)
 - [Middleware feature](middleware.md)
 - [Sub-agent and orchestrator steering](subagent-steering.md)
 - [Structured output feature](structured-output.md)

@@ -142,6 +142,28 @@ pub use harness::cancel::CancellationToken;
 // --- Workspace isolation / sandbox hooks ---
 pub use harness::workspace::{SharedRootWorkspace, WorkspaceDescriptor, WorkspaceIsolation};
 
+// --- Harness: host capability seams (what an embedding application supplies) ---
+// The ten extension points where the crate deliberately has no opinion —
+// retrieval, context assembly, policy, budgets, definitions, experience,
+// learning, progress delivery, failure classification, and model routing —
+// each paired with an inert default so a host can adopt them one at a time.
+// See `harness::host` for the scope boundaries between these and the
+// crate-implemented capabilities they sit beside.
+pub use harness::host::{
+    AdmissionRequest, AgentDefinition, BudgetGate, BudgetLease, BudgetVerdict, CallVerdict,
+    ContextBlock, ContextComposer, ContextPlacement, DefinitionRegistry, DigestCaps,
+    ExperienceEntry, ExperienceHit, ExperienceQuery, ExperienceStore, InMemoryDefinitionRegistry,
+    InMemoryMemoryProvider, InputScreenRequest, InputVerdict, LearningSink, MemoryFilter,
+    MemoryProvider, MemoryQuery, MemoryRecord, MemoryWrite, ModelResolution, ModelResolver,
+    NamespaceDigest, NoopExperienceStore, NoopLearningSink, NoopProgressSink,
+    NoopToolOutcomeClassifier, PassthroughContextComposer, PathIntent, PathRequest, ProgressSink,
+    Redaction, RedactionDirection, RedactionRequest, RetryDisposition, RootContainedSecurityGate,
+    SecurityGate, StaticModelResolver, SystemPromptRequest, ToolCallRequest, ToolExposure,
+    ToolExposureRequest, ToolFailure, ToolFailureContext, ToolOutcomeClassifier, ToolOutcomeRecord,
+    TranscriptCommit, TurnCharge, TurnPreparation, TurnPreparationRequest, TurnRecord,
+    UnmeteredBudgetGate, UsageEntry,
+};
+
 // --- Harness: durable observability (journals, status stores, sinks) ---
 pub use harness::observability::{
     AgentCallLatency, AgentLatencyMetrics, AgentObservation, FanOutSink, HarnessEventJournal,
