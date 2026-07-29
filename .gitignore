@@ -3,4 +3,6 @@
 
 # Local secrets — never commit; copy .env.example to .env
 .env
+# BYOK provider matrix credentials; copy providers.env.example to providers.env
+providers.env
 .DS_Store

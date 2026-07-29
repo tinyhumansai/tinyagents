@@ -54,6 +54,36 @@ doubles as runtime model discovery for local/self-hosted providers (Ollama,
 Together, Groq, OpenRouter, ...); returned ids can be fed straight into
 `.with_model(..)`.
 
+## BYOK provider matrix (live verification)
+
+`tests/live_provider_matrix.rs` verifies every provider you hold a key for in a
+single run. For each one it makes a 1-shot chat call, a streaming call, and a
+tool call, then prints a `provider | PASS/FAIL(reason) | latency(ms)` table.
+
+```text
+cp providers.env.example providers.env   # fill in the keys you have
+PROVIDER_MATRIX=1 cargo test --test live_provider_matrix -- --nocapture
+```
+
+Providers are discovered from `providers.env`, so adding one is three lines of
+config rather than a code change:
+
+```text
+PROVIDER_GROQ_PRESET=groq                                # a built-in preset, OR
+PROVIDER_CEREBRAS_BASE_URL=https://api.cerebras.ai/v1    # any compatible endpoint
+PROVIDER_CEREBRAS_API_KEY=                               # blank => SKIP, never dialled
+PROVIDER_CEREBRAS_MODEL=gpt-oss-120b                     # required without a preset
+```
+
+An exported `PROVIDER_*` variable overrides the file (a blank one never does),
+so a single run can be retargeted without editing a `providers.env` that holds
+real keys. A blank key falls back to the preset's own variable
+(`OPENAI_API_KEY`, ...) and then skips. Dialling is opt-in through
+`PROVIDER_MATRIX=1`, so a bare `cargo test` stays offline. Providers are dialled
+concurrently; a failing provider fails the test unless
+`PROVIDER_MATRIX_ALLOW_FAILURES=1` is set. `providers.env` is gitignored —
+never commit real keys.
+
 ## Streaming (SSE)
 
 Streaming responses are decoded by a small state machine (`SseState` /

@@ -299,6 +299,24 @@ cargo build --all-targets
 cargo test
 ```
 
+### Verifying real providers (BYOK)
+
+`cargo test` never touches the network. To check the providers you hold keys
+for — a chat call, a streaming call, and a tool call each, reported as a
+`provider | PASS/FAIL(reason) | latency(ms)` table:
+
+```sh
+cp providers.env.example providers.env   # fill in the keys you have; blank => skipped
+PROVIDER_MATRIX=1 cargo test --test live_provider_matrix -- --nocapture
+```
+
+Dialling is opt-in through `PROVIDER_MATRIX=1`, so a bare `cargo test` stays
+offline even with a fully configured `providers.env`.
+
+`providers.env` is gitignored — never commit real keys. See
+[`src/harness/providers/openai/README.md`](src/harness/providers/openai/README.md)
+for the configuration format.
+
 ## Contributing
 
 TinyAgents welcomes focused contributions that improve the graph runtime,
