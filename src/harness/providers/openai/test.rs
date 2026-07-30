@@ -678,6 +678,111 @@ fn requires_streaming_flag_skips_non_streaming_attempt() {
     );
 }
 
+// openhuman#5165: the streaming-only constraint used to be re-discovered on
+// every unary call, because nothing recorded it. `ChatModel::invoke` takes
+// `&self`, so the latch has to be interior-mutable — a plain `bool` field could
+// only ever be set by the builder, which nothing calls in production. Without
+// the latch a streaming-only proxy costs one guaranteed-400 round trip per
+// agent turn forever (511 events / 2 users on the linked Sentry issue).
+#[test]
+fn stream_required_constraint_latches_after_discovery() {
+    let m = model();
+    assert!(!m.requires_streaming(), "must start un-latched");
+
+    m.latch_stream_required();
+    assert!(
+        m.requires_streaming(),
+        "a discovered constraint must be remembered so later calls skip \
+         the doomed non-streaming attempt"
+    );
+
+    // Idempotent: latching again is a no-op (the log fires only on transition).
+    m.latch_stream_required();
+    assert!(m.requires_streaming());
+}
+
+#[test]
+fn stream_required_latch_survives_through_a_shared_handle() {
+    // Production holds models as `Arc<dyn ChatModel>`, so the latch must be
+    // observable through a shared reference — that is the whole reason it is an
+    // `AtomicBool` and not a `bool`.
+    let shared: std::sync::Arc<OpenAiModel> = std::sync::Arc::new(model());
+    let clone = std::sync::Arc::clone(&shared);
+    assert!(!clone.requires_streaming());
+
+    shared.latch_stream_required();
+    assert!(
+        clone.requires_streaming(),
+        "the latch must be visible to every holder of the shared model"
+    );
+}
+
+// The trigger used to be a single case-sensitive `contains("Stream must be set
+// to true")`. OpenAI-compatible proxies do not standardise this wording, so any
+// other phrasing hard-failed the run instead of falling back to streaming.
+#[test]
+fn is_stream_required_error_matches_the_known_proxy_wordings() {
+    let m = model();
+
+    for body in [
+        // The exact body from the openhuman#5165 Sentry report (FastAPI-style
+        // `detail` envelope — note `parse_error_body` cannot promote it to
+        // `message`, so the raw-body scan is what catches nesting).
+        r#"{"detail":"Stream must be set to true"}"#,
+        // Lower-case, and quoted field name.
+        r#"{"detail":"stream must be set to true"}"#,
+        r#"{"error":{"message":"'stream' must be true for this endpoint"}}"#,
+        // Other phrasings seen from OpenAI-compatible gateways.
+        r#"{"error":{"message":"streaming is required for this model"}}"#,
+        r#"{"error":{"message":"Only streaming responses are supported"}}"#,
+        r#"{"error":{"message":"this deployment requires streaming"}}"#,
+        r#"{"error":{"message":"stream=true is required"}}"#,
+        // Nested under a non-standard key alongside a generic top-level message.
+        r#"{"message":"Bad Request","errors":[{"reason":"stream must be true"}]}"#,
+    ] {
+        let err = m.parse_error_body(400, body);
+        assert!(
+            is_stream_required_error(&err),
+            "must detect the streaming requirement in: {body}"
+        );
+    }
+
+    // FastAPI validates request fields with 422, so accept that status too.
+    let unprocessable = m.parse_error_body(422, r#"{"detail":"Stream must be set to true"}"#);
+    assert!(
+        is_stream_required_error(&unprocessable),
+        "422 with the streaming wording must also trigger the fallback"
+    );
+}
+
+#[test]
+fn is_stream_required_error_ignores_unrelated_failures() {
+    let m = model();
+
+    // Wrong status: the same wording on a 500 is a server fault, not a
+    // request-shape constraint, and must stay retryable rather than be
+    // rerouted into the streaming path.
+    let server_error = m.parse_error_body(500, r#"{"detail":"Stream must be set to true"}"#);
+    assert!(!is_stream_required_error(&server_error));
+
+    // Right status, unrelated wording — must not hijack the other 400 handlers
+    // (`degrade_for_400`, the `/responses` max_output_tokens retry).
+    for body in [
+        r#"{"error":{"message":"Invalid value for 'tool_choice'"}}"#,
+        r#"{"error":{"message":"max_output_tokens is not supported"}}"#,
+        // Mentions stream but states no requirement.
+        r#"{"error":{"message":"stream_options is not supported by this model"}}"#,
+        // States a requirement but about a different field.
+        r#"{"error":{"message":"'store' must be true"}}"#,
+    ] {
+        let err = m.parse_error_body(400, body);
+        assert!(
+            !is_stream_required_error(&err),
+            "must NOT treat this as a streaming requirement: {body}"
+        );
+    }
+}
+
 #[test]
 fn reasoning_tag_extraction_defaults_off_for_hosted_openai_only() {
     // Hosted OpenAI never emits inline `<think>` reasoning; unconditional

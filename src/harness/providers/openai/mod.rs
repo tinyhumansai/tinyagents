@@ -26,6 +26,15 @@
 //! or automatically as a single retry when a 400 body implicates the shape. See
 //! the module `README.md` "Local-server compatibility" section.
 //!
+//! Some OpenAI-compatible proxies go further and refuse unary calls entirely,
+//! answering `stream: false` with an HTTP 400/422 such as
+//! `{"detail":"Stream must be set to true"}`. [`ChatModel::invoke`] recognises
+//! that family of rejections (`is_stream_required_error` in `transport`), folds
+//! the SSE stream into a single [`ModelResponse`] instead, and **latches** the
+//! constraint on the instance so only the first call pays the rejected round
+//! trip. Declare it up front with
+//! [`OpenAiModel::with_requires_streaming`] to skip even that one.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -90,7 +99,7 @@ use sse::*;
 #[cfg(test)]
 use transport::{
     Degrade, auth_headers, degrade_for_400, effective_temperature, glob_match,
-    merge_provider_options, merge_system_into_user, request_timeout,
+    is_stream_required_error, merge_provider_options, merge_system_into_user, request_timeout,
 };
 
 #[cfg(test)]
