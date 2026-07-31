@@ -188,6 +188,30 @@ preference:
 - If a provider only accepts JSON tool declarations, it may fall back to the
   JSON schema while preserving `ToolSchema::format` in harness metadata.
 
+## Prompt-Guided Message Shape
+
+A model whose profile reports `tool_calling = false` is driven through its own
+Jinja chat template by the serving runtime (LM Studio, llama.cpp, Ollama), so
+the outgoing message list has to satisfy that template, not just the wire
+schema. Two helpers in `harness::tool` normalize it:
+
+- `coalesce_prompt_tool_results` renders assistant `tool_calls` back into
+  `<tool_call>` text and folds consecutive `tool`-role results into one
+  `[Tool results]` user turn — the `tool` role and structured `tool_calls`
+  field are not consumable by these models.
+- `ensure_resolvable_user_turn` guarantees the list contains a user turn the
+  template can resolve as "the user query", inserting one after any leading
+  system turns when none is present. Several widely used templates hard-require
+  one: Qwen 3's raises `No user query found in messages.` and the runtime
+  returns a 400 before the model is called. A prompt-guided tool loop reaches
+  that state legitimately once the real user turn ages out of the window
+  (summarization, a resumed transcript, a task carried entirely by the system
+  prompt), leaving only assistant continuations and folded tool results — which
+  do not count as a query, since the model requested them itself.
+
+Both are applied by the OpenAI-compatible adapter before wire translation.
+Native-tool models keep their message list untouched.
+
 ## Execution Lifecycle
 
 1. Check cancellation, wall-clock deadline, and tool-call limits.

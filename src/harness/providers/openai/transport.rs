@@ -905,7 +905,7 @@ impl OpenAiModel {
         let prompt_guided_tools = !self.profile.tool_calling && !request.tools.is_empty();
         let prompt_messages;
         let instructed_messages;
-        let base_messages: &[Message] = if prompt_guided_tools {
+        let coalesced_messages: &[Message] = if prompt_guided_tools {
             prompt_messages = crate::harness::tool::coalesce_prompt_tool_results(&request.messages);
             instructed_messages = crate::harness::tool::with_prompt_tool_instructions(
                 &prompt_messages,
@@ -914,6 +914,22 @@ impl OpenAiModel {
             &instructed_messages
         } else {
             &request.messages
+        };
+
+        // A model with no native tool calling is rendered through its own chat
+        // template by the serving runtime, and templates like Qwen 3's abort the
+        // request outright when they cannot locate a user query. Guarantee one
+        // (openhuman#5291). Scoped to the no-native-tools profile — that is the
+        // set of models served through a Jinja template with this guard — and
+        // applied after the coalescing above so folded tool results are already
+        // in their final user-turn shape when we look for a real query.
+        let user_normalized_messages;
+        let base_messages: &[Message] = if self.profile.tool_calling {
+            coalesced_messages
+        } else {
+            user_normalized_messages =
+                crate::harness::tool::ensure_resolvable_user_turn(coalesced_messages);
+            &user_normalized_messages
         };
 
         // Optionally fold system messages into the first user turn (for endpoints

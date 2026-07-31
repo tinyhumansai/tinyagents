@@ -35,6 +35,18 @@ const OPEN_PREFIX: &str = "<tool_call";
 const DS_OPEN: &str = "<｜tool▁call▁begin｜>";
 const DS_CLOSE: &str = "<｜tool▁call▁end｜>";
 
+/// Leading marker of the synthetic user turn that [`coalesce_prompt_tool_results`]
+/// folds tool results into. Shared with [`ensure_resolvable_user_turn`], which
+/// must be able to tell a folded result apart from a real user query — keeping
+/// one const means the two can never drift.
+const TOOL_RESULTS_MARKER: &str = "[Tool results]";
+
+/// User turn synthesized by [`ensure_resolvable_user_turn`] when a request
+/// carries none. Deliberately content-free: the actual task is in the system
+/// prompt (or in the transcript that follows), and this exists to satisfy chat
+/// templates that require a locatable user query, not to add instructions.
+const CONTINUATION_USER_TURN: &str = "Continue with the task described above.";
+
 /// Build the tool-use protocol block appended to the system prompt when native
 /// tool calling is unavailable. Describes the `<tool_call>` convention and lists
 /// each tool's name, description, and JSON-Schema parameters.
@@ -99,7 +111,7 @@ pub fn coalesce_prompt_tool_results(messages: &[Message]) -> Vec<Message> {
     fn flush(out: &mut Vec<Message>, pending: &mut Vec<String>) {
         if !pending.is_empty() {
             out.push(Message::user(format!(
-                "[Tool results]\n{}",
+                "{TOOL_RESULTS_MARKER}\n{}",
                 std::mem::take(pending).join("\n")
             )));
         }
@@ -136,6 +148,70 @@ pub fn coalesce_prompt_tool_results(messages: &[Message]) -> Vec<Message> {
         }
     }
     flush(&mut out, &mut pending);
+    out
+}
+
+/// Whether this message is a user turn a chat template can resolve as "the user
+/// query".
+///
+/// A folded tool-result turn does not count. It carries the
+/// [`TOOL_RESULTS_MARKER`] prefix, and templates that look for a user query are
+/// looking for a request to answer, not for the transcript of a tool the model
+/// itself invoked — Qwen 3's template makes the same distinction, skipping user
+/// turns that are wholly a tool response. Neither does an empty or
+/// whitespace-only turn. Non-text content (JSON, an image) does count: it is a
+/// real user input the model is being asked about.
+fn is_resolvable_user_query(message: &Message) -> bool {
+    let Message::User(user) = message else {
+        return false;
+    };
+    if message.text().trim_start().starts_with(TOOL_RESULTS_MARKER) {
+        return false;
+    }
+    user.content.iter().any(|block| match block {
+        ContentBlock::Text(text) => !text.trim().is_empty(),
+        ContentBlock::Json(_) | ContentBlock::Image(_) => true,
+        // Reasoning replay and opaque provider payloads are not user input.
+        ContentBlock::Thinking { .. }
+        | ContentBlock::RedactedThinking { .. }
+        | ContentBlock::ProviderExtension(_) => false,
+    })
+}
+
+/// Guarantee the outgoing list contains a user turn a chat template can resolve,
+/// inserting one only when none is present.
+///
+/// Models without native tool calling are driven through their **own** chat
+/// template by the serving runtime (LM Studio, llama.cpp, Ollama), and several
+/// widely used templates hard-require a locatable user query. Qwen 3's raises
+/// outright:
+///
+/// ```text
+/// {%- if ns.multi_step_tool %}{{- raise_exception('No user query found in messages.') }}
+/// ```
+///
+/// A prompt-guided tool loop can reach that state legitimately: once the real
+/// user turn has aged out of the window — summarization, a resumed transcript,
+/// a task delivered entirely through the system prompt — every remaining
+/// non-system turn is an assistant continuation or a folded tool result, and the
+/// template aborts the request with a 400 before the model is ever called
+/// (tinyhumansai/openhuman#5291). Native-tool models are unaffected: they are
+/// served through the provider's own tool protocol, not a Jinja template with
+/// this guard.
+///
+/// The inserted turn goes directly after any leading system messages, so the
+/// transcript still reads system → user → assistant. A request that already has
+/// a real user turn is returned unchanged.
+pub fn ensure_resolvable_user_turn(messages: &[Message]) -> Vec<Message> {
+    if messages.iter().any(is_resolvable_user_query) {
+        return messages.to_vec();
+    }
+    let mut out = messages.to_vec();
+    let insert_at = out
+        .iter()
+        .position(|message| !matches!(message, Message::System(_)))
+        .unwrap_or(out.len());
+    out.insert(insert_at, Message::user(CONTINUATION_USER_TURN));
     out
 }
 

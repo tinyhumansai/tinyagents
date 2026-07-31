@@ -2091,6 +2091,73 @@ fn prompt_guided_request_replays_calls_and_results_as_text() {
 }
 
 #[test]
+fn prompt_guided_request_carries_a_user_turn_for_the_chat_template() {
+    // openhuman#5291: a tool loop whose real user turn has aged out sends only a
+    // system prompt plus assistant/tool continuations. LM Studio renders that
+    // through the model's own template, and Qwen 3's raises `No user query found
+    // in messages.` — a 400 before the model is called. The wire body must carry
+    // a user turn regardless.
+    let model = OpenAiModel::new("k")
+        .with_model("qwen3.5-9b")
+        .with_native_tool_calling(false);
+    let mut assistant = Message::assistant("");
+    let Message::Assistant(message) = &mut assistant else {
+        unreachable!()
+    };
+    message.tool_calls = vec![crate::harness::tool::ToolCall::new(
+        "call-1",
+        "lookup",
+        json!({"q":"weather"}),
+    )];
+    let request = ModelRequest::new(vec![
+        Message::system("You are a helpful assistant."),
+        assistant,
+        Message::tool("call-1", "sunny"),
+    ])
+    .with_tools(vec![ToolSchema::new(
+        "lookup",
+        "look something up",
+        json!({"type":"object"}),
+    )]);
+
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+    let messages = value["messages"].as_array().unwrap();
+    let queries: Vec<&str> = messages
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .filter_map(|m| m["content"].as_str())
+        .filter(|content| !content.starts_with("[Tool results]"))
+        .collect();
+    assert_eq!(
+        queries.len(),
+        1,
+        "exactly one resolvable user query is present: {messages:?}"
+    );
+    // It sits after the system prompt, so the transcript still reads
+    // system → user → assistant.
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[2]["role"], "assistant");
+}
+
+#[test]
+fn native_tool_model_keeps_its_messages_untouched() {
+    // The normalization is scoped to the no-native-tools profile: a native-tool
+    // model is served through the provider's tool protocol, not a Jinja template
+    // with a user-query guard, so nothing is inserted.
+    let model = OpenAiModel::new("k").with_model("gpt-4o-mini");
+    let request = ModelRequest::new(vec![
+        Message::system("You are a helpful assistant."),
+        Message::assistant("continuing"),
+    ]);
+
+    let value = serde_json::to_value(model.translate_request(&request).unwrap()).unwrap();
+    let messages = value["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert!(messages.iter().all(|m| m["role"] != "user"));
+}
+
+#[test]
 fn with_vision_toggles_image_in_modality() {
     let off = OpenAiModel::new("k")
         .with_model("qwen2.5")
