@@ -1,7 +1,7 @@
 //! Tests for the prompt-guided tool-call protocol.
 
 use super::*;
-use crate::harness::message::{ContentBlock, Message};
+use crate::harness::message::{ContentBlock, ImageRef, Message};
 
 fn schema(name: &str) -> ToolSchema {
     ToolSchema {
@@ -82,6 +82,88 @@ fn prompt_results_coalesce_consecutive_tool_messages() {
 fn prompt_result_coalescing_without_tools_is_identity() {
     let messages = vec![Message::system("system"), Message::user("question")];
     assert_eq!(coalesce_prompt_tool_results(&messages), messages);
+}
+
+#[test]
+fn user_turn_normalization_leaves_a_real_query_alone() {
+    let messages = vec![
+        Message::system("system"),
+        Message::user("question"),
+        Message::assistant("answer"),
+    ];
+    assert_eq!(ensure_resolvable_user_turn(&messages), messages);
+}
+
+#[test]
+fn user_turn_normalization_inserts_after_leading_system_turns() {
+    // openhuman#5291: the real user turn aged out of the window, leaving a
+    // system prompt and an assistant continuation. Qwen 3's template raises
+    // `No user query found in messages.` on exactly this shape.
+    let messages = vec![
+        Message::system("system"),
+        Message::system("tool protocol"),
+        Message::assistant("continuing"),
+    ];
+
+    let out = ensure_resolvable_user_turn(&messages);
+
+    assert_eq!(out.len(), 4);
+    assert!(matches!(out[0], Message::System(_)));
+    assert!(matches!(out[1], Message::System(_)));
+    assert!(matches!(out[2], Message::User(_)), "user turn is inserted");
+    assert!(matches!(out[3], Message::Assistant(_)));
+}
+
+#[test]
+fn user_turn_normalization_does_not_count_folded_tool_results() {
+    // The only user-role turns are coalesced tool results, which is not a query
+    // the template can answer — the model asked for those itself.
+    let coalesced = coalesce_prompt_tool_results(&[
+        Message::system("system"),
+        Message::assistant("calling"),
+        Message::tool("call-1", "result"),
+    ]);
+    assert!(
+        coalesced.iter().any(|m| matches!(m, Message::User(_))),
+        "coalescing produces a user-role turn"
+    );
+
+    let out = ensure_resolvable_user_turn(&coalesced);
+
+    assert_eq!(out.len(), coalesced.len() + 1);
+    assert!(matches!(out[1], Message::User(_)));
+    assert!(!out[1].text().starts_with("[Tool results]"));
+}
+
+#[test]
+fn user_turn_normalization_ignores_a_blank_user_turn() {
+    let messages = vec![Message::system("system"), Message::user("   ")];
+    let out = ensure_resolvable_user_turn(&messages);
+    assert_eq!(out.len(), 3);
+    assert!(!out[1].text().trim().is_empty());
+}
+
+#[test]
+fn user_turn_normalization_accepts_a_non_text_user_turn() {
+    // An image-only turn carries no text but is still a real user input.
+    let mut messages = vec![Message::system("system"), Message::user("")];
+    let Message::User(user) = &mut messages[1] else {
+        unreachable!()
+    };
+    user.content = vec![ContentBlock::Image(ImageRef {
+        url: "https://example.invalid/a.png".to_string(),
+        mime_type: None,
+    })];
+
+    assert_eq!(ensure_resolvable_user_turn(&messages), messages);
+}
+
+#[test]
+fn user_turn_normalization_inserts_first_when_there_is_no_system_turn() {
+    let messages = vec![Message::assistant("continuing")];
+    let out = ensure_resolvable_user_turn(&messages);
+    assert_eq!(out.len(), 2);
+    assert!(matches!(out[0], Message::User(_)));
 }
 
 #[test]
