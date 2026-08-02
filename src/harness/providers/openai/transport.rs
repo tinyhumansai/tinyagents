@@ -7,6 +7,8 @@
 use super::responses;
 use super::*;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::harness::model::StreamAccumulator;
 
 /// How the provider expects the API credential to be sent on each request.
@@ -113,11 +115,22 @@ pub struct OpenAiModel {
     /// inline `<think>` reasoning, and unconditional extraction would silently
     /// strip legitimate content that mentions a literal `<think>` tag.
     reasoning_tags_overridden: bool,
-    /// When `true`, the unary [`ChatModel::invoke`] path sends `stream: true`
-    /// on the wire and folds the server-sent-events stream into a single
+    /// When set, the unary [`ChatModel::invoke`] path sends `stream: true` on
+    /// the wire and folds the server-sent-events stream into a single
     /// [`ModelResponse`] internally — for providers that reject a
-    /// `stream: false` body with an HTTP 400. `false` by default.
-    requires_streaming: bool,
+    /// `stream: false` body (`{"detail":"Stream must be set to true"}` and
+    /// friends). Starts `false`; seeded by
+    /// [`with_requires_streaming`](Self::with_requires_streaming) and
+    /// **latched at run time** the first time the provider rejects a
+    /// non-streaming request.
+    ///
+    /// It is an [`AtomicBool`] rather than a plain `bool` because
+    /// [`ChatModel::invoke`] takes `&self` (models are shared behind
+    /// `Arc<dyn ChatModel>`): without interior mutability the discovery could
+    /// not be remembered, so every single call would keep paying a
+    /// guaranteed-400 round trip before falling back. See
+    /// [`Self::latch_stream_required`].
+    stream_required: AtomicBool,
 }
 
 /// The auth headers `(name, value)` for a given [`AuthStyle`] + credential.
@@ -345,21 +358,45 @@ impl OpenAiModel {
             // `<think>` and must not strip literal mentions of the tag.
             reasoning_tags: Some(ReasoningTagExtraction::default()),
             reasoning_tags_overridden: false,
-            requires_streaming: false,
+            stream_required: AtomicBool::new(false),
         }
     }
 
     /// When the provider requires `stream: true` for every request, routes
     /// unary [`invoke`](ChatModel::invoke) through the streaming path internally.
-    pub fn with_requires_streaming(mut self, enabled: bool) -> Self {
-        self.requires_streaming = enabled;
+    ///
+    /// Optional: the transport also discovers this on its own (see
+    /// [`Self::latch_stream_required`]). Set it explicitly to skip the one
+    /// exploratory request that discovery costs.
+    pub fn with_requires_streaming(self, enabled: bool) -> Self {
+        self.stream_required.store(enabled, Ordering::Relaxed);
         self
     }
 
-    /// Returns whether the provider requires streaming for all calls.
-    #[cfg(test)]
-    pub(super) fn requires_streaming(&self) -> bool {
-        self.requires_streaming
+    /// Returns whether this instance currently requires streaming for all
+    /// unary calls — either declared up front via
+    /// [`with_requires_streaming`](Self::with_requires_streaming) or learned
+    /// from a provider rejection.
+    pub fn requires_streaming(&self) -> bool {
+        self.stream_required.load(Ordering::Relaxed)
+    }
+
+    /// Remembers that this endpoint only accepts `stream: true`.
+    ///
+    /// Called once the provider has told us so with an HTTP 400/422 (see
+    /// [`is_stream_required_error`]). Without this latch the transport
+    /// re-discovers the constraint on **every** unary call, so a streaming-only
+    /// proxy costs one guaranteed-400 round trip per agent turn — the shape
+    /// behind the 511 events / 2 users on openhuman#5165. Logs on the
+    /// transition only, so the discovery is visible exactly once per process.
+    pub(super) fn latch_stream_required(&self) {
+        if !self.stream_required.swap(true, Ordering::Relaxed) {
+            tracing::info!(
+                provider = %self.provider,
+                model = %self.model,
+                "[openai] provider requires stream:true; latching for subsequent calls"
+            );
+        }
     }
 
     /// Routes calls to the OpenAI **Responses API** (`/v1/responses`) instead of
@@ -1390,6 +1427,73 @@ pub(super) struct Degrade {
     pub json_object: bool,
 }
 
+/// Statuses an OpenAI-compatible proxy uses to reject a non-streaming request.
+///
+/// `400` is what the reference implementation returns. `422` is included because
+/// the wording seen in the wild arrives in a FastAPI `{"detail": …}` envelope,
+/// and FastAPI's own rejection status is `422` — a proxy that validates `stream`
+/// as a request field rather than raising an explicit `HTTPException(400)` lands
+/// there. The stream-specific wording still has to match, so widening the status
+/// set does not widen the false-positive surface meaningfully.
+const STREAM_REQUIRED_STATUSES: [u16; 2] = [400, 422];
+
+/// Recognises "this endpoint only accepts `stream: true`" from a provider error.
+///
+/// Some OpenAI-compatible proxies refuse unary calls outright. The wording is
+/// not standardised, so match a family of phrasings case-insensitively rather
+/// than one literal string:
+///
+/// - `{"detail":"Stream must be set to true"}` — the openhuman#5165 report
+/// - `stream must be true` / `'stream' must be set to true`
+/// - `streaming is required` / `only streaming is supported`
+/// - `stream=true is required`
+///
+/// Both the decoded `message` **and** the raw body are searched, because
+/// [`OpenAiModel::parse_error_body`] only promotes `error.message` / `message`
+/// to `ProviderError::message`. A proxy that nests the reason under any other
+/// key (`detail`, `errors[0].reason`, …) alongside a generic top-level
+/// `message` would otherwise be invisible to the check.
+///
+/// The `stream` mention is required in addition to the "must be true" phrasing
+/// so unrelated 400s ("`max_output_tokens` must be true"-shaped nonsense,
+/// `tool_choice` rejections) never route a call into the streaming path.
+///
+/// Pure, so the detection policy is unit-testable without a network call.
+pub(super) fn is_stream_required_error(error: &ProviderError) -> bool {
+    if !error
+        .status
+        .is_some_and(|status| STREAM_REQUIRED_STATUSES.contains(&status))
+    {
+        return false;
+    }
+    if mentions_stream_required(&error.message) {
+        return true;
+    }
+    error
+        .raw
+        .as_ref()
+        .is_some_and(|raw| mentions_stream_required(&raw.to_string()))
+}
+
+/// The wording half of [`is_stream_required_error`], split out so both the
+/// decoded message and the raw body run through identical rules.
+fn mentions_stream_required(haystack: &str) -> bool {
+    let lower = haystack.to_ascii_lowercase();
+    if !lower.contains("stream") {
+        return false;
+    }
+    const PHRASES: [&str; 7] = [
+        "must be set to true",
+        "must be true",
+        "streaming is required",
+        "requires streaming",
+        "only streaming",
+        "stream=true",
+        "stream: true is required",
+    ];
+    PHRASES.iter().any(|phrase| lower.contains(phrase))
+}
+
 /// Computes the additional degradation to apply after an HTTP 400, or `None`
 /// when the failure is not an auto-degradable request-shape rejection.
 ///
@@ -1514,10 +1618,12 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
     /// Invokes the OpenAI Chat Completions endpoint and maps the response into a
     /// [`ModelResponse`].
     ///
-    /// When the provider requires streaming
-    /// ([`Self::requires_streaming`] or a 400 with `"Stream must be set to
-    /// true"`), the call is degraded to the streaming path internally and the
-    /// SSE stream is folded into a single response.
+    /// When the provider requires streaming — declared via
+    /// [`OpenAiModel::with_requires_streaming`], or discovered from a rejection
+    /// matching [`is_stream_required_error`] — the call is degraded to the
+    /// streaming path internally and the SSE stream is folded into a single
+    /// response. A discovered constraint is latched on the instance, so only the
+    /// first call pays the rejected round trip.
     ///
     /// # Errors
     ///
@@ -1529,13 +1635,15 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             return self.invoke_responses(&request).await;
         }
 
-        // Short-circuit: providers that require `stream: true` on every call
-        // skip the non-streaming attempt entirely to avoid a guaranteed 400.
-        if self.requires_streaming {
-            tracing::info!(
-                provider = self.provider,
+        // Short-circuit: providers known to require `stream: true` on every
+        // call skip the non-streaming attempt entirely to avoid a guaranteed
+        // 400. "Known" covers both an explicit `with_requires_streaming(true)`
+        // and a constraint latched from an earlier rejection on this instance.
+        if self.requires_streaming() {
+            tracing::debug!(
+                provider = %self.provider,
                 model = %self.model,
-                "[openai] requires_streaming is set; folding stream into unary response"
+                "[openai] stream:true required; folding stream into unary response"
             );
             return invoke_with_streaming(self, request).await;
         }
@@ -1545,15 +1653,16 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             .await
         {
             Ok(response) => response,
-            Err(TinyAgentsError::Provider(err))
-                if err.status == Some(400)
-                    && err.message.contains("Stream must be set to true") =>
-            {
-                // The provider rejects `stream: false`. Fall back to the
-                // streaming path and fold the SSE stream into a response.
+            Err(TinyAgentsError::Provider(err)) if is_stream_required_error(&err) => {
+                // The provider rejects `stream: false`. Remember it so the next
+                // call goes straight to streaming instead of re-paying this
+                // failed round trip, then fall back to the streaming path and
+                // fold the SSE stream into a response.
+                self.latch_stream_required();
                 tracing::info!(
                     provider = %err.provider,
                     model = %err.model.as_deref().unwrap_or("?"),
+                    status = ?err.status,
                     "[openai] provider rejected non-streaming request; \
                      falling back to streaming path"
                 );
