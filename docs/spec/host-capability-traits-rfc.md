@@ -141,10 +141,10 @@ Resolves an agent id to its definition. Replaces direct reads of `profiles` and
 ```rust
 #[async_trait]
 pub trait DefinitionRegistry: Send + Sync {
-    async fn resolve(&self, id: &AgentId) -> Result<Option<AgentDefinition>>;
+    async fn resolve(&self, id: &str) -> Result<Option<AgentDefinition>>;
     async fn list(&self) -> Result<Vec<AgentDefinition>>;
     /// Subagent ids this agent may delegate to, already tier-checked.
-    async fn delegates_for(&self, id: &AgentId) -> Result<Vec<AgentId>>;
+    async fn delegates_for(&self, id: &str) -> Result<Vec<String>>;
 }
 ```
 
@@ -217,7 +217,7 @@ pub trait ToolOutcomeClassifier: Send + Sync {
 #[async_trait]
 pub trait ExperienceStore: Send + Sync {
     async fn record(&self, exp: &Experience) -> Result<()>;
-    async fn recall_for(&self, agent: &AgentId, task: &str) -> Result<Vec<Experience>>;
+    async fn recall_for(&self, agent_id: &str, task: &str) -> Result<Vec<Experience>>;
 }
 ```
 
@@ -236,7 +236,7 @@ routing, which is product logic and must not be published).
 ```rust
 #[async_trait]
 pub trait ModelResolver<State: Send + Sync>: Send + Sync {
-    async fn resolve(&self, req: &ModelRequest) -> Result<Arc<dyn ChatModel<State>>>;
+    async fn resolve(&self, req: &ModelResolveRequest) -> Result<Arc<dyn ChatModel<State>>>;
 }
 ```
 
@@ -260,27 +260,60 @@ pub trait ModelResolver<State: Send + Sync>: Send + Sync {
 1. ~~**`MemoryProvider` name collision with `tinyflows`** (§3.1).~~ **Resolved
    2026-08-02** — this trait is `AgentMemory`; `tinyflows` keeps
    `MemoryProvider`. See the note in §3.1.
-2. **Where do these live?** Proposal: one module per trait under
-   `src/harness/host/`, re-exported from `harness::prelude`, matching the
-   existing `src/harness/<area>/types.rs` convention.
-3. **Do optional capabilities belong on `AgentHarness` or on a new
-   `HostCapabilities` bundle?** tinyflows chose a bundle struct
-   (`Capabilities`) with `Option` fields; this crate currently uses builder
-   setters. Consistency across the two crates argues for a bundle.
+2. ~~**Where do these live?**~~ **Resolved 2026-08-02** — one module per trait
+   under `src/harness/host/`, re-exported from `host::*`.
+   *Partially deferred:* each capability is currently a single flat file
+   (trait + value types + default impl + inline tests) rather than the crate's
+   `<area>/{mod,types,test}.rs` split, so its value types sit in a module that
+   also imports `async_trait`. That does not yet satisfy §6's "inert value-type
+   module, dependency-free". Deferred rather than done because the split is
+   30 files of pure motion and buys nothing until a host actually needs to
+   depend on the value types without the crate. **Do it before publishing.**
+3. ~~**Bundle or builder?**~~ **Resolved 2026-08-02** — a
+   `HostCapabilities<State>` bundle (`host/mod.rs`), matching
+   `tinyflows::caps::Capabilities`. The four required capabilities are
+   constructor arguments; the six optional ones are `Option<Arc<dyn …>>` set
+   through `with_*`. Generic over `State` only because `ModelResolver` is.
+   `Clone` is hand-written: deriving it would demand `State: Clone`, which is
+   wrong when every field is an `Arc`.
 4. **Contract versioning.** OpenHuman's kernel spec requires each contract to
    carry `CONTRACT_VERSION: (u16, u16)`. Should this crate adopt that, or is
    semver on the crate itself sufficient? (Semver is probably sufficient for an
-   embedded driver, and insufficient for the out-of-process case.)
+   embedded driver, and insufficient for the out-of-process case.) **Still
+   open** — nothing depends on it until an out-of-process driver exists.
+5. ~~**No `AgentId` in the crate.**~~ **Resolved 2026-08-02** — agent identity
+   is `&str` / `String` throughout, and §3.3 / §3.9 / §3.10 above have been
+   amended to match. A newtype minted in these modules would not be the type a
+   host's registry hands around, so it would add a conversion at every call
+   site and buy no safety.
+6. ~~**§3.10's `ModelRequest` collides with `harness::model::ModelRequest`.**~~
+   **Resolved 2026-08-02** — the routing type is `ModelResolveRequest`; §3.10
+   amended.
+
+### Identity conventions (fixed during Phase 1)
+
+Ten independently-written modules encoded agent and thread identity four
+different ways — `agent` vs `agent_id`, `thread` vs `thread_id`, and one
+`CallEstimate.agent: String` that re-encoded "absent" as `""`. Normalised to:
+
+- **`agent_id`** and **`thread_id`** as the field names, everywhere.
+- **`Option<…>` when the value can be absent** — never a sentinel empty string.
+  A host cannot be expected to remember a per-field convention, and the one
+  place that used a sentinel was in the same change set as a module that
+  documented at length why sentinels are wrong.
 
 ---
 
 ## 6. Acceptance criteria for Phase 0
 
-- [ ] Trait signatures reviewed and the ten-trait budget accepted (or amended).
+- [x] Trait signatures reviewed and the ten-trait budget accepted — all ten
+      landed 2026-08-02, budget held at ten, no eleventh needed.
 - [x] §5.1 naming collision resolved (`AgentMemory`, 2026-08-02).
-- [ ] §5.2 module layout agreed.
-- [ ] §5.3 bundle-vs-builder decided.
-- [ ] Inert value-type module named and confirmed dependency-free.
+- [x] §5.2 module layout agreed (`src/harness/host/`); per-capability
+      types/test split deferred — see §5.2.
+- [x] §5.3 decided: `HostCapabilities<State>` bundle.
+- [ ] Inert value-type module named and confirmed dependency-free — **not met**;
+      see §5.2. Blocks publishing, not Phase 4.
 
 Only then does Phase 1 (land the traits with default impls, no host change)
 begin.

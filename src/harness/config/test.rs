@@ -80,10 +80,10 @@ fn all_keys_leads_with_the_block_key_and_dedupes_siblings() {
         block_key: "  thoughts ".into(),
         required_keys: vec![
             "next_action".into(),
-            "  ".into(),        // blank entries are dropped
+            "  ".into(),          // blank entries are dropped
             "next_action".into(), // duplicates are dropped
-            "thoughts".into(),  // repeating the block key is a no-op
-            " reason ".into(),  // trimmed
+            "thoughts".into(),    // repeating the block key is a no-op
+            " reason ".into(),    // trimmed
         ],
     };
     assert_eq!(r.all_keys(), vec!["thoughts", "next_action", "reason"]);
