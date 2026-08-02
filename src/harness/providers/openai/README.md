@@ -37,12 +37,21 @@ of the rest of the harness.
 - `OpenAiModel::from_spec(spec, api_key)` / `from_spec_env(spec)` — build from a
   `providers::ProviderSpec` (base URL, default model, provider id already
   resolved).
-- **Compatibility presets** — thin wrappers over `new` + `with_base_url` +
-  `with_model` for endpoints that speak the same Chat Completions wire format:
+- **Compatibility presets** for hosted endpoints that speak the same Chat
+  Completions wire format:
   `compatible(base_url, model)` / `compatible_provider(..)` (arbitrary
   endpoint), `deepseek`, `anthropic` (compat endpoint, not the native
-  Anthropic API), `groq`, `xai`, `openrouter`, `together`, `mistral`, `ollama`.
+  Anthropic API), `groq`, `xai`, `openrouter`, `together`, and `mistral`.
   Override the preset's default model with `.with_model(..)`.
+- **Local-runtime presets** — `ollama()`, fallible
+  `ollama_at(base_url, model)`, and fallible
+  `lm_studio(base_url, api_key, model)`. These normalize a server or
+  `/v1/models` URL to its `/v1` API base and use conservative local defaults:
+  no native or parallel tool calls, no streamed tool chunks, and no image
+  input. `ollama()` and `ollama_at()` send no authorization header; LM Studio
+  sends a bearer token only when its API key is non-empty.
+  `ProviderSpec::Ollama` uses the same defaults unless `requires_api_key` is
+  enabled, in which case it sends a bearer token.
 
 Accessors: `.model()`, `.provider()`, `.base_url()`.
 

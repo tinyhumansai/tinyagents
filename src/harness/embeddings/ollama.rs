@@ -2,6 +2,10 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use super::EmbeddingModel;
 use crate::error::{Result, TinyAgentsError};
@@ -17,7 +21,7 @@ pub struct OllamaEmbeddingModel {
     client: reqwest::Client,
     base_url: String,
     model: String,
-    dimensions: usize,
+    dimensions: Arc<AtomicUsize>,
     options: Option<OllamaOptions>,
 }
 
@@ -27,13 +31,49 @@ impl OllamaEmbeddingModel {
             client: reqwest::Client::new(),
             base_url: normalize_base_url(base_url)?,
             model: normalize_model(model)?,
-            dimensions: if dimensions == 0 {
+            dimensions: Arc::new(AtomicUsize::new(if dimensions == 0 {
                 DEFAULT_OLLAMA_DIMENSIONS
             } else {
                 dimensions
-            },
+            })),
             options: None,
         })
+    }
+
+    pub(super) fn try_new_unresolved(base_url: &str, model: &str) -> Result<Self> {
+        Ok(Self {
+            client: reqwest::Client::new(),
+            base_url: normalize_base_url(base_url)?,
+            model: normalize_model(model)?,
+            dimensions: Arc::new(AtomicUsize::new(0)),
+            options: None,
+        })
+    }
+
+    /// Embeds text for a model whose vector width is not known in advance.
+    ///
+    /// The temporary adapter learns and validates the response width internally;
+    /// callers receive only the resolved width and vectors, so no model with an
+    /// unstable `dimensions()` or signature escapes this operation.
+    pub async fn embed_discovering_dimensions(
+        base_url: &str,
+        model: &str,
+        client: reqwest::Client,
+        texts: &[String],
+        num_ctx: u32,
+        num_batch: u32,
+    ) -> Result<(usize, Vec<Vec<f32>>)> {
+        if !texts.iter().any(|text| !text.trim().is_empty()) {
+            return Err(TinyAgentsError::Validation(
+                "dynamic embedding dimension discovery requires at least one nonblank input"
+                    .to_string(),
+            ));
+        }
+        let adapter = Self::try_new_unresolved(base_url, model)?
+            .with_client(client)
+            .with_context_options(num_ctx, num_batch);
+        let vectors = adapter.embed(texts).await?;
+        Ok((adapter.dimensions(), vectors))
     }
 
     pub fn new(base_url: &str, model: &str, dimensions: usize) -> Self {
@@ -134,11 +174,25 @@ impl OllamaEmbeddingModel {
         Ok(output)
     }
 
-    fn validate_dimensions(&self, index: usize, vector: &[f32]) -> Result<()> {
-        if vector.len() != self.dimensions {
+    pub(super) fn validate_dimensions(&self, index: usize, vector: &[f32]) -> Result<()> {
+        if vector.is_empty() {
+            return Err(TinyAgentsError::Embedding(format!(
+                "ollama embed returned an empty vector at index {index}"
+            )));
+        }
+        let expected = match self.dimensions.compare_exchange(
+            0,
+            vector.len(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => vector.len(),
+            Err(expected) => expected,
+        };
+        if vector.len() != expected {
             return Err(TinyAgentsError::Embedding(format!(
                 "ollama embed dimension mismatch at index {index}: expected {}, got {}",
-                self.dimensions,
+                expected,
                 vector.len()
             )));
         }
@@ -284,7 +338,7 @@ impl EmbeddingModel for OllamaEmbeddingModel {
     }
 
     fn dimensions(&self) -> usize {
-        self.dimensions
+        self.dimensions.load(Ordering::Acquire)
     }
 
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {

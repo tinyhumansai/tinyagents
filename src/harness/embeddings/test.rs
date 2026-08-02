@@ -69,6 +69,30 @@ async fn mock_model_batches_in_order() {
     }
 }
 
+#[test]
+fn unresolved_ollama_dimensions_are_learned_and_enforced_internally() {
+    let model = OllamaEmbeddingModel::try_new_unresolved("http://host:11434", "custom").unwrap();
+    assert_eq!(model.dimensions(), 0);
+    model.validate_dimensions(0, &[0.0; 7]).unwrap();
+    assert_eq!(model.dimensions(), 7);
+    assert!(model.validate_dimensions(1, &[0.0; 8]).is_err());
+}
+
+#[tokio::test]
+async fn dynamic_ollama_discovery_rejects_blank_only_batches() {
+    let error = OllamaEmbeddingModel::embed_discovering_dimensions(
+        "http://host:11434",
+        "custom",
+        reqwest::Client::new(),
+        &[" ".to_string()],
+        1,
+        1,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("nonblank"));
+}
+
 #[tokio::test]
 async fn mock_model_empty_input_returns_empty() {
     let model = MockEmbeddingModel::new(8);

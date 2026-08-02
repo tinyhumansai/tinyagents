@@ -39,6 +39,8 @@ pub enum AuthStyle {
 pub struct OpenAiModel {
     /// Shared HTTP client.
     client: reqwest::Client,
+    /// Whether the client was supplied by the caller and owns default deadlines.
+    caller_owned_client: bool,
     /// API credential; how it is sent is governed by [`Self::auth`].
     api_key: String,
     /// How `api_key` is attached to each request (default [`AuthStyle::Bearer`]).
@@ -317,6 +319,7 @@ impl OpenAiModel {
                 .connect_timeout(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
                 .build()
                 .expect("default reqwest client builds"),
+            caller_owned_client: false,
             api_key: api_key.into(),
             auth: AuthStyle::Bearer,
             extra_headers: Vec::new(),
@@ -390,6 +393,14 @@ impl OpenAiModel {
     /// CLI user agent).
     pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
         self.user_agent = Some(user_agent.into());
+        self
+    }
+
+    /// Reuses a caller-configured HTTP client, including its connection pool,
+    /// proxy settings, and request deadlines.
+    pub fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self.caller_owned_client = true;
         self
     }
 
@@ -545,12 +556,19 @@ impl OpenAiModel {
     /// Overrides the default model id.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
-        let local_capabilities = self
-            .local_capabilities_locked
-            .then_some((self.profile.tool_calling, self.profile.modalities.image_in));
+        let local_capabilities = self.local_capabilities_locked.then_some((
+            self.profile.tool_calling,
+            self.profile.parallel_tool_calls,
+            self.profile.streaming_tool_chunks,
+            self.profile.modalities.image_in,
+        ));
         self.profile = derive_profile(&self.provider, &self.model);
-        if let Some((tool_calling, image_in)) = local_capabilities {
+        if let Some((tool_calling, parallel_tool_calls, streaming_tool_chunks, image_in)) =
+            local_capabilities
+        {
             self.profile.tool_calling = tool_calling;
+            self.profile.parallel_tool_calls = parallel_tool_calls;
+            self.profile.streaming_tool_chunks = streaming_tool_chunks;
             self.profile.modalities.image_in = image_in;
         }
         self
@@ -559,12 +577,19 @@ impl OpenAiModel {
     /// Overrides the provider family id used in profiles and normalized errors.
     pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
         self.provider = provider.into();
-        let local_capabilities = self
-            .local_capabilities_locked
-            .then_some((self.profile.tool_calling, self.profile.modalities.image_in));
+        let local_capabilities = self.local_capabilities_locked.then_some((
+            self.profile.tool_calling,
+            self.profile.parallel_tool_calls,
+            self.profile.streaming_tool_chunks,
+            self.profile.modalities.image_in,
+        ));
         self.profile = derive_profile(&self.provider, &self.model);
-        if let Some((tool_calling, image_in)) = local_capabilities {
+        if let Some((tool_calling, parallel_tool_calls, streaming_tool_chunks, image_in)) =
+            local_capabilities
+        {
             self.profile.tool_calling = tool_calling;
+            self.profile.parallel_tool_calls = parallel_tool_calls;
+            self.profile.streaming_tool_chunks = streaming_tool_chunks;
             self.profile.modalities.image_in = image_in;
         }
         self
@@ -614,6 +639,7 @@ impl OpenAiModel {
     /// Builds an OpenAI-compatible model from a provider spec and explicit API
     /// key.
     pub fn from_spec(spec: ProviderSpec, api_key: impl Into<String>) -> Result<Self> {
+        let api_key = api_key.into();
         if spec.model.trim().is_empty() {
             return Err(TinyAgentsError::Validation(
                 "provider spec model must not be empty".to_string(),
@@ -623,6 +649,20 @@ impl OpenAiModel {
             return Err(TinyAgentsError::Validation(
                 "provider spec base_url must not be empty".to_string(),
             ));
+        }
+        if spec.kind == crate::harness::providers::ProviderKind::Ollama {
+            let auth = if spec.requires_api_key {
+                AuthStyle::Bearer
+            } else {
+                AuthStyle::None
+            };
+            return Ok(Self::local_runtime(
+                &spec.provider,
+                normalize_local_v1_base_url(spec.base_url, "http://localhost:11434")?,
+                api_key,
+                spec.model,
+            )
+            .with_auth_style(auth));
         }
         Ok(Self::compatible_provider(
             spec.provider,
@@ -797,16 +837,17 @@ impl OpenAiModel {
     /// `llama3.2`.
     pub fn ollama() -> Self {
         Self::ollama_at("http://localhost:11434", "llama3.2")
+            .expect("the built-in Ollama URL is valid")
     }
 
     /// An Ollama server exposed through its OpenAI-compatible HTTP API.
-    pub fn ollama_at(base_url: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::local_runtime(
+    pub fn ollama_at(base_url: impl Into<String>, model: impl Into<String>) -> Result<Self> {
+        Ok(Self::local_runtime(
             "ollama",
-            normalize_local_v1_base_url(base_url.into(), "http://localhost:11434"),
+            normalize_local_v1_base_url(base_url.into(), "http://localhost:11434")?,
             "",
             model,
-        )
+        ))
     }
 
     /// An LM Studio server exposed through its OpenAI-compatible HTTP API.
@@ -817,20 +858,20 @@ impl OpenAiModel {
         base_url: impl Into<String>,
         api_key: impl Into<String>,
         model: impl Into<String>,
-    ) -> Self {
+    ) -> Result<Self> {
         let api_key = api_key.into();
         let auth = if api_key.trim().is_empty() {
             AuthStyle::None
         } else {
             AuthStyle::Bearer
         };
-        Self::local_runtime(
+        Ok(Self::local_runtime(
             "lm_studio",
-            normalize_local_v1_base_url(base_url.into(), "http://localhost:1234"),
+            normalize_local_v1_base_url(base_url.into(), "http://localhost:1234")?,
             api_key,
             model,
         )
-        .with_auth_style(auth)
+        .with_auth_style(auth))
     }
 
     fn local_runtime(
@@ -849,6 +890,11 @@ impl OpenAiModel {
     fn lock_local_capabilities(mut self) -> Self {
         self.local_capabilities_locked = true;
         self
+    }
+
+    #[cfg(test)]
+    pub(super) fn auth_config(&self) -> (&str, &AuthStyle) {
+        (&self.api_key, &self.auth)
     }
 
     /// Returns the default model id this instance will request.
@@ -1109,7 +1155,7 @@ impl OpenAiModel {
         url: &str,
     ) -> Result<reqwest::Response> {
         let mut builder = self.authorized(self.client.post(url)).json(body);
-        if let Some(timeout) = request_timeout(timeout_ms, false) {
+        if let Some(timeout) = self.effective_request_timeout(timeout_ms, false) {
             builder = builder.timeout(timeout);
         }
         self.send_checked(builder, "responses request", url).await
@@ -1160,10 +1206,22 @@ impl OpenAiModel {
     ) -> Result<reqwest::Response> {
         let url = format!("{}/chat/completions", self.base_url);
         let mut builder = self.authorized(self.client.post(&url)).json(body);
-        if let Some(timeout) = request_timeout(timeout_ms, streaming) {
+        if let Some(timeout) = self.effective_request_timeout(timeout_ms, streaming) {
             builder = builder.timeout(timeout);
         }
         self.send_checked(builder, what, &url).await
+    }
+
+    pub(super) fn effective_request_timeout(
+        &self,
+        timeout_ms: Option<u64>,
+        streaming: bool,
+    ) -> Option<Duration> {
+        if self.caller_owned_client && timeout_ms.is_none() {
+            None
+        } else {
+            request_timeout(timeout_ms, streaming)
+        }
     }
 
     /// Builds the chat-completions wire body for `request` under the given
@@ -1278,7 +1336,7 @@ impl OpenAiModel {
     }
 }
 
-fn normalize_local_v1_base_url(raw: String, default_root: &str) -> String {
+fn normalize_local_v1_base_url(raw: String, default_root: &str) -> Result<String> {
     let trimmed = raw.trim().trim_end_matches('/');
     let root = if trimmed.is_empty() {
         default_root.to_owned()
@@ -1287,8 +1345,15 @@ fn normalize_local_v1_base_url(raw: String, default_root: &str) -> String {
     } else {
         format!("http://{trimmed}")
     };
-    let mut url =
-        reqwest::Url::parse(&root).expect("local runtime URL is normalized with a scheme");
+    let mut url = reqwest::Url::parse(&root).map_err(|error| {
+        TinyAgentsError::Validation(format!("invalid local runtime URL `{root}`: {error}"))
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(TinyAgentsError::Validation(format!(
+            "local runtime URL must use http or https, got `{}`",
+            url.scheme()
+        )));
+    }
     let mut segments: Vec<&str> = url
         .path()
         .split('/')
@@ -1305,7 +1370,7 @@ fn normalize_local_v1_base_url(raw: String, default_root: &str) -> String {
     url.set_path(&format!("/{}", segments.join("/")));
     url.set_query(None);
     url.set_fragment(None);
-    url.to_string().trim_end_matches('/').to_owned()
+    Ok(url.to_string().trim_end_matches('/').to_owned())
 }
 
 /// Request-shape degradations to apply when building an OpenAI wire body.
