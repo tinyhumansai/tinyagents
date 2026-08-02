@@ -68,7 +68,7 @@ rather than speculative.
 
 | # | Trait | Replaces (refs) | Optional? |
 |---|-------|-----------------|-----------|
-| 1 | `MemoryProvider` | `memory` 57, `memory_store` 41, `memory_tree` 16, `agent_memory` 11, `memory_tools` 5, `memory_conversations` 3 | yes |
+| 1 | `AgentMemory` | `memory` 57, `memory_store` 41, `memory_tree` 16, `agent_memory` 11, `memory_tools` 5, `memory_conversations` 3 | yes |
 | 2 | `ContextComposer` | `context` 52, `thread_goals` 5 | no |
 | 3 | `DefinitionRegistry` | `profiles` 34, `agent_registry` 22 | no |
 | 4 | `SecurityGate` | `security` 25, `approval` 10, `agent_tool_policy` 6, `sandbox` 4, `prompt_injection` 2 | no |
@@ -79,14 +79,14 @@ rather than speculative.
 | 9 | `ExperienceStore` | `agent_experience` 3 | yes |
 | 10 | `ModelResolver` | `inference` 72 (with the existing `ChatModel`) | no |
 
-### 3.1 `MemoryProvider`
+### 3.1 `AgentMemory`
 
 The largest seam (133 refs across six domains). Note the crate must **not**
 learn what a memory is — recall returns opaque, already-redacted host values.
 
 ```rust
 #[async_trait]
-pub trait MemoryProvider: Send + Sync {
+pub trait AgentMemory: Send + Sync {
     /// Retrieves memory relevant to `query` for injection into a turn's
     /// context. Returned items are already scope-filtered and redacted by the
     /// host; the runtime must not re-rank or re-filter them.
@@ -106,12 +106,14 @@ pub trait MemoryProvider: Send + Sync {
 `citation: Option<String>` — deliberately **not** OpenHuman's `MemoryCitation`,
 whose UI shape stays host-side.
 
-> **Naming collision, flagged deliberately.** `tinyflows` 0.5.1 shipped a
+> **Why `AgentMemory` and not `MemoryProvider`.** `tinyflows` 0.5.1 shipped a
 > *different* `MemoryProvider` (`recall`/`flavour`/`people`/`remember`/`forget`,
 > `serde_json::Value`-typed, flow-scoped). The two are not interchangeable and
-> both crates are in the same dependency graph for OpenHuman. Either rename
-> this one (`AgentMemory`?) or accept that hosts will alias one at the import
-> site. **This needs an upstream decision before Phase 1.**
+> both crates sit in OpenHuman's dependency graph, so sharing the name would
+> force an import alias at every host call site. Resolved 2026-08-02: this trait
+> is `AgentMemory`; `tinyflows` keeps `MemoryProvider`. The scoped name is also
+> the more honest one — this is the agent runtime's view of memory, not a
+> general memory abstraction.
 
 ### 3.2 `ContextComposer`
 
@@ -255,7 +257,9 @@ pub trait ModelResolver<State: Send + Sync>: Send + Sync {
 
 ## 5. Open questions for upstream
 
-1. **`MemoryProvider` name collision with `tinyflows`** (§3.1). Blocking.
+1. ~~**`MemoryProvider` name collision with `tinyflows`** (§3.1).~~ **Resolved
+   2026-08-02** — this trait is `AgentMemory`; `tinyflows` keeps
+   `MemoryProvider`. See the note in §3.1.
 2. **Where do these live?** Proposal: one module per trait under
    `src/harness/host/`, re-exported from `harness::prelude`, matching the
    existing `src/harness/<area>/types.rs` convention.
@@ -273,7 +277,7 @@ pub trait ModelResolver<State: Send + Sync>: Send + Sync {
 ## 6. Acceptance criteria for Phase 0
 
 - [ ] Trait signatures reviewed and the ten-trait budget accepted (or amended).
-- [ ] §5.1 naming collision resolved.
+- [x] §5.1 naming collision resolved (`AgentMemory`, 2026-08-02).
 - [ ] §5.2 module layout agreed.
 - [ ] §5.3 bundle-vs-builder decided.
 - [ ] Inert value-type module named and confirmed dependency-free.
