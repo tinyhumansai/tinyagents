@@ -99,10 +99,33 @@ impl RequiredOutput {
         }
     }
 
+    /// Every key the reply's block must carry, `block_key` first, then each
+    /// distinct non-blank entry of `required_keys` in declared order.
+    ///
+    /// Returns empty for a blank `block_key` — the block key is the contract's
+    /// defining key, so a blank one makes the whole contract inert *even when
+    /// `required_keys` lists siblings*. Enforcement therefore never accepts or
+    /// synthesizes a block that is missing it.
+    pub fn all_keys(&self) -> Vec<String> {
+        let block_key = self.block_key.trim();
+        if block_key.is_empty() {
+            return Vec::new();
+        }
+
+        let mut keys: Vec<String> = vec![block_key.to_string()];
+        for key in &self.required_keys {
+            let trimmed = key.trim();
+            if !trimmed.is_empty() && !keys.iter().any(|k| k == trimmed) {
+                keys.push(trimmed.to_string());
+            }
+        }
+        keys
+    }
+
     /// Whether this contract actually enforces anything. A blank `block_key`
     /// is inert — callers should skip enforcement rather than fail every turn.
     pub fn is_active(&self) -> bool {
-        !self.block_key.trim().is_empty()
+        !self.all_keys().is_empty()
     }
 }
 
