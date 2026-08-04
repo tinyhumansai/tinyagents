@@ -284,7 +284,7 @@ mod tests {
         // The runtime holds this capability as `Option<Arc<dyn …>>`, so the
         // trait must stay object-safe.
         let classifier: std::sync::Arc<dyn ToolOutcomeClassifier> =
-            std::sync::Arc::new(ErrorFieldClassifier::default());
+            std::sync::Arc::new(ErrorFieldClassifier);
         assert_eq!(
             classifier.classify("search", &result_with_error(Some("nope"))),
             OutcomeClass::PermanentFailure

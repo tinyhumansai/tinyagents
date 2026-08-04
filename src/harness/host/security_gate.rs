@@ -398,7 +398,7 @@ mod tests {
     async fn allow_all_gate_authorizes_a_destructive_looking_call_too() {
         // Pinning the "no checks whatsoever" contract: nothing about the tool
         // name or arguments changes the answer.
-        let gate = AllowAllSecurityGate::default();
+        let gate = AllowAllSecurityGate;
         let request = ToolCallRequest::new("shell", json!({ "cmd": "rm -rf /" }), "lead");
         assert!(gate.authorize_tool(&request).await.unwrap().is_allowed());
     }

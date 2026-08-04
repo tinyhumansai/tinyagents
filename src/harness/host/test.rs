@@ -7,13 +7,9 @@ use super::*;
 /// in these tests needs a real state, so use unit.
 type S = ();
 
-fn required() -> (
-    Arc<dyn ContextComposer>,
-    Arc<dyn DefinitionRegistry>,
-    Arc<dyn SecurityGate>,
-    Arc<dyn ModelResolver<S>>,
-) {
-    (
+/// A bundle carrying the four required capabilities and no optional ones.
+fn bundle() -> HostCapabilities<S> {
+    HostCapabilities::new(
         Arc::new(StaticContextComposer::new("you are a test agent")),
         Arc::new(InMemoryDefinitionRegistry::new(Vec::new())),
         Arc::new(AllowAllSecurityGate),
@@ -21,11 +17,6 @@ fn required() -> (
             crate::harness::testkit::ScriptedModel::replies(vec!["ok"]),
         ))),
     )
-}
-
-fn bundle() -> HostCapabilities<S> {
-    let (context, definitions, security, models) = required();
-    HostCapabilities::new(context, definitions, security, models)
 }
 
 #[test]

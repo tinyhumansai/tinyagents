@@ -523,7 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn unlimited_gate_records_usage_without_accumulating() {
-        let gate = UnlimitedBudgetGate::default();
+        let gate = UnlimitedBudgetGate;
         gate.record(&Usage::new(1_000, 1_000))
             .await
             .expect("recording is infallible");

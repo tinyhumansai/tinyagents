@@ -428,7 +428,7 @@ mod tests {
         }
         // Nothing observable to assert beyond "did not panic, returned unit" —
         // which is precisely the contract: emit has no failure channel.
-        assert_eq!(sink, NoopProgressSink::default());
+        assert_eq!(sink, NoopProgressSink);
     }
 
     // ── RecordingProgressSink ────────────────────────────────────────────────
