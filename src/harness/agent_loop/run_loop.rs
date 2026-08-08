@@ -50,6 +50,15 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
 
         match exit {
             LoopExit::Finished | LoopExit::LimitStop(_) => {
+                if let LoopExit::LimitStop(kind) = &exit {
+                    tracing::debug!(
+                        target: "tinyagents::agent_loop",
+                        run_id = %ctx.run_id(),
+                        limit_kind = ?kind,
+                        messages = run.messages.len(),
+                        "[agent_loop] completing with the partial run after a limit stop"
+                    );
+                }
                 let record = ctx.emit(AgentEvent::RunCompleted {
                     run_id: ctx.run_id().clone(),
                 });

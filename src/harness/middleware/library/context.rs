@@ -12,8 +12,7 @@ use crate::harness::middleware::{
     PromptCacheGuardMiddleware,
 };
 use crate::harness::summarization::{
-    ConcatSummarizer, SummarizationPolicy, Summarizer, SummaryRecord, TrimStrategy,
-    estimate_tokens, trim_messages,
+    ConcatSummarizer, SummarizationPolicy, Summarizer, SummaryRecord, TrimStrategy, trim_messages,
 };
 
 // ── MessageTrimMiddleware ─────────────────────────────────────────────────────
