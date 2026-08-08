@@ -9,8 +9,29 @@
 //!
 //! All public items are re-exported through [`super`].
 
-use crate::harness::events::HarnessRunStatus;
+use crate::harness::events::{HarnessRunStatus, LimitKind};
 use crate::harness::middleware::AgentRun;
+use crate::harness::steering::PauseState;
+
+/// How the agent loop body stopped iterating.
+///
+/// Kept separate from the `Result` channel so a *deliberate* stop (a pause, a
+/// `StopWithPartial` limit) is never confused with a failure, and so the caller
+/// can finalize each kind differently: a finish and a limit-stop complete the
+/// run, while a pause is reported as interrupted and leaves the pause latched
+/// on the steering handle.
+#[derive(Clone, Debug)]
+pub(crate) enum LoopExit {
+    /// The model produced a final answer, or a middleware requested
+    /// [`crate::harness::context::MiddlewareControl::StopWithFinal`].
+    Finished,
+    /// A call cap was reached under
+    /// [`LimitBehavior::StopWithPartial`][crate::harness::limits::LimitBehavior::StopWithPartial]:
+    /// stop cleanly and keep everything the run produced.
+    LimitStop(LimitKind),
+    /// Steering latched a pause; the run is resumable, not finished.
+    Paused(PauseState),
+}
 
 /// The full result of an agent-loop invocation: the accumulated [`AgentRun`]
 /// plus a compact [`HarnessRunStatus`] snapshot.
