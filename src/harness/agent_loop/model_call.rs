@@ -631,6 +631,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     call_id: call_id.clone(),
                     delta: message_delta,
                 });
+                *deltas_emitted += 1;
                 self.middleware
                     .run_on_model_delta(ctx, state, &mut model_delta)
                     .await?;
