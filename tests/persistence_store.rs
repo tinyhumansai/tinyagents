@@ -119,7 +119,14 @@ async fn one_unreadable_thread_file_does_not_break_list_threads() {
 /// `append` is a read-modify-write over the store. Concurrent appends used to
 /// drop messages, giving the two `ChatHistory` backends different guarantees
 /// for one trait method.
-#[tokio::test]
+///
+/// The runtime flavour is load-bearing. `#[tokio::test]` defaults to a
+/// **current-thread** runtime, and `FileStore`'s methods are `async fn`s with
+/// no interior `.await`, so each read-modify-write runs to completion before
+/// the next task is polled — the race cannot occur and the test passes even
+/// against the unsynchronised version. Only a multi-threaded runtime actually
+/// interleaves them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_store_appends_do_not_lose_messages() {
     let dir = tempfile::tempdir().unwrap();
     let history = Arc::new(StoreChatHistory::new(FileStore::new(dir.path())));

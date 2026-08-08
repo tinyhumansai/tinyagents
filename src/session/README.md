@@ -96,13 +96,13 @@ and completion read state and then act on it, so they take the write lock up
 front with `BEGIN IMMEDIATE` — racing claims serialize at `BEGIN` rather than
 failing at `COMMIT` after one has already decided it won.
 
-**That serialization only happens because a busy timeout is installed.**
-SQLite's default `busy_timeout` is **zero**: with no busy handler, a
-`BEGIN IMMEDIATE` that meets a competing writer does not wait, it fails
-immediately with `SQLITE_BUSY`. Every connection therefore sets a five-second
-timeout on open (`store::BUSY_TIMEOUT`) alongside `foreign_keys` and WAL mode.
-Remove it and the paragraph above stops being true — racing claims start
-returning spurious storage errors under ordinary concurrency.
+**That serialization depends on a busy timeout, which we now set ourselves.**
+SQLite's own default is zero — with no busy handler a `BEGIN IMMEDIATE` that
+meets a competing writer fails immediately with `SQLITE_BUSY` instead of
+waiting. It was never actually zero here: `rusqlite`'s `Connection::open`
+installs a 5s timeout unconditionally. `store::BUSY_TIMEOUT` sets the same value
+explicitly, so a correctness property the claim/gate/sequence logic relies on is
+not silently supplied by a transitive dependency's undocumented default.
 
 **An upsert reads its own write back inside the same transaction.** Inserting on
 an autocommit connection, closing it, then re-opening to `get_*` returns

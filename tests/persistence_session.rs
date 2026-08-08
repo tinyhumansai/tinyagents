@@ -49,10 +49,13 @@ fn workspace() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
 }
 
-/// SESS-1: a competing writer must be waited out, not failed on.
+/// A competing writer must be waited out, not failed on.
 ///
-/// SQLite's default `busy_timeout` is 0, so before the fix `BEGIN IMMEDIATE`
-/// returned `SQLITE_BUSY` the instant it met another writer.
+/// This pins a property rather than a fix: it passes against the pre-change
+/// code too, because `rusqlite` installs a 5s busy timeout on every
+/// `Connection::open` of its own accord. The explicit `store::BUSY_TIMEOUT` is
+/// about owning that guarantee instead of inheriting it from an undocumented
+/// dependency default — and this test is what would catch it going away.
 #[test]
 fn a_competing_writer_is_waited_out_rather_than_failed_on() {
     let dir = workspace();

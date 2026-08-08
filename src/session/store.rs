@@ -17,14 +17,25 @@ const DB_FILE: &str = "sessions.db";
 /// How long a statement waits for a competing writer's lock before giving up
 /// with `SQLITE_BUSY`.
 ///
-/// SQLite's default is **zero**: a `BEGIN IMMEDIATE` that finds the write lock
-/// held fails instantly rather than waiting. Every claim/gate/sequence
-/// allocation in this module is written on the assumption that racing writers
-/// *serialize* at `BEGIN` — with no busy handler installed they do not, they
-/// just fail, and the caller sees a spurious storage error under ordinary
-/// concurrency. Five seconds is long enough to ride out any transaction this
-/// module takes (all of them are a handful of small statements) and short
-/// enough to surface a genuine deadlock rather than hang.
+/// # This is a guarantee we own, not a bug fix
+///
+/// SQLite's own default is zero — a `BEGIN IMMEDIATE` that finds the write lock
+/// held would fail instantly rather than wait — and every claim, gate and
+/// sequence allocation in this module is written on the assumption that racing
+/// writers *serialize* at `BEGIN`.
+///
+/// That assumption was, as it happens, already satisfied: `rusqlite`'s
+/// `Connection::open` calls `sqlite3_busy_timeout(db, 5000)` unconditionally,
+/// so the connections here have never actually had a zero timeout. Setting it
+/// explicitly changes no behaviour today. It is worth doing anyway, because the
+/// alternative is that a load-bearing correctness property of this module is
+/// supplied by an undocumented default of a transitive dependency, invisible at
+/// every call site and free to change in a patch release. Stating it here makes
+/// the dependency deliberate and greppable.
+///
+/// Five seconds is long enough to ride out any transaction this module takes
+/// (all of them are a handful of small statements) and short enough to surface
+/// a genuine deadlock rather than hang.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Databases whose migrations have already been applied **in this process**.
