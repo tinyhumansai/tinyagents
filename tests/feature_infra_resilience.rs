@@ -120,6 +120,7 @@ fn provider_error_retryability_follows_its_flag() {
         code: None,
         message: "service unavailable".into(),
         retryable: true,
+        retry_after_ms: None,
         raw: None,
     };
     assert!(is_retryable(&TinyAgentsError::Provider(Box::new(
@@ -129,6 +130,7 @@ fn provider_error_retryability_follows_its_flag() {
 
     let terminal = ProviderError {
         retryable: false,
+        retry_after_ms: None,
         status: Some(401),
         message: "invalid api key".into(),
         ..retryable.clone()
@@ -192,6 +194,7 @@ fn classify_provider_error_and_reason_labels_are_stable() {
         code: None,
         message: "internal server error".into(),
         retryable: true,
+        retry_after_ms: None,
         raw: None,
     };
     let class = classify_provider_error(&err);
