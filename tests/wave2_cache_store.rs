@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use tinyagents::Result;
 use tinyagents::harness::cache::{CachePolicy, InMemoryResponseCache, ResponseCache, SingleFlight};
 use tinyagents::harness::model::ModelResponse;
 
