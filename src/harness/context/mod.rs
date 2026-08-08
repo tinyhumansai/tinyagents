@@ -99,16 +99,37 @@ impl RunConfig {
         self
     }
 
-    /// Sets the maximum number of model calls permitted for this run.
+    /// Sets the maximum number of model calls permitted for this run,
+    /// **explicitly**.
+    ///
+    /// An explicitly-set cap is a ceiling: the agent loop reconciles it with the
+    /// harness [`RunPolicy`][crate::harness::runtime::RunPolicy] by taking the
+    /// stricter of the two, so a policy default can only ever tighten it.
     pub fn with_max_model_calls(mut self, n: usize) -> Self {
-        self.max_model_calls = n;
+        self.max_model_calls = Some(n);
         self
     }
 
-    /// Sets the maximum number of tool invocations permitted for this run.
+    /// Sets the maximum number of tool invocations permitted for this run,
+    /// **explicitly**. Same ceiling semantics as
+    /// [`RunConfig::with_max_model_calls`].
     pub fn with_max_tool_calls(mut self, n: usize) -> Self {
-        self.max_tool_calls = n;
+        self.max_tool_calls = Some(n);
         self
+    }
+
+    /// The model-call cap actually applied to this run: the explicitly-set
+    /// value, or the crate-default [`RunLimits`] cap when unset.
+    pub fn effective_max_model_calls(&self) -> usize {
+        self.max_model_calls
+            .unwrap_or_else(|| RunLimits::default().max_model_calls)
+    }
+
+    /// The tool-call cap actually applied to this run: the explicitly-set
+    /// value, or the crate-default [`RunLimits`] cap when unset.
+    pub fn effective_max_tool_calls(&self) -> usize {
+        self.max_tool_calls
+            .unwrap_or_else(|| RunLimits::default().max_tool_calls)
     }
 
     /// Sets the maximum output tokens requested for each model turn.
@@ -169,8 +190,8 @@ impl RunConfig {
     /// defaults.
     fn to_run_limits(&self) -> RunLimits {
         RunLimits::default()
-            .with_max_model_calls(self.max_model_calls)
-            .with_max_tool_calls(self.max_tool_calls)
+            .with_max_model_calls(self.effective_max_model_calls())
+            .with_max_tool_calls(self.effective_max_tool_calls())
             .with_max_wall_clock_ms(self.timeout_ms)
             .with_max_depth(self.max_depth)
     }
