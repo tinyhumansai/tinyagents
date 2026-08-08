@@ -87,7 +87,7 @@ async fn a_cache_served_response_does_not_consume_the_budget() {
 
     let snapshot = tracker.snapshot();
     assert_eq!(
-        snapshot.usage.input_tokens, 0,
+        snapshot.usage.usage.input_tokens, 0,
         "phantom spend was recorded for cache replays: {snapshot:?}"
     );
 }
