@@ -1510,12 +1510,14 @@ impl OpenAiModel {
             .with_json_object_format(false)
             .with_strict_json_schema(false);
         model.local_runtime = Some(kind);
-        model.local_capabilities_locked = true;
+        // Re-derive **before** locking. The lock preserves the profile values it
+        // finds, and at this point they are still the hosted ones the
+        // `compatible_provider` call above produced — locking first would
+        // preserve exactly the invented context window this preset exists to
+        // remove (`llama3.2` → 128 000 from the generic hint table).
         model.rederive_profile();
-        // `rederive_profile` re-derives from the (now local) policy, so re-apply
-        // the vision override it just reset — the lock only preserves values
-        // captured *before* the re-derive.
         model.profile.modalities.image_in = false;
+        model.local_capabilities_locked = true;
         model
     }
 
