@@ -33,8 +33,9 @@ fn schema() -> serde_json::Value {
 ///
 /// A profile with `native_structured_output = false` is the whole point: it is
 /// what selects `StructuredStrategy::ToolCall`, the path the bug lived on, and
-/// it is what `ModelProfile::default()` yields — so this is the *default*
-/// behaviour for a profile-declaring provider, not an exotic corner.
+/// it is what `ModelProfile::default()` yields for that field — so this is the
+/// ordinary case for a tool-calling provider without native constrained JSON,
+/// not an exotic corner.
 struct RecordingModel {
     profile: ModelProfile,
     script: Mutex<Vec<ModelResponse>>,
