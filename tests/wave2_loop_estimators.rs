@@ -8,54 +8,84 @@
 
 use serde_json::json;
 
+use tinyagents::harness::context::{RunConfig, RunContext};
 use tinyagents::harness::message::{ContentBlock, Message, ToolMessage};
-use tinyagents::harness::middleware::MicrocompactMiddleware;
+use tinyagents::harness::middleware::{Middleware, MicrocompactMiddleware};
 use tinyagents::harness::model::ModelRequest;
 
-/// A tool message whose payload lives in a non-text content block, which
-/// `Message::text()` does not see at all.
-fn image_tool_message(id: &str) -> Message {
+const PLACEHOLDER: &str = "[elided]";
+
+/// A tool result whose payload lives in a JSON content block, which
+/// `Message::text()` does not see at all — the shape a tool returning
+/// structured data produces.
+fn json_tool_message(id: &str, trusted_verbatim: bool) -> Message {
+    let payload = json!({
+        "id": id,
+        "rows": (0..80).map(|i| json!({"n": i, "label": format!("row-{i}-{id}")}))
+            .collect::<Vec<_>>(),
+    });
     Message::Tool(ToolMessage {
         tool_call_id: id.to_string(),
-        content: vec![ContentBlock::Image {
-            mime_type: "image/png".to_string(),
-            data: "A".repeat(4_000),
-        }],
-        trusted_verbatim: false,
+        content: vec![ContentBlock::Json(payload)],
+        trusted_verbatim,
         artifact: None,
     })
 }
 
-/// REASON-3: the micro-compaction budget gate must see a transcript whose
-/// weight is non-textual. Summing over `text()` scored these at zero, so the
-/// gate never tripped.
-#[tokio::test]
-async fn microcompaction_budget_gate_sees_non_textual_payloads() {
-    let messages: Vec<Message> = (0..6).map(|i| image_tool_message(&format!("c{i}"))).collect();
-    let counted = tinyagents::harness::message::count_tokens_approximately(&messages);
+/// Runs the middleware's `before_model` hook against a throwaway context.
+async fn compact(middleware: &MicrocompactMiddleware, request: &mut ModelRequest) {
+    let mut ctx: RunContext<()> = RunContext::new(RunConfig::new("estimator"), ());
+    Middleware::<(), ()>::before_model(middleware, &mut ctx, &(), request)
+        .await
+        .expect("before_model succeeds");
+}
+
+/// REASON-3: the shared estimator charges non-textual content; the old
+/// text-only sum scored the identical transcript at zero.
+#[test]
+fn the_shared_estimator_charges_non_textual_payloads() {
+    let messages: Vec<Message> = (0..6)
+        .map(|i| json_tool_message(&format!("c{i}"), false))
+        .collect();
+
     let text_only: u64 = messages
         .iter()
         .map(|m| tinyagents::harness::summarization::estimate_tokens(&m.text()))
         .sum();
+    let counted = tinyagents::harness::message::count_tokens_approximately(&messages);
 
     assert_eq!(
         text_only, 0,
-        "precondition: the old text-only estimator scores these at zero"
+        "precondition: the old text-only estimator scores a JSON transcript at zero"
     );
     assert!(
         counted > 1_000,
-        "the shared estimator must charge non-textual blocks, got {counted}"
+        "the shared estimator must charge JSON tool results, got {counted}"
     );
+}
 
-    // With a budget well below the real weight but above the text-only estimate
-    // of zero, the gate must fire and blank the older tool results.
-    let middleware = MicrocompactMiddleware::new(2).with_token_budget(100);
-    let mut request = ModelRequest::new(messages);
-    let before = request.messages.clone();
-    middleware.compact_for_test(&mut request);
+/// REASON-3, micro-compaction: with a budget far below the transcript's real
+/// weight but above its text-only estimate of zero, the gate must fire.
+///
+/// Before the switch `total_message_tokens` returned 0 here, so the gate
+/// concluded the transcript still fit and micro-compaction never ran.
+#[tokio::test]
+async fn microcompaction_budget_gate_trips_on_a_non_textual_transcript() {
+    let messages: Vec<Message> = (0..6)
+        .map(|i| json_tool_message(&format!("c{i}"), false))
+        .collect();
+
+    let middleware = MicrocompactMiddleware::new(2, PLACEHOLDER).with_token_budget(100);
+    let mut request = ModelRequest::new(messages.clone());
+    compact(&middleware, &mut request).await;
+
     assert_ne!(
-        request.messages, before,
-        "the budget gate must trip on a non-textual transcript"
+        request.messages, messages,
+        "the budget gate must trip on a transcript whose weight is non-textual"
+    );
+    assert!(
+        request.messages.iter().any(|m| m.text() == PLACEHOLDER),
+        "older tool bodies should have been blanked"
     );
 }
 
@@ -64,44 +94,35 @@ async fn microcompaction_budget_gate_sees_non_textual_payloads() {
 /// forbids — it produces content that reads fine and is wrong.
 #[tokio::test]
 async fn microcompaction_leaves_trusted_verbatim_tool_results_alone() {
-    let mut messages: Vec<Message> = Vec::new();
-    for i in 0..4 {
-        let mut msg = ToolMessage {
-            tool_call_id: format!("c{i}"),
-            content: vec![ContentBlock::Text(format!(
-                "argument schema {i}: {}",
-                json!({"required": ["path"]})
-            ))],
+    let messages = vec![
+        // Oldest — the first one micro-compaction would blank.
+        Message::Tool(ToolMessage {
+            tool_call_id: "c0".to_string(),
+            content: vec![ContentBlock::Text("argument schema for `write`".to_string())],
+            trusted_verbatim: true,
+            artifact: None,
+        }),
+        Message::Tool(ToolMessage {
+            tool_call_id: "c1".to_string(),
+            content: vec![ContentBlock::Text("ordinary tool output".to_string())],
             trusted_verbatim: false,
             artifact: None,
-        };
-        // The oldest result is the one micro-compaction would blank first.
-        if i == 0 {
-            msg.trusted_verbatim = true;
-        }
-        messages.push(Message::Tool(msg));
-    }
+        }),
+        Message::tool("c2", "kept recent"),
+    ];
 
-    let middleware = MicrocompactMiddleware::new(1);
+    let middleware = MicrocompactMiddleware::new(1, PLACEHOLDER);
     let mut request = ModelRequest::new(messages);
-    middleware.compact_for_test(&mut request);
+    compact(&middleware, &mut request).await;
 
-    let Message::Tool(first) = &request.messages[0] else {
-        panic!("expected a tool message");
-    };
-    assert!(
-        first.text_content().contains("argument schema 0"),
-        "a trusted_verbatim tool result must survive compaction verbatim, got {:?}",
-        first.content
+    assert_eq!(
+        request.messages[0].text(),
+        "argument schema for `write`",
+        "a trusted_verbatim tool result must survive compaction verbatim"
     );
-    assert!(first.trusted_verbatim);
-
-    // The untrusted sibling is still compacted, so the middleware still works.
-    let Message::Tool(second) = &request.messages[1] else {
-        panic!("expected a tool message");
-    };
-    assert!(
-        !second.text_content().contains("argument schema 1"),
+    assert_eq!(
+        request.messages[1].text(),
+        PLACEHOLDER,
         "untrusted tool results should still be blanked"
     );
 }
