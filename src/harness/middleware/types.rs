@@ -25,6 +25,7 @@ use async_trait::async_trait;
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::cache::CacheLayoutEvent;
 use crate::harness::context::RunContext;
+use crate::harness::ids::RunId;
 use crate::harness::model::{ModelDelta, ModelRequest, ModelResponse};
 use crate::harness::summarization::{SummarizationPolicy, Summarizer, SummaryRecord, TrimStrategy};
 use crate::harness::tool::{ToolCall, ToolDelta, ToolResult};
