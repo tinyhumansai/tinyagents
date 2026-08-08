@@ -50,6 +50,27 @@ pub struct SingleFlight {
     inflight: Arc<Mutex<HashMap<String, broadcast::Sender<Outcome>>>>,
 }
 
+/// Removes a leader's entry even when its future is cancelled mid-call.
+///
+/// Dropping the sender closes every follower receiver, which makes followers
+/// retry their own call instead of waiting forever behind an abandoned leader.
+struct LeaderGuard {
+    inflight: Arc<Mutex<HashMap<String, broadcast::Sender<Outcome>>>>,
+    key: String,
+}
+
+impl LeaderGuard {
+    fn retire(&mut self) -> Option<broadcast::Sender<Outcome>> {
+        self.inflight.lock().ok()?.remove(&self.key)
+    }
+}
+
+impl Drop for LeaderGuard {
+    fn drop(&mut self) {
+        let _ = self.retire();
+    }
+}
+
 impl std::fmt::Debug for SingleFlight {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let inflight = self.inflight.lock().map(|m| m.len()).unwrap_or(0);
@@ -127,13 +148,15 @@ impl SingleFlight {
             }
         }
 
-        // Leader: run the call, then publish the outcome and retire the key.
+        // Leader: install the guard before awaiting. If this future is dropped,
+        // the guard retires the sender and wakes followers through channel
+        // closure; without it, a cancelled leader wedges this key forever.
+        let mut leader = LeaderGuard {
+            inflight: Arc::clone(&self.inflight),
+            key: key.to_string(),
+        };
         let result = call().await;
-        let sender = self
-            .inflight
-            .lock()
-            .ok()
-            .and_then(|mut inflight| inflight.remove(key));
+        let sender = leader.retire();
         if let Some(sender) = sender {
             let outcome = match &result {
                 Ok(response) => Outcome::Ready(Box::new(response.clone())),

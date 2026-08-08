@@ -209,6 +209,13 @@ pub struct PendingActivation {
     /// packet (plain edge/goto activations carry `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_arg: Option<serde_json::Value>,
+    /// Stable identity of this scheduled task within its superstep.
+    ///
+    /// Unlike `node`, this distinguishes repeated `Send` fan-out activations
+    /// targeting the same node. Empty on checkpoints written before task
+    /// identities were persisted.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub task_id: String,
 }
 
 /// The persisted arrivals recorded against one barrier (waiting-edge) join node:

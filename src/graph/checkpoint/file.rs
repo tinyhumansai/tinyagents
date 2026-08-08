@@ -92,14 +92,48 @@ impl<State> FileCheckpointer<State> {
     /// The thread id is percent-escaped so it is a safe, injective single path
     /// component (no separators, no collisions between distinct ids).
     fn thread_path(&self, thread_id: &str) -> PathBuf {
-        self.base_dir
-            .join(format!("{}.{THREAD_EXT}", escape_thread_id(thread_id)))
+        let canonical = self.canonical_thread_path(thread_id);
+        if canonical.exists() {
+            canonical
+        } else {
+            let legacy = self.legacy_thread_path(thread_id);
+            if legacy.exists() { legacy } else { canonical }
+        }
     }
 
     /// Resolves the pending-writes sidecar path for `thread_id`.
     fn writes_path(&self, thread_id: &str) -> PathBuf {
+        let canonical = self.canonical_writes_path(thread_id);
+        if canonical.exists() {
+            canonical
+        } else {
+            let legacy = self.legacy_writes_path(thread_id);
+            if legacy.exists() { legacy } else { canonical }
+        }
+    }
+
+    fn canonical_thread_path(&self, thread_id: &str) -> PathBuf {
+        self.base_dir
+            .join(format!("{}.{THREAD_EXT}", escape_thread_id(thread_id)))
+    }
+
+    fn canonical_writes_path(&self, thread_id: &str) -> PathBuf {
         self.base_dir
             .join(format!("{}{WRITES_SUFFIX}", escape_thread_id(thread_id)))
+    }
+
+    fn legacy_thread_path(&self, thread_id: &str) -> PathBuf {
+        self.base_dir.join(format!(
+            "{}.{THREAD_EXT}",
+            legacy_escape_thread_id(thread_id)
+        ))
+    }
+
+    fn legacy_writes_path(&self, thread_id: &str) -> PathBuf {
+        self.base_dir.join(format!(
+            "{}{WRITES_SUFFIX}",
+            legacy_escape_thread_id(thread_id)
+        ))
     }
 
     /// Reads a thread's write sidecar, tolerating a torn trailing line exactly
@@ -144,19 +178,26 @@ impl<State> Clone for FileCheckpointer<State> {
 /// differ only by letter case: lowercasing the whole name is injective on the
 /// image, which is exactly what case-insensitive collision-freedom means.
 ///
-/// # Storage-format note
-///
-/// This changes the on-disk name of any thread whose id contains an uppercase
-/// letter (`Run1` was `Run1.jsonl`, now `%52un1.jsonl`). A pre-existing
-/// directory keeps its old files; they simply stop resolving under the new
-/// scheme. `list_threads` still reports them (it recovers the id from the
-/// record, not the filename), so recovering one is a copy through
-/// [`Checkpointer::copy_thread`] rather than a data loss — but a deployment
-/// with live uppercase thread ids should migrate deliberately.
 fn escape_thread_id(thread_id: &str) -> String {
     let mut out = String::with_capacity(thread_id.len());
     for &b in thread_id.as_bytes() {
         if b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-') {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The filename escaping used before uppercase letters were made explicit.
+/// Kept only as a read/write fallback so persisted threads remain reachable
+/// after an upgrade; new thread files always use [`escape_thread_id`].
+fn legacy_escape_thread_id(thread_id: &str) -> String {
+    let mut out = String::with_capacity(thread_id.len());
+    for &b in thread_id.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-') {
             out.push(b as char);
         } else {
             out.push('%');

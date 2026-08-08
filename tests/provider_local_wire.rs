@@ -809,14 +809,17 @@ async fn a_context_overflow_is_classified_with_a_stable_code() {
     let error = ChatModel::<()>::invoke(&model, &(), user("hi"))
         .await
         .expect_err("a 400 fails the call");
-    let tinyagents::TinyAgentsError::Provider(provider) = error else {
-        panic!("expected a structured provider error");
+    let tinyagents::TinyAgentsError::ContextOverflow {
+        provider,
+        model,
+        message,
+    } = error
+    else {
+        panic!("expected a typed context-overflow error");
     };
-    assert_eq!(
-        provider.code.as_deref(),
-        Some(tinyagents::harness::providers::openai::CONTEXT_OVERFLOW_CODE),
-        "callers must be able to act on a code, not string-match a message"
-    );
+    assert_eq!(provider, "ollama");
+    assert_eq!(model.as_deref(), Some("llama3.2"));
+    assert!(message.contains("maximum context length"));
 }
 
 // ---------------------------------------------------------------------------

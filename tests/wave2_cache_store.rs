@@ -261,6 +261,35 @@ async fn distinct_keys_do_not_block_each_other() {
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
 
+#[tokio::test]
+async fn cancelling_a_leader_releases_followers() {
+    let flight = SingleFlight::new();
+    let (started, started_rx) = tokio::sync::oneshot::channel();
+    let leader_flight = flight.clone();
+    let leader = tokio::spawn(async move {
+        leader_flight
+            .run("cancelled", || async move {
+                let _ = started.send(());
+                std::future::pending::<tinyagents::Result<ModelResponse>>().await
+            })
+            .await
+    });
+    started_rx.await.unwrap();
+    leader.abort();
+    let recovered = tokio::time::timeout(
+        Duration::from_secs(1),
+        flight.run("cancelled", || async {
+            Ok(ModelResponse::assistant("recovered"))
+        }),
+    )
+    .await
+    .expect("follower must not wait behind a cancelled leader")
+    .unwrap();
+    assert_eq!(recovered.0.text(), "recovered");
+    assert!(!recovered.1);
+    assert_eq!(flight.inflight_len(), 0);
+}
+
 // ── C-SQLITE-CACHE ───────────────────────────────────────────────────────────
 
 #[cfg(feature = "sqlite")]

@@ -195,13 +195,47 @@ pub fn apply_retention(workspace_dir: &Path, older_than: DateTime<Utc>) -> Resul
         "{LOG_PREFIX} apply_retention.entry cutoff={}",
         older_than.to_rfc3339()
     );
-    let report = RetentionReport {
-        sessions: prune_sessions_before(workspace_dir, older_than)?,
-        messages: 0,
-        tool_calls: prune_tool_calls_before(workspace_dir, older_than)?,
-        run_events: prune_run_events_before(workspace_dir, older_than)?,
-        run_telemetry: prune_run_telemetry_before(workspace_dir, older_than)?,
-    };
+    let cutoff = older_than.to_rfc3339();
+    let report = with_transaction(workspace_dir, |conn| {
+        let ids: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM sessions WHERE status != 'running' AND ended_at IS NOT NULL AND ended_at < ?1",
+            )?;
+            stmt.query_map(params![cutoff], |row| row.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for id in &ids {
+            conn.execute(
+                "DELETE FROM sessions_fts WHERE session_id = ?1",
+                params![id],
+            )
+            .storage_context("delete session FTS rows")?;
+            conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])
+                .storage_context("delete session")?;
+        }
+        Ok(RetentionReport {
+            sessions: ids.len(),
+            messages: 0,
+            tool_calls: conn
+                .execute(
+                    "DELETE FROM session_tool_calls WHERE created_at < ?1",
+                    params![cutoff],
+                )
+                .storage_context("prune tool calls")?,
+            run_events: conn
+                .execute(
+                    "DELETE FROM run_events WHERE timestamp < ?1",
+                    params![cutoff],
+                )
+                .storage_context("prune run events")?,
+            run_telemetry: conn
+                .execute(
+                    "DELETE FROM run_telemetry WHERE updated_at < ?1",
+                    params![cutoff],
+                )
+                .storage_context("prune run telemetry")?,
+        })
+    })?;
     tracing::info!(
         "{LOG_PREFIX} apply_retention.exit removed total={} sessions={} tool_calls={} \
          run_events={} run_telemetry={}",

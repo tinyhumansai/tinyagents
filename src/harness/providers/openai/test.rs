@@ -2427,6 +2427,21 @@ fn default_provider_options_are_baked_onto_every_request() {
 }
 
 #[test]
+fn cache_identity_includes_baked_answer_configuration() {
+    let base = OpenAiModel::ollama().with_model("qwen2.5");
+    let context_window = OpenAiModel::ollama()
+        .with_model("qwen2.5")
+        .with_default_provider_options(json!({ "options": { "num_ctx": 8192 } }));
+    let merged_system = OpenAiModel::ollama()
+        .with_model("qwen2.5")
+        .with_merge_system_into_user();
+
+    let identity = |model: &OpenAiModel| <OpenAiModel as ChatModel<()>>::cache_identity(model);
+    assert_ne!(identity(&base), identity(&context_window));
+    assert_ne!(identity(&base), identity(&merged_system));
+}
+
+#[test]
 fn request_provider_options_win_over_baked_defaults() {
     let model = OpenAiModel::ollama()
         .with_model("qwen2.5")

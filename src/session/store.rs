@@ -1,6 +1,4 @@
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use rusqlite::Connection;
@@ -38,17 +36,6 @@ const DB_FILE: &str = "sessions.db";
 /// a genuine deadlock rather than hang.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Databases whose migrations have already been applied **in this process**.
-///
-/// [`migrations::apply`] is idempotent and cheap when up to date (one indexed
-/// row read), but a connection is opened per operation, so even that read is
-/// worth skipping once we know the file is current. Keyed by resolved path;
-/// entries are only inserted after a successful migration run.
-fn migrated_paths() -> &'static Mutex<HashSet<PathBuf>> {
-    static MIGRATED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    MIGRATED.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
 /// Resolves the session database path for a workspace root.
 ///
 /// Kept public so hosts can locate the file for backup, inspection, or
@@ -79,26 +66,11 @@ pub fn with_connection<T>(
         .storage_context(&format!("failed to open session DB: {}", db_path.display()))?;
     prepare_connection(&conn)?;
 
-    // Migrations run once per database per process; see `migrated_paths`.
-    let already_migrated = {
-        let guard = migrated_paths()
-            .lock()
-            .map_err(|e| poisoned("migration cache", e))?;
-        guard.contains(&db_path)
-    };
-    if !already_migrated {
-        migrations::apply(&conn)?;
-        migrated_paths()
-            .lock()
-            .map_err(|e| poisoned("migration cache", e))?
-            .insert(db_path.clone());
-    }
+    // Migrations are idempotent, and checking on every fresh connection also
+    // handles a database atomically replaced at this same path.
+    migrations::apply(&conn)?;
 
     f(&conn)
-}
-
-fn poisoned(what: &str, err: impl std::fmt::Display) -> crate::error::TinyAgentsError {
-    crate::error::TinyAgentsError::Storage(format!("session DB {what} lock poisoned: {err}"))
 }
 
 /// Applies the per-connection pragmas every session-DB handle needs.

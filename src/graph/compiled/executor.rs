@@ -196,21 +196,24 @@ where
             namespace: self.namespace.clone(),
         };
         let recorded = checkpointer.get_writes(&completed_config).await?;
-        let done: HashSet<NodeId> = if recorded.is_empty() {
+        let done: HashSet<String> = if recorded.is_empty() {
             checkpoint
                 .pending_writes
                 .iter()
-                .map(|w| w.node.clone())
+                .map(|w| w.task_id.clone())
                 .collect()
         } else {
-            recorded.iter().map(|w| w.node.clone()).collect()
+            recorded.iter().map(|w| w.task_id.clone()).collect()
         };
         let active: Vec<Activation> = if done.is_empty() {
             active
         } else {
             let filtered: Vec<Activation> = active
                 .iter()
-                .filter(|a| !done.contains(&a.node))
+                // A node name is not a task identity: a Send fan-out can have
+                // several live activations of one node. Legacy checkpoints
+                // have no persisted task id, so leave them runnable.
+                .filter(|a| a.task_id.is_empty() || !done.contains(&a.task_id))
                 .cloned()
                 .collect();
             if filtered.is_empty() {
@@ -295,6 +298,7 @@ where
             active.push(Activation {
                 node,
                 send_arg: input.payload,
+                task_id: String::new(),
             });
         }
         if active.is_empty() {
@@ -532,6 +536,14 @@ where
                 }
             }
             steps += 1;
+            // Assign identities before any branch runs. A failure checkpoint
+            // carries these identities with its pending activations, letting a
+            // later resume skip only the completed fan-out task.
+            for (index, activation) in active.iter_mut().enumerate() {
+                if activation.task_id.is_empty() {
+                    activation.task_id = format!("{steps}:{index}:{}", activation.node);
+                }
+            }
             self.emit(GraphEvent::StepStarted {
                 step: steps,
                 active: activation_nodes(&active),
@@ -655,7 +667,6 @@ where
                 };
                 let mut pending = successors;
                 pending.extend(active[failed_index..].iter().cloned());
-                let completed_nodes = activation_nodes(&active[..failed_index]);
                 // Settle any in-flight Async background writes before the
                 // failure-boundary persist so earlier boundaries are durable
                 // when the run aborts. Like the persist error below, a
@@ -671,7 +682,7 @@ where
                         &run_id,
                         &state,
                         &pending,
-                        &completed_nodes,
+                        &active[..failed_index],
                         &barrier_arrivals,
                         parent_checkpoint.clone(),
                         steps,
@@ -759,7 +770,7 @@ where
                         &run_id,
                         &state,
                         &pending,
-                        &activation_nodes(&active[..index]),
+                        &active[..index],
                         vec![emitted.clone()],
                         std::slice::from_ref(&active[index].node),
                         &barrier_arrivals,
@@ -812,7 +823,6 @@ where
             // Select the next active set from commands or static/conditional
             // edges, evaluated against the freshly-committed state. Barrier
             // arrivals accumulate into `barrier_arrivals` (persisted below).
-            let completed_nodes = activation_nodes(&active);
             let next = match self.route_completed(&active, &goto_map, &state, &mut barrier_arrivals)
             {
                 Ok(next) => next,
@@ -864,7 +874,7 @@ where
                         &run_id,
                         &state,
                         &next,
-                        &completed_nodes,
+                        &active,
                         &barrier_arrivals,
                         parent_checkpoint.clone(),
                         steps,
@@ -895,7 +905,7 @@ where
                         &run_id,
                         &state,
                         &next,
-                        &completed_nodes,
+                        &active,
                         Vec::new(),
                         &[],
                         &barrier_arrivals,
@@ -1036,7 +1046,7 @@ where
         run_id: &RunId,
         state: &State,
         pending: &[Activation],
-        completed_tasks: &[NodeId],
+        completed_tasks: &[Activation],
         barrier_arrivals: &HashMap<NodeId, HashSet<NodeId>>,
         parent: Option<String>,
         step: usize,
@@ -1056,7 +1066,7 @@ where
             namespace: self.namespace.clone(),
             state: state.clone(),
             next_nodes: activation_nodes(pending),
-            completed_tasks: completed_tasks.to_vec(),
+            completed_tasks: activation_nodes(completed_tasks),
             pending_writes: Self::completion_writes(completed_tasks, step),
             interrupts: Vec::new(),
             pending_activations: Some(pending.iter().map(PendingActivation::from).collect()),
@@ -1521,7 +1531,7 @@ where
         run_id: &RunId,
         state: &State,
         pending: &[Activation],
-        completed_tasks: &[NodeId],
+        completed_tasks: &[Activation],
         interrupts: Vec<Interrupt>,
         interrupted: &[NodeId],
         barrier_arrivals: &HashMap<NodeId, HashSet<NodeId>>,
@@ -1591,7 +1601,7 @@ where
         run_id: &RunId,
         state: &State,
         pending: &[Activation],
-        completed_tasks: &[NodeId],
+        completed_tasks: &[Activation],
         barrier_arrivals: &HashMap<NodeId, HashSet<NodeId>>,
         parent: Option<String>,
         step: usize,
@@ -1655,20 +1665,18 @@ where
     /// that distinction is the whole point of
     /// the ledger.
     ///
-    /// The task id is `"<step>:<index>:<node>"`: unique within a superstep even
-    /// when a fan-out runs one node several times, and stable across a resume of
-    /// the same checkpoint because the step number is part of it.
+    /// The task id is persisted on the activation itself, so a resume can
+    /// match a marker to one fan-out task rather than every task with its node.
     fn completion_writes(
-        completed_tasks: &[NodeId],
-        step: usize,
+        completed_tasks: &[Activation],
+        _step: usize,
     ) -> Vec<crate::graph::checkpoint::PendingWrite> {
         completed_tasks
             .iter()
-            .enumerate()
-            .map(|(index, node)| {
+            .map(|activation| {
                 crate::graph::checkpoint::PendingWrite::completion_marker(
-                    node.clone(),
-                    format!("{step}:{index}:{node}"),
+                    activation.node.clone(),
+                    activation.task_id.clone(),
                 )
             })
             .collect()
@@ -1683,7 +1691,7 @@ where
         run_id: &RunId,
         state: &State,
         pending: &[Activation],
-        completed_tasks: &[NodeId],
+        completed_tasks: &[Activation],
         interrupts: Vec<Interrupt>,
         interrupted: &[NodeId],
         barrier_arrivals: &HashMap<NodeId, HashSet<NodeId>>,
@@ -1718,7 +1726,7 @@ where
             namespace: self.namespace.clone(),
             state: state.clone(),
             next_nodes: activation_nodes(pending),
-            completed_tasks: completed_tasks.to_vec(),
+            completed_tasks: activation_nodes(completed_tasks),
             pending_writes: Self::completion_writes(completed_tasks, step),
             pending_activations: Some(pending.iter().map(PendingActivation::from).collect()),
             barrier_arrivals: barriers_to_persisted(barrier_arrivals),

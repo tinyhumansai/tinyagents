@@ -1969,7 +1969,7 @@ impl OpenAiModel {
                 );
                 error.retry_after_ms = Some(ms);
             }
-            return Err(TinyAgentsError::Provider(Box::new(error)));
+            return Err(TinyAgentsError::from_provider_error(error));
         }
         Ok(response)
     }
@@ -2535,12 +2535,25 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
     /// first, because this string is folded into keys that reach logs, events,
     /// and durable cache files.
     fn cache_identity(&self) -> Option<String> {
-        Some(crate::harness::cache::model_cache_identity(
+        let endpoint = crate::harness::cache::model_cache_identity(
             &self.provider,
             &self.model,
             &self.base_url,
             self.responses_api_primary.then_some("responses"),
             &self.api_key,
+        );
+        let configuration = serde_json::json!({
+            "default_provider_options": self.default_provider_options,
+            "temperature_override": self.temperature_override,
+            "merge_system_into_user": self.merge_system_into_user,
+            "responses_omit_max_output_tokens": self.responses_omit_max_output_tokens,
+            "requires_streaming": self.requires_streaming(),
+            "named_tool_choice_supported": self.named_tool_choice_supported.load(Ordering::Relaxed),
+            "json_object_format_supported": self.json_object_format_supported.load(Ordering::Relaxed),
+        });
+        Some(format!(
+            "{endpoint}|{}",
+            serde_json::to_string(&configuration).expect("model cache configuration serializes")
         ))
     }
 

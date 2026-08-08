@@ -412,7 +412,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                             // Sleep for the backoff only when the policy opts in
                             // (`with_backoff_sleep`); otherwise this is a no-op so
                             // the loop stays fast and deterministic in tests.
-                            self.policy.retry.sleep_backoff(backoff_attempt).await;
+                            self.policy
+                                .retry
+                                .sleep_backoff_for_error(backoff_attempt, &error)
+                                .await;
                             continue;
                         }
                         break Err(error);

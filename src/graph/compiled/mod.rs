@@ -182,6 +182,7 @@ struct StepFailure {
 struct Activation {
     node: NodeId,
     send_arg: Option<serde_json::Value>,
+    task_id: String,
 }
 
 impl Activation {
@@ -189,6 +190,7 @@ impl Activation {
         Self {
             node,
             send_arg: None,
+            task_id: String::new(),
         }
     }
 }
@@ -198,6 +200,7 @@ impl From<&Activation> for PendingActivation {
         PendingActivation {
             node: a.node.clone(),
             send_arg: a.send_arg.clone(),
+            task_id: a.task_id.clone(),
         }
     }
 }
@@ -207,6 +210,7 @@ impl From<&PendingActivation> for Activation {
         Activation {
             node: p.node.clone(),
             send_arg: p.send_arg.clone(),
+            task_id: p.task_id.clone(),
         }
     }
 }
