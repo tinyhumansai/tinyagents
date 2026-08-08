@@ -5,7 +5,8 @@
 
 use super::context::StorageContext;
 use super::ops::*;
-use super::store::{init_schema, with_memory_connection};
+use super::migrations::apply as init_schema;
+use super::store::with_memory_connection;
 use super::types::*;
 use crate::error::TinyAgentsError;
 use chrono::Utc;
@@ -615,4 +616,49 @@ fn record_tool_call_returns_the_tool_call_row_id() {
         Ok(())
     })
     .unwrap();
+}
+
+/// SESS-1 regression: every session-DB connection installs a busy handler.
+///
+/// SQLite's default `busy_timeout` is **0**. With no handler installed, a
+/// `BEGIN IMMEDIATE` that meets a competing writer fails instantly with
+/// `SQLITE_BUSY` instead of waiting — which contradicts the whole
+/// serialize-at-BEGIN rationale that `with_transaction`, the task claim CAS and
+/// the run-event sequence allocation are written against.
+///
+/// The test holds a real write lock from a second connection for a beat, then
+/// asserts a `with_transaction` issued concurrently *waits and succeeds*.
+/// Before the fix it returns a `database is locked` storage error immediately.
+#[test]
+fn with_transaction_waits_out_a_competing_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().to_path_buf();
+
+    // Create the DB (and run migrations) before contending for it.
+    super::store::with_connection(&workspace, |_| Ok(())).unwrap();
+
+    let blocker = Connection::open(super::store::db_path(&workspace)).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        blocker.execute_batch("ROLLBACK").unwrap();
+    });
+
+    let result = super::store::with_transaction(&workspace, |conn| {
+        conn.execute(
+            "INSERT INTO sessions (
+                id, agent_definition_id, agent_definition_name, session_key,
+                status, started_at
+             ) VALUES ('waited', 'a', 'a', 'k', 'running', ?1)",
+            params![Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    });
+
+    releaser.join().unwrap();
+    assert!(
+        result.is_ok(),
+        "BEGIN IMMEDIATE must wait for the competing writer, not fail instantly: {result:?}"
+    );
 }

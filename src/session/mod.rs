@@ -64,6 +64,7 @@
 //! See [`README.md`](./README.md) for the schema, the FTS behaviour, and the
 //! coordination guarantees.
 
+mod migrations;
 mod context;
 mod ops;
 pub mod run_ledger;
