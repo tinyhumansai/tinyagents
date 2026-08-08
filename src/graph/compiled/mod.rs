@@ -235,6 +235,44 @@ fn activation_nodes(active: &[Activation]) -> Vec<NodeId> {
     active.iter().map(|a| a.node.clone()).collect()
 }
 
+/// The nodes of *this* graph that paused at an interrupt boundary — the ones a
+/// resume value belongs to.
+///
+/// Read from the `interrupted_nodes` metadata the interrupt boundary stamps,
+/// which is the local activation rather than
+/// [`Interrupt::node`](crate::graph::command::Interrupt::node): a subgraph node
+/// re-emits its *child's* interrupt, so the recorded interrupt can name a node
+/// that does not exist in this graph. Falls back to the recorded interrupts for
+/// checkpoints written before that metadata existed — intersected with
+/// `pending`, because a legacy checkpoint of a re-emitted child interrupt names
+/// a node this graph never schedules. An empty result tells the caller to fan
+/// the resume value across the pending set, which is what those checkpoints got
+/// before the metadata existed.
+fn interrupted_nodes<State>(checkpoint: &Checkpoint<State>, pending: &[Activation]) -> Vec<NodeId> {
+    let stamped = checkpoint
+        .metadata
+        .get("interrupted_nodes")
+        .and_then(serde_json::Value::as_array)
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(NodeId::from)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if stamped.is_empty() {
+        let scheduled: HashSet<&NodeId> = pending.iter().map(|a| &a.node).collect();
+        return checkpoint
+            .interrupts
+            .iter()
+            .map(|i| i.node.clone())
+            .filter(|node| scheduled.contains(node))
+            .collect();
+    }
+    stamped
+}
+
 impl<State, Update> CompiledGraph<State, Update> {
     /// Internal constructor used by the builder.
     #[allow(clippy::too_many_arguments)]

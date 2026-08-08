@@ -266,7 +266,13 @@ where
     ///
     /// Strategy (lineage- and delta-safe):
     ///
-    /// 1. Protect the most recent `keep_last` checkpoints (listing order).
+    /// 1. Protect the most recent `keep_last` checkpoints (listing order) *of
+    ///    every namespace present in the thread*. An embedded subgraph writes
+    ///    its checkpoints under the parent's thread id but its own namespace,
+    ///    and its lineage is disjoint from the parent's (no parent-namespace
+    ///    record ever references a child-namespace id), so a thread-wide
+    ///    recency window would delete the child lineage outright and leave the
+    ///    thread unresumable.
     /// 2. Walk the `parent_checkpoint_id` chain of every protected checkpoint
     ///    and protect every ancestor reached. This is what honors the
     ///    delta-channel warning: a kept checkpoint that only stores a delta (or
@@ -283,18 +289,26 @@ where
         if metas.is_empty() {
             return Ok(0);
         }
-        let keep_last = keep_last.max(1).min(metas.len());
+        let keep_last = keep_last.max(1);
 
         // Index by id so ancestor walks are O(depth).
         let mut parent_of: HashMap<&str, Option<&str>> = HashMap::new();
         for m in &metas {
             parent_of.insert(m.checkpoint_id.as_str(), m.parent_checkpoint_id.as_deref());
         }
+        // Group by namespace so each lineage (the root run and every embedded
+        // subgraph run sharing this thread) gets its own recency window.
+        let mut by_namespace: HashMap<&Vec<String>, Vec<&CheckpointMetadata>> = HashMap::new();
+        for m in &metas {
+            by_namespace.entry(&m.namespace).or_default().push(m);
+        }
 
         let mut protected: HashSet<String> = HashSet::new();
-        // Step 1: the recency window.
-        for m in metas.iter().rev().take(keep_last) {
-            protected.insert(m.checkpoint_id.clone());
+        // Step 1: the recency window, per namespace.
+        for group in by_namespace.values() {
+            for m in group.iter().rev().take(keep_last) {
+                protected.insert(m.checkpoint_id.clone());
+            }
         }
         // Step 2: expand to every ancestor of a protected checkpoint.
         let window: Vec<String> = protected.iter().cloned().collect();

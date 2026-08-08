@@ -143,20 +143,48 @@ impl<State, Update> Clone for CompiledGraph<State, Update> {
 /// in-flight writes at its terminal/interrupt boundary ([`Self::drain`]). A
 /// run therefore never reports success while one of its checkpoints silently
 /// failed to persist.
+///
+/// # Ordering
+///
+/// Writes are *chained*, not merely spawned: each background task awaits the
+/// previously spawned one before performing its own `put`. Every bundled
+/// backend defines a thread's "latest" checkpoint by insertion order, so
+/// letting boundary N+1 land before boundary N would make a concurrent reader
+/// (or a `retry` racing a straggler append) observe a stale record as latest.
 #[derive(Default)]
 pub(crate) struct AsyncCheckpointWrites {
     /// In-flight (or finished-but-unharvested) background writes, in the order
-    /// they were spawned.
+    /// they were spawned. Because each spawn chains onto its predecessor, this
+    /// holds at most the tail of the chain.
     handles: Vec<tokio::task::JoinHandle<crate::error::Result<CheckpointId>>>,
 }
 
 impl AsyncCheckpointWrites {
-    /// Tracks one spawned background write.
-    pub(crate) fn push(
-        &mut self,
-        handle: tokio::task::JoinHandle<crate::error::Result<CheckpointId>>,
-    ) {
-        self.handles.push(handle);
+    /// Spawns `write` so it runs only after every previously spawned write has
+    /// settled, keeping appends in boundary order.
+    ///
+    /// The spawned task reports the first error along the chain (in spawn
+    /// order), so a predecessor's failure is never lost by being folded behind
+    /// a later success. Awaiting a panicked predecessor yields a join error
+    /// rather than deadlocking the chain.
+    pub(crate) fn spawn_ordered<F>(&mut self, runtime: &tokio::runtime::Handle, write: F)
+    where
+        F: std::future::Future<Output = crate::error::Result<CheckpointId>> + Send + 'static,
+    {
+        let previous = self.handles.pop();
+        self.handles.push(runtime.spawn(async move {
+            let prior = match previous {
+                Some(handle) => Self::harvest(handle.await),
+                None => None,
+            };
+            // A predecessor that never persisted would leave this record's
+            // `parent_checkpoint_id` dangling, so skip the write entirely and
+            // report the failure that broke the lineage.
+            match prior {
+                Some(err) => Err(err),
+                None => write.await,
+            }
+        }));
     }
 
     /// Harvests writes that have already finished, without blocking on the

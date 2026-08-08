@@ -2435,3 +2435,476 @@ async fn async_durability_surfaces_background_write_failure_in_run_result() {
         "unexpected error: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression: resume value targeting, barrier-gated manual writes, async drains
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn resume_value_reaches_only_the_interrupted_node() {
+    // Parallel [a, b]: a routes to successor `x` and completes; b interrupts.
+    // The interrupt boundary schedules both `x` and `b`, but only `b` actually
+    // interrupted — `x` has never run, so it must observe `ctx.resume == None`
+    // on its first activation. Fanning the resume value across the whole
+    // pending set used to drive `x` down its "already approved" arm.
+    let cp = Arc::new(InMemoryCheckpointer::<Counter>::new());
+    let graph = GraphBuilder::<Counter, i32>::new()
+        .with_parallel(true)
+        .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: i32| {
+            s.value += u;
+            s.log.push(format!("+{u}"));
+            Ok(s)
+        }))
+        .add_node("super", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Command(
+                Command::default().with_goto(["a", "b"]),
+            ))
+        })
+        .add_node("a", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(1))
+        })
+        .add_node("b", |_s: Counter, c: NodeContext| async move {
+            match c.resume {
+                Some(_) => Ok(NodeResult::Update(100)),
+                None => Ok(NodeResult::Interrupt(Interrupt::new("b", json!({})))),
+            }
+        })
+        // 10 on a first (unresumed) activation, 1000 if it wrongly sees a
+        // resume value it never asked for.
+        .add_node("x", |_s: Counter, c: NodeContext| async move {
+            Ok(NodeResult::Update(if c.resume.is_some() {
+                1000
+            } else {
+                10
+            }))
+        })
+        .set_entry("super")
+        .mark_command_routing("super")
+        .add_edge("a", "x")
+        .set_finish("b")
+        .set_finish("x")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    let paused = graph
+        .run_with_thread(
+            "t-resume-scope",
+            Counter {
+                value: 0,
+                log: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(paused.is_interrupted());
+
+    let done = graph
+        .resume("t-resume-scope", Command::resume(json!({"approved": true})))
+        .await
+        .unwrap();
+    // 1 (a) + 100 (b, resumed) + 10 (x, first activation, no resume value).
+    assert_eq!(
+        done.state.value, 111,
+        "the resume value must reach only the node that interrupted"
+    );
+}
+
+#[tokio::test]
+async fn attributed_update_does_not_fire_an_unsatisfied_barrier() {
+    // Diamond `super -> {b, c} -> merge` joined by waiting edges. `c` interrupts
+    // on its first activation, so the pause leaves `c` pending with only `b`
+    // arrived at the barrier. A manual write attributed to `b` must not
+    // schedule `merge` (that would run the join without `c`'s contribution),
+    // and the recorded arrival must let `merge` fire once `c` completes.
+    let cp = Arc::new(InMemoryCheckpointer::<Counter>::new());
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let once = interrupted.clone();
+    let graph = GraphBuilder::<Counter, i32>::new()
+        .with_parallel(true)
+        .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: i32| {
+            s.value += u;
+            s.log.push(format!("+{u}"));
+            Ok(s)
+        }))
+        .add_node("super", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Command(
+                Command::default().with_goto(["b", "c"]),
+            ))
+        })
+        .add_node("b", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(1))
+        })
+        .add_node("c", move |_s: Counter, _c: NodeContext| {
+            let once = once.clone();
+            async move {
+                if once.swap(true, AtomicOrdering::SeqCst) {
+                    Ok(NodeResult::Update(2))
+                } else {
+                    Ok(NodeResult::Interrupt(Interrupt::new("c", json!({}))))
+                }
+            }
+        })
+        .add_node("merge", |_s: Counter, _c: NodeContext| async move {
+            Ok(NodeResult::Update(100))
+        })
+        .set_entry("super")
+        .mark_command_routing("super")
+        .add_waiting_edge("b", "merge")
+        .add_waiting_edge("c", "merge")
+        .set_finish("merge")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    let paused = graph
+        .run_with_thread(
+            "t-barrier-update",
+            Counter {
+                value: 0,
+                log: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(paused.is_interrupted());
+
+    // Operator edits state and attributes the write to `b`, the barrier
+    // predecessor that already ran.
+    graph
+        .update_state("t-barrier-update", 10, Some(NodeId::from("b")))
+        .await
+        .unwrap();
+    let written = cp.get("t-barrier-update", None).await.unwrap().unwrap();
+    assert!(
+        !written.next_nodes.iter().any(|n| n.as_str() == "merge"),
+        "an unsatisfied barrier must not be scheduled by an attributed write"
+    );
+    assert!(
+        written.next_nodes.iter().any(|n| n.as_str() == "c"),
+        "the still-pending barrier predecessor must stay scheduled"
+    );
+    // Resume prefers `pending_activations` over `next_nodes`, so the two must
+    // never disagree: a node named by only one of them would be silently
+    // dropped (or scheduled without its `Send` arg).
+    if let Some(pending) = &written.pending_activations {
+        assert_eq!(
+            pending.iter().map(|a| a.node.clone()).collect::<Vec<_>>(),
+            written.next_nodes,
+            "pending activations and next nodes must describe the same schedule"
+        );
+    }
+
+    let done = graph.retry("t-barrier-update").await.unwrap();
+    assert!(
+        done.visited.iter().any(|n| n.as_str() == "merge"),
+        "merge must fire once the remaining predecessor arrives"
+    );
+    // 1 (b) + 10 (manual write) + 2 (c) + 100 (merge).
+    assert_eq!(done.state.value, 113);
+}
+
+#[tokio::test]
+async fn async_durability_drains_background_writes_on_abort() {
+    // The recursion-limit abort returns `Err` mid-run. Any in-flight background
+    // checkpoint write must be settled first: dropping the tracker would detach
+    // the tasks, discarding their outcome and racing a caller that immediately
+    // retries the thread.
+    use crate::graph::checkpoint::DurabilityMode;
+
+    let completed_puts = Arc::new(AtomicUsize::new(0));
+    let cp = Arc::new(SlowCheckpointer {
+        inner: Arc::new(InMemoryCheckpointer::new()),
+        delay: Duration::from_millis(50),
+        completed_puts: completed_puts.clone(),
+    });
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("a", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .set_entry("a")
+        .add_edge("a", "a")
+        .with_recursion_limit(3)
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp)
+        .with_durability(DurabilityMode::Async);
+
+    let err = graph
+        .run_with_thread("t-async-abort", 0)
+        .await
+        .expect_err("the run must abort at the recursion limit");
+    assert!(matches!(err, TinyAgentsError::RecursionLimit(3)));
+    assert_eq!(
+        completed_puts.load(AtomicOrdering::SeqCst),
+        3,
+        "every background boundary write must be settled before the abort returns"
+    );
+}
+
+/// Delegating checkpointer that makes the *first* `put` slow and every later
+/// one instant, so an unserialized background writer would append boundary 2
+/// before boundary 1.
+struct FirstPutSlowCheckpointer {
+    inner: Arc<InMemoryCheckpointer<i32>>,
+    started: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Checkpointer<i32> for FirstPutSlowCheckpointer {
+    async fn put(
+        &self,
+        checkpoint: crate::graph::checkpoint::Checkpoint<i32>,
+    ) -> crate::error::Result<crate::harness::ids::CheckpointId> {
+        if self.started.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        self.inner.put(checkpoint).await
+    }
+
+    async fn get(
+        &self,
+        thread_id: &str,
+        checkpoint_id: Option<&str>,
+    ) -> crate::error::Result<Option<crate::graph::checkpoint::Checkpoint<i32>>> {
+        self.inner.get(thread_id, checkpoint_id).await
+    }
+
+    async fn list(
+        &self,
+        thread_id: &str,
+    ) -> crate::error::Result<Vec<crate::graph::checkpoint::CheckpointMetadata>> {
+        self.inner.list(thread_id).await
+    }
+
+    async fn list_threads(&self) -> crate::error::Result<Vec<String>> {
+        self.inner.list_threads().await
+    }
+
+    async fn delete_thread(&self, thread_id: &str) -> crate::error::Result<()> {
+        self.inner.delete_thread(thread_id).await
+    }
+
+    async fn delete_checkpoints(
+        &self,
+        thread_id: &str,
+        ids: &[String],
+    ) -> crate::error::Result<usize> {
+        self.inner.delete_checkpoints(thread_id, ids).await
+    }
+}
+
+#[tokio::test]
+async fn async_durability_appends_boundaries_in_order() {
+    // Every bundled backend defines a thread's "latest" checkpoint by insertion
+    // order, so background writes must land in boundary order even when an
+    // earlier `put` is slower than a later one.
+    use crate::graph::checkpoint::DurabilityMode;
+
+    let cp = Arc::new(FirstPutSlowCheckpointer {
+        inner: Arc::new(InMemoryCheckpointer::new()),
+        started: AtomicUsize::new(0),
+    });
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("a", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .add_node("b", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .add_node("c", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .set_entry("a")
+        .add_edge("a", "b")
+        .add_edge("b", "c")
+        .set_finish("c")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone())
+        .with_durability(DurabilityMode::Async);
+
+    let run = graph.run_with_thread("t-async-order", 0).await.unwrap();
+    assert_eq!(run.state, 3);
+    // Insertion order is listing order: each record's parent must be the one
+    // appended just before it.
+    let list = cp.list("t-async-order").await.unwrap();
+    assert_eq!(list.len(), 3);
+    for pair in list.windows(2) {
+        assert_eq!(
+            pair[1].parent_checkpoint_id.as_deref(),
+            Some(pair[0].checkpoint_id.as_str()),
+            "boundary writes landed out of order"
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_interrupt_checkpoint_without_stamped_nodes_still_resumes() {
+    // Checkpoints written before the `interrupted_nodes` metadata existed carry
+    // only `Interrupt::node`, which for a re-emitted child interrupt (what a
+    // subgraph node does) names a node this graph never schedules. The resume
+    // value must still reach the paused node — falling back to the pending set —
+    // rather than being addressed to a node that does not exist here, which
+    // would re-run the paused node unresumed and interrupt forever.
+    let cp = Arc::new(InMemoryCheckpointer::<Counter>::new());
+    let graph = GraphBuilder::<Counter, i32>::new()
+        .set_reducer(ClosureStateReducer::new(|mut s: Counter, u: i32| {
+            s.value += u;
+            s.log.push(format!("+{u}"));
+            Ok(s)
+        }))
+        .add_node("gate", |_s: Counter, c: NodeContext| async move {
+            match c.resume {
+                // The interrupt names a foreign node, as a subgraph node's
+                // re-emitted child interrupt does.
+                None => Ok(NodeResult::Interrupt(Interrupt::new(
+                    "child-gate",
+                    json!({}),
+                ))),
+                Some(_) => Ok(NodeResult::Update(5)),
+            }
+        })
+        .set_entry("gate")
+        .set_finish("gate")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    let paused = graph
+        .run_with_thread(
+            "t-legacy-resume",
+            Counter {
+                value: 0,
+                log: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(paused.is_interrupted());
+
+    // Age the boundary checkpoint into its pre-upgrade shape.
+    let mut legacy = cp.get("t-legacy-resume", None).await.unwrap().unwrap();
+    legacy
+        .metadata
+        .as_object_mut()
+        .unwrap()
+        .remove("interrupted_nodes");
+    cp.put(legacy).await.unwrap();
+
+    let done = graph
+        .resume("t-legacy-resume", Command::resume(json!("go")))
+        .await
+        .unwrap();
+    assert!(
+        !done.is_interrupted(),
+        "a legacy interrupt checkpoint must still deliver the resume value"
+    );
+    assert_eq!(done.state.value, 5);
+}
+
+/// Delegating checkpointer whose first `put` fails *slowly* (so the next
+/// boundary's write is already chained behind it) and records every attempt.
+struct FirstPutFailsSlowlyCheckpointer {
+    inner: Arc<InMemoryCheckpointer<i32>>,
+    attempts: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Checkpointer<i32> for FirstPutFailsSlowlyCheckpointer {
+    async fn put(
+        &self,
+        checkpoint: crate::graph::checkpoint::Checkpoint<i32>,
+    ) -> crate::error::Result<crate::harness::ids::CheckpointId> {
+        if self.attempts.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            return Err(crate::error::TinyAgentsError::Checkpoint(
+                "injected background write failure".to_string(),
+            ));
+        }
+        self.inner.put(checkpoint).await
+    }
+
+    async fn get(
+        &self,
+        thread_id: &str,
+        checkpoint_id: Option<&str>,
+    ) -> crate::error::Result<Option<crate::graph::checkpoint::Checkpoint<i32>>> {
+        self.inner.get(thread_id, checkpoint_id).await
+    }
+
+    async fn list(
+        &self,
+        thread_id: &str,
+    ) -> crate::error::Result<Vec<crate::graph::checkpoint::CheckpointMetadata>> {
+        self.inner.list(thread_id).await
+    }
+
+    async fn list_threads(&self) -> crate::error::Result<Vec<String>> {
+        self.inner.list_threads().await
+    }
+
+    async fn delete_thread(&self, thread_id: &str) -> crate::error::Result<()> {
+        self.inner.delete_thread(thread_id).await
+    }
+
+    async fn delete_checkpoints(
+        &self,
+        thread_id: &str,
+        ids: &[String],
+    ) -> crate::error::Result<usize> {
+        self.inner.delete_checkpoints(thread_id, ids).await
+    }
+}
+
+#[tokio::test]
+async fn async_durability_skips_a_write_whose_predecessor_failed() {
+    // Writing boundary N+1 after boundary N failed would durably append a
+    // record whose `parent_checkpoint_id` points at something that never
+    // persisted. The chained write must skip its own `put` and report the
+    // failure that broke the lineage.
+    use crate::graph::checkpoint::DurabilityMode;
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let cp = Arc::new(FirstPutFailsSlowlyCheckpointer {
+        inner: Arc::new(InMemoryCheckpointer::new()),
+        attempts: attempts.clone(),
+    });
+    let graph = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("a", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .add_node("b", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .add_node("c", |s, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s + 1))
+        })
+        .set_entry("a")
+        .add_edge("a", "b")
+        .add_edge("b", "c")
+        .set_finish("c")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone())
+        .with_durability(DurabilityMode::Async);
+
+    let err = graph
+        .run_with_thread("t-async-orphan", 0)
+        .await
+        .expect_err("a lost background checkpoint must fail the run");
+    assert!(
+        err.to_string()
+            .contains("injected background write failure"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        attempts.load(AtomicOrdering::SeqCst),
+        1,
+        "the write chained behind a failed one must not be attempted"
+    );
+    assert!(
+        cp.list("t-async-orphan").await.unwrap().is_empty(),
+        "no orphaned checkpoint may be appended after a broken lineage"
+    );
+}

@@ -498,6 +498,7 @@ mod tool_tests {
             depth: 0,
             max_turn_output_tokens: None,
             events: EventSink::new(),
+            cancellation: crate::harness::cancel::CancellationToken::new(),
             streaming: false,
             workspace: None,
         }
