@@ -36,36 +36,22 @@ use tinyagents::harness::usage::Usage;
 
 // ── Scripted model helpers ────────────────────────────────────────────────────
 
+/// Builds an assistant turn that requests `calls`.
+///
+/// Deliberately built from [`ModelResponse::assistant`] rather than a struct
+/// literal so the fixture survives new fields being added to `ModelResponse`.
 fn tool_calls_response(calls: Vec<ToolCall>) -> ModelResponse {
-    ModelResponse {
-        message: AssistantMessage {
-            id: Some("msg-tools".into()),
-            content: Vec::new(),
-            tool_calls: calls,
-            usage: Some(Usage::new(6, 2)),
-        },
-        usage: Some(Usage::new(6, 2)),
-        finish_reason: Some("tool_calls".into()),
-        raw: None,
-        resolved_model: None,
-        continue_turn: None,
-    }
+    let mut response = ModelResponse::assistant("");
+    response.message.content = Vec::new();
+    response.message.tool_calls = calls;
+    response.finish_reason = Some("tool_calls".into());
+    response
 }
 
 fn text_response(text: &str) -> ModelResponse {
-    ModelResponse {
-        message: AssistantMessage {
-            id: None,
-            content: vec![ContentBlock::Text(text.into())],
-            tool_calls: Vec::new(),
-            usage: Some(Usage::new(3, 1)),
-        },
-        usage: Some(Usage::new(3, 1)),
-        finish_reason: Some("stop".into()),
-        raw: None,
-        resolved_model: None,
-        continue_turn: None,
-    }
+    let mut response = ModelResponse::assistant(text);
+    response.finish_reason = Some("stop".into());
+    response
 }
 
 fn empty_object_schema(name: &str) -> ToolSchema {
