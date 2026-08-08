@@ -79,11 +79,11 @@ const TIMEOUT_MS: u64 = 180_000;
 /// that never reached the answer.
 ///
 /// The crate already treats this as a first-class failure mode — see
-/// [`RunPolicy::empty_response_retries`], whose documentation names `qwen3` via
+/// [`RunPolicy::truncated_empty_retries`], whose documentation names `qwen3` via
 /// Ollama specifically — so the tests must not reintroduce it by being frugal.
 /// A budget this size is what a host talking to local models should use.
 ///
-/// [`RunPolicy::empty_response_retries`]: tinyagents::harness::runtime::RunPolicy::empty_response_retries
+/// [`RunPolicy::truncated_empty_retries`]: tinyagents::harness::runtime::RunPolicy::truncated_empty_retries
 const MAX_TOKENS: u32 = 1024;
 
 /// The weather the fake tool always reports. Distinctive enough that finding it
