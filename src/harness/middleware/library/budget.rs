@@ -294,6 +294,20 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for BudgetMidd
             guard.reserved_input_total = guard.reserved_input_total.saturating_sub(reserved);
         }
 
+        // A cache replay spent nothing: no provider call was made, no tokens
+        // were consumed, no money changed hands. Folding its (replayed) usage
+        // into the tracker bills phantom spend, and enough hits can abort a run
+        // on a budget it never actually touched. The reservation is still
+        // released above — that part is real bookkeeping.
+        if response.served_from_cache {
+            tracing::debug!(
+                target: "tinyagents::middleware",
+                label = self.label,
+                "[budget] skipping accounting for a cache-served response"
+            );
+            return Ok(());
+        }
+
         let Some(usage) = response.usage else {
             return Ok(());
         };
