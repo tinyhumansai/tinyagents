@@ -482,7 +482,11 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             result.call_id = prepared.call_id.as_str().to_string();
         }
 
-        if let Err(err) = self.middleware.run_after_tool(ctx, state, &mut result).await {
+        if let Err(err) = self
+            .middleware
+            .run_after_tool(ctx, state, &mut result)
+            .await
+        {
             self.fail_tool_call(
                 ctx,
                 status,
@@ -694,9 +698,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 let fut = Self::with_tool_policy_timeout(tool_timeout, timeout_result, fut);
                 // As in serial mode: the error policy routes the *tool's*
                 // failure, inside the run-budget wrapper that stays fatal.
-                let guarded = async move {
-                    apply_tool_error_policy(&error_policy, &policy_call, fut.await)
-                };
+                let guarded =
+                    async move { apply_tool_error_policy(&error_policy, &policy_call, fut.await) };
                 Self::with_call_budget(run_budget, &run_id, "tool call", guarded).await
             });
         }

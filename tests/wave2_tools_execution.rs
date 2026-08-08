@@ -462,7 +462,10 @@ async fn duplicate_call_ids_do_not_clear_each_others_active_entry() {
     // keeps the two duplicate entries independent; a `retain` would have
     // cleared both on the first completion.
     let events = recorder.events();
-    assert_eq!(started_call_ids(&events), vec!["dup".to_string(), "dup".to_string()]);
+    assert_eq!(
+        started_call_ids(&events),
+        vec!["dup".to_string(), "dup".to_string()]
+    );
     assert_eq!(completed_call_ids(&events), vec!["dup".to_string()]);
     assert_eq!(
         events
