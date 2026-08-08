@@ -13,6 +13,25 @@ use crate::harness::events::{HarnessRunStatus, LimitKind};
 use crate::harness::middleware::AgentRun;
 use crate::harness::steering::PauseState;
 
+/// The result of an agent-loop invocation that keeps the partial run even when
+/// the loop fails.
+///
+/// [`crate::harness::runtime::AgentHarness::invoke`] returns `Err` on failure
+/// and drops the [`AgentRun`] with it, so a run that tripped a limit or hit a
+/// tool failure halfway through loses every message and usage figure it had
+/// accumulated. `PartialRunOutcome` keeps both, letting a caller inspect,
+/// repair, or resume from the partial conversation.
+#[derive(Debug)]
+pub struct PartialRunOutcome {
+    /// The accumulated transcript, usage, counters, and final response —
+    /// populated as far as the run got, whether or not it failed.
+    pub run: AgentRun,
+    /// A compact lifecycle/status snapshot reflecting how the run ended.
+    pub status: HarnessRunStatus,
+    /// The error that ended the run, or `None` when it succeeded.
+    pub error: Option<crate::error::TinyAgentsError>,
+}
+
 /// How the agent loop body stopped iterating.
 ///
 /// Kept separate from the `Result` channel so a *deliberate* stop (a pause, a
