@@ -345,6 +345,12 @@ async fn invalid_tool_arguments_are_rejected_before_execution() {
         .register_tool(Arc::new(StrictLookupTool {
             calls: Arc::clone(&calls),
         }));
+    // `ReturnToolError` is the default now, so the fail-closed schema boundary
+    // this test pins has to be opted into.
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::Fail,
+        ..RunPolicy::default()
+    });
 
     let ctx =
         RunContext::new(RunConfig::new("mw-e2e-tool-schema"), ()).with_events(recorder.sink());
