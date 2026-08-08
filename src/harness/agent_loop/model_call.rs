@@ -7,6 +7,9 @@
 //! the full loop lifecycle, limits, and backoff design.
 
 use super::*;
+use crate::harness::cache::{
+    CachePolicy, CacheSkipReason, apply_prompt_cache_breakpoints, scoped_cache_key,
+};
 
 impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// Invokes a model, consulting the local response cache around the
