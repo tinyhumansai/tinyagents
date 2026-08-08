@@ -168,13 +168,65 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// [`crate::harness::model::ChatModel::stream`] (firing `on_model_delta`
     /// middleware per delta) or the unary
     /// [`crate::harness::model::ChatModel::invoke`] path.
+    /// Runs the loop and returns the accumulated run **and** any error, instead
+    /// of discarding the run when the loop fails.
+    ///
+    /// [`AgentHarness::invoke`] and friends return `Err` on failure, which drops
+    /// the partially-populated [`AgentRun`] — every message, tool result, and
+    /// usage figure the run produced before it tripped a limit or hit a tool
+    /// failure. Use this when that partial work is worth keeping: to inspect
+    /// what the agent had done, to repair the transcript, or to resume from it.
+    ///
+    /// The returned [`PartialRunOutcome::error`] is `None` exactly when the run
+    /// succeeded.
+    pub async fn invoke_collecting_partial(
+        &self,
+        state: &State,
+        ctx_data: Ctx,
+        config: RunConfig,
+        input: Vec<Message>,
+    ) -> PartialRunOutcome {
+        let ctx = RunContext::new(config, ctx_data);
+        self.drive_collecting(state, ctx, input, false).await
+    }
+
+    /// [`AgentHarness::invoke_collecting_partial`] against a caller-supplied
+    /// [`RunContext`].
+    pub async fn invoke_in_context_collecting_partial(
+        &self,
+        state: &State,
+        ctx: RunContext<Ctx>,
+        input: Vec<Message>,
+    ) -> PartialRunOutcome {
+        self.drive_collecting(state, ctx, input, false).await
+    }
+
     async fn drive(
+        &self,
+        state: &State,
+        ctx: RunContext<Ctx>,
+        input: Vec<Message>,
+        streaming: bool,
+    ) -> Result<AgentLoopResult> {
+        let outcome = self.drive_collecting(state, ctx, input, streaming).await;
+        match outcome.error {
+            Some(error) => Err(error),
+            None => Ok(AgentLoopResult {
+                run: outcome.run,
+                status: outcome.status,
+            }),
+        }
+    }
+
+    /// The shared driver both entry shapes delegate to. Never discards the
+    /// run, so the failing path can hand the partial transcript back.
+    async fn drive_collecting(
         &self,
         state: &State,
         mut ctx: RunContext<Ctx>,
         input: Vec<Message>,
         streaming: bool,
-    ) -> Result<AgentLoopResult> {
+    ) -> PartialRunOutcome {
         let run_id = ctx.config.run_id.clone();
         let thread_id = ctx.config.thread_id.clone();
         // Record the drive mode so tool execution contexts (and the sub-agents
@@ -194,8 +246,19 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             .await
         {
             Ok(()) => {
-                status.mark_completed();
-                Ok(AgentLoopResult { run, status })
+                // A paused run is resumable, not finished: reporting it
+                // `completed` is what made "paused for a human" look identical
+                // to "the model produced an empty final answer".
+                if run.paused.is_some() {
+                    status.mark_interrupted();
+                } else {
+                    status.mark_completed();
+                }
+                PartialRunOutcome {
+                    run,
+                    status,
+                    error: None,
+                }
             }
             Err(error) => {
                 let record = ctx.emit(AgentEvent::RunFailed {
