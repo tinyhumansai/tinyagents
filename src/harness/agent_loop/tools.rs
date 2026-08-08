@@ -120,6 +120,15 @@ enum AdmittedCall<State: Send + Sync> {
     Recovered { call: ToolCall, message: String },
 }
 
+/// One transcript slot per requested call, in original order, used by the
+/// concurrent path to reassemble results deterministically.
+enum ToolSlot {
+    /// An executed call: consumes the next prepared/result pair in order.
+    Execute,
+    /// A recovery, folded in place through the normal result pipeline.
+    Recovered { call: ToolCall, message: String },
+}
+
 /// Admission metadata for one executable call, paired 1:1 (in order) with its
 /// execution future/result on the concurrent path.
 struct PreparedToolCall {
