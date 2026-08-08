@@ -103,13 +103,21 @@ enum ResolvedToolCall<State: Send + Sync> {
     ErrorMessage(String),
 }
 
-/// One transcript slot per requested call, in original order, used by the
-/// concurrent path to reassemble results deterministically.
-enum ToolSlot {
-    /// An executed call: consumes the next prepared/future pair in order.
-    Execute,
-    /// An unknown-tool recovery message, appended verbatim.
-    Immediate { call_id: String, message: String },
+/// One requested call after admission, in original order.
+///
+/// The concurrent path materialises the whole admitted batch before emitting a
+/// single [`AgentEvent::ToolStarted`], so an admission failure part-way through
+/// the batch cannot leave earlier calls announced-but-never-run (TOOL-3).
+enum AdmittedCall<State: Send + Sync> {
+    /// A registered tool to invoke, with its (validated) call.
+    Execute {
+        tool: Arc<dyn Tool<State>>,
+        call: ToolCall,
+    },
+    /// A recovery: no tool runs, but the call is still answered through the
+    /// normal result pipeline so it emits the same started/completed pair and
+    /// runs the same `after_tool` hooks (TOOL-11).
+    Recovered { call: ToolCall, message: String },
 }
 
 /// Admission metadata for one executable call, paired 1:1 (in order) with its
