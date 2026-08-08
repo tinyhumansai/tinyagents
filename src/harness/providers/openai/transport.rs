@@ -2521,6 +2521,28 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         Some(&self.profile)
     }
 
+    /// Identifies this endpoint for the response cache key.
+    ///
+    /// Covers everything that makes two `OpenAiModel`s answer the same prompt
+    /// differently: the provider family, the model id, the base URL (a local
+    /// Ollama and hosted OpenAI are two different answers to one question), and
+    /// a **fingerprint** of the API credential — two keys can address two
+    /// tenants or two fine-tunes behind one base URL.
+    ///
+    /// The raw credential never appears: it goes through
+    /// [`credential_fingerprint`][crate::harness::cache::credential_fingerprint]
+    /// first, because this string is folded into keys that reach logs, events,
+    /// and durable cache files.
+    fn cache_identity(&self) -> Option<String> {
+        Some(crate::harness::cache::model_cache_identity(
+            &self.provider,
+            &self.model,
+            &self.base_url,
+            self.responses_api_primary.then_some("responses"),
+            &self.api_key,
+        ))
+    }
+
     /// Invokes the OpenAI Chat Completions endpoint and maps the response into a
     /// [`ModelResponse`].
     ///
