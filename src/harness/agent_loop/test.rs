@@ -2760,6 +2760,7 @@ async fn request_cache_policy_overrides_run_policy_to_disable_caching() {
             request.cache_policy = Some(CachePolicy {
                 response_cache_enabled: false,
                 protect_prompt_prefix: false,
+                ..CachePolicy::default()
             });
             Ok(())
         }
