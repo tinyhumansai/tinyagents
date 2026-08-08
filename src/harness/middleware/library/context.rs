@@ -423,15 +423,27 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for PromptCach
 
     async fn before_model(
         &self,
-        _ctx: &mut RunContext<Ctx>,
+        ctx: &mut RunContext<Ctx>,
         _state: &State,
         request: &mut ModelRequest,
     ) -> Result<()> {
         let layout = PromptCacheLayout::from_request(request);
+        let run_id = ctx.run_id().clone();
         let mut previous = self.previous.lock().expect("previous mutex poisoned");
-        if let Some(prev) = previous.as_ref()
+        // Only compare within one run. See the field docs on
+        // `PromptCacheGuardMiddleware::previous`: a prefix cache is scoped to a
+        // single conversation, so a baseline carried over from a previous run
+        // would report an invalidation that never happened.
+        if let Some((prev_run, prev)) = previous.as_ref()
+            && prev_run == &run_id
             && !prev.is_prefix_stable_against(&layout)
         {
+            tracing::debug!(
+                "[cache] prompt_cache_guard: prefix invalidated run={run_id} \
+                 before={} after={}",
+                prev.fingerprint(),
+                layout.fingerprint()
+            );
             let event = CacheLayoutEvent::new(prev, &layout);
             let mut events = self.events.lock().expect("events mutex poisoned");
             if self.max_events > 0 {
