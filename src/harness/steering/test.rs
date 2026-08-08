@@ -43,6 +43,7 @@ fn text_response(text: &str) -> ModelResponse {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -84,6 +85,7 @@ impl ChatModel<()> for RecordingModel {
                 raw: None,
                 resolved_model: None,
                 continue_turn: None,
+                served_from_cache: false,
             })
         } else {
             Ok(text_response("done"))

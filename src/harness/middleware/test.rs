@@ -39,6 +39,7 @@ fn response_with_usage(usage: Usage) -> ModelResponse {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -999,6 +1000,7 @@ fn response_text(text: &str) -> ModelResponse {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 

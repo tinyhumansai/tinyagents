@@ -991,6 +991,7 @@ fn provider_failed_stream_item_finishes_as_provider_error() {
         code: Some("rate_limit".to_string()),
         message: "too many requests".to_string(),
         retryable: true,
+        retry_after_ms: None,
         raw: None,
     }));
 
@@ -2779,6 +2780,7 @@ fn stream_cleanup_scrubs_leaked_markup_from_live_deltas() {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     };
     let terminal = super::transport::clean_stream_item(
         ModelStreamItem::Completed(response),

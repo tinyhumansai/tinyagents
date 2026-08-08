@@ -348,6 +348,7 @@ fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> Mod
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -372,6 +373,7 @@ fn invalid_tool_call_response(id: &str, name: &str, raw: &str) -> ModelResponse 
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -389,6 +391,7 @@ fn text_response(text: &str, input: u64, output: u64) -> ModelResponse {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -410,6 +413,7 @@ fn truncated_empty_response(reasoning_tokens: u64) -> ModelResponse {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -517,6 +521,7 @@ impl ChatModel<()> for TimestampingFailingModel {
 /// structured flag rather than retrying every provider failure.
 struct ProviderFailingModel {
     retryable: bool,
+    retry_after_ms: None,
     status: u16,
     attempts: Mutex<usize>,
 }
@@ -530,6 +535,7 @@ impl ChatModel<()> for ProviderFailingModel {
                 provider: "test-provider".to_string(),
                 status: Some(self.status),
                 retryable: self.retryable,
+                retry_after_ms: None,
                 message: "boom".to_string(),
                 ..crate::harness::model::ProviderError::default()
             },
@@ -1794,6 +1800,7 @@ async fn provider_error_401_is_not_retried() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     let model = Arc::new(ProviderFailingModel {
         retryable: false,
+        retry_after_ms: None,
         status: 401,
         attempts: Mutex::new(0),
     });
@@ -1818,6 +1825,7 @@ async fn provider_error_429_is_retried_up_to_max_attempts() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     let model = Arc::new(ProviderFailingModel {
         retryable: true,
+        retry_after_ms: None,
         status: 429,
         attempts: Mutex::new(0),
     });
@@ -3099,6 +3107,7 @@ fn multi_tool_call_response(calls: Vec<(&str, &str)>) -> ModelResponse {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
