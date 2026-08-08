@@ -453,7 +453,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for PromptCach
                 events.push_back(event);
             }
         }
-        *previous = Some(layout);
+        *previous = Some((run_id, layout));
         Ok(())
     }
 }
