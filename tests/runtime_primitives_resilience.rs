@@ -205,7 +205,10 @@ fn loop6_failure_variants_exist_for_tool_model_and_subagent() {
         },
     ];
     let kinds: Vec<&str> = events.iter().map(AgentEvent::kind).collect();
-    assert_eq!(kinds, vec!["tool.failed", "model.failed", "subagent.failed"]);
+    assert_eq!(
+        kinds,
+        vec!["tool.failed", "model.failed", "subagent.failed"]
+    );
 
     // They must survive a durable journal round trip.
     for event in events {
@@ -274,7 +277,8 @@ fn loop9_a_panicking_listener_does_not_stop_later_delivery() {
 
 #[test]
 fn loop8_a_rejected_batch_applies_nothing() {
-    let handle = SteeringHandle::new(SteeringPolicy::new().allow(SteeringCommandKind::InjectMessage));
+    let handle =
+        SteeringHandle::new(SteeringPolicy::new().allow(SteeringCommandKind::InjectMessage));
     handle.send(SteeringCommand::InjectMessage(Message::user("first")));
     handle.send(SteeringCommand::Cancel); // not allowed
 
@@ -291,7 +295,8 @@ fn loop8_a_rejected_batch_applies_nothing() {
 #[test]
 fn loop8_a_pause_is_latched_and_resumable_across_checkpoints() {
     let handle = SteeringHandle::allow_all();
-    let mut ctx: RunContext = RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
+    let mut ctx: RunContext =
+        RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
     let mut messages: Vec<Message> = Vec::new();
 
     handle.send(SteeringCommand::PauseWith {
