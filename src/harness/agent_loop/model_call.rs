@@ -634,6 +634,66 @@ pub(super) struct ModelCallBase<'h, State: Send + Sync, Ctx: Send + Sync> {
     pub(super) streaming: bool,
 }
 
+impl<State: Send + Sync, Ctx: Send + Sync> ModelCallBase<'_, State, Ctx> {
+    /// Produces the binding for one invocation, honouring a model override that
+    /// a wrap middleware wrote into `request.model`.
+    ///
+    /// * `request.model` absent, or equal to the already-resolved name: reuse
+    ///   the captured binding (the common path — no registry lookup).
+    /// * `request.model` names something the registry resolves as a genuine
+    ///   [`ModelResolutionSource::RequestOverride`]: use it. This is what makes
+    ///   a wrap-layer fallback actually switch models.
+    /// * `request.model` names something unresolvable (unregistered, missing a
+    ///   required capability, provider-retired): fall back to the captured
+    ///   binding and emit [`AgentEvent::ModelOverrideSkipped`], matching the
+    ///   fail-closed behaviour `run_loop` already has for a pre-wrap override.
+    ///   Silently substituting a different model is the one outcome that is
+    ///   never acceptable.
+    fn rebind(
+        &self,
+        ctx: &mut RunContext<Ctx>,
+        request: &ModelRequest,
+    ) -> ResolvedModelBinding<State> {
+        let captured = || ResolvedModelBinding {
+            resolved: self.resolved.clone(),
+            model: Arc::clone(&self.model),
+        };
+        let Some(requested) = request.model.as_deref() else {
+            return captured();
+        };
+        if requested == self.resolved.name {
+            return captured();
+        }
+        match self.harness.models.resolve_request(request, None, None) {
+            Some(binding)
+                if binding.resolved.source == ModelResolutionSource::RequestOverride
+                    && binding.resolved.name == requested =>
+            {
+                tracing::debug!(
+                    call_id = %self.call_id.as_str(),
+                    from = %self.resolved.name,
+                    to = %binding.resolved.name,
+                    "[model] wrap layer overrode the model; re-resolved the binding"
+                );
+                binding
+            }
+            _ => {
+                tracing::warn!(
+                    call_id = %self.call_id.as_str(),
+                    requested = %requested,
+                    resolved = %self.resolved.name,
+                    "[model] wrap layer named an unresolvable model; keeping the resolved binding"
+                );
+                ctx.emit(AgentEvent::ModelOverrideSkipped {
+                    requested: requested.to_string(),
+                    resolved: self.resolved.name.clone(),
+                });
+                captured()
+            }
+        }
+    }
+}
+
 impl<State: Send + Sync, Ctx: Send + Sync> ModelBaseCall<State, Ctx>
     for ModelCallBase<'_, State, Ctx>
 {
