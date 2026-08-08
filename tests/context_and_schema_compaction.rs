@@ -122,13 +122,28 @@ fn keep_first_and_last_never_orphans_either_end() {
 
 #[test]
 fn max_tokens_never_orphans_a_tool_result() {
+    // The assistant turn carries visible text as well as its tool call, so the
+    // budget loop stops *between* the call and its result — the only way a
+    // front-dropping token trim can orphan one.
+    let narrating_call = Message::Assistant(AssistantMessage {
+        id: None,
+        content: vec![tinyagents::harness::message::ContentBlock::Text(
+            "Let me look that up. ".repeat(20),
+        )],
+        tool_calls: vec![ToolCall::new(
+            "c1",
+            "get_weather",
+            serde_json::json!({"city": "Paris"}),
+        )],
+        usage: None,
+    });
     let messages = vec![
-        Message::user("x".repeat(400)),
-        assistant_calling("c1"),
+        Message::user("x".repeat(40)),
+        narrating_call,
         Message::tool("c1", "r1"),
         Message::assistant("done"),
     ];
-    let trimmed = trim_messages(&messages, &TrimStrategy::MaxTokens(4));
+    let trimmed = trim_messages(&messages, &TrimStrategy::MaxTokens(3));
     assert!(
         pairing_intact(&trimmed),
         "MaxTokens produced a slice a provider would reject: {trimmed:#?}"
