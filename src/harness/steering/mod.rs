@@ -104,6 +104,8 @@ impl SteeringHandle {
             inner: Arc::new(SteeringInner {
                 queue: Mutex::new(VecDeque::new()),
                 policy,
+                paused: Mutex::new(None),
+                checkpoints: Mutex::new(0),
             }),
         }
     }
@@ -163,6 +165,78 @@ impl SteeringHandle {
     pub fn policy(&self) -> &SteeringPolicy {
         &self.inner.policy
     }
+
+    /// Returns the latched [`PauseState`] when the run is paused, `None`
+    /// otherwise.
+    ///
+    /// This is how a caller distinguishes a run that stopped for a human from a
+    /// run that finished with nothing to say: on a
+    /// [`SteeringOutcome::Pause`] this is always `Some`.
+    pub fn pause_state(&self) -> Option<PauseState> {
+        self.lock_paused().clone()
+    }
+
+    /// Returns `true` when a pause is latched.
+    pub fn is_paused(&self) -> bool {
+        self.lock_paused().is_some()
+    }
+
+    /// Latches a pause with an optional reason. Idempotent: an existing pause
+    /// keeps its original reason and checkpoint, so a repeated `Pause` does not
+    /// rewrite why the run stopped.
+    fn latch_pause(&self, reason: Option<String>) -> PauseState {
+        let checkpoint = *self
+            .inner
+            .checkpoints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut paused = self.lock_paused();
+        let state = paused.get_or_insert(PauseState {
+            reason,
+            paused_at_checkpoint: checkpoint,
+        });
+        tracing::debug!(
+            target: "tinyagents::steering",
+            checkpoint = state.paused_at_checkpoint,
+            reason = state.reason.as_deref(),
+            "[steering] pause latched"
+        );
+        state.clone()
+    }
+
+    /// Clears any latched pause, returning the state that was cleared.
+    ///
+    /// Equivalent to delivering a [`SteeringCommand::Resume`]; exposed directly
+    /// so a host UI can resume without going through the queue. A no-op when no
+    /// pause is in effect.
+    pub fn resume(&self) -> Option<PauseState> {
+        let cleared = self.lock_paused().take();
+        if cleared.is_some() {
+            tracing::debug!(target: "tinyagents::steering", "[steering] pause cleared by resume");
+        }
+        cleared
+    }
+
+    /// Increments and returns the checkpoint counter.
+    fn advance_checkpoint(&self) -> usize {
+        let mut checkpoints = self
+            .inner
+            .checkpoints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = *checkpoints;
+        *checkpoints += 1;
+        current
+    }
+
+    /// Locks the pause latch, recovering from poisoning (see
+    /// [`SteeringHandle::send`]).
+    fn lock_paused(&self) -> std::sync::MutexGuard<'_, Option<PauseState>> {
+        self.inner
+            .paused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 // ── Checkpoint application ────────────────────────────────────────────────────
@@ -175,26 +249,32 @@ impl SteeringHandle {
 /// standalone, synchronous function so it can be unit-tested without a full
 /// run. Behaviour:
 ///
-/// - When `ctx` has no [`SteeringHandle`] (or its queue is empty), returns
+/// - When `ctx` has no [`SteeringHandle`], returns
 ///   [`SteeringOutcome::Continue`] without emitting anything.
-/// - Every drained command is checked against the handle's
-///   [`SteeringPolicy`]. A disallowed command emits an
-///   [`AgentEvent::Steered`] with `accepted = false` and returns
-///   [`TinyAgentsError::Steering`], aborting the run; no later command in the
-///   batch is applied.
+/// - The batch is **validated in full before anything is applied**. If any
+///   command is disallowed, an [`AgentEvent::Steered`] with `accepted = false`
+///   is emitted for it and [`TinyAgentsError::Steering`] is returned — with the
+///   working transcript and run metadata completely untouched. (It used to
+///   validate lazily while applying, so a rejected command at position *n* left
+///   commands `0..n` already applied, commands after it dropped, and the run
+///   erroring: a partially-steered run and no way to reason about its state.)
 /// - [`SteeringCommand::Cancel`] takes precedence: it is applied (emitting an
 ///   accepted event) and the function returns [`SteeringOutcome::Cancel`]
 ///   immediately, ignoring the rest of the batch.
-/// - [`SteeringCommand::Pause`] sets a net-pause outcome; a later
-///   [`SteeringCommand::Resume`] in the same batch clears it.
+/// - [`SteeringCommand::Pause`] / [`SteeringCommand::PauseWith`] latch a pause
+///   **on the handle**, so it survives past this batch. Any later
+///   [`SteeringCommand::Resume`] — in this batch or a subsequent one — clears
+///   it. While latched, every checkpoint returns [`SteeringOutcome::Pause`]
+///   even with an empty queue.
 /// - [`SteeringCommand::InjectMessage`] and [`SteeringCommand::Redirect`]
 ///   append to `messages`; [`SteeringCommand::SetMetadata`] replaces
 ///   `ctx.config.metadata`.
 ///
 /// # Errors
 ///
-/// Returns [`TinyAgentsError::Steering`] when a drained command is not
-/// permitted by the run's [`SteeringPolicy`].
+/// Returns [`TinyAgentsError::Steering`] when any drained command is not
+/// permitted by the run's [`SteeringPolicy`]. No command in the batch is
+/// applied in that case.
 pub fn apply_pending_steering<Ctx>(
     ctx: &mut RunContext<Ctx>,
     messages: &mut Vec<Message>,
@@ -204,33 +284,56 @@ pub fn apply_pending_steering<Ctx>(
     let Some(handle) = ctx.steering.clone() else {
         return Ok(SteeringOutcome::Continue);
     };
+    let checkpoint = handle.advance_checkpoint();
     let commands = handle.drain();
-    if commands.is_empty() {
-        return Ok(SteeringOutcome::Continue);
+
+    // ── Phase 1: validate the whole batch, mutating nothing ─────────────────
+    //
+    // A policy violation must abort the checkpoint *atomically*. Checking as we
+    // apply means the run dies with some of the batch already in the
+    // transcript.
+    if let Some(rejected) = commands
+        .iter()
+        .map(SteeringCommand::kind)
+        .find(|kind| !handle.policy().is_allowed(*kind))
+    {
+        tracing::debug!(
+            target: "tinyagents::steering",
+            checkpoint,
+            command_kind = rejected.as_str(),
+            batch_size = commands.len(),
+            "[steering] batch rejected by policy; nothing applied"
+        );
+        ctx.emit(AgentEvent::Steered {
+            command_kind: rejected.as_str().to_string(),
+            accepted: false,
+        });
+        return Err(TinyAgentsError::Steering(format!(
+            "steering command `{}` is not permitted by the run policy",
+            rejected.as_str()
+        )));
     }
 
-    let mut outcome = SteeringOutcome::Continue;
+    // ── Phase 2: apply ──────────────────────────────────────────────────────
+    tracing::debug!(
+        target: "tinyagents::steering",
+        checkpoint,
+        batch_size = commands.len(),
+        already_paused = handle.is_paused(),
+        "[steering] applying checkpoint batch"
+    );
     for command in commands {
         let kind = command.kind();
 
-        if !handle.policy().is_allowed(kind) {
-            ctx.emit(AgentEvent::Steered {
-                command_kind: kind.as_str().to_string(),
-                accepted: false,
-            });
-            return Err(TinyAgentsError::Steering(format!(
-                "steering command `{}` is not permitted by the run policy",
-                kind.as_str()
-            )));
-        }
-
-        // Apply the permitted command.
         match command {
-            SteeringCommand::Pause => outcome = SteeringOutcome::Pause,
+            SteeringCommand::Pause => {
+                handle.latch_pause(None);
+            }
+            SteeringCommand::PauseWith { reason } => {
+                handle.latch_pause(Some(reason));
+            }
             SteeringCommand::Resume => {
-                if outcome == SteeringOutcome::Pause {
-                    outcome = SteeringOutcome::Continue;
-                }
+                handle.resume();
             }
             SteeringCommand::Cancel => {
                 ctx.emit(AgentEvent::Steered {
@@ -257,7 +360,13 @@ pub fn apply_pending_steering<Ctx>(
         });
     }
 
-    Ok(outcome)
+    // The latch — not this batch — decides the outcome, so a pause applied at an
+    // earlier checkpoint keeps holding the run.
+    if handle.is_paused() {
+        Ok(SteeringOutcome::Pause)
+    } else {
+        Ok(SteeringOutcome::Continue)
+    }
 }
 
 #[cfg(test)]

@@ -31,12 +31,29 @@ use crate::harness::message::Message;
 #[serde(rename_all = "snake_case", tag = "command")]
 pub enum SteeringCommand {
     /// Cooperatively pause the run: the loop stops issuing further model and
-    /// tool work at the next checkpoint until a [`SteeringCommand::Resume`] is
-    /// delivered in the same drained batch.
+    /// tool work at the next checkpoint, and **stays** paused until a
+    /// [`SteeringCommand::Resume`] arrives — in this batch or any later one.
+    ///
+    /// The pause is latched on the [`SteeringHandle`], not on the batch. It used
+    /// to be batch-scoped, which made a pause unresumable in practice: a
+    /// `Resume` sent after the pause had already been applied found nothing to
+    /// clear.
     Pause,
 
-    /// Clear a pending pause so the loop continues. A `Resume` with no
-    /// preceding `Pause` in the same batch is a no-op.
+    /// Pause with a human-readable reason recorded in the resulting
+    /// [`PauseState`], for example `"waiting for human approval of the refund"`.
+    ///
+    /// Identical to [`SteeringCommand::Pause`] in every other respect,
+    /// including its [`SteeringCommandKind::Pause`] policy gate — a policy that
+    /// allows one allows the other.
+    PauseWith {
+        /// Why the run was paused. Surfaced to the caller through
+        /// [`PauseState::reason`].
+        reason: String,
+    },
+
+    /// Clear a latched pause so the loop continues. A `Resume` with no pause in
+    /// effect is a no-op.
     Resume,
 
     /// Terminate the run cooperatively at the next checkpoint. Cancel takes
@@ -70,7 +87,9 @@ impl SteeringCommand {
     /// Returns the policy-relevant [`SteeringCommandKind`] of this command.
     pub fn kind(&self) -> SteeringCommandKind {
         match self {
-            SteeringCommand::Pause => SteeringCommandKind::Pause,
+            SteeringCommand::Pause | SteeringCommand::PauseWith { .. } => {
+                SteeringCommandKind::Pause
+            }
             SteeringCommand::Resume => SteeringCommandKind::Resume,
             SteeringCommand::Cancel => SteeringCommandKind::Cancel,
             SteeringCommand::InjectMessage(_) => SteeringCommandKind::InjectMessage,
@@ -138,14 +157,64 @@ pub struct SteeringPolicy {
 
 /// The control-flow decision produced by applying a batch of steering commands
 /// at a checkpoint.
+///
+/// Deliberately still `Copy` and payload-free: the agent loop matches on it
+/// directly, and widening a variant would break every one of those call sites
+/// for no gain. The *state* behind a [`SteeringOutcome::Pause`] lives on the
+/// [`SteeringHandle`] — read it with [`SteeringHandle::pause_state`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SteeringOutcome {
     /// No steering, or only transcript/metadata mutations: continue the loop.
     Continue,
-    /// A net pause is in effect: the loop should cooperatively stop.
+    /// A pause is latched: the loop should cooperatively stop and report the
+    /// run as **paused**, not completed.
+    ///
+    /// # Contract for the agent loop (wave 2)
+    ///
+    /// The loop currently treats this as a bare `break`, which falls through to
+    /// the success epilogue and reports the run completed with
+    /// `final_response: None`. A caller cannot then tell "paused waiting for a
+    /// human" from "the model produced an empty answer". On this outcome the
+    /// loop must instead:
+    ///
+    /// 1. Read [`SteeringHandle::pause_state`] from `ctx.steering` — it is
+    ///    always `Some` when this outcome is returned — and surface the
+    ///    [`PauseState`] (reason, checkpoint index) to the caller.
+    /// 2. Report the run as paused/interrupted rather than completed
+    ///    (`HarnessRunStatus::mark_interrupted`, or the crate's
+    ///    `Interrupted` shape) so it is distinguishable from success.
+    /// 3. Leave the pause latched. It is *not* cleared by breaking out of the
+    ///    loop: sending [`SteeringCommand::Resume`] on the same handle clears
+    ///    it, and re-invoking the run continues from the checkpoint.
     Pause,
     /// A cancel was requested: the loop should terminate the run.
     Cancel,
+}
+
+impl SteeringOutcome {
+    /// `true` when the loop should cooperatively stop for a pause.
+    pub fn is_pause(self) -> bool {
+        matches!(self, SteeringOutcome::Pause)
+    }
+}
+
+/// The latched state behind a [`SteeringOutcome::Pause`].
+///
+/// A pause used to be scoped to the drained batch: [`SteeringCommand::Resume`]
+/// only cleared a [`SteeringCommand::Pause`] that arrived in the *same* batch,
+/// so a pause applied at one checkpoint could never be lifted — the run was
+/// stuck. The state now lives on the [`SteeringHandle`], so a `Resume` sent at
+/// any later moment resumes the run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PauseState {
+    /// Why the run was paused, when the orchestrator supplied one via
+    /// [`SteeringCommand::PauseWith`]. `None` for a bare
+    /// [`SteeringCommand::Pause`].
+    pub reason: Option<String>,
+    /// Zero-based index of the steering checkpoint at which the pause took
+    /// effect, i.e. how many checkpoints this handle had already processed.
+    /// Lets a caller (and a resumed run) report *where* the run stopped.
+    pub paused_at_checkpoint: usize,
 }
 
 /// A cloneable, thread-safe handle to a running agent's steering queue.
@@ -171,4 +240,10 @@ pub(crate) struct SteeringInner {
     pub(crate) queue: Mutex<VecDeque<SteeringCommand>>,
     /// The allowlist gating which drained commands may be applied.
     pub(crate) policy: SteeringPolicy,
+    /// The latched pause, if one is in effect. Survives across checkpoints so a
+    /// [`SteeringCommand::Resume`] delivered in a *later* batch can lift it.
+    pub(crate) paused: Mutex<Option<PauseState>>,
+    /// How many steering checkpoints this handle has processed. Recorded into
+    /// [`PauseState::paused_at_checkpoint`].
+    pub(crate) checkpoints: Mutex<usize>,
 }

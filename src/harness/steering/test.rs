@@ -398,3 +398,198 @@ fn steering_queue_recovers_from_poisoned_lock() {
     assert_eq!(handle.drain().len(), 2);
     assert!(handle.is_empty());
 }
+
+// ── LOOP-8(a): the batch is validated before anything is applied ──────────────
+
+#[test]
+fn a_rejected_command_leaves_no_earlier_command_applied() {
+    // Regression test (LOOP-8a): `apply_pending_steering` drained the whole
+    // batch up front and then validated lazily *while applying*, so a policy
+    // violation at position 2 left commands 0 and 1 already in the transcript,
+    // command 3 silently dropped, and the run erroring. The checkpoint must be
+    // atomic: reject the batch, change nothing.
+    let recorder = EventRecorder::new();
+    let handle = SteeringHandle::new(
+        SteeringPolicy::new()
+            .allow(SteeringCommandKind::InjectMessage)
+            .allow(SteeringCommandKind::SetMetadata),
+    );
+    handle.send(SteeringCommand::InjectMessage(Message::user("first")));
+    handle.send(SteeringCommand::SetMetadata {
+        metadata: serde_json::json!({"tag": "applied"}),
+    });
+    // Not allowed → the whole batch must be refused.
+    handle.send(SteeringCommand::Cancel);
+    handle.send(SteeringCommand::InjectMessage(Message::user("last")));
+
+    let mut ctx: RunContext = RunContext::new(RunConfig::new("r"), ())
+        .with_events(recorder.sink())
+        .with_steering(handle);
+    let mut messages = Vec::new();
+
+    let err = apply_pending_steering(&mut ctx, &mut messages).unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Steering(_)), "got {err:?}");
+
+    assert!(
+        messages.is_empty(),
+        "an earlier command in a rejected batch was applied: {messages:?}"
+    );
+    assert_eq!(
+        ctx.config.metadata,
+        serde_json::Value::Null,
+        "metadata was mutated by a rejected batch"
+    );
+    // Exactly one event, for the offending command.
+    assert_eq!(
+        recorder.events(),
+        vec![AgentEvent::Steered {
+            command_kind: "cancel".to_string(),
+            accepted: false,
+        }]
+    );
+}
+
+// ── LOOP-8(b): a pause is latched and resumable across checkpoints ────────────
+
+#[test]
+fn a_pause_survives_the_batch_and_holds_later_checkpoints() {
+    // Regression test (LOOP-8b): `Resume` only cancelled a `Pause` from the
+    // *same* drained batch, and the outcome was recomputed from scratch each
+    // checkpoint — so a pause applied at one checkpoint silently evaporated at
+    // the next, and could never be deliberately resumed either.
+    let handle = SteeringHandle::allow_all();
+    handle.send(SteeringCommand::Pause);
+    let mut ctx: RunContext = RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
+    let mut messages = Vec::new();
+
+    assert_eq!(
+        apply_pending_steering(&mut ctx, &mut messages).unwrap(),
+        SteeringOutcome::Pause
+    );
+    assert!(handle.is_paused());
+
+    // A later checkpoint with an EMPTY queue must stay paused.
+    assert_eq!(
+        apply_pending_steering(&mut ctx, &mut messages).unwrap(),
+        SteeringOutcome::Pause,
+        "the pause evaporated at the next checkpoint"
+    );
+}
+
+#[test]
+fn a_pause_is_resumable_from_a_later_batch() {
+    let handle = SteeringHandle::allow_all();
+    let mut ctx: RunContext = RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
+    let mut messages = Vec::new();
+
+    handle.send(SteeringCommand::Pause);
+    assert_eq!(
+        apply_pending_steering(&mut ctx, &mut messages).unwrap(),
+        SteeringOutcome::Pause
+    );
+
+    // The resume arrives long after the pause was applied — the case that was
+    // impossible before.
+    handle.send(SteeringCommand::Resume);
+    assert_eq!(
+        apply_pending_steering(&mut ctx, &mut messages).unwrap(),
+        SteeringOutcome::Continue,
+        "a pause applied in an earlier batch was unresumable"
+    );
+    assert!(!handle.is_paused());
+    assert!(handle.pause_state().is_none());
+}
+
+#[test]
+fn pause_state_makes_a_paused_run_distinguishable_from_an_empty_answer() {
+    // The loop reports `final_response: None` for both a pause and an empty
+    // model turn; `pause_state()` is what tells the caller which happened.
+    let handle = SteeringHandle::allow_all();
+    handle.send(SteeringCommand::PauseWith {
+        reason: "waiting for human approval".into(),
+    });
+    let mut ctx: RunContext = RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
+    let mut messages = Vec::new();
+
+    let outcome = apply_pending_steering(&mut ctx, &mut messages).unwrap();
+    assert!(outcome.is_pause());
+
+    let state = handle
+        .pause_state()
+        .expect("a Pause outcome must always carry a PauseState");
+    assert_eq!(state.reason.as_deref(), Some("waiting for human approval"));
+    assert_eq!(state.paused_at_checkpoint, 0);
+
+    // A run that was never paused has no state at all.
+    assert!(SteeringHandle::allow_all().pause_state().is_none());
+}
+
+#[test]
+fn a_repeated_pause_keeps_the_original_reason_and_checkpoint() {
+    let handle = SteeringHandle::allow_all();
+    let mut ctx: RunContext = RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
+    let mut messages = Vec::new();
+
+    handle.send(SteeringCommand::PauseWith {
+        reason: "first reason".into(),
+    });
+    apply_pending_steering(&mut ctx, &mut messages).unwrap();
+
+    handle.send(SteeringCommand::PauseWith {
+        reason: "second reason".into(),
+    });
+    apply_pending_steering(&mut ctx, &mut messages).unwrap();
+
+    let state = handle.pause_state().expect("still paused");
+    assert_eq!(state.reason.as_deref(), Some("first reason"));
+    assert_eq!(state.paused_at_checkpoint, 0);
+}
+
+#[test]
+fn pause_with_is_gated_by_the_same_policy_kind_as_pause() {
+    assert_eq!(
+        SteeringCommand::PauseWith {
+            reason: "why".into()
+        }
+        .kind(),
+        SteeringCommandKind::Pause
+    );
+
+    // A policy that forbids Pause forbids PauseWith too.
+    let handle = SteeringHandle::new(SteeringPolicy::new().allow(SteeringCommandKind::Resume));
+    handle.send(SteeringCommand::PauseWith {
+        reason: "why".into(),
+    });
+    let mut ctx: RunContext = RunContext::new(RunConfig::new("r"), ()).with_steering(handle);
+    let mut messages = Vec::new();
+    assert!(apply_pending_steering(&mut ctx, &mut messages).is_err());
+}
+
+#[test]
+fn handle_resume_clears_a_latch_without_going_through_the_queue() {
+    let handle = SteeringHandle::allow_all();
+    handle.send(SteeringCommand::Pause);
+    let mut ctx: RunContext = RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
+    let mut messages = Vec::new();
+    apply_pending_steering(&mut ctx, &mut messages).unwrap();
+
+    let cleared = handle.resume().expect("a pause was in effect");
+    assert_eq!(cleared.paused_at_checkpoint, 0);
+    assert!(!handle.is_paused());
+    assert!(handle.resume().is_none(), "resume must be idempotent");
+
+    assert_eq!(
+        apply_pending_steering(&mut ctx, &mut messages).unwrap(),
+        SteeringOutcome::Continue
+    );
+}
+
+#[test]
+fn pause_with_round_trips_through_json() {
+    let command = SteeringCommand::PauseWith {
+        reason: "human review".into(),
+    };
+    let json = serde_json::to_value(&command).expect("serialize");
+    let back: SteeringCommand = serde_json::from_value(json).expect("deserialize");
+    assert_eq!(back, command);
+}
