@@ -73,9 +73,12 @@ async fn a_cache_served_response_does_not_consume_the_budget() {
     let tracker = budget.tracker();
 
     let mut harness: AgentHarness<()> = AgentHarness::new();
-    harness.register_model("m", Arc::new(FlaggedModel {
-        served_from_cache: true,
-    }));
+    harness.register_model(
+        "m",
+        Arc::new(FlaggedModel {
+            served_from_cache: true,
+        }),
+    );
     harness.push_middleware(Arc::new(budget));
 
     for _ in 0..5 {
