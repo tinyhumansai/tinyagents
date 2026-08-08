@@ -56,7 +56,10 @@ fn a_tool_result_artifact_survives_into_the_transcript() {
 
     assert_eq!(message.text(), "3 rows matched");
     assert_eq!(
-        message.artifact().and_then(|a| a["rows"].as_array()).map(Vec::len),
+        message
+            .artifact()
+            .and_then(|a| a["rows"].as_array())
+            .map(Vec::len),
         Some(3)
     );
     // The payload is host-side state and is not charged to the context window.
