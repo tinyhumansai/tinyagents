@@ -275,3 +275,204 @@ fn concurrent_journal_appends_replay_in_offset_order() {
     let tail = journal.replay_from(expected.len() as u64 - 5);
     assert_eq!(tail.len(), 5);
 }
+
+// ---------------------------------------------------------------------------
+// LOOP-9: a panicking listener must not wedge the sink
+// ---------------------------------------------------------------------------
+
+/// A listener that panics on its first `n` events, then records normally.
+struct PanickingListener {
+    remaining_panics: std::sync::Mutex<usize>,
+    seen: std::sync::Mutex<Vec<String>>,
+}
+
+impl EventListener for PanickingListener {
+    fn on_event(&self, record: &EventRecord) {
+        {
+            let mut remaining = self
+                .remaining_panics
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *remaining > 0 {
+                *remaining -= 1;
+                panic!("listener blew up on {}", record.event.kind());
+            }
+        }
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(record.event.kind().to_string());
+    }
+}
+
+#[test]
+fn a_panicking_listener_does_not_permanently_wedge_the_sink() {
+    // Regression test (LOOP-9): `dispatching` was cleared only when the drain
+    // loop reached an empty queue. A panic inside `on_event` unwound straight
+    // past that reset, so the flag stayed `true` forever: every subsequent
+    // `emit` saw a drain "already in progress", pushed onto `pending`, and
+    // returned. The run kept emitting and no listener ever received anything
+    // again, while `pending` grew without bound.
+    let sink = EventSink::new();
+    let bomb = Arc::new(PanickingListener {
+        remaining_panics: std::sync::Mutex::new(1),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let recorder = Arc::new(RecordingListener::new());
+    sink.subscribe(bomb.clone());
+    sink.subscribe(recorder.clone());
+
+    // First emit: the listener panics. Catch it the way a host would.
+    let sink_for_panic = sink.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        sink_for_panic.emit(AgentEvent::StateUpdate)
+    }));
+    assert!(result.is_err(), "the listener was supposed to panic");
+
+    // Every later emit must still be delivered, synchronously, to every
+    // listener — including the one that panicked.
+    for _ in 0..3 {
+        sink.emit(AgentEvent::StateUpdate);
+    }
+
+    assert_eq!(
+        recorder.len(),
+        3,
+        "sink stayed wedged after a listener panic: later events were queued, never delivered"
+    );
+    assert_eq!(
+        bomb.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        3,
+        "the recovered listener should have received the later events too"
+    );
+}
+
+#[test]
+fn sink_accessors_recover_from_a_poisoned_lock() {
+    // A panic while a listener holds no sink lock cannot poison it, but a panic
+    // anywhere else in the process can. `SteeringHandle` already recovers from
+    // poisoning; the events module used to `.expect(...)` and take the whole
+    // bus down with it.
+    let sink = EventSink::new();
+    let recorder = Arc::new(RecordingListener::new());
+    sink.subscribe(recorder.clone());
+
+    // Poison the recorder's own buffer lock from a panicking thread.
+    let poisoner = recorder.clone();
+    let _ = thread::spawn(move || {
+        let _guard = poisoner.records.lock().expect("first lock is clean");
+        panic!("poison the recording listener");
+    })
+    .join();
+    assert!(
+        recorder.records.is_poisoned(),
+        "the test needs a genuinely poisoned lock"
+    );
+
+    // Both the sink and the listener remain usable.
+    sink.emit(AgentEvent::StateUpdate);
+    assert_eq!(sink.len(), 1);
+    assert_eq!(recorder.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// LOOP-6: every Started variant has a terminal partner on the error path
+// ---------------------------------------------------------------------------
+
+#[test]
+fn failure_variants_exist_and_carry_stable_kind_strings() {
+    // Regression test (LOOP-6): there was no `ToolFailed` / `ModelFailed` /
+    // `SubAgentFailed`, so the three `?` sites that skip the `Completed` emit
+    // left a `Started` with no terminal partner, and any exporter pairing
+    // started/completed silently dropped every failed call.
+    use crate::harness::ids::CallId;
+
+    let tool_failed = AgentEvent::ToolFailed {
+        call_id: CallId::new("call-1"),
+        tool_name: "search".into(),
+        started_at_ms: Some(1_000),
+        duration_ms: Some(25),
+        error: "boom".into(),
+    };
+    let model_failed = AgentEvent::ModelFailed {
+        call_id: CallId::new("call-2"),
+        model: "gpt-4o".into(),
+        started_at_ms: Some(1_000),
+        attempts: Some(4),
+        error: "429 rate limited".into(),
+    };
+    let subagent_failed = AgentEvent::SubAgentFailed {
+        name: "researcher".into(),
+        depth: 2,
+        error: "child run failed".into(),
+    };
+
+    assert_eq!(tool_failed.kind(), "tool.failed");
+    assert_eq!(model_failed.kind(), "model.failed");
+    assert_eq!(subagent_failed.kind(), "subagent.failed");
+}
+
+#[test]
+fn failure_variants_round_trip_through_serde() {
+    use crate::harness::ids::CallId;
+
+    for event in [
+        AgentEvent::ToolFailed {
+            call_id: CallId::new("call-1"),
+            tool_name: "search".into(),
+            started_at_ms: None,
+            duration_ms: None,
+            error: "boom".into(),
+        },
+        AgentEvent::ModelFailed {
+            call_id: CallId::new("call-2"),
+            model: "gpt-4o".into(),
+            started_at_ms: None,
+            attempts: None,
+            error: "boom".into(),
+        },
+        AgentEvent::SubAgentFailed {
+            name: "researcher".into(),
+            depth: 1,
+            error: "boom".into(),
+        },
+    ] {
+        let json = serde_json::to_value(&event).expect("serialize");
+        let back: AgentEvent = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, event);
+    }
+}
+
+#[test]
+fn every_started_variant_pairs_with_both_a_completed_and_a_failed_variant() {
+    // Guard against a future `*Started` landing without its error-path partner.
+    // Kept as a string check because the enum has no structural grouping.
+    let kinds: Vec<&str> = vec![
+        "tool.started",
+        "tool.completed",
+        "tool.failed",
+        "model.started",
+        "model.completed",
+        "model.failed",
+        "subagent.started",
+        "subagent.completed",
+        "subagent.failed",
+        "middleware.started",
+        "middleware.completed",
+        "middleware.failed",
+    ];
+    for started in kinds.iter().filter(|k| k.ends_with(".started")) {
+        let prefix = started.trim_end_matches(".started");
+        assert!(
+            kinds.contains(&format!("{prefix}.completed").as_str()),
+            "{prefix} has no completed partner"
+        );
+        assert!(
+            kinds.contains(&format!("{prefix}.failed").as_str()),
+            "{prefix} has no failed partner"
+        );
+    }
+}
