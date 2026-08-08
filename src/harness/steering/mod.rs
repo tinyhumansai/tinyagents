@@ -213,7 +213,8 @@ impl SteeringHandle {
         cleared
     }
 
-    /// Increments and returns the checkpoint counter.
+    /// Returns this checkpoint's zero-based index and advances the counter, so
+    /// the *current* checkpoint is what a pause records (not the next one).
     fn advance_checkpoint(&self) -> usize {
         let mut checkpoints = self
             .inner
@@ -323,10 +324,10 @@ pub fn apply_pending_steering<Ctx>(
 
         match command {
             SteeringCommand::Pause => {
-                handle.latch_pause(None);
+                handle.latch_pause(checkpoint, None);
             }
             SteeringCommand::PauseWith { reason } => {
-                handle.latch_pause(Some(reason));
+                handle.latch_pause(checkpoint, Some(reason));
             }
             SteeringCommand::Resume => {
                 handle.resume();
