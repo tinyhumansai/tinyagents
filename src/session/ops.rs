@@ -6,7 +6,7 @@ use rusqlite::{Connection, params};
 use crate::error::{Result, TinyAgentsError};
 
 use super::context::StorageContext;
-use super::store::with_connection;
+use super::store::{with_connection, with_transaction};
 use super::types::{
     SessionMessage, SessionRecord, SessionSearchParams, SessionSearchResult, SessionStatus,
     SessionToolCall,
@@ -39,7 +39,13 @@ pub fn record_session_start(
         source_channel.unwrap_or("-"),
     );
 
-    with_connection(workspace_dir, |conn| {
+    // The row and its FTS entry are ONE unit of work. On an autocommit
+    // connection they are two independent commits, so a failure between them
+    // leaves a permanently unsearchable row with no reindex path — and the FTS
+    // table is external-content-free, so nothing ever notices the gap. The
+    // transaction makes the pair atomic; `reindex_fts` exists to repair rows
+    // that predate it.
+    with_transaction(workspace_dir, |conn| {
         conn.execute(
             "INSERT INTO sessions (
                 id, agent_definition_id, agent_definition_name, session_key,
@@ -134,7 +140,13 @@ pub fn record_message(
         content.len()
     );
 
-    with_connection(workspace_dir, |conn| {
+    // The row and its FTS entry are ONE unit of work. On an autocommit
+    // connection they are two independent commits, so a failure between them
+    // leaves a permanently unsearchable row with no reindex path — and the FTS
+    // table is external-content-free, so nothing ever notices the gap. The
+    // transaction makes the pair atomic; `reindex_fts` exists to repair rows
+    // that predate it.
+    with_transaction(workspace_dir, |conn| {
         conn.execute(
             "INSERT INTO session_messages (
                 session_id, role, content, model,
@@ -194,7 +206,13 @@ pub fn record_tool_call(
         }
     });
 
-    with_connection(workspace_dir, |conn| {
+    // The row and its FTS entry are ONE unit of work. On an autocommit
+    // connection they are two independent commits, so a failure between them
+    // leaves a permanently unsearchable row with no reindex path — and the FTS
+    // table is external-content-free, so nothing ever notices the gap. The
+    // transaction makes the pair atomic; `reindex_fts` exists to repair rows
+    // that predate it.
+    with_transaction(workspace_dir, |conn| {
         conn.execute(
             "INSERT INTO session_tool_calls (
                 session_id, message_id, tool_name, tool_input,
@@ -578,8 +596,35 @@ pub(super) fn fts_match_query(raw: &str) -> String {
         .join(" AND ")
 }
 
-/// Longest FTS snippet indexed per message, in bytes.
-pub(super) const MAX_FTS_SNIPPET_BYTES: usize = 2000;
+/// Default cap on how much of a message body is copied into the search index,
+/// in bytes.
+///
+/// Indexing whole messages would let the FTS table grow without bound next to
+/// the message rows themselves, so only a leading snippet is indexed — which
+/// means **a match beyond this offset is not findable**. That is a real
+/// behavioural limit, not an implementation detail, so it is public and
+/// overridable rather than a private constant nobody could see.
+pub const DEFAULT_FTS_SNIPPET_BYTES: usize = 2000;
+
+/// The live snippet cap. Read through [`fts_snippet_bytes`], set through
+/// [`set_fts_snippet_bytes`].
+static FTS_SNIPPET_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(DEFAULT_FTS_SNIPPET_BYTES);
+
+/// Returns the current FTS snippet cap in bytes.
+pub fn fts_snippet_bytes() -> usize {
+    FTS_SNIPPET_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Overrides the FTS snippet cap.
+///
+/// Process-wide and takes effect for subsequently indexed content only —
+/// raising it does not retroactively widen what is already indexed. Pair it
+/// with [`super::retention::reindex_fts`] to rebuild the index at the new cap.
+pub fn set_fts_snippet_bytes(bytes: usize) {
+    tracing::debug!("[session_db] fts snippet cap set to {bytes} bytes");
+    FTS_SNIPPET_BYTES.store(bytes, std::sync::atomic::Ordering::Relaxed);
+}
 
 pub(super) fn index_fts_content(conn: &Connection, session_id: &str, content: &str) -> Result<()> {
     // Slice on a character boundary, not a byte offset. `&content[..2000]`
@@ -588,8 +633,9 @@ pub(super) fn index_fts_content(conn: &Connection, session_id: &str, content: &s
     // the message INSERT has already autocommitted by this point, so the row
     // survives with no FTS entry and is silently unsearchable forever after.
     // Mirrors the truncation already done in `record_tool_call`.
-    let snippet = if content.len() > MAX_FTS_SNIPPET_BYTES {
-        let mut cutoff = MAX_FTS_SNIPPET_BYTES;
+    let limit = fts_snippet_bytes();
+    let snippet = if content.len() > limit {
+        let mut cutoff = limit;
         while cutoff > 0 && !content.is_char_boundary(cutoff) {
             cutoff -= 1;
         }
