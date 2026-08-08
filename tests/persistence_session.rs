@@ -10,8 +10,40 @@ use chrono::{Duration, Utc};
 use tinyagents::session;
 use tinyagents::session::run_ledger::{
     self,
-    types::{AgentTeamTaskStatus, AgentTeamTaskUpsert, AgentTeamUpsert, ClaimOutcome},
+    types::{
+        AgentTeamStatus, AgentTeamTaskStatus, AgentTeamTaskUpsert, AgentTeamUpsert, ClaimOutcome,
+    },
 };
+
+fn team(id: &str) -> AgentTeamUpsert {
+    AgentTeamUpsert {
+        id: id.into(),
+        parent_thread_id: None,
+        lead_agent_id: "lead".into(),
+        status: AgentTeamStatus::Active,
+        summary: None,
+        created_at: None,
+        closed_at: None,
+    }
+}
+
+fn task(id: &str, status: AgentTeamTaskStatus) -> AgentTeamTaskUpsert {
+    AgentTeamTaskUpsert {
+        id: id.into(),
+        team_id: "team".into(),
+        title: format!("work {id}"),
+        objective: None,
+        status,
+        owner_member_id: None,
+        depends_on: Vec::new(),
+        gate_status: None,
+        gate_reason: None,
+        evidence: Vec::new(),
+        source_run_id: None,
+        order_index: 0,
+        created_at: None,
+    }
+}
 
 fn workspace() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
@@ -102,26 +134,8 @@ fn listing_sort_columns_are_indexed() {
 #[test]
 fn a_done_task_cannot_be_reclaimed() {
     let dir = workspace();
-    run_ledger::upsert_agent_team(
-        dir.path(),
-        AgentTeamUpsert {
-            id: "team".into(),
-            lead_agent_id: "lead".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    run_ledger::upsert_agent_team_task(
-        dir.path(),
-        AgentTeamTaskUpsert {
-            id: "task".into(),
-            team_id: "team".into(),
-            title: "done work".into(),
-            status: AgentTeamTaskStatus::Done,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    run_ledger::upsert_agent_team(dir.path(), team("team")).unwrap();
+    run_ledger::upsert_agent_team_task(dir.path(), task("task", AgentTeamTaskStatus::Done)).unwrap();
 
     let outcome =
         run_ledger::claim_agent_team_task(dir.path(), "team", "task", "stale-worker", "tok")
@@ -146,26 +160,8 @@ fn a_done_task_cannot_be_reclaimed() {
 #[test]
 fn a_todo_task_is_still_claimable() {
     let dir = workspace();
-    run_ledger::upsert_agent_team(
-        dir.path(),
-        AgentTeamUpsert {
-            id: "team".into(),
-            lead_agent_id: "lead".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    run_ledger::upsert_agent_team_task(
-        dir.path(),
-        AgentTeamTaskUpsert {
-            id: "task".into(),
-            team_id: "team".into(),
-            title: "open work".into(),
-            status: AgentTeamTaskStatus::Todo,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    run_ledger::upsert_agent_team(dir.path(), team("team")).unwrap();
+    run_ledger::upsert_agent_team_task(dir.path(), task("task", AgentTeamTaskStatus::Todo)).unwrap();
     let outcome =
         run_ledger::claim_agent_team_task(dir.path(), "team", "task", "worker", "tok").unwrap();
     assert!(matches!(outcome, ClaimOutcome::Claimed(_)), "{outcome:?}");
