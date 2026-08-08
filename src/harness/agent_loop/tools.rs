@@ -635,20 +635,32 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         messages: &mut Vec<Message>,
         tool_calls: Vec<ToolCall>,
     ) -> Result<()> {
-        // Phase 1 — admission, serial, in call order.
-        let mut slots: Vec<ToolSlot> = Vec::with_capacity(tool_calls.len());
+        // Phase 1 — admission, serial, in call order. Nothing is announced and
+        // nothing is queued here: an admission failure at call *k* must not
+        // leave calls `0..k` with a `ToolStarted` they will never answer, nor
+        // an `active_tool_calls` entry for work that is dropped unpolled
+        // (TOOL-3). The serial path would have executed those calls; the
+        // concurrent path now agrees with it by executing none of them.
+        let mut admitted: Vec<AdmittedCall<State>> = Vec::with_capacity(tool_calls.len());
+        for mut call in tool_calls {
+            match self.admit_tool_call(state, ctx, status, &mut call).await? {
+                ResolvedToolCall::Tool(tool) => admitted.push(AdmittedCall::Execute { tool, call }),
+                ResolvedToolCall::ErrorMessage(message) => {
+                    admitted.push(AdmittedCall::Recovered { call, message })
+                }
+            }
+        }
+
+        // Phase 2 — announce and queue. Every admission succeeded, so every
+        // `ToolStarted` emitted here is matched by a terminal event below.
+        let mut slots: Vec<ToolSlot> = Vec::with_capacity(admitted.len());
         let mut prepared: Vec<PreparedToolCall> = Vec::new();
         let mut futures: Vec<_> = Vec::new();
-        for mut call in tool_calls {
-            let tool = match self.admit_tool_call(state, ctx, status, &mut call).await? {
-                ResolvedToolCall::Tool(tool) => tool,
-                ResolvedToolCall::ErrorMessage(message) => {
-                    run.tool_calls += 1;
-                    status.tool_calls = run.tool_calls;
-                    slots.push(ToolSlot::Immediate {
-                        call_id: call.id.clone(),
-                        message,
-                    });
+        for entry in admitted {
+            let (tool, call) = match entry {
+                AdmittedCall::Execute { tool, call } => (tool, call),
+                AdmittedCall::Recovered { call, message } => {
+                    slots.push(ToolSlot::Recovered { call, message });
                     continue;
                 }
             };
@@ -666,30 +678,52 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             let run_budget = self.call_budget(ctx);
             let run_id = ctx.run_id().as_str().to_string();
             let exec_ctx = ToolExecutionContext::from_run_context(ctx);
+            let error_policy = tool.error_policy();
+            let policy_call = call.clone();
             futures.push(async move {
                 let fut = tool.call_with_context(state, call, exec_ctx);
                 let fut = Self::with_tool_policy_timeout(tool_timeout, timeout_result, fut);
-                Self::with_call_budget(run_budget, &run_id, "tool call", fut).await
+                // As in serial mode: the error policy routes the *tool's*
+                // failure, inside the run-budget wrapper that stays fatal.
+                let guarded = async move {
+                    apply_tool_error_policy(&error_policy, &policy_call, fut.await)
+                };
+                Self::with_call_budget(run_budget, &run_id, "tool call", guarded).await
             });
         }
 
-        // Phase 2 — run all admitted calls concurrently. `join_all` preserves
+        // Phase 3 — run all admitted calls concurrently. `join_all` preserves
         // input order, so results pair 1:1 with `prepared`.
         let results = futures::future::join_all(futures).await;
 
-        // Phase 3 — fold in original call order: the first failing call (in
-        // that order) fails the turn; siblings already ran to completion.
+        // Phase 4 — fold in original call order: the first call whose policy
+        // kept its failure fatal (in that order) fails the turn; siblings
+        // already ran to completion.
         let mut executed = prepared.into_iter().zip(results);
         for slot in slots {
             match slot {
-                ToolSlot::Immediate { call_id, message } => {
-                    messages.push(Message::tool(call_id, message));
+                ToolSlot::Recovered { call, message } => {
+                    self.recover_tool_call(state, ctx, run, status, messages, &call, message)
+                        .await?;
                 }
                 ToolSlot::Execute => {
                     let (prepared, result) = executed
                         .next()
                         .expect("every Execute slot has a prepared/result pair");
-                    let result = result?;
+                    let result = match result {
+                        Ok(result) => result,
+                        Err(err) => {
+                            self.fail_tool_call(
+                                ctx,
+                                status,
+                                &prepared.call_id,
+                                &prepared.tool_name,
+                                prepared.started_at_ms,
+                                &err,
+                            );
+                            return Err(err);
+                        }
+                    };
                     self.finish_tool_call(state, ctx, run, status, messages, prepared, result)
                         .await?;
                 }
@@ -697,6 +731,42 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         }
         Ok(())
     }
+}
+
+/// Removes **one** occurrence of `call_id` from the in-flight list.
+///
+/// Positional, not `retain`: a provider can emit two calls in one turn that
+/// share a `tool_call_id`, and a predicate-based removal would clear both
+/// entries when the first completes — leaving the second call in flight with no
+/// entry to close, and the run reporting an empty in-flight list while a tool is
+/// still running (TOOL-10).
+fn release_active_tool_call(status: &mut HarnessRunStatus, call_id: &CallId) {
+    if let Some(position) = status
+        .active_tool_calls
+        .iter()
+        .position(|active| active == call_id)
+    {
+        status.active_tool_calls.remove(position);
+    }
+}
+
+/// Routes a tool invocation outcome through `policy`, keeping middleware
+/// refusals fatal.
+///
+/// [`ToolErrorPolicy::apply`] already re-raises cancellation and interruption.
+/// This adds one more class the policy must not swallow: an error raised by
+/// *middleware* wrapping the call. That is how an approval gate or an allowlist
+/// refuses a call, and converting a refusal into "the tool failed, try
+/// something else" would let the loop continue past a gate that said no.
+fn apply_tool_error_policy(
+    policy: &ToolErrorPolicy,
+    call: &ToolCall,
+    outcome: Result<crate::harness::tool::ToolResult>,
+) -> Result<crate::harness::tool::ToolResult> {
+    if let Err(TinyAgentsError::Middleware(_)) = &outcome {
+        return outcome;
+    }
+    policy.apply(call, outcome)
 }
 
 /// Repairs provider-neutral argument shape defects before schema validation.

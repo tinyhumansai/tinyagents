@@ -644,10 +644,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> ModelBaseCall<State, Ctx>
         request: ModelRequest,
     ) -> BoxModelFuture<'a> {
         Box::pin(async move {
-            let binding = ResolvedModelBinding {
-                resolved: self.resolved.clone(),
-                model: Arc::clone(&self.model),
-            };
+            let binding = self.rebind(ctx, &request);
             self.harness
                 .invoke_model_with_retry(
                     state,
