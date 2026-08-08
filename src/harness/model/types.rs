@@ -713,6 +713,39 @@ pub trait ChatModel<State: Send + Sync>: Send + Sync {
         None
     }
 
+    /// Returns a stable string identifying *which* model, at *which* endpoint,
+    /// under *which* credential this handle talks to — folded into the response
+    /// cache key by
+    /// [`scoped_cache_key`][crate::harness::cache::scoped_cache_key].
+    ///
+    /// # Why the request is not enough
+    ///
+    /// [`ModelRequest::model`] is an optional *hint* that the agent loop does
+    /// not even set on the requests it builds; the real model is chosen by
+    /// [`ModelRegistry::resolve_request`] afterwards, and the endpoint and
+    /// credential live inside this trait object and never appear in the request
+    /// at all. A cache keyed on the request alone therefore has no provider or
+    /// model identity in it, and one shared cache serves a hosted harness's
+    /// answer to a local one. LangChain avoids this by looking up on
+    /// `(prompt, llm_string)`, where `llm_string` serializes the whole model
+    /// object.
+    ///
+    /// # Contract
+    ///
+    /// * Return `None` (the default) to decline; the key then folds a fixed
+    ///   `anonymous-model` marker, which still separates identifying models
+    ///   from each other but cannot separate two anonymous ones.
+    /// * The value must be **stable across process restarts** — a cache that is
+    ///   only valid within one process lifetime is not a cache.
+    /// * The value must **never contain a raw credential**. It is folded into
+    ///   keys that end up in logs, events, and durable cache files. Use
+    ///   [`credential_fingerprint`][crate::harness::cache::credential_fingerprint]
+    ///   (or the whole-identity helper
+    ///   [`model_cache_identity`][crate::harness::cache::model_cache_identity]).
+    fn cache_identity(&self) -> Option<String> {
+        None
+    }
+
     /// Invokes the model and returns a complete response.
     async fn invoke(&self, state: &State, request: ModelRequest) -> Result<ModelResponse>;
 
