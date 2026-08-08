@@ -62,7 +62,9 @@ where
     /// returned (last-write-wins, consistent with [`Checkpointer::get`]).
     ///
     /// Composed from [`Checkpointer::list`] + [`Checkpointer::get`] so every
-    /// backend inherits it; override only for a cheaper scoped query.
+    /// backend inherits it; override for a cheaper scoped query — both durable
+    /// backends do, because the default costs a full thread scan per call and
+    /// [`Checkpointer::state_history`] issues one per lineage hop.
     async fn get_scoped(
         &self,
         thread_id: &str,
@@ -238,10 +240,15 @@ where
     /// ones).
     ///
     /// The default walks [`Checkpointer::get_tuple`] once per hop, so a backend
-    /// that re-reads the whole thread per lookup (the file/JSONL backend) is
-    /// O(H²) over the lineage. Such backends override this to read the thread
-    /// once and walk the lineage in memory (O(H)). The observable result is
-    /// identical to iterating `get_tuple` by parent pointer.
+    /// whose scoped lookup re-reads the whole thread is O(H²) over the lineage.
+    /// Every bundled backend overrides it to read the thread (or the
+    /// namespace's rows) once and walk the lineage in memory, so none of the
+    /// three is in that class: the JSONL backend parses its file once, and the
+    /// SQLite backend issues one indexed range query — the
+    /// `(thread_id, namespace, seq)` index is what makes the namespace scope
+    /// expressible in SQL at all, and without it that backend silently fell
+    /// back to this default. The observable result is identical to iterating
+    /// `get_tuple` by parent pointer.
     ///
     /// The walk carries a **visited set**. `parent_checkpoint_id` is caller-set
     /// data, not a structurally enforced acyclic pointer: a hand-written
