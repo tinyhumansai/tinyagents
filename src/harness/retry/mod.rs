@@ -22,6 +22,7 @@
 //! `now: Instant` / `rand01: f64` so tests can drive time and randomness
 //! deterministically without injecting a clock trait.
 
+mod jitter;
 mod types;
 
 pub use types::*;
@@ -31,6 +32,17 @@ use std::time::{Duration, Instant};
 
 use crate::error::TinyAgentsError;
 use crate::harness::model::ProviderError;
+
+/// Fraction of the base backoff the additive jitter band spans in each
+/// direction: with jitter enabled the effective delay lands uniformly in
+/// `[base * (1 - JITTER_FRACTION), base * (1 + JITTER_FRACTION)]`.
+///
+/// Matches LangChain's `_retry.py` (`delay ± 25%`). LangGraph instead adds a
+/// flat `uniform(0, 1)` second; the proportional form generalizes better across
+/// the sub-second and multi-second ends of the same schedule. What both
+/// references share, and what matters here, is that jitter is **additive** — it
+/// never scales the delay toward zero.
+pub const JITTER_FRACTION: f64 = 0.25;
 
 // ── Provider failure classification ─────────────────────────────────────────
 
@@ -280,26 +292,117 @@ impl RetryPolicy {
     /// Enables or disables actually sleeping for the computed backoff between
     /// retries.
     ///
-    /// Off by default so tests stay deterministic and fast. Enable it in
-    /// production so a transient failure is retried after a real, growing delay
-    /// rather than back-to-back. See [`RetryPolicy::backoff_sleep`].
+    /// **On by default.** Pass `false` to opt out — which tests that assert on
+    /// retry counts without wanting real elapsed time should do explicitly. See
+    /// [`RetryPolicy::backoff_sleep`] for why the default is on.
     pub fn with_backoff_sleep(mut self, sleep: bool) -> Self {
         self.backoff_sleep = sleep;
         self
+    }
+
+    /// Sets the ceiling applied to a server-supplied `Retry-After` delay. See
+    /// [`RetryPolicy::max_retry_after_ms`].
+    pub fn with_max_retry_after_ms(mut self, ms: u64) -> Self {
+        self.max_retry_after_ms = ms;
+        self
+    }
+
+    /// Replaces the built-in [`is_retryable`] classification with `predicate`.
+    ///
+    /// The predicate decides *only* whether an error is transient; the attempt
+    /// cap still applies on top. Ported from LangGraph's
+    /// `RetryPolicy.retry_on`.
+    pub fn with_retry_on(mut self, predicate: RetryPredicate) -> Self {
+        self.retry_on = Some(predicate);
+        self
+    }
+
+    /// Clears any custom [`RetryPolicy::retry_on`] predicate, restoring the
+    /// built-in [`is_retryable`] classification.
+    pub fn with_default_retry_on(mut self) -> Self {
+        self.retry_on = None;
+        self
+    }
+
+    /// Classifies `error` using this policy's [`RetryPolicy::retry_on`]
+    /// predicate when one is set, and the crate-wide [`is_retryable`] otherwise.
+    ///
+    /// This is the single classification entry point every retry loop should
+    /// use; calling the free [`is_retryable`] directly silently ignores a
+    /// caller's custom predicate.
+    pub fn is_retryable_error(&self, error: &TinyAgentsError) -> bool {
+        match &self.retry_on {
+            Some(predicate) => predicate(error),
+            None => is_retryable(error),
+        }
     }
 
     /// Sleeps for this policy's backoff before the given retry `attempt`, but
     /// only when [`RetryPolicy::backoff_sleep`] is enabled.
     ///
     /// A single, reusable helper so every retry loop that honors a
-    /// [`RetryPolicy`] gets identical, opt-in backoff behavior. A no-op (returns
+    /// [`RetryPolicy`] gets identical backoff behavior. A no-op (returns
     /// immediately) when sleeping is disabled or the computed backoff is zero.
+    ///
+    /// Prefer [`RetryPolicy::sleep_backoff_for_error`] where the failure is in
+    /// hand: it additionally honors a server-supplied `Retry-After`.
     pub async fn sleep_backoff(&self, attempt: usize) {
+        self.sleep_for(attempt, self.backoff_for_attempt(attempt), None)
+            .await;
+    }
+
+    /// Sleeps for `max(computed backoff, server-supplied Retry-After)` before
+    /// retry `attempt`, but only when [`RetryPolicy::backoff_sleep`] is enabled.
+    ///
+    /// A `429` carrying `Retry-After: 30` means the provider will keep refusing
+    /// for 30 seconds; retrying after the policy's 200 ms merely burns the
+    /// remaining attempts. Taking the **max** (rather than replacing the
+    /// backoff) means a server hint can only ever lengthen the wait, so a bogus
+    /// `Retry-After: 0` cannot defeat backoff. The hint is clamped at
+    /// [`RetryPolicy::max_retry_after_ms`].
+    pub async fn sleep_backoff_for_error(&self, attempt: usize, error: &TinyAgentsError) {
+        let hint = self.clamped_retry_after(error);
+        self.sleep_for(attempt, self.backoff_for_error(attempt, error), hint)
+            .await;
+    }
+
+    /// The delay this policy would wait before retry `attempt` given `error`:
+    /// the larger of the computed backoff and the clamped server-supplied
+    /// `Retry-After`. Computed regardless of [`RetryPolicy::backoff_sleep`], so
+    /// observability can report the intended delay even when sleeping is off.
+    pub fn backoff_for_error(&self, attempt: usize, error: &TinyAgentsError) -> Duration {
+        let computed = self.backoff_for_attempt(attempt);
+        match self.clamped_retry_after(error) {
+            Some(hint) => computed.max(hint),
+            None => computed,
+        }
+    }
+
+    /// Extracts and clamps the server-supplied `Retry-After` carried by `error`.
+    fn clamped_retry_after(&self, error: &TinyAgentsError) -> Option<Duration> {
+        retry_after_hint(error).map(|hint| hint.min(Duration::from_millis(self.max_retry_after_ms)))
+    }
+
+    /// Shared sleep body: logs the decision, then waits when enabled.
+    async fn sleep_for(&self, attempt: usize, backoff: Duration, hint: Option<Duration>) {
         if !self.backoff_sleep {
+            tracing::debug!(
+                target: "tinyagents::retry",
+                attempt,
+                backoff_ms = backoff.as_millis() as u64,
+                "[retry] backoff sleep disabled; retrying immediately"
+            );
             return;
         }
-        let backoff = self.backoff_for_attempt(attempt);
         if backoff > Duration::ZERO {
+            tracing::debug!(
+                target: "tinyagents::retry",
+                attempt,
+                backoff_ms = backoff.as_millis() as u64,
+                retry_after_ms = hint.map(|h| h.as_millis() as u64),
+                jitter = self.jitter,
+                "[retry] sleeping before retry"
+            );
             tokio::time::sleep(backoff).await;
         }
     }
@@ -326,7 +429,7 @@ impl RetryPolicy {
     /// [`RetryPolicy::with_max_attempts`] first and call this on the capped
     /// policy.
     pub fn should_retry_error(&self, attempt: usize, error: &TinyAgentsError) -> bool {
-        is_retryable(error) && self.should_retry(attempt)
+        self.is_retryable_error(error) && self.should_retry(attempt)
     }
 
     /// Reconciles this policy's own `max_attempts` with a harness-level
@@ -343,37 +446,94 @@ impl RetryPolicy {
             .min(max_retries_per_call.saturating_add(1))
     }
 
-    /// Computes the deterministic (no-jitter) backoff for the given retry
-    /// `attempt`.
+    /// Computes the backoff for the given retry `attempt`.
     ///
     /// - `attempt = 0` → `initial_backoff_ms`
     /// - `attempt = 1` → `initial_backoff_ms * multiplier`
     /// - …capped at `max_backoff_ms`
     ///
-    /// When [`RetryPolicy::jitter`] is `true`, prefer
-    /// [`backoff_for_attempt_with`][Self::backoff_for_attempt_with] and supply a
-    /// caller-controlled `[0, 1)` random value so the implementation remains
-    /// testable.
+    /// When [`RetryPolicy::jitter`] is `false` this is fully deterministic. When
+    /// jitter is enabled it draws a **real** random value and spreads the result
+    /// additively around the base (see
+    /// [`backoff_for_attempt_with`][Self::backoff_for_attempt_with]); tests that
+    /// need a fixed spread should call that method with an explicit `rand01`
+    /// rather than this one.
     pub fn backoff_for_attempt(&self, attempt: usize) -> Duration {
-        self.backoff_for_attempt_with(attempt, 0.0)
+        // 0.5 is the band midpoint, so the no-jitter and jitter paths agree
+        // exactly when jitter is off — and the RNG is not touched at all then.
+        let rand01 = if self.jitter { jitter::rand01() } else { 0.5 };
+        self.backoff_for_attempt_with(attempt, rand01)
     }
 
     /// Computes backoff for `attempt` using the supplied `rand01 ∈ [0, 1)` for
-    /// jitter.
+    /// jitter. This is the deterministic seam: tests inject a fixed value here,
+    /// production goes through [`backoff_for_attempt`][Self::backoff_for_attempt].
     ///
     /// When [`RetryPolicy::jitter`] is `false`, `rand01` is ignored and the
-    /// result is fully deterministic. When jitter is enabled, the backoff is
-    /// uniformly distributed over `[0, base_backoff]`.
+    /// result is the exact exponential schedule.
+    ///
+    /// When jitter is enabled the delay is spread **additively** around the base:
+    /// `base * (1 + JITTER_FRACTION * (2 * rand01 - 1))`, i.e. uniformly over
+    /// `[base * 0.75, base * 1.25]` at the default
+    /// [`JITTER_FRACTION`], then clamped to `max_backoff_ms`. `rand01 == 0.5`
+    /// reproduces the un-jittered value exactly.
+    ///
+    /// This is deliberately **not** the old `base * rand01` form. That one
+    /// scaled the delay *down* toward zero, and because the production path
+    /// passed a hardcoded `rand01 = 0.0`, turning jitter on produced a zero
+    /// delay and disabled backoff entirely. Both reference implementations are
+    /// additive: LangGraph adds `uniform(0, 1)` seconds, LangChain applies
+    /// `delay ± 25%` clamped at zero.
     pub fn backoff_for_attempt_with(&self, attempt: usize, rand01: f64) -> Duration {
         let base = (self.initial_backoff_ms as f64) * self.multiplier.powi(attempt as i32);
-        let capped = base.min(self.max_backoff_ms as f64);
-        let effective = if self.jitter {
-            capped * rand01.clamp(0.0, 1.0)
+        let jittered = if self.jitter {
+            // Map [0, 1) onto [-1, 1) then scale by the band width.
+            let offset = JITTER_FRACTION * (2.0 * rand01.clamp(0.0, 1.0) - 1.0);
+            (base * (1.0 + offset)).max(0.0)
         } else {
-            capped
+            base
         };
-        Duration::from_millis(effective as u64)
+        let capped = jittered.min(self.max_backoff_ms as f64);
+        Duration::from_millis(capped as u64)
     }
+}
+
+/// Extracts a server-supplied `Retry-After` delay carried by `error`, if any.
+///
+/// A `429` or `503` that names how long the client must wait is authoritative:
+/// retrying sooner burns an attempt for certain. [`RetryPolicy::backoff_for_error`]
+/// folds this into the delay by taking the larger of the two.
+///
+/// # What this reads today, and what wave 2 must add
+///
+/// Today the only place the value survives is the error's **message text**, so
+/// this parses it with [`parse_retry_after_ms`]. That works (hosted providers
+/// generally echo the header into the error body) but it is a string-matching
+/// fallback, not a contract.
+///
+/// The structured path is the intended one and needs a change in
+/// `harness::model` / `harness::providers`, which this module does not own:
+///
+/// 1. Add `pub retry_after_ms: Option<u64>` to
+///    [`ProviderError`][crate::harness::model::ProviderError] (defaulting to
+///    `None`, so it is backwards compatible).
+/// 2. In the OpenAI transport, parse the HTTP `Retry-After` response header on
+///    every non-2xx (both integer seconds and the HTTP-date form) and populate
+///    that field.
+/// 3. Add the field as the **first** branch of the `Provider` arm below, ahead
+///    of the message-text fallback.
+///
+/// Until step 3 lands, a provider that sends the header but not the body text
+/// is not honored.
+pub fn retry_after_hint(error: &TinyAgentsError) -> Option<Duration> {
+    let message = match error {
+        // TODO(wave 2): prefer `provider_error.retry_after_ms` once the field
+        // exists; fall through to the message text only when it is `None`.
+        TinyAgentsError::Provider(provider_error) => provider_error.message.as_str(),
+        TinyAgentsError::Model(message) | TinyAgentsError::Tool(message) => message.as_str(),
+        _ => return None,
+    };
+    parse_retry_after_ms(message).map(Duration::from_millis)
 }
 
 // ── is_retryable ─────────────────────────────────────────────────────────────
@@ -385,7 +545,7 @@ impl RetryPolicy {
 /// | Variant | Retryable | Rationale |
 /// |---|---|---|
 /// | `Provider` | depends | Classified from [`crate::harness::model::ProviderError::retryable`] — a 429/408/409/5xx is retryable, a 4xx like 401/400 is not. |
-/// | `Model` | yes | No structured detail to classify from (transport/parse failure); transient provider 5xx / rate-limit / network glitch is the common case. |
+/// | `Model` | depends | No structured `ProviderError` to read, so the message text is run through [`classify_provider_failure`] — a 5xx / 429 / timeout is retryable, an `invalid api key` or `model not found` is not. |
 /// | `Tool` | yes | Tool execution may have hit a transient dependency. |
 /// | `Validation` | **no** | Caller-side schema or policy error; retrying will not help. |
 /// | `Serialization` | **no** | Malformed data; retrying will not help. |
@@ -393,10 +553,28 @@ impl RetryPolicy {
 /// | `MissingStart` / `MissingNode` / `MissingEdgeTarget` / `MissingRoute` | **no** | Graph configuration errors; not transient. |
 /// | `ToolNotFound` / `ModelNotFound` | **no** | Registry errors; not transient. |
 /// | `StructuredOutput` | **no** | Schema mismatch; retrying the same call will likely fail again. |
+///
+/// Callers holding a [`RetryPolicy`] should call
+/// [`RetryPolicy::is_retryable_error`] instead, so a caller-supplied
+/// [`RetryPolicy::retry_on`] predicate is honored.
 pub fn is_retryable(err: &TinyAgentsError) -> bool {
     match err {
         TinyAgentsError::Provider(provider_error) => provider_error.retryable,
-        TinyAgentsError::Model(_) | TinyAgentsError::Tool(_) => true,
+        // A bare `Model(String)` used to be retried unconditionally, so a
+        // permanent `401 invalid api key` burned every attempt with a
+        // guaranteed-identical failure. There is no structured
+        // `ProviderError` here, but the message text is the same text
+        // `classify_provider_failure` already knows how to read — so use it
+        // rather than assuming transience.
+        TinyAgentsError::Model(message) => {
+            classify_provider_failure(None, None, message).is_retryable()
+        }
+        // Tool failures stay unconditionally retryable: a tool's error text is
+        // arbitrary caller-authored content with no shared vocabulary to
+        // classify against, so the HTTP-shaped heuristics above would be
+        // guessing. Callers that know better narrow this with
+        // [`RetryPolicy::retry_on`].
+        TinyAgentsError::Tool(_) => true,
         _ => false,
     }
 }

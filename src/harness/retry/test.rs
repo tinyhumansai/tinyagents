@@ -55,26 +55,91 @@ fn backoff_grows_exponentially_then_caps() {
 }
 
 #[test]
-fn backoff_jitter_scales_by_rand01() {
+fn backoff_jitter_spreads_additively_around_the_base() {
     let policy = RetryPolicy::default().with_jitter(true);
 
-    // attempt 2 base = 800ms. With jitter the result is base * rand01.
+    // attempt 2 base = 800ms. Jitter spreads it over ±25% → [600, 1000].
     assert_eq!(
         policy.backoff_for_attempt_with(2, 0.0),
-        Duration::from_millis(0)
+        Duration::from_millis(600)
     );
+    // The band midpoint reproduces the un-jittered value exactly.
     assert_eq!(
         policy.backoff_for_attempt_with(2, 0.5),
-        Duration::from_millis(400)
+        Duration::from_millis(800)
     );
-    // rand01 is clamped into [0, 1).
+    // rand01 is clamped into [0, 1].
     assert_eq!(
         policy.backoff_for_attempt_with(2, 5.0),
-        Duration::from_millis(800)
+        Duration::from_millis(1_000)
     );
     assert_eq!(
         policy.backoff_for_attempt_with(2, -3.0),
-        Duration::from_millis(0)
+        Duration::from_millis(600)
+    );
+}
+
+#[test]
+fn jitter_never_collapses_the_backoff_to_zero() {
+    // Regression test (LOOP-2): jitter used to be *multiplicative*
+    // (`base * rand01`), and the production path — `backoff_for_attempt`, which
+    // `sleep_backoff` calls — passed a hardcoded `rand01 = 0.0`. So the
+    // production-hardened-looking `.with_backoff_sleep(true).with_jitter(true)`
+    // computed a ZERO delay, `sleep_backoff`'s `> Duration::ZERO` guard never
+    // fired, and nothing ever slept: a rate-limited provider got hammered
+    // back-to-back. Jitter must only ever *widen* the delay band.
+    let policy = RetryPolicy::default().with_jitter(true);
+
+    for attempt in 0..8 {
+        let plain = RetryPolicy::default().backoff_for_attempt(attempt);
+        let floor = plain.mul_f64(1.0 - super::JITTER_FRACTION);
+        let ceiling = plain.mul_f64(1.0 + super::JITTER_FRACTION);
+
+        // The deterministic seam across the whole [0, 1) input range.
+        for step in 0..=20 {
+            let jittered = policy.backoff_for_attempt_with(attempt, f64::from(step) / 20.0);
+            assert!(jittered > Duration::ZERO, "jitter collapsed the delay");
+            assert!(jittered >= floor && jittered <= ceiling, "outside the band");
+        }
+
+        // And the production path, which now draws real randomness.
+        for _ in 0..64 {
+            let jittered = policy.backoff_for_attempt(attempt);
+            assert!(
+                jittered > Duration::ZERO,
+                "production backoff_for_attempt returned a zero delay with jitter on"
+            );
+            assert!(jittered >= floor && jittered <= ceiling, "outside the band");
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn jittered_sleep_backoff_actually_sleeps() {
+    // The end-to-end shape of LOOP-2: the config that reads as
+    // production-hardened must wait, not spin.
+    use tokio::time::Instant as TokioInstant;
+
+    let policy = RetryPolicy::default()
+        .with_backoff_sleep(true)
+        .with_jitter(true);
+
+    let t0 = TokioInstant::now();
+    policy.sleep_backoff(0).await;
+    assert!(
+        t0.elapsed() > Duration::ZERO,
+        "jitter + backoff_sleep must still sleep"
+    );
+}
+
+#[test]
+fn production_backoff_is_random_when_jitter_is_enabled() {
+    // A stuck RNG would reproduce the original defect in a subtler form.
+    let policy = RetryPolicy::default().with_jitter(true);
+    let first = policy.backoff_for_attempt(4);
+    assert!(
+        (0..128).any(|_| policy.backoff_for_attempt(4) != first),
+        "jittered backoff never varied — the randomness source is not wired up"
     );
 }
 
@@ -374,35 +439,230 @@ fn rate_limiter_refill_caps_at_capacity() {
 }
 
 #[test]
-fn backoff_sleep_defaults_off_and_is_opt_in() {
-    // Default policy does not sleep, keeping retry loops deterministic in tests.
-    assert!(!RetryPolicy::default().backoff_sleep);
-    // The builder flips it on for production callers.
+fn backoff_sleep_defaults_on_and_is_opt_out() {
+    // Regression test (LOCAL-4): the default used to be `false` "so tests stay
+    // deterministic and fast", which made test convenience the *production*
+    // policy. Transport failures are classified retryable, so the default four
+    // attempts fired back-to-back against a local runtime that was merely
+    // loading a multi-gigabyte model. LangGraph's reference default
+    // (`initial_interval=0.5, backoff_factor=2.0, jitter=True`) is on.
     assert!(
-        RetryPolicy::default()
-            .with_backoff_sleep(true)
+        RetryPolicy::default().backoff_sleep,
+        "backoff must sleep by default"
+    );
+    // Tests and other latency-sensitive callers opt out explicitly.
+    assert!(
+        !RetryPolicy::default()
+            .with_backoff_sleep(false)
             .backoff_sleep
     );
 }
 
 #[tokio::test(start_paused = true)]
-async fn sleep_backoff_waits_only_when_enabled() {
+async fn sleep_backoff_waits_unless_explicitly_disabled() {
     use tokio::time::Instant as TokioInstant;
 
-    // Disabled (default): returns immediately with no virtual time elapsed.
-    let policy = RetryPolicy::default();
+    // Explicitly disabled: returns immediately with no virtual time elapsed.
+    let policy = RetryPolicy::default().with_backoff_sleep(false);
     let t0 = TokioInstant::now();
     policy.sleep_backoff(1).await;
     assert_eq!(t0.elapsed(), Duration::ZERO);
 
-    // Enabled: advances virtual time by the computed backoff (attempt 1 =
-    // initial_backoff_ms with the default multiplier applied at attempt^power).
-    let sleeping = RetryPolicy::default().with_backoff_sleep(true);
+    // Default (enabled): advances virtual time by the computed backoff.
+    let sleeping = RetryPolicy::default();
     let expected = sleeping.backoff_for_attempt(1);
     let t1 = TokioInstant::now();
     sleeping.sleep_backoff(1).await;
     assert_eq!(t1.elapsed(), expected);
     assert!(expected > Duration::ZERO);
+}
+
+// ── Retry-After (LOOP-5) ──────────────────────────────────────────────────────
+
+#[test]
+fn retry_after_hint_is_read_from_every_error_shape_that_can_carry_one() {
+    use crate::harness::model::ProviderError;
+    use crate::harness::retry::retry_after_hint;
+
+    assert_eq!(
+        retry_after_hint(&TinyAgentsError::Model(
+            "429 Too Many Requests, Retry-After: 30".into()
+        )),
+        Some(Duration::from_secs(30))
+    );
+    assert_eq!(
+        retry_after_hint(&TinyAgentsError::Provider(Box::new(ProviderError {
+            provider: "openai".into(),
+            status: Some(429),
+            retryable: true,
+            message: "rate limited; retry_after: 12.5 seconds".into(),
+            ..ProviderError::default()
+        }))),
+        Some(Duration::from_millis(12_500))
+    );
+    // Nothing to read → no hint, and the plain backoff applies.
+    assert_eq!(
+        retry_after_hint(&TinyAgentsError::Model("500 Internal Server Error".into())),
+        None
+    );
+    assert_eq!(
+        retry_after_hint(&TinyAgentsError::Validation("bad".into())),
+        None
+    );
+}
+
+#[test]
+fn backoff_for_error_takes_the_max_of_backoff_and_retry_after() {
+    // Regression test (LOOP-5): `parse_retry_after_ms` existed but had only
+    // test callers, so a 429 saying `Retry-After: 30` was retried after the
+    // policy's 200ms, three times, and then gave up.
+    let policy = RetryPolicy::default();
+    let rate_limited = TinyAgentsError::Model("429 rate limited, Retry-After: 30".into());
+
+    assert_eq!(
+        policy.backoff_for_error(0, &rate_limited),
+        Duration::from_secs(30),
+        "a server-supplied Retry-After must win over a shorter computed backoff"
+    );
+
+    // A hint shorter than the computed backoff can never shorten the wait, so a
+    // bogus `Retry-After: 0` cannot defeat backoff.
+    let tiny_hint = TinyAgentsError::Model("429 rate limited, Retry-After: 0".into());
+    assert_eq!(
+        policy.backoff_for_error(3, &tiny_hint),
+        policy.backoff_for_attempt(3)
+    );
+
+    // No hint at all → identical to the plain schedule.
+    let plain = TinyAgentsError::Model("502 bad gateway".into());
+    assert_eq!(
+        policy.backoff_for_error(1, &plain),
+        policy.backoff_for_attempt(1)
+    );
+}
+
+#[test]
+fn retry_after_is_clamped_so_a_hostile_header_cannot_park_the_run() {
+    let policy = RetryPolicy::default().with_max_retry_after_ms(5_000);
+    let absurd = TinyAgentsError::Model("429 rate limited, Retry-After: 86400".into());
+    assert_eq!(
+        policy.backoff_for_error(0, &absurd),
+        Duration::from_millis(5_000)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn sleep_backoff_for_error_honors_retry_after() {
+    use tokio::time::Instant as TokioInstant;
+
+    let policy = RetryPolicy::default();
+    let rate_limited = TinyAgentsError::Model("429 rate limited, Retry-After: 30".into());
+
+    let t0 = TokioInstant::now();
+    policy.sleep_backoff_for_error(0, &rate_limited).await;
+    assert_eq!(t0.elapsed(), Duration::from_secs(30));
+}
+
+// ── retry_on predicate (LOOP-5b) ──────────────────────────────────────────────
+
+#[test]
+fn model_errors_are_classified_from_their_message_not_assumed_transient() {
+    // Regression test (LOOP-5b): the `Model(_)` arm returned `true`
+    // unconditionally, so a permanent auth failure that never got a structured
+    // `ProviderError` burned every attempt.
+    assert!(!is_retryable(&TinyAgentsError::Model(
+        "401 Unauthorized: invalid api key".into()
+    )));
+    assert!(!is_retryable(&TinyAgentsError::Model(
+        "model gpt-9 does not exist".into()
+    )));
+
+    // Transient shapes stay retryable.
+    assert!(is_retryable(&TinyAgentsError::Model(
+        "502 Bad Gateway".into()
+    )));
+    assert!(is_retryable(&TinyAgentsError::Model(
+        "429 Too Many Requests: rate limit exceeded".into()
+    )));
+    // Unclassifiable transport text keeps the permissive default.
+    assert!(is_retryable(&TinyAgentsError::Model(
+        "connection reset by peer".into()
+    )));
+}
+
+#[test]
+fn retry_on_predicate_overrides_the_builtin_classification() {
+    use std::sync::Arc;
+
+    // Default: no predicate → built-in classification, unchanged.
+    let default_policy = RetryPolicy::default();
+    assert!(default_policy.is_retryable_error(&TinyAgentsError::Tool("flaky".into())));
+    assert!(!default_policy.is_retryable_error(&TinyAgentsError::Validation("bad".into())));
+
+    // LangGraph's curated default shape: connection errors and 5xx, never a
+    // programming error (a failing tool is the closest analogue here).
+    let narrowed = RetryPolicy::default()
+        .with_retry_on(Arc::new(|err: &TinyAgentsError| {
+            matches!(err, TinyAgentsError::Model(_) | TinyAgentsError::Provider(_))
+        }));
+    assert!(narrowed.is_retryable_error(&TinyAgentsError::Model("timeout".into())));
+    assert!(
+        !narrowed.is_retryable_error(&TinyAgentsError::Tool("flaky".into())),
+        "a custom predicate must be able to *narrow* the built-in set"
+    );
+
+    // And it can widen it too.
+    let widened =
+        RetryPolicy::default().with_retry_on(Arc::new(|_: &TinyAgentsError| true));
+    assert!(widened.is_retryable_error(&TinyAgentsError::Validation("bad".into())));
+
+    // Clearing restores the built-in classification.
+    assert!(
+        !widened
+            .clone()
+            .with_default_retry_on()
+            .is_retryable_error(&TinyAgentsError::Validation("bad".into()))
+    );
+}
+
+#[test]
+fn should_retry_error_consults_the_custom_predicate() {
+    use std::sync::Arc;
+
+    // Regression test: `should_retry_error` called the free `is_retryable`
+    // directly, so a caller's `retry_on` would have been silently ignored by
+    // every retry loop in the harness.
+    let policy = RetryPolicy::default()
+        .with_max_attempts(3)
+        .with_retry_on(Arc::new(|err: &TinyAgentsError| {
+            matches!(err, TinyAgentsError::Validation(_))
+        }));
+
+    assert!(policy.should_retry_error(0, &TinyAgentsError::Validation("retry me".into())));
+    assert!(!policy.should_retry_error(0, &TinyAgentsError::Tool("do not".into())));
+    // The attempt cap still applies on top of the predicate.
+    assert!(!policy.should_retry_error(2, &TinyAgentsError::Validation("retry me".into())));
+}
+
+#[test]
+fn retry_policy_equality_and_debug_survive_the_predicate_field() {
+    use std::sync::Arc;
+
+    assert_eq!(RetryPolicy::default(), RetryPolicy::default());
+
+    let predicate: crate::harness::retry::RetryPredicate = Arc::new(|_: &TinyAgentsError| true);
+    let a = RetryPolicy::default().with_retry_on(predicate.clone());
+    let b = RetryPolicy::default().with_retry_on(predicate);
+    assert_eq!(a, b, "the same Arc compares equal");
+    assert_ne!(a, RetryPolicy::default());
+    assert_ne!(
+        a,
+        RetryPolicy::default().with_retry_on(Arc::new(|_: &TinyAgentsError| true)),
+        "distinct closures are not equal"
+    );
+
+    assert!(format!("{a:?}").contains("custom predicate"));
+    assert!(format!("{:?}", RetryPolicy::default()).contains("retry_on: None"));
 }
 
 #[test]
