@@ -9,18 +9,52 @@
 //!
 //! 1. **Admission** (always serial, in call order, under `&mut RunContext`):
 //!    cancellation/deadline/limit checks, the lifecycle `before_tool` hooks,
-//!    unknown-tool policy resolution, schema validation, and the
-//!    [`AgentEvent::ToolStarted`] emission.
+//!    unknown-tool policy resolution, injected-argument stripping, and schema
+//!    validation. Admission emits **no** [`AgentEvent::ToolStarted`] — see
+//!    "Started/terminal pairing" below.
 //! 2. **Execution**: when the turn requests **two or more** tools and **no
 //!    tool-wrap middleware** ([`crate::harness::middleware::ToolMiddleware`])
 //!    is registered, the admitted calls run **concurrently**
 //!    (`join_all`), so turn latency is the slowest tool instead of the sum.
 //!    Otherwise execution is serial, preserving the historical semantics.
+//!    [`AgentEvent::ToolStarted`] is emitted here, once every admission has
+//!    succeeded, so a call that is announced always runs.
 //! 3. **Fold** (always serial, in original call order): the lifecycle
 //!    `after_tool` hooks, accounting, the [`AgentEvent::ToolCompleted`]
 //!    emission, and the transcript append. Results are attached to their
 //!    original `tool_call_id` in the calls' original order regardless of
 //!    completion order.
+//!
+//! ## Started/terminal pairing (the invariant this module maintains)
+//!
+//! Every [`AgentEvent::ToolStarted`] is followed by exactly one terminal
+//! partner — [`AgentEvent::ToolCompleted`] when the call produced a result
+//! (successful *or* error-carrying) or [`AgentEvent::ToolFailed`] when the run
+//! itself is aborting because of it. `status.active_tool_calls` is cleared on
+//! both paths, and by *position*, so two calls sharing one id (a real provider
+//! defect) cannot clear each other's entry.
+//!
+//! Recovery paths — unknown tool, schema-invalid arguments, provider-unparseable
+//! arguments — are not exceptions: they are folded through the same
+//! [`AgentHarness::finish_tool_call`] pipeline, so they emit the same
+//! started/completed pair, run `after_tool`, and account identically. The only
+//! difference is that no tool ran.
+//!
+//! ## Tool errors are policy-routed, not fatal by default
+//!
+//! An `Err` from a tool is routed through that tool's
+//! [`crate::harness::tool::ToolErrorPolicy`]: the default
+//! [`Fail`][crate::harness::tool::ToolErrorPolicy::Fail] still aborts the run,
+//! while `ReturnToError`/`Message` turn the failure into a model-visible error
+//! result. Cancellation and interruption bubble regardless of policy, and two
+//! error classes are deliberately kept **outside** the policy because they are
+//! not tool failures at all:
+//!
+//! - the run's remaining wall-clock budget expiring around the call
+//!   ([`AgentHarness::with_call_budget`]) — the run is over, not the tool, and
+//! - an error raised by *middleware* wrapping the call, which is how an
+//!   approval or allowlist gate refuses a call. Converting a refusal into "the
+//!   tool failed, carry on" would defeat the gate.
 //!
 //! ## Why tool-wrap middleware forces serial execution
 //!
