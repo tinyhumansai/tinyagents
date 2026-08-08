@@ -187,7 +187,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // Safe steering checkpoint: drain any orchestrator/human steering
             // commands and apply the policy-permitted ones before the next
             // model call. Cancel terminates the run; Pause short-circuits it.
-            match crate::harness::steering::apply_pending_steering(ctx, &mut messages)? {
+            match crate::harness::steering::apply_pending_steering(ctx, messages)? {
                 crate::harness::steering::SteeringOutcome::Cancel => {
                     return Err(TinyAgentsError::Cancelled);
                 }
