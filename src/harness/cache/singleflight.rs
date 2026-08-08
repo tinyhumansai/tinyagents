@@ -70,6 +70,24 @@ impl SingleFlight {
         self.inflight.lock().map(|m| m.len()).unwrap_or(0)
     }
 
+    /// Claims leadership of `key`, or subscribes to the current leader.
+    ///
+    /// Returns `None` when the map is poisoned, `Some(None)` when this caller
+    /// is the leader, and `Some(Some(receiver))` when it is a follower. The
+    /// lock never escapes this function, so no guard is held across an await.
+    #[allow(clippy::option_option)]
+    fn claim(&self, key: &str) -> Option<Option<broadcast::Receiver<Outcome>>> {
+        let mut inflight = self.inflight.lock().ok()?;
+        Some(match inflight.get(key) {
+            Some(sender) => Some(sender.subscribe()),
+            None => {
+                let (sender, _) = broadcast::channel(1);
+                inflight.insert(key.to_string(), sender);
+                None
+            }
+        })
+    }
+
     /// Runs `call` for `key`, or waits for an already in-flight call with the
     /// same key and returns its result.
     ///
