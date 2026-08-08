@@ -1799,7 +1799,6 @@ async fn provider_error_401_is_not_retried() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     let model = Arc::new(ProviderFailingModel {
         retryable: false,
-        retry_after_ms: None,
         status: 401,
         attempts: Mutex::new(0),
     });
@@ -1824,7 +1823,6 @@ async fn provider_error_429_is_retried_up_to_max_attempts() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     let model = Arc::new(ProviderFailingModel {
         retryable: true,
-        retry_after_ms: None,
         status: 429,
         attempts: Mutex::new(0),
     });
