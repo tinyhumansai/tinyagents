@@ -279,9 +279,7 @@ impl TinyAgentsError {
     /// [code]: crate::harness::providers::openai::CONTEXT_OVERFLOW_CODE
     /// [pc]: crate::harness::model::ProviderError::code
     pub fn from_provider_error(error: crate::harness::model::ProviderError) -> Self {
-        if error.code.as_deref()
-            == Some(crate::harness::providers::openai::CONTEXT_OVERFLOW_CODE)
-        {
+        if error.code.as_deref() == Some(crate::harness::providers::openai::CONTEXT_OVERFLOW_CODE) {
             tracing::debug!(
                 "[error] promoting provider `{}` context-overflow code to a typed error",
                 error.provider

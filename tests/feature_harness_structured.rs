@@ -153,7 +153,8 @@ async fn parse_type_mismatch_still_errors_for_a_schema_free_extractor() {
     // The `parse::<T>()` mismatch path is still reachable: an extractor with no
     // declared schema validates nothing, so the deserialisation boundary is
     // where the mismatch is caught.
-    let extractor = StructuredExtractor::new(StructuredStrategy::ProviderSchema, "answer", json!({}));
+    let extractor =
+        StructuredExtractor::new(StructuredStrategy::ProviderSchema, "answer", json!({}));
     let response = ModelResponse::assistant(r#"{"value":"x","score":"not-a-number"}"#);
 
     let output = extractor.extract(&response).expect("valid JSON extracts");

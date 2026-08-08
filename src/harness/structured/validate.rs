@@ -189,9 +189,16 @@ mod test {
 
     #[test]
     fn rejects_a_missing_required_field_by_path() {
-        let err = validate_value(&score_schema(), &json!({ "wrong_key": 1 }), "schema 'score'")
-            .expect_err("a missing required field is not valid");
-        assert!(err.to_string().contains("schema 'score'.score is required"), "{err}");
+        let err = validate_value(
+            &score_schema(),
+            &json!({ "wrong_key": 1 }),
+            "schema 'score'",
+        )
+        .expect_err("a missing required field is not valid");
+        assert!(
+            err.to_string().contains("schema 'score'.score is required"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -203,7 +210,8 @@ mod test {
         )
         .expect_err("a string is not an integer");
         assert!(
-            err.to_string().contains("schema 'score'.score must be integer, got string"),
+            err.to_string()
+                .contains("schema 'score'.score must be integer, got string"),
             "{err}"
         );
     }

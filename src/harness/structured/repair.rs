@@ -93,7 +93,9 @@ pub fn parse_lenient(raw: &str) -> Option<(Value, JsonRepair)> {
     }
 
     let unfenced = strip_code_fence(trimmed);
-    if unfenced != trimmed && let Ok(value) = serde_json::from_str::<Value>(unfenced) {
+    if unfenced != trimmed
+        && let Ok(value) = serde_json::from_str::<Value>(unfenced)
+    {
         tracing::debug!("[structured::repair] recovered JSON by removing a markdown code fence");
         return Some((value, JsonRepair::CodeFence));
     }
@@ -101,7 +103,9 @@ pub fn parse_lenient(raw: &str) -> Option<(Value, JsonRepair)> {
     if let Some(sliced) = slice_json_span(unfenced)
         && let Ok(value) = serde_json::from_str::<Value>(sliced)
     {
-        tracing::debug!("[structured::repair] recovered JSON by slicing it out of surrounding text");
+        tracing::debug!(
+            "[structured::repair] recovered JSON by slicing it out of surrounding text"
+        );
         return Some((value, JsonRepair::Slice));
     }
 
@@ -247,9 +251,8 @@ mod test {
 
     #[test]
     fn slices_a_value_out_of_prose() {
-        let (value, repair) =
-            parse_lenient("Sure! Here it is: {\"score\": 4} — hope that helps.")
-                .expect("a value embedded in prose parses");
+        let (value, repair) = parse_lenient("Sure! Here it is: {\"score\": 4} — hope that helps.")
+            .expect("a value embedded in prose parses");
         assert_eq!(value, json!({ "score": 4 }));
         assert_eq!(repair, JsonRepair::Slice);
     }
@@ -263,9 +266,8 @@ mod test {
 
     #[test]
     fn closes_a_truncated_object() {
-        let (value, repair) =
-            parse_lenient(r#"{"summary": "the model ran out of budget mid-sent"#)
-                .expect("a truncated value is closed");
+        let (value, repair) = parse_lenient(r#"{"summary": "the model ran out of budget mid-sent"#)
+            .expect("a truncated value is closed");
         assert_eq!(repair, JsonRepair::Closed);
         assert_eq!(value["summary"], "the model ran out of budget mid-sent");
     }
@@ -279,7 +281,8 @@ mod test {
 
     #[test]
     fn drops_a_dangling_comma_before_closing() {
-        let (value, repair) = parse_lenient(r#"{"a": 1, "b": 2,"#).expect("a dangling comma is trimmed");
+        let (value, repair) =
+            parse_lenient(r#"{"a": 1, "b": 2,"#).expect("a dangling comma is trimmed");
         assert_eq!(repair, JsonRepair::Closed);
         assert_eq!(value, json!({ "a": 1, "b": 2 }));
     }

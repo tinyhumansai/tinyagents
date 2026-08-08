@@ -81,8 +81,7 @@ fn extraction_repairs_a_truncated_response() {
         "properties": { "summary": { "type": "string" } },
         "required": ["summary"]
     });
-    let extractor =
-        StructuredExtractor::new(StructuredStrategy::ProviderSchema, "review", schema);
+    let extractor = StructuredExtractor::new(StructuredStrategy::ProviderSchema, "review", schema);
     let output = extractor
         .extract(&ModelResponse::assistant(
             r#"{"summary": "cut off mid-sente"#,
@@ -117,7 +116,10 @@ fn extract_outcome_records_a_failure_instead_of_raising() {
     assert!(!outcome.is_success());
     assert!(outcome.value.is_none());
     assert!(
-        outcome.error.as_deref().is_some_and(|e| e.contains("score")),
+        outcome
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("score")),
         "the recorded error must be usable as a repair prompt: {:?}",
         outcome.error
     );
