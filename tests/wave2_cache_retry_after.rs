@@ -43,14 +43,14 @@ fn the_structured_field_is_honored_when_the_body_says_nothing() {
 fn the_structured_field_wins_over_the_message_text() {
     // Both present and disagreeing: the header is the contract, the text is a
     // string-matching fallback.
-    let error = provider_error("Rate limited. Please retry after 2 seconds.", Some(45_000));
+    let error = provider_error("Rate limited. retry-after: 2", Some(45_000));
     assert_eq!(retry_after_hint(&error), Some(Duration::from_millis(45_000)));
 }
 
 #[test]
 fn the_message_text_fallback_still_works() {
     // Adapters that do not yet populate the field keep the wave-1 behaviour.
-    let error = provider_error("Rate limited. Please retry after 2 seconds.", None);
+    let error = provider_error("Rate limited. retry-after: 2", None);
     assert_eq!(retry_after_hint(&error), Some(Duration::from_secs(2)));
 }
 
