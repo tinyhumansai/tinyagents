@@ -156,23 +156,31 @@ pub fn append_run_event(workspace_dir: &Path, event: RunEventAppend) -> Result<R
         serde_json::to_string(&event.payload).storage_context("serialize run event")?;
     crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
-        let next_sequence: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_events WHERE run_id = ?1",
-            params![event.run_id],
-            |row| row.get(0),
-        )?;
-        conn.execute(
-            "INSERT INTO run_events (run_id, sequence, event_type, payload_json, timestamp)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                event.run_id,
-                next_sequence,
-                event.event_type,
-                payload_json,
-                now.to_rfc3339(),
-            ],
-        )
-        .storage_context("append run event")?;
+        // Allocate and insert the sequence in ONE statement. Reading
+        // `MAX(sequence) + 1` and then inserting is a read-modify-write race:
+        // two connections appending for the same run can read the same next
+        // value, and the loser fails the `(run_id, sequence)` primary key —
+        // silently dropping a real run event unless every caller implements an
+        // undocumented retry. The sub-select is evaluated inside the same
+        // statement, so SQLite's write lock serializes the whole allocation.
+        let next_sequence: i64 = conn
+            .query_row(
+                "INSERT INTO run_events (run_id, sequence, event_type, payload_json, timestamp)
+             VALUES (
+                ?1,
+                (SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_events WHERE run_id = ?1),
+                ?2, ?3, ?4
+             )
+             RETURNING sequence",
+                params![
+                    event.run_id,
+                    event.event_type,
+                    payload_json,
+                    now.to_rfc3339(),
+                ],
+                |row| row.get(0),
+            )
+            .storage_context("append run event")?;
         Ok(RunEvent {
             run_id: event.run_id,
             sequence: next_sequence as u64,
@@ -191,21 +199,36 @@ pub fn upsert_run_telemetry(
     crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         conn.execute(
+            // The counters are `Option` so a caller can update one field without
+            // clobbering the rest, but the columns are `NOT NULL DEFAULT`, and
+            // SQLite does NOT apply a column default to an explicitly supplied
+            // NULL. Binding the raw `None` therefore made every partial upsert
+            // (say, recording only `model` or only `error`) fail a NOT NULL
+            // constraint on first write. The insert side coalesces to the
+            // column default; the update side re-reads the SAME parameter and
+            // coalesces to the stored value, which keeps per-field optionality.
+            // `excluded.*` cannot serve the update side here — it observes the
+            // already-coalesced insert row, so a `None` would read as 0 and
+            // overwrite the stored counter.
             "INSERT INTO run_telemetry (
                 run_id, input_tokens, output_tokens, cached_input_tokens, cost_usd,
                 elapsed_ms, tool_count, model, provider, error, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ) VALUES (
+                ?1,
+                COALESCE(?2, 0), COALESCE(?3, 0), COALESCE(?4, 0), COALESCE(?5, 0.0),
+                ?6, COALESCE(?7, 0), ?8, ?9, ?10, ?11
+             )
              ON CONFLICT(run_id) DO UPDATE SET
-                input_tokens = COALESCE(excluded.input_tokens, run_telemetry.input_tokens),
-                output_tokens = COALESCE(excluded.output_tokens, run_telemetry.output_tokens),
-                cached_input_tokens = COALESCE(excluded.cached_input_tokens, run_telemetry.cached_input_tokens),
-                cost_usd = COALESCE(excluded.cost_usd, run_telemetry.cost_usd),
-                elapsed_ms = COALESCE(excluded.elapsed_ms, run_telemetry.elapsed_ms),
-                tool_count = COALESCE(excluded.tool_count, run_telemetry.tool_count),
-                model = COALESCE(excluded.model, run_telemetry.model),
-                provider = COALESCE(excluded.provider, run_telemetry.provider),
-                error = COALESCE(excluded.error, run_telemetry.error),
-                updated_at = excluded.updated_at",
+                input_tokens = COALESCE(?2, run_telemetry.input_tokens),
+                output_tokens = COALESCE(?3, run_telemetry.output_tokens),
+                cached_input_tokens = COALESCE(?4, run_telemetry.cached_input_tokens),
+                cost_usd = COALESCE(?5, run_telemetry.cost_usd),
+                elapsed_ms = COALESCE(?6, run_telemetry.elapsed_ms),
+                tool_count = COALESCE(?7, run_telemetry.tool_count),
+                model = COALESCE(?8, run_telemetry.model),
+                provider = COALESCE(?9, run_telemetry.provider),
+                error = COALESCE(?10, run_telemetry.error),
+                updated_at = ?11",
             params![
                 upsert.run_id,
                 upsert.input_tokens.map(|v| v as i64),
@@ -886,7 +909,7 @@ pub fn claim_agent_team_task(
     tracing::debug!(
         "{LOG_PREFIX} claim_agent_team_task.entry team={team_id} task={task_id} member={member_id}"
     );
-    let outcome = crate::session::store::with_connection(workspace_dir, |conn| {
+    let outcome = crate::session::store::with_transaction(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
 
         // 1. Resolve the task within this team.
@@ -980,7 +1003,7 @@ pub fn complete_agent_team_task(
     tracing::debug!(
         "{LOG_PREFIX} complete_agent_team_task.entry team={team_id} task={task_id} member={member_id}"
     );
-    let outcome = crate::session::store::with_connection(workspace_dir, |conn| {
+    let outcome = crate::session::store::with_transaction(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
 
         // 1. Resolve the task within this team.
@@ -1513,6 +1536,105 @@ mod tests {
     /// this, so a fresh `TempDir` per test gives a fresh database.
     fn test_workspace(dir: &TempDir) -> &Path {
         dir.path()
+    }
+
+    // ── Regressions for the review findings on PR #90 ─────────────────────
+
+    /// A partial telemetry upsert must not fail the NOT NULL constraints.
+    ///
+    /// The counters are `Option` so one field can be updated alone, but the
+    /// columns are `NOT NULL DEFAULT` and SQLite does not apply a column
+    /// default to an explicitly supplied NULL. Recording only `model` used to
+    /// fail outright on the first write for a run.
+    #[test]
+    fn partial_telemetry_upsert_applies_column_defaults() {
+        let dir = TempDir::new().unwrap();
+        let workspace_dir = test_workspace(&dir);
+
+        let telemetry = upsert_run_telemetry(
+            workspace_dir,
+            RunTelemetryUpsert {
+                run_id: "run-partial".into(),
+                model: Some("claude-x".into()),
+                ..Default::default()
+            },
+        )
+        .expect("a model-only upsert must succeed");
+
+        assert_eq!(telemetry.model.as_deref(), Some("claude-x"));
+        assert_eq!(telemetry.input_tokens, 0, "counters default, not NULL");
+        assert_eq!(telemetry.output_tokens, 0);
+        assert_eq!(telemetry.cost_usd, 0.0);
+    }
+
+    /// A later partial upsert must not clobber fields it does not carry.
+    #[test]
+    fn partial_telemetry_upsert_preserves_untouched_fields() {
+        let dir = TempDir::new().unwrap();
+        let workspace_dir = test_workspace(&dir);
+
+        upsert_run_telemetry(
+            workspace_dir,
+            RunTelemetryUpsert {
+                run_id: "run-merge".into(),
+                input_tokens: Some(120),
+                model: Some("claude-x".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Second write carries only the error; everything else must survive.
+        let merged = upsert_run_telemetry(
+            workspace_dir,
+            RunTelemetryUpsert {
+                run_id: "run-merge".into(),
+                error: Some("boom".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(merged.error.as_deref(), Some("boom"));
+        assert_eq!(merged.input_tokens, 120, "prior counter must survive");
+        assert_eq!(merged.model.as_deref(), Some("claude-x"));
+    }
+
+    /// Sequences are allocated by the INSERT itself, so appends stay dense and
+    /// ordered rather than racing on a read-then-write.
+    #[test]
+    fn run_event_sequences_are_allocated_by_the_insert() {
+        let dir = TempDir::new().unwrap();
+        let workspace_dir = test_workspace(&dir);
+
+        let seqs: Vec<u64> = (0..5)
+            .map(|i| {
+                append_run_event(
+                    workspace_dir,
+                    RunEventAppend {
+                        run_id: "run-seq".into(),
+                        event_type: format!("evt-{i}"),
+                        payload: json!({ "i": i }),
+                    },
+                )
+                .unwrap()
+                .sequence
+            })
+            .collect();
+
+        assert_eq!(seqs, vec![1, 2, 3, 4, 5]);
+
+        // A second run numbers independently from 1.
+        let other = append_run_event(
+            workspace_dir,
+            RunEventAppend {
+                run_id: "run-other".into(),
+                event_type: "evt".into(),
+                payload: json!({}),
+            },
+        )
+        .unwrap();
+        assert_eq!(other.sequence, 1);
     }
 
     #[test]

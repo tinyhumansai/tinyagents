@@ -349,3 +349,50 @@ fn combined_filters() {
     })
     .unwrap();
 }
+
+// ── Regressions for the review findings on PR #90 ─────────────────────────
+
+/// A long non-ASCII message must not panic while being indexed.
+///
+/// `&content[..2000]` panicked whenever byte 2000 landed inside a multi-byte
+/// character. The message INSERT autocommits before the FTS write, so the panic
+/// left a stored message with no FTS row — permanently unsearchable.
+#[test]
+fn long_multibyte_message_is_indexed_without_panicking() {
+    with_memory_connection(|conn| {
+        // '€' is 3 bytes and 2000 is not a multiple of 3, so byte 2000 lands
+        // strictly inside a character — the case that panicked. A 2-byte char
+        // would leave 2000 on a boundary and pass vacuously.
+        let content = "€".repeat(1500);
+        assert!(content.len() > 2000);
+        assert!(!content.is_char_boundary(2000));
+
+        index_fts_content(conn, "sess-utf8", &content)?;
+
+        let indexed: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sessions_fts WHERE session_id = 'sess-utf8'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(indexed, 1, "the message must still get an FTS row");
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// An ASCII message longer than the cap still truncates to exactly the cap.
+#[test]
+fn long_ascii_message_truncates_at_the_byte_cap() {
+    with_memory_connection(|conn| {
+        let content = "a".repeat(5000);
+        index_fts_content(conn, "sess-ascii", &content)?;
+        let stored: String = conn.query_row(
+            "SELECT content FROM sessions_fts WHERE session_id = 'sess-ascii'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(stored.len(), 2000);
+        Ok(())
+    })
+    .unwrap();
+}

@@ -84,6 +84,25 @@ pub mod rlm;
 #[cfg(feature = "sqlite")]
 pub mod session;
 
+// --- Session: durable session history + run ledger (feature `sqlite`) ---
+// Centralized here per AGENTS.md so downstream users get a predictable surface
+// rather than reaching through the module path. The record/query entry points
+// and the ledger's coordination types are the surface a host actually binds
+// against; the rest stays reachable via `session::` for callers that want it.
+#[cfg(feature = "sqlite")]
+pub use session::run_ledger::{
+    AgentRun, AgentRunKind, AgentRunStatus, AgentRunUpsert, AgentTeam, AgentTeamMember,
+    AgentTeamMemberStatus, AgentTeamStatus, AgentTeamTask, AgentTeamTaskStatus, ClaimOutcome,
+    CompletionOutcome, RunEvent, RunEventAppend, RunTelemetry, RunTelemetryUpsert, WorkflowRun,
+    WorkflowRunStatus, WorkflowRunUpsert,
+};
+#[cfg(feature = "sqlite")]
+pub use session::{
+    SessionMessage, SessionRecord, SessionSearchParams, SessionSearchResult, SessionStatus,
+    SessionToolCall, get_session, list_sessions, record_message, record_session_end,
+    record_session_start, record_tool_call, search_sessions,
+};
+
 // --- Error: the crate-wide error type and `Result` alias ---
 pub use error::{Result, TinyAgentsError};
 

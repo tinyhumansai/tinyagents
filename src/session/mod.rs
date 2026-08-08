@@ -71,7 +71,7 @@ pub use ops::{
     get_session, list_children, list_messages, list_sessions, list_tool_calls, mark_interrupted,
     record_message, record_session_end, record_session_start, record_tool_call, search_sessions,
 };
-pub use store::{db_path, with_connection};
+pub use store::{db_path, with_connection, with_transaction};
 pub use types::{
     SessionMessage, SessionRecord, SessionSearchParams, SessionSearchResult, SessionStatus,
     SessionToolCall,

@@ -548,9 +548,22 @@ fn index_fts_session(conn: &Connection, session_id: &str, agent_name: &str) -> R
     Ok(())
 }
 
+/// Longest FTS snippet indexed per message, in bytes.
+const MAX_FTS_SNIPPET_BYTES: usize = 2000;
+
 fn index_fts_content(conn: &Connection, session_id: &str, content: &str) -> Result<()> {
-    let snippet = if content.len() > 2000 {
-        &content[..2000]
+    // Slice on a character boundary, not a byte offset. `&content[..2000]`
+    // panics whenever byte 2000 lands inside a multi-byte character, which any
+    // ordinary long non-ASCII message can do. The panic is worse than it looks:
+    // the message INSERT has already autocommitted by this point, so the row
+    // survives with no FTS entry and is silently unsearchable forever after.
+    // Mirrors the truncation already done in `record_tool_call`.
+    let snippet = if content.len() > MAX_FTS_SNIPPET_BYTES {
+        let mut cutoff = MAX_FTS_SNIPPET_BYTES;
+        while cutoff > 0 && !content.is_char_boundary(cutoff) {
+            cutoff -= 1;
+        }
+        &content[..cutoff]
     } else {
         content
     };

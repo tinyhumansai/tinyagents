@@ -43,6 +43,47 @@ pub fn with_connection<T>(
     f(&conn)
 }
 
+/// Opens the session database and runs `f` inside a single **immediate**
+/// write transaction, committing on `Ok` and rolling back on `Err`.
+///
+/// [`with_connection`] hands out an autocommit connection: each statement
+/// commits on its own, so a multi-statement read-then-write sequence has no
+/// isolation at all. Any operation whose correctness depends on the state it
+/// read still holding when it writes — a compare-and-swap claim, a gate that
+/// checks dependencies before acting — must use this instead.
+///
+/// `BEGIN IMMEDIATE` rather than the default deferred begin: it takes the
+/// write lock up front, so two racing claims serialize at `BEGIN` instead of
+/// discovering the conflict at COMMIT time and failing with `SQLITE_BUSY`
+/// after one of them has already decided it won.
+pub fn with_transaction<T>(
+    workspace_dir: &Path,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    with_connection(workspace_dir, |conn| {
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .storage_context("begin session DB transaction")?;
+        match f(conn) {
+            Ok(value) => {
+                conn.execute_batch("COMMIT")
+                    .storage_context("commit session DB transaction")?;
+                Ok(value)
+            }
+            Err(err) => {
+                // Roll back best-effort: the caller's error is the one worth
+                // reporting, and a failed rollback (connection already gone)
+                // must not mask it.
+                if let Err(rollback_err) = conn.execute_batch("ROLLBACK") {
+                    tracing::warn!(
+                        "[session] rollback after error failed: {rollback_err} (original: {err})"
+                    );
+                }
+                Err(err)
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 pub fn with_memory_connection<T>(f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
     let conn =
