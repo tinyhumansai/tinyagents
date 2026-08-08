@@ -65,7 +65,23 @@ impl StructuredStrategy {
     /// Returns [`StructuredStrategy::ProviderSchema`] when the model advertises
     /// native structured output *and* JSON Schema support, or when no profile is
     /// available (the conservative default). Otherwise returns
-    /// [`StructuredStrategy::ToolCall`], which works on any tool-calling model.
+    /// [`StructuredStrategy::ToolCall`] — but **only for a model that can
+    /// actually call tools**.
+    ///
+    /// # Why the `tool_calling` check matters
+    ///
+    /// This used to select `ToolCall` for *any* profile lacking native
+    /// structured output, including profiles that declare `tool_calling:
+    /// false`. That strategy declares an artificial tool and forces
+    /// [`ToolChoice::Tool`][tc]; on a model with no tool support the harness
+    /// runs prompt-guided instead, so the wire `tools` array is empty and the
+    /// forced choice is dropped — leaving a request that asks for nothing in
+    /// particular and an extractor waiting for a tool call that can never
+    /// arrive. Provider-schema mode at least asks for JSON and, with the repair
+    /// ladder in [`super::structured::repair`], parses what a JSON-mode model
+    /// actually returns.
+    ///
+    /// [tc]: crate::harness::model::ToolChoice::Tool
     ///
     /// # Example
     ///
