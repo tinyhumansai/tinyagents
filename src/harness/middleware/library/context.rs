@@ -44,10 +44,18 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for MessageTri
 
 // ── ContextCompressionMiddleware ──────────────────────────────────────────────
 
-/// Estimate the total tokens of a message slice using the same per-message
-/// heuristic the [`SummarizationPolicy`] uses internally.
+/// Estimate the total tokens of a message slice.
+///
+/// Uses the crate's shared
+/// [`count_tokens_approximately`][crate::harness::message::count_tokens_approximately]
+/// estimator rather than summing `estimate_tokens(&m.text())`. `text()` returns
+/// only the *textual* content blocks, so a transcript of large JSON tool
+/// results or image blocks estimated to nearly zero and the micro-compaction
+/// budget gate never tripped on exactly the transcripts it exists to shrink.
+/// The shared estimator charges every content block, tool call, and tool-call
+/// id, and calibrates against reported usage metadata when it is present.
 fn total_message_tokens(messages: &[crate::harness::message::Message]) -> u64 {
-    messages.iter().map(|m| estimate_tokens(&m.text())).sum()
+    crate::harness::message::count_tokens_approximately(messages)
 }
 
 impl ContextCompressionMiddleware {
