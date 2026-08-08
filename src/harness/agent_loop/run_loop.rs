@@ -138,12 +138,31 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         ctx.limits
             .sync_call_limits(effective_model_calls, effective_tool_calls);
 
-        let mut messages = input;
-
         // The tool set is fixed for the duration of a run, so build the sorted
         // schema vec once here instead of re-collecting, re-calling every tool's
         // `schema()`, and re-sorting on every turn (per model call).
         let tool_schemas = self.tools.schemas();
+
+        // Fail closed on a structured-output schema whose name collides with a
+        // registered tool. Under the tool-call strategy the schema is sent as an
+        // extra `function` entry, so a collision puts two identically-named
+        // functions in one request — which OpenAI rejects outright — and makes
+        // "was this the schema or the real tool?" unanswerable for every
+        // returned call.
+        if let Some(name) = self.policy.default_response_format.as_ref().and_then(
+            |format| match format {
+                ResponseFormat::Auto { name, .. } | ResponseFormat::JsonSchema { name, .. } => {
+                    Some(name)
+                }
+                _ => None,
+            },
+        ) && self.tools.names().iter().any(|registered| registered == name)
+        {
+            return Err(TinyAgentsError::Validation(format!(
+                "structured-output schema name `{name}` collides with a registered tool of the \
+                 same name; rename one of them"
+            )));
+        }
 
         status.mark_running(HarnessPhase::Middleware);
         self.middleware.run_before_agent(ctx, state).await?;
