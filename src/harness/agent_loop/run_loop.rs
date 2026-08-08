@@ -486,6 +486,20 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     }
 }
 
+/// Resolves one run-scoped call cap from the per-run [`RunConfig`] value and
+/// the harness-wide [`crate::harness::runtime::RunPolicy`] value.
+///
+/// An explicitly-set config cap is the caller's ceiling and can only be
+/// tightened by the policy (fail-closed `min`); an unset config cap leaves the
+/// policy as the single source of truth, which is what lets a policy raise a
+/// cap above the crate default.
+fn resolve_call_cap(config_cap: Option<usize>, policy_cap: usize) -> usize {
+    match config_cap {
+        Some(explicit) => explicit.min(policy_cap),
+        None => policy_cap,
+    }
+}
+
 /// Clears the per-turn truncated-empty recovery state (see
 /// [`crate::harness::runtime::RunPolicy::truncated_empty_retries`]).
 ///
