@@ -629,21 +629,52 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // `agent_loop/tools.rs` for the dispatch rules and the semantics
             // preserved in each mode.
             status.mark_running(HarnessPhase::Tools);
-            self.execute_tools(state, ctx, run, status, &mut messages, tool_calls)
+            self.execute_tools(state, ctx, run, status, messages, real_tool_calls)
                 .await?;
+
+            // Safe checkpoint: honor a control requested from `after_tool` /
+            // `wrap_tool` at the edge it was raised on, rather than a model
+            // call later.
+            if let Some(exit) = self.apply_pending_control(ctx, run, status)? {
+                return Ok(exit);
+            }
         }
+    }
 
-        run.messages = messages;
-
-        status.mark_running(HarnessPhase::Middleware);
-        self.middleware.run_after_agent(ctx, state, run).await?;
-
-        let record = ctx.emit(AgentEvent::RunCompleted {
-            run_id: ctx.run_id().clone(),
+    /// Drains any pending [`MiddlewareControl`] and turns it into a loop
+    /// decision.
+    ///
+    /// Returns `Ok(None)` when nothing was requested, `Ok(Some(exit))` when the
+    /// loop must stop, and `Err` for
+    /// [`MiddlewareControl::Interrupt`]. Called at every safe checkpoint — the
+    /// top of an iteration, after the model call, and after tool execution — so
+    /// a control raised anywhere in a turn takes effect on that turn.
+    fn apply_pending_control(
+        &self,
+        ctx: &mut RunContext<Ctx>,
+        run: &mut AgentRun,
+        status: &mut HarnessRunStatus,
+    ) -> Result<Option<LoopExit>> {
+        let Some(control) = ctx.take_control() else {
+            return Ok(None);
+        };
+        let record = ctx.emit(AgentEvent::ControlApplied {
+            control: control.kind().to_string(),
+            detail: match &control {
+                MiddlewareControl::StopWithFinal(text) => text.clone(),
+                MiddlewareControl::Interrupt { node, message } => format!("{node}: {message}"),
+            },
         });
         status.set_last_event(record.id);
-
-        Ok(())
+        match control {
+            MiddlewareControl::StopWithFinal(text) => {
+                run.final_response = Some(ModelResponse::assistant(text));
+                Ok(Some(LoopExit::Finished))
+            }
+            MiddlewareControl::Interrupt { node, message } => {
+                Err(TinyAgentsError::Interrupted { node, message })
+            }
+        }
     }
 
     /// Resolves the effective response-cache decision for `request`.
