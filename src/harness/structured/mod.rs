@@ -184,6 +184,34 @@ impl StructuredExtractor {
 
     fn extract_provider_schema(&self, response: &ModelResponse) -> Result<StructuredOutput> {
         let raw = response.text();
+
+        // A reasoning model can spend its entire output budget thinking and
+        // return no content at all. The provider says so plainly through
+        // `finish_reason: "length"`, but a naive parse of the empty string
+        // reports "expected value at line 1 column 1" — which sends the reader
+        // hunting for a malformed response that was never sent, and hides the
+        // one-line fix of raising `max_tokens` or capping reasoning.
+        if raw.trim().is_empty() {
+            let truncated = response
+                .finish_reason
+                .as_deref()
+                .is_some_and(|reason| reason == "length");
+            return Err(TinyAgentsError::StructuredOutput(if truncated {
+                format!(
+                    "schema '{}': the model returned no content because it hit its output limit \
+                     (finish_reason = \"length\"). Reasoning models can consume the whole budget \
+                     before emitting an answer: raise `max_tokens`, or cap/disable reasoning.",
+                    self.schema_name
+                )
+            } else {
+                format!(
+                    "schema '{}': the model returned no content (finish_reason = {:?})",
+                    self.schema_name,
+                    response.finish_reason.as_deref().unwrap_or("unknown")
+                )
+            }));
+        }
+
         let value: Value = serde_json::from_str(&raw).map_err(|e| {
             TinyAgentsError::StructuredOutput(format!(
                 "schema '{}': response text is not valid JSON: {e}",

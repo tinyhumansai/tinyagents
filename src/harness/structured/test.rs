@@ -111,3 +111,52 @@ fn structured_output_parse_deserialises() {
     let parsed: Answer = output.parse().unwrap();
     assert_eq!(parsed.value, "hello");
 }
+
+// -- truncation diagnostics --
+
+/// A response whose content is `text`, stopped for `finish_reason`.
+fn stopped(text: &str, finish_reason: &str) -> ModelResponse {
+    ModelResponse::assistant(text).with_finish_reason(finish_reason)
+}
+
+#[test]
+fn empty_content_stopped_for_length_reports_the_output_limit() {
+    // A reasoning model can spend its whole output budget thinking and return
+    // no content. Parsing the empty string reports "expected value at line 1
+    // column 1", which sends the reader hunting for a malformed response that
+    // was never sent, and hides the one-line fix.
+    let extractor =
+        StructuredExtractor::new(StructuredStrategy::ProviderSchema, "review", json!({}));
+    let err = extractor
+        .extract(&stopped("", "length"))
+        .expect_err("empty content is not extractable");
+
+    let message = err.to_string();
+    assert!(message.contains("output limit"), "{message}");
+    assert!(message.contains("max_tokens"), "{message}");
+    assert!(
+        !message.contains("line 1 column 1"),
+        "the misleading parse error must not survive: {message}"
+    );
+}
+
+#[test]
+fn empty_content_stopped_normally_reports_what_is_known() {
+    let extractor =
+        StructuredExtractor::new(StructuredStrategy::ProviderSchema, "review", json!({}));
+    let err = extractor
+        .extract(&stopped("   ", "stop"))
+        .expect_err("empty content is not extractable");
+    assert!(err.to_string().contains("no content"), "{err}");
+}
+
+#[test]
+fn genuinely_malformed_json_still_reports_a_parse_error() {
+    // The new branch must not swallow the case it was not written for.
+    let extractor =
+        StructuredExtractor::new(StructuredStrategy::ProviderSchema, "review", json!({}));
+    let err = extractor
+        .extract(&stopped("not json at all", "stop"))
+        .expect_err("malformed content is not extractable");
+    assert!(err.to_string().contains("not valid JSON"), "{err}");
+}
