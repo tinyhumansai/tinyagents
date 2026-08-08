@@ -326,8 +326,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 // awaited unbounded.
                 let remaining = self.call_budget(ctx);
                 let attempt_result = if streaming {
-                    let fut =
-                        self.invoke_model_streaming_once(state, ctx, &model, request, call_id);
+                    let fut = self.invoke_model_streaming_once(
+                        state,
+                        ctx,
+                        &model,
+                        request,
+                        call_id,
+                        &mut deltas_emitted,
+                    );
                     Self::with_call_budget(remaining, run_id.as_str(), "model call", fut).await
                 } else {
                     // Race the wall-clock-bounded unary call against cooperative
