@@ -1163,7 +1163,7 @@ async fn collect_sse_with(
         bytes: Box::pin(bytes),
         buf: Vec::new(),
         pending: std::collections::VecDeque::new(),
-        acc: OpenAiStreamAcc::new(reasoning_tags),
+        acc: OpenAiStreamAcc::new(reasoning_tags, CacheTokenAccounting::default()),
         provider: "openai".to_string(),
         model: "gpt-4.1-mini".to_string(),
         started: false,
@@ -1341,7 +1341,7 @@ fn parse_chat_response_extracts_inline_think_and_side_channel() {
     });
 
     let cfg = ReasoningTagExtraction::default();
-    let response = parse_chat_response(body, Some(&cfg)).unwrap();
+    let response = parse_chat_response(body, Some(&cfg), CacheTokenAccounting::default()).unwrap();
     assert_eq!(response.text(), "The answer is 42.");
     // Side-channel leads, inline follows, separator-joined.
     assert_eq!(response_reasoning(&response), "side\ninline");
@@ -1356,7 +1356,7 @@ fn parse_chat_response_without_config_leaves_inline_tags_in_text() {
         ]
     });
 
-    let response = parse_chat_response(body, None).unwrap();
+    let response = parse_chat_response(body, None, CacheTokenAccounting::default()).unwrap();
     assert_eq!(response.text(), "<think>x</think>y");
     assert_eq!(response_reasoning(&response), "");
 }
@@ -2523,6 +2523,7 @@ fn degrade_for_400_targets_only_the_shape_the_request_used() {
         Some(Degrade {
             named_tool_choice: true,
             json_object: false,
+            ..Degrade::default()
         })
     );
 
@@ -2537,6 +2538,7 @@ fn degrade_for_400_targets_only_the_shape_the_request_used() {
         Some(Degrade {
             named_tool_choice: false,
             json_object: true,
+            ..Degrade::default()
         })
     );
 }
@@ -2571,6 +2573,7 @@ fn degrade_for_400_ignores_unrelated_or_already_degraded_failures() {
             Degrade {
                 named_tool_choice: true,
                 json_object: false,
+                ..Degrade::default()
             },
         ),
         None
@@ -2590,11 +2593,13 @@ fn degrade_for_400_unions_with_existing_baseline_degrade() {
             Degrade {
                 named_tool_choice: true,
                 json_object: false,
+                ..Degrade::default()
             },
         ),
         Some(Degrade {
             named_tool_choice: true,
             json_object: true,
+            ..Degrade::default()
         })
     );
 }
@@ -2619,12 +2624,14 @@ fn shape_degrade_latches_after_discovery_so_baseline_is_already_degraded() {
     m.latch_degrade(Degrade {
         named_tool_choice: true,
         json_object: false,
+        ..Degrade::default()
     });
     assert_eq!(
         m.baseline_degrade(),
         Degrade {
             named_tool_choice: true,
             json_object: false,
+            ..Degrade::default()
         },
         "a discovered named_tool_choice rejection must be remembered so the next \
          call's baseline body is already degraded, instead of re-paying the 400"
@@ -2635,12 +2642,14 @@ fn shape_degrade_latches_after_discovery_so_baseline_is_already_degraded() {
     m.latch_degrade(Degrade {
         named_tool_choice: true,
         json_object: true,
+        ..Degrade::default()
     });
     assert_eq!(
         m.baseline_degrade(),
         Degrade {
             named_tool_choice: true,
             json_object: true,
+            ..Degrade::default()
         }
     );
 }
@@ -2656,12 +2665,14 @@ fn shape_degrade_latch_survives_through_a_shared_handle() {
     shared.latch_degrade(Degrade {
         named_tool_choice: false,
         json_object: true,
+        ..Degrade::default()
     });
     assert_eq!(
         clone.baseline_degrade(),
         Degrade {
             named_tool_choice: false,
             json_object: true,
+            ..Degrade::default()
         },
         "the latch must be visible to every holder of the shared model"
     );
