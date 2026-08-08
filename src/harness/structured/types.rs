@@ -136,6 +136,9 @@ pub struct StructuredExtractor {
     /// Name used to match the artificial tool call (for [`StructuredStrategy::ToolCall`])
     /// or to label errors.
     pub(crate) schema_name: String,
-    /// The JSON Schema document (kept for potential future local validation).
+    /// The JSON Schema document. **Enforced**: every extracted value is checked
+    /// against it by [`super::validate`] before it is returned, so a
+    /// well-formed value of the wrong shape is a reported error rather than
+    /// silent garbage in `run.structured`.
     pub(crate) schema: Value,
 }
