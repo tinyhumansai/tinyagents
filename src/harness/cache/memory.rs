@@ -102,7 +102,8 @@ impl LruResponseMap {
 
     /// Evicts least-recently-used entries until both bounds are satisfied.
     fn evict_to_fit(&mut self) {
-        while self.data.len() > self.capacity || (self.bytes > self.max_bytes && self.data.len() > 1)
+        while self.data.len() > self.capacity
+            || (self.bytes > self.max_bytes && self.data.len() > 1)
         {
             let Some((_, victim)) = self.order.iter().next().map(|(k, v)| (*k, v.clone())) else {
                 break;

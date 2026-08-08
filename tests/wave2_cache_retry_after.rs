@@ -44,7 +44,10 @@ fn the_structured_field_wins_over_the_message_text() {
     // Both present and disagreeing: the header is the contract, the text is a
     // string-matching fallback.
     let error = provider_error("Rate limited. retry-after: 2", Some(45_000));
-    assert_eq!(retry_after_hint(&error), Some(Duration::from_millis(45_000)));
+    assert_eq!(
+        retry_after_hint(&error),
+        Some(Duration::from_millis(45_000))
+    );
 }
 
 #[test]
@@ -75,9 +78,8 @@ fn a_server_supplied_wait_drives_the_backoff_and_stays_clamped() {
 fn provider_error_round_trips_without_the_new_field() {
     // `#[serde(default)]` keeps payloads written before the field existed
     // decodable — important for anything that persists provider errors.
-    let legacy: ProviderError = serde_json::from_str(
-        r#"{"provider":"openai","message":"boom","retryable":true}"#,
-    )
-    .expect("legacy payload decodes");
+    let legacy: ProviderError =
+        serde_json::from_str(r#"{"provider":"openai","message":"boom","retryable":true}"#)
+            .expect("legacy payload decodes");
     assert_eq!(legacy.retry_after_ms, None);
 }

@@ -376,7 +376,10 @@ async fn model_fallback_middleware_actually_switches_models() {
         "the backup model must actually be invoked, not merely announced"
     );
     assert!(
-        events.kinds().iter().any(|k| k == "model.fallback_selected"),
+        events
+            .kinds()
+            .iter()
+            .any(|k| k == "model.fallback_selected"),
         "the fallback event is still emitted"
     );
 }

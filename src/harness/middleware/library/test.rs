@@ -830,9 +830,11 @@ async fn concurrent_runs_on_one_middleware_release_their_own_reservations() {
         .unwrap();
     // Expected from the crate's shared estimator (which charges every content
     // block, tool call, and the role label) rather than a hand-copied number.
-    let expected = crate::harness::message::count_tokens_approximately(&[Message::user(
-        "x".repeat(40),
-    )]) + crate::harness::message::count_tokens_approximately(&[Message::user("y".repeat(400))]);
+    let expected =
+        crate::harness::message::count_tokens_approximately(&[Message::user("x".repeat(40))])
+            + crate::harness::message::count_tokens_approximately(&[Message::user(
+                "y".repeat(400),
+            )]);
     let reserved = tracker.snapshot().reserved_input_total;
     assert_eq!(
         reserved, expected,

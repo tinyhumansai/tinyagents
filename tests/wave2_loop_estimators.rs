@@ -10,7 +10,7 @@ use serde_json::json;
 
 use tinyagents::harness::context::{RunConfig, RunContext};
 use tinyagents::harness::message::{ContentBlock, Message, ToolMessage};
-use tinyagents::harness::middleware::{Middleware, MicrocompactMiddleware};
+use tinyagents::harness::middleware::{MicrocompactMiddleware, Middleware};
 use tinyagents::harness::model::ModelRequest;
 
 const PLACEHOLDER: &str = "[elided]";
@@ -98,7 +98,9 @@ async fn microcompaction_leaves_trusted_verbatim_tool_results_alone() {
         // Oldest — the first one micro-compaction would blank.
         Message::Tool(ToolMessage {
             tool_call_id: "c0".to_string(),
-            content: vec![ContentBlock::Text("argument schema for `write`".to_string())],
+            content: vec![ContentBlock::Text(
+                "argument schema for `write`".to_string(),
+            )],
             trusted_verbatim: true,
             artifact: None,
         }),

@@ -42,11 +42,13 @@ impl PromptCacheLayout {
         for segment in &request.cache_segments {
             material.push_str(&segment.id);
             material.push('\u{1}');
-            material.push_str(match serde_json::to_value(segment.role) {
-                Ok(Value::String(role)) => role,
-                _ => String::new(),
-            }
-            .as_str());
+            material.push_str(
+                match serde_json::to_value(segment.role) {
+                    Ok(Value::String(role)) => role,
+                    _ => String::new(),
+                }
+                .as_str(),
+            );
             material.push('\u{1}');
             material.push(if segment.cacheable { '1' } else { '0' });
             material.push('\u{2}');
@@ -64,7 +66,9 @@ impl PromptCacheLayout {
             message_digests: request
                 .messages
                 .iter()
-                .map(|message| fnv1a_hex(serde_json::to_vec(message).unwrap_or_default().as_slice()))
+                .map(|message| {
+                    fnv1a_hex(serde_json::to_vec(message).unwrap_or_default().as_slice())
+                })
                 .collect(),
         }
     }

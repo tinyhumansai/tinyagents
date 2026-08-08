@@ -10,9 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tinyagents::Result;
-use tinyagents::harness::cache::{
-    CachePolicy, InMemoryResponseCache, ResponseCache, SingleFlight,
-};
+use tinyagents::harness::cache::{CachePolicy, InMemoryResponseCache, ResponseCache, SingleFlight};
 use tinyagents::harness::model::ModelResponse;
 
 // ── C-TTL ────────────────────────────────────────────────────────────────────
@@ -30,7 +28,10 @@ async fn an_expired_entry_is_a_miss_and_is_dropped() {
         )
         .await
         .unwrap();
-    assert!(cache.get("k").await.unwrap().is_some(), "live before expiry");
+    assert!(
+        cache.get("k").await.unwrap().is_some(),
+        "live before expiry"
+    );
 
     tokio::time::sleep(Duration::from_millis(40)).await;
     assert!(
@@ -77,10 +78,9 @@ fn cache_policy_carries_ttl_and_namespace() {
     let back: CachePolicy = serde_json::from_str(&json).unwrap();
     assert_eq!(back, policy);
     // And a policy serialized before these fields existed still deserializes.
-    let legacy: CachePolicy = serde_json::from_str(
-        r#"{"response_cache_enabled":true,"protect_prompt_prefix":false}"#,
-    )
-    .unwrap();
+    let legacy: CachePolicy =
+        serde_json::from_str(r#"{"response_cache_enabled":true,"protect_prompt_prefix":false}"#)
+            .unwrap();
     assert!(legacy.ttl().is_none());
 }
 
@@ -196,7 +196,10 @@ async fn concurrent_identical_calls_collapse_into_one() {
         1,
         "eight identical concurrent calls must reach the provider once"
     );
-    assert_eq!(followers, 7, "seven callers rode along on the leader's call");
+    assert_eq!(
+        followers, 7,
+        "seven callers rode along on the leader's call"
+    );
     assert_eq!(flight.inflight_len(), 0, "the key is retired when done");
 }
 
@@ -308,7 +311,9 @@ mod sqlite_backend {
 
         {
             let cache = SqliteResponseCache::open(&path)?;
-            cache.put("k", ModelResponse::assistant("persisted")).await?;
+            cache
+                .put("k", ModelResponse::assistant("persisted"))
+                .await?;
         }
         let reopened = SqliteResponseCache::open(&path)?;
         let hit = reopened.get("k").await?.expect("survives a reopen");

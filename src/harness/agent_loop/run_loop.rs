@@ -149,14 +149,21 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // functions in one request — which OpenAI rejects outright — and makes
         // "was this the schema or the real tool?" unanswerable for every
         // returned call.
-        if let Some(name) = self.policy.default_response_format.as_ref().and_then(
-            |format| match format {
+        if let Some(name) = self
+            .policy
+            .default_response_format
+            .as_ref()
+            .and_then(|format| match format {
                 ResponseFormat::Auto { name, .. } | ResponseFormat::JsonSchema { name, .. } => {
                     Some(name)
                 }
                 _ => None,
-            },
-        ) && self.tools.names().iter().any(|registered| registered == name)
+            })
+            && self
+                .tools
+                .names()
+                .iter()
+                .any(|registered| registered == name)
         {
             return Err(TinyAgentsError::Validation(format!(
                 "structured-output schema name `{name}` collides with a registered tool of the \

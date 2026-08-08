@@ -149,8 +149,14 @@ fn scoped_key_separates_identity_streaming_and_namespace() {
     let namespaced = scoped_cache_key(&base, Some("provider-a"), false, Some("tenant-7"));
 
     assert_ne!(a, b, "two identities must not share a key");
-    assert_ne!(a, anon, "an anonymous model must not collide with a named one");
-    assert_ne!(a, streamed, "streaming is a call parameter and must be keyed");
+    assert_ne!(
+        a, anon,
+        "an anonymous model must not collide with a named one"
+    );
+    assert_ne!(
+        a, streamed,
+        "streaming is a call parameter and must be keyed"
+    );
     assert_ne!(a, namespaced, "the policy namespace must be keyed");
     assert_eq!(
         a,
@@ -165,13 +171,8 @@ fn model_identity_never_carries_the_raw_credential() {
     // The identity ends up folded into keys that reach logs, events, and
     // durable cache files, so a raw key must never survive into it.
     let secret = "sk-super-secret-value";
-    let identity = model_cache_identity(
-        "openai",
-        "gpt-5",
-        "https://api.openai.com/v1",
-        None,
-        secret,
-    );
+    let identity =
+        model_cache_identity("openai", "gpt-5", "https://api.openai.com/v1", None, secret);
     assert!(
         !identity.contains(secret),
         "the raw credential leaked into the cache identity: {identity}"
@@ -206,7 +207,11 @@ fn key_ignores_fields_that_cannot_change_the_answer() {
     // A transport deadline cannot change what the model says.
     let mut with_timeout = base.clone();
     with_timeout.timeout_ms = Some(30_000);
-    assert_eq!(cache_key(&with_timeout), key, "timeout_ms must not be keyed");
+    assert_eq!(
+        cache_key(&with_timeout),
+        key,
+        "timeout_ms must not be keyed"
+    );
 
     // The policy selects *whether* to cache. Folding it in meant flipping the
     // (previously dead) `protect_prompt_prefix` flag invalidated every entry.
@@ -251,11 +256,7 @@ fn key_still_reflects_every_behaviour_affecting_field() {
 
     let mut opted = base.clone();
     opted.provider_options = serde_json::json!({ "hotness": 3 });
-    assert_ne!(
-        cache_key(&opted),
-        key,
-        "provider_options change the answer"
-    );
+    assert_ne!(cache_key(&opted), key, "provider_options change the answer");
 
     let mut stopped = base.clone();
     stopped.stop_sequences = vec!["STOP".to_string()];
@@ -271,7 +272,11 @@ fn key_still_reflects_every_behaviour_affecting_field() {
 
     let mut named = base.clone();
     named.model = Some("model-b".to_string());
-    assert_ne!(cache_key(&named), key, "an explicit model override is keyed");
+    assert_ne!(
+        cache_key(&named),
+        key,
+        "an explicit model override is keyed"
+    );
 
     let mut longer = base.clone();
     longer.messages.push(Message::user("and one more"));

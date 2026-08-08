@@ -141,12 +141,18 @@ fn protect_prompt_prefix_is_load_bearing_for_the_layout_event() {
     // one assertion. It now decides whether a detected invalidation counts as a
     // policy violation.
     let before = PromptCacheLayout::from_request(
-        &ModelRequest::new(vec![Message::user("q")])
-            .with_cache_segments(vec![segment("sys", SegmentRole::System, true)]),
+        &ModelRequest::new(vec![Message::user("q")]).with_cache_segments(vec![segment(
+            "sys",
+            SegmentRole::System,
+            true,
+        )]),
     );
     let after = PromptCacheLayout::from_request(
-        &ModelRequest::new(vec![Message::user("q")])
-            .with_cache_segments(vec![segment("turn", SegmentRole::Volatile, false)]),
+        &ModelRequest::new(vec![Message::user("q")]).with_cache_segments(vec![segment(
+            "turn",
+            SegmentRole::Volatile,
+            false,
+        )]),
     );
 
     let unprotected = CacheLayoutEvent::under_policy(&CachePolicy::default(), &before, &after)
@@ -161,8 +167,8 @@ fn protect_prompt_prefix_is_load_bearing_for_the_layout_event() {
         protect_prompt_prefix: true,
         ..CachePolicy::default()
     };
-    let violation = CacheLayoutEvent::under_policy(&protected, &before, &after)
-        .expect("the prefix did change");
+    let violation =
+        CacheLayoutEvent::under_policy(&protected, &before, &after).expect("the prefix did change");
     assert!(violation.violates_policy, "the flag must be load-bearing");
     assert!(violation.volatile_only);
 
@@ -174,8 +180,7 @@ fn protect_prompt_prefix_is_load_bearing_for_the_layout_event() {
 
 #[test]
 fn a_prompt_cache_key_is_derived_from_the_stable_prefix() {
-    let request =
-        |question: &str| built_with_system("You are a careful assistant.", question);
+    let request = |question: &str| built_with_system("You are a careful assistant.", question);
 
     let first = prompt_cache_key(&request("q1")).expect("a stable prefix exists");
     let second = prompt_cache_key(&request("q2")).expect("a stable prefix exists");
