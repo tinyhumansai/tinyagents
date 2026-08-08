@@ -264,6 +264,58 @@ pub enum TinyAgentsError {
     Storage(String),
 }
 
+impl TinyAgentsError {
+    /// Builds the right error for a structured provider failure, promoting a
+    /// recognised context overflow to [`TinyAgentsError::ContextOverflow`].
+    ///
+    /// Provider adapters classify the overflow and stamp
+    /// [`CONTEXT_OVERFLOW_CODE`][code] on
+    /// [`ProviderError::code`][pc]; this is where that code becomes a type. Use
+    /// it in place of `TinyAgentsError::Provider(Box::new(error))` at every
+    /// site that has a `ProviderError` in hand — the generic variant is still
+    /// correct for everything else, and is what this returns when the code is
+    /// absent or unrecognised.
+    ///
+    /// [code]: crate::harness::providers::openai::CONTEXT_OVERFLOW_CODE
+    /// [pc]: crate::harness::model::ProviderError::code
+    pub fn from_provider_error(error: crate::harness::model::ProviderError) -> Self {
+        if error.code.as_deref()
+            == Some(crate::harness::providers::openai::CONTEXT_OVERFLOW_CODE)
+        {
+            tracing::debug!(
+                "[error] promoting provider `{}` context-overflow code to a typed error",
+                error.provider
+            );
+            return Self::ContextOverflow {
+                provider: error.provider,
+                model: error.model,
+                message: error.message,
+            };
+        }
+        Self::Provider(Box::new(error))
+    }
+
+    /// Whether this error means the request did not fit the model's context
+    /// window.
+    ///
+    /// Recognises **both** the typed [`TinyAgentsError::ContextOverflow`] and a
+    /// [`TinyAgentsError::Provider`] still carrying the classification code, so
+    /// a caller's compact-and-retry logic behaves identically no matter which
+    /// construction site produced the error. Call sites are migrating to
+    /// [`Self::from_provider_error`]; until every one has, the two shapes must
+    /// classify the same or the same failure would be handled two ways.
+    pub fn is_context_overflow(&self) -> bool {
+        match self {
+            Self::ContextOverflow { .. } => true,
+            Self::Provider(error) => {
+                error.code.as_deref()
+                    == Some(crate::harness::providers::openai::CONTEXT_OVERFLOW_CODE)
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Converts a raw `rusqlite` failure into [`TinyAgentsError::Storage`] so the
 /// session store and run ledger can use `?` on driver calls directly. Call
 /// sites that have useful context to add should still map explicitly rather
