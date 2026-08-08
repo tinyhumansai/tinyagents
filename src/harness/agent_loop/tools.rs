@@ -406,6 +406,41 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         }
     }
 
+    /// Terminal partner of [`AgentEvent::ToolStarted`] on the abort path:
+    /// emits [`AgentEvent::ToolFailed`] and closes the call's `active_tool_calls`
+    /// entry.
+    ///
+    /// Without this, every `?` between `ToolStarted` and `ToolCompleted` left a
+    /// dangling start — an exporter pairing the two by `call_id` silently drops
+    /// the failed span, and the run keeps reporting a call that is no longer in
+    /// flight (TOOL-6). Call it on **every** error path after
+    /// [`Self::start_tool_call`].
+    fn fail_tool_call(
+        &self,
+        ctx: &RunContext<Ctx>,
+        status: &mut HarnessRunStatus,
+        call_id: &CallId,
+        tool_name: &str,
+        started_at_ms: u64,
+        error: &TinyAgentsError,
+    ) {
+        release_active_tool_call(status, call_id);
+        let duration_ms = crate::harness::ids::now_ms().saturating_sub(started_at_ms);
+        tracing::debug!(
+            "[agent_loop::tools] tool `{tool_name}` call `{}` failed after {duration_ms} ms: \
+             {error}",
+            call_id.as_str()
+        );
+        let record = ctx.emit(AgentEvent::ToolFailed {
+            call_id: call_id.clone(),
+            tool_name: tool_name.to_string(),
+            started_at_ms: Some(started_at_ms),
+            duration_ms: Some(duration_ms),
+            error: error.to_string(),
+        });
+        status.set_last_event(record.id);
+    }
+
     /// Fold phase for one completed call: the lifecycle `after_tool` hooks,
     /// accounting, the `ToolCompleted` emission, and the transcript append.
     #[allow(clippy::too_many_arguments)]
@@ -419,13 +454,40 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         prepared: PreparedToolCall,
         mut result: crate::harness::tool::ToolResult,
     ) -> Result<()> {
-        self.middleware
-            .run_after_tool(ctx, state, &mut result)
-            .await?;
+        // The harness, not the tool, owns the identity of the call being
+        // answered. A tool that stamps its own `call_id` — a hard-coded string,
+        // an empty one, a reused constant — would otherwise put a
+        // `tool_call_id` in the transcript that matches no `tool_calls[].id` in
+        // the preceding assistant message, and the provider rejects that on the
+        // *next* request, one turn away from the tool that caused it (TOOL-1).
+        // Overwrite rather than fail: the correct id is known here, and a
+        // third-party bug should not end a run.
+        if result.call_id != prepared.call_id.as_str() {
+            tracing::warn!(
+                "[agent_loop::tools] tool `{}` returned call_id `{}` for call `{}`; \
+                 overwriting with the admitted id so the transcript stays consistent",
+                prepared.tool_name,
+                result.call_id,
+                prepared.call_id.as_str()
+            );
+            result.call_id = prepared.call_id.as_str().to_string();
+        }
+
+        if let Err(err) = self.middleware.run_after_tool(ctx, state, &mut result).await {
+            self.fail_tool_call(
+                ctx,
+                status,
+                &prepared.call_id,
+                &prepared.tool_name,
+                prepared.started_at_ms,
+                &err,
+            );
+            return Err(err);
+        }
 
         run.tool_calls += 1;
         status.tool_calls = run.tool_calls;
-        status.active_tool_calls.retain(|c| c != &prepared.call_id);
+        release_active_tool_call(status, &prepared.call_id);
         let captured_output = self
             .policy
             .capture
