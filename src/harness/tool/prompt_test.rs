@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::harness::message::{ContentBlock, ImageRef, Message};
+use crate::harness::model::ModelResponse;
 
 fn schema(name: &str) -> ToolSchema {
     ToolSchema {
@@ -475,4 +476,37 @@ fn scrubber_matches_batch_parser_on_the_visible_text() {
     let frags: Vec<String> = full.chars().map(|c| c.to_string()).collect();
     let refs: Vec<&str> = frags.iter().map(String::as_str).collect();
     assert_eq!(scrub_all(&refs).trim(), batch);
+}
+
+#[test]
+fn apply_prompt_tool_calls_preserves_a_leading_thinking_block() {
+    // A prompt-guided reasoning model emits a `Thinking` block followed by the
+    // `<tool_call>` text. Recovering the call must not discard the reasoning.
+    let mut response = ModelResponse::assistant(
+        r#"reply <tool_call>{"name":"search","arguments":{"q":"x"}}</tool_call>"#,
+    );
+    response.message.content.insert(
+        0,
+        ContentBlock::Thinking {
+            text: "chain of thought".to_string(),
+            signature: None,
+        },
+    );
+
+    let out = apply_prompt_tool_calls(response);
+
+    assert_eq!(out.message.tool_calls.len(), 1);
+    assert_eq!(out.message.tool_calls[0].name, "search");
+    assert_eq!(
+        out.message.content[0],
+        ContentBlock::Thinking {
+            text: "chain of thought".to_string(),
+            signature: None,
+        },
+        "the thinking block must survive the content rebuild"
+    );
+    assert_eq!(
+        out.message.content[1],
+        ContentBlock::Text("reply".to_string())
+    );
 }
