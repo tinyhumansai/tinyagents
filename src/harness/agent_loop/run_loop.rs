@@ -29,13 +29,43 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         status.mark_running(HarnessPhase::Idle);
 
         // Reconcile the `RunConfig`-derived limit tracker with the harness's
-        // `RunPolicy::limits` so model/tool call caps have one enforced
-        // source of truth instead of the two silently disagreeing (see
-        // `LimitTracker::sync_call_limits`).
-        ctx.limits.sync_call_limits(
+        // `RunPolicy::limits` so model/tool call caps have one enforced source
+        // of truth instead of the two silently disagreeing.
+        //
+        // The two directions are NOT symmetric, and telling them apart is the
+        // whole reason `RunConfig`'s caps are `Option<usize>`:
+        //
+        // - an **explicitly set** `RunConfig` cap is the caller's ceiling, so
+        //   the stricter of (config, policy) wins — fail-closed. Previously
+        //   this was a plain assignment, so
+        //   `RunConfig::new("r").with_max_model_calls(2)` against the default
+        //   policy silently ran 25 model calls;
+        // - an **unset** cap merely defaulted, so the policy is the only real
+        //   source of truth and may raise the cap above that default.
+        let effective_model_calls = resolve_call_cap(
+            ctx.config.max_model_calls,
             self.policy.limits.max_model_calls,
-            self.policy.limits.max_tool_calls,
         );
+        let effective_tool_calls =
+            resolve_call_cap(ctx.config.max_tool_calls, self.policy.limits.max_tool_calls);
+        tracing::debug!(
+            target: "tinyagents::agent_loop",
+            run_id = %ctx.run_id(),
+            config_model_calls = ?ctx.config.max_model_calls,
+            config_tool_calls = ?ctx.config.max_tool_calls,
+            policy_model_calls = self.policy.limits.max_model_calls,
+            policy_tool_calls = self.policy.limits.max_tool_calls,
+            effective_model_calls,
+            effective_tool_calls,
+            "[agent_loop] resolved run call caps"
+        );
+        // The values are already reconciled per-axis above, so the assignment
+        // form (`sync_call_limits`) is the correct primitive here:
+        // `tighten_call_limits` would additionally min against the tracker's
+        // config-*default*-derived cap and so could not honor a policy that
+        // legitimately raises an unset cap.
+        ctx.limits
+            .sync_call_limits(effective_model_calls, effective_tool_calls);
 
         let mut messages = input;
 
