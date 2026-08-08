@@ -797,18 +797,24 @@ fn local_presets_need_no_credential_and_default_to_their_own_ports() {
     );
 }
 
-/// Pins the default that makes local tool loops brittle, and the opt-in that
-/// fixes them.
+/// Pins the recovering crate default, and the stronger normalizing policy a
+/// local host still opts into on top of it.
 ///
-/// If the crate default ever changes to a recovering policy, this test fails
-/// and [`local_run_policy`]'s rationale (and the docs pointing hosts at it)
-/// should be revisited rather than the assertion simply flipped.
+/// This test previously asserted the default was [`InvalidArgsPolicy::Fail`]
+/// and said that if the default ever became a recovering policy, this
+/// assertion should not simply be flipped — [`local_run_policy`]'s rationale
+/// had to be revisited first. The default did change, and it was: the helper's
+/// doc comment no longer justifies itself by "the default aborts the run", but
+/// by the provider-shape normalization pass that `ReturnToolError` alone does
+/// not perform. The assertion below is updated only because that reasoning was
+/// re-derived, not to make a red test green.
 #[test]
-fn invalid_tool_arguments_abort_the_run_unless_recovery_is_opted_into() {
+fn invalid_tool_arguments_recover_by_default_and_local_hosts_add_normalization() {
     assert_eq!(
         RunPolicy::default().invalid_args,
-        InvalidArgsPolicy::Fail,
-        "the crate default aborts a run on schema-invalid tool arguments"
+        InvalidArgsPolicy::ReturnToolError,
+        "the crate default hands the validation error back to the model \
+         rather than aborting the run"
     );
     assert_eq!(
         local_run_policy().invalid_args,
