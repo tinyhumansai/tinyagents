@@ -69,11 +69,11 @@ mod tests {
         assert!(format!("{client:?}").contains("Client"));
     }
 
-    #[test]
-    fn embedding_deadline_is_shorter_than_the_chat_deadline() {
-        // An embedding call has no generation phase, so it must not inherit the
-        // chat path's 600 s patience.
+    /// An embedding call has no generation phase, so it must not inherit the
+    /// chat path's 600 s patience — and the connect timeout must be the tighter
+    /// of the two. Both are compile-time facts, so assert them as such.
+    const _: () = {
         assert!(DEFAULT_EMBEDDING_TIMEOUT_SECS < 600);
         assert!(DEFAULT_CONNECT_TIMEOUT_SECS < DEFAULT_EMBEDDING_TIMEOUT_SECS);
-    }
+    };
 }

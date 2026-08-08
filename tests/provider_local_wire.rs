@@ -82,15 +82,13 @@ impl MockServer {
         let recorder = Arc::clone(&seen);
 
         std::thread::spawn(move || {
-            let mut index = 0usize;
-            for stream in listener.incoming() {
+            for (index, stream) in listener.incoming().enumerate() {
                 let Ok(stream) = stream else { break };
                 let reply = script
                     .get(index)
                     .or_else(|| script.last())
                     .cloned()
                     .unwrap_or_else(|| Canned::ok(json!({})));
-                index += 1;
                 if let Some(record) = serve_one(stream, &reply) {
                     recorder.lock().expect("recorder lock").push(record);
                 }

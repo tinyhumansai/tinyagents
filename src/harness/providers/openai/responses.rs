@@ -119,7 +119,7 @@ pub(super) fn translate_reasoning(
     if let Some(summary) = &config.summary {
         object.insert("summary".to_string(), Value::String(summary.clone()));
     }
-    (!object.is_empty()).then(|| Value::Object(object))
+    (!object.is_empty()).then_some(Value::Object(object))
 }
 
 /// Translates a tool schema onto the Responses API's flattened tool shape.
