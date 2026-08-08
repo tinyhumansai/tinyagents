@@ -567,6 +567,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// [`ModelResponse`] via [`StreamAccumulator`]. The merged response is
     /// equivalent to what the unary [`crate::harness::model::ChatModel::invoke`]
     /// path would have produced, so the rest of the loop is unaffected.
+    ///
+    /// `deltas_emitted` is incremented for every delta actually handed to
+    /// consumers, so the retry path can tell whether a failed attempt already
+    /// published output that now has to be discarded.
     async fn invoke_model_streaming_once(
         &self,
         state: &State,
@@ -574,6 +578,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         model: &Arc<dyn ChatModel<State>>,
         request: &ModelRequest,
         call_id: &CallId,
+        deltas_emitted: &mut usize,
     ) -> Result<ModelResponse> {
         let mut stream = model.stream(state, request.clone()).await?;
         let mut accumulator = StreamAccumulator::new();
