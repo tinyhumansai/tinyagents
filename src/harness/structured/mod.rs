@@ -42,8 +42,11 @@
 //! assert_eq!(output.value["score"], 42);
 //! ```
 
+mod repair;
 mod types;
+mod validate;
 
+pub use repair::JsonRepair;
 pub use types::*;
 
 use serde::de::DeserializeOwned;
