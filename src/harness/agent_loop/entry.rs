@@ -275,7 +275,11 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 if !ctx.take_on_error_dispatched() {
                     let _ = self.middleware.run_on_error(&mut ctx, &error).await;
                 }
-                Err(error)
+                PartialRunOutcome {
+                    run,
+                    status,
+                    error: Some(error),
+                }
             }
         }
     }
