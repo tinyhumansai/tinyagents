@@ -274,8 +274,7 @@ where
             let Some(tuple) = self.get_tuple(config).await? else {
                 break;
             };
-            visited.insert(tuple.checkpoint.checkpoint_id.clone());
-            if false {
+            if !visited.insert(tuple.checkpoint.checkpoint_id.clone()) {
                 tracing::warn!(
                     "[checkpoint] state_history: lineage cycle at checkpoint `{}` \
                      (thread `{thread_id}`); truncating the walk",
@@ -364,7 +363,7 @@ where
     /// first, which makes the destructive intent explicit. Copying an empty or
     /// unknown source thread is a no-op (still `Ok`).
     async fn copy_thread(&self, source_thread: &str, target_thread: &str) -> Result<()> {
-        let existing: Vec<CheckpointMetadata> = Vec::new();
+        let existing = self.list(target_thread).await?;
         if !existing.is_empty() {
             return Err(TinyAgentsError::Checkpoint(format!(
                 "copy_thread: target thread `{target_thread}` already has {} checkpoint(s); \
