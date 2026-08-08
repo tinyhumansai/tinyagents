@@ -21,6 +21,77 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         input: Vec<Message>,
         streaming: bool,
     ) -> Result<()> {
+        let mut messages = input;
+        // The body borrows the working transcript rather than owning it so the
+        // transcript survives **every** exit path, not just the successful one.
+        // A mid-turn tool failure used to drop everything accumulated so far,
+        // leaving the caller unable to inspect, repair, or resume from the
+        // partial conversation.
+        let outcome = self
+            .run_loop_body(state, ctx, run, status, &mut messages, streaming)
+            .await;
+        run.messages = std::mem::take(&mut messages);
+
+        let exit = match outcome {
+            Ok(exit) => exit,
+            Err(error) => {
+                tracing::debug!(
+                    target: "tinyagents::agent_loop",
+                    run_id = %ctx.run_id(),
+                    messages = run.messages.len(),
+                    "[agent_loop] run failed; partial transcript preserved on the run"
+                );
+                return Err(error);
+            }
+        };
+
+        status.mark_running(HarnessPhase::Middleware);
+        self.middleware.run_after_agent(ctx, state, run).await?;
+
+        match exit {
+            LoopExit::Finished | LoopExit::LimitStop(_) => {
+                let record = ctx.emit(AgentEvent::RunCompleted {
+                    run_id: ctx.run_id().clone(),
+                });
+                status.set_last_event(record.id);
+            }
+            LoopExit::Paused(pause) => {
+                // A pause is not a completion: reporting `run.completed` here
+                // is exactly what made "paused for a human" indistinguishable
+                // from "the model produced an empty final answer". The pause
+                // stays latched on the steering handle so a later `Resume`
+                // lifts it.
+                let record = ctx.emit(AgentEvent::ControlApplied {
+                    control: "paused".to_string(),
+                    detail: pause.reason.clone().unwrap_or_else(|| {
+                        format!("paused at checkpoint {}", pause.paused_at_checkpoint)
+                    }),
+                });
+                status.set_last_event(record.id);
+                tracing::debug!(
+                    target: "tinyagents::agent_loop",
+                    run_id = %ctx.run_id(),
+                    checkpoint = pause.paused_at_checkpoint,
+                    "[agent_loop] run paused by steering"
+                );
+                run.paused = Some(pause);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// The loop body proper. Returns how the loop left off so the caller can
+    /// finalize (and, on any error, still keep the working transcript).
+    async fn run_loop_body(
+        &self,
+        state: &State,
+        ctx: &mut RunContext<Ctx>,
+        run: &mut AgentRun,
+        status: &mut HarnessRunStatus,
+        messages: &mut Vec<Message>,
+        streaming: bool,
+    ) -> Result<LoopExit> {
         let record = ctx.emit(AgentEvent::RunStarted {
             run_id: ctx.run_id().clone(),
             thread_id: ctx.thread_id().cloned(),
