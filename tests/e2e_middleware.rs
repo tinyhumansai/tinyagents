@@ -35,7 +35,7 @@ use tinyagents::harness::middleware::{
 };
 use tinyagents::harness::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyagents::harness::retry::RetryPolicy;
-use tinyagents::harness::runtime::{AgentHarness, RunPolicy};
+use tinyagents::harness::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy};
 use tinyagents::harness::testkit::{EventRecorder, FakeTool, ScriptedModel, Trajectory};
 use tinyagents::harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
 use tinyagents::harness::usage::Usage;
