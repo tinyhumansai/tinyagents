@@ -45,6 +45,8 @@ impl RecordingModel {
     fn new(script: Vec<ModelResponse>) -> Self {
         Self {
             profile: ModelProfile {
+                tool_calling: true,
+                parallel_tool_calls: true,
                 native_structured_output: false,
                 json_schema: false,
                 ..ModelProfile::default()
