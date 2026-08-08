@@ -268,19 +268,26 @@ async fn reachable_runtimes() -> Vec<LocalRuntime> {
 
 /// The [`RunPolicy`] a host should use to drive a small local model.
 ///
-/// The crate default is [`InvalidArgsPolicy::Fail`], which aborts the entire
-/// run the first time a model calls a registered tool with schema-invalid
-/// arguments. That is a reasonable default for a frontier model, where the case
-/// is nearly always a genuine bug — but a 3B quantised model omits a required
-/// argument often enough that `Fail` makes the loop unusably brittle: one bad
-/// call and the run dies rather than the model getting a chance to correct
-/// itself. [`InvalidArgsPolicy::NormalizeThenReturnToolError`] repairs the
-/// common provider-shape defects and otherwise hands the validation error back
-/// to the model as a tool result, and the recovery still consumes a tool-call
-/// budget slot so the loop stays bounded.
+/// The crate default is now [`InvalidArgsPolicy::ReturnToolError`], which hands
+/// the validation error back to the model as a tool result instead of aborting
+/// the run. That change removed the original reason this helper existed: the
+/// default used to be [`InvalidArgsPolicy::Fail`], which killed the whole run
+/// the first time a model called a registered tool with schema-invalid
+/// arguments — reasonable for a frontier model, where that is nearly always a
+/// genuine bug, but unusably brittle for a 3B quantised model that omits a
+/// required argument often enough to end most runs on the first tool call.
 ///
-/// This is observed behaviour, not a hypothetical: with the default policy,
-/// `llama3.2:3b` fails this file's tool-loop test with
+/// The helper still earns its keep, for a narrower reason.
+/// [`InvalidArgsPolicy::NormalizeThenReturnToolError`] additionally repairs the
+/// common provider-shape defects — JSON emitted as a string, a scalar sent
+/// where an array is declared — *before* deciding the call is invalid. Those
+/// defects are characteristic of small local models specifically, so the extra
+/// normalization pass is worth requesting locally and not worth paying for by
+/// default. Either way the recovery consumes a tool-call budget slot, so the
+/// correction loop stays bounded.
+///
+/// This is observed behaviour, not a hypothetical: under the old default,
+/// `llama3.2:3b` failed this file's tool-loop test with
 /// `tool `get_weather` arguments.city is required`.
 fn local_run_policy() -> RunPolicy {
     RunPolicy {
