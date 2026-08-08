@@ -504,32 +504,26 @@ impl RetryPolicy {
 /// retrying sooner burns an attempt for certain. [`RetryPolicy::backoff_for_error`]
 /// folds this into the delay by taking the larger of the two.
 ///
-/// # What this reads today, and what wave 2 must add
+/// # Two sources, in priority order
 ///
-/// Today the only place the value survives is the error's **message text**, so
-/// this parses it with [`parse_retry_after_ms`]. That works (hosted providers
-/// generally echo the header into the error body) but it is a string-matching
-/// fallback, not a contract.
-///
-/// The structured path is the intended one and needs a change in
-/// `harness::model` / `harness::providers`, which this module does not own:
-///
-/// 1. Add `pub retry_after_ms: Option<u64>` to
-///    [`ProviderError`][crate::harness::model::ProviderError] (defaulting to
-///    `None`, so it is backwards compatible).
-/// 2. In the OpenAI transport, parse the HTTP `Retry-After` response header on
-///    every non-2xx (both integer seconds and the HTTP-date form) and populate
-///    that field.
-/// 3. Add the field as the **first** branch of the `Provider` arm below, ahead
-///    of the message-text fallback.
-///
-/// Until step 3 lands, a provider that sends the header but not the body text
-/// is not honored.
+/// 1. **The structured field.**
+///    [`ProviderError::retry_after_ms`][crate::harness::model::ProviderError::retry_after_ms]
+///    is populated by the provider adapter directly from the HTTP `Retry-After`
+///    response header (both the delta-seconds and HTTP-date forms). This is the
+///    contract; it is read first.
+/// 2. **The error message text**, parsed with [`parse_retry_after_ms`]. Hosted
+///    providers generally echo the header into the error body, so this is a
+///    useful fallback for adapters that do not yet populate the field — but it
+///    is string matching, not a contract, and a provider that sends the header
+///    without echoing it into the body is served only by source 1.
 pub fn retry_after_hint(error: &TinyAgentsError) -> Option<Duration> {
     let message = match error {
-        // TODO(wave 2): prefer `provider_error.retry_after_ms` once the field
-        // exists; fall through to the message text only when it is `None`.
-        TinyAgentsError::Provider(provider_error) => provider_error.message.as_str(),
+        TinyAgentsError::Provider(provider_error) => {
+            if let Some(ms) = provider_error.retry_after_ms {
+                return Some(Duration::from_millis(ms));
+            }
+            provider_error.message.as_str()
+        }
         TinyAgentsError::Model(message) | TinyAgentsError::Tool(message) => message.as_str(),
         _ => return None,
     };
