@@ -613,6 +613,19 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
 /// can proceed, short-circuit, retry, or fall back around the *whole* real model
 /// call. The resolved binding is rebuilt per invocation so a wrap middleware
 /// that retries `next` issues a fresh provider call each time.
+///
+/// # The binding is re-resolved from the request
+///
+/// [`ModelCallBase::call`] used to rebuild the binding purely from
+/// [`Self::resolved`] / [`Self::model`], both captured **before** the wrap onion
+/// ran, and ignore [`ModelRequest::model`] entirely. A wrap middleware steers by
+/// mutating that field — it is the only lever it has — so
+/// [`ModelFallbackMiddleware`][crate::harness::middleware::ModelFallbackMiddleware]
+/// re-invoked *the same failing model* once per configured fallback name,
+/// emitting a misleading `FallbackSelected { from, to }` for each, and then
+/// returned the original error. The asymmetry was easy to miss because
+/// `before_model` **does** honour `request.model`: lifecycle resolution happens
+/// after that hook, but before this one.
 pub(super) struct ModelCallBase<'h, State: Send + Sync, Ctx: Send + Sync> {
     pub(super) harness: &'h AgentHarness<State, Ctx>,
     pub(super) call_id: CallId,
