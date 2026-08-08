@@ -569,7 +569,6 @@ pub struct ModelResponse {
     /// this needs no cap of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continue_turn: Option<String>,
- served_from_cache: false,
     /// `true` when this response was served from a local
     /// [`ResponseCache`][crate::harness::cache::ResponseCache] rather than
     /// produced by a provider call.
