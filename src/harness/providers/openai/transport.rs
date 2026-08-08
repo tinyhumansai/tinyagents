@@ -2839,3 +2839,42 @@ async fn invoke_with_streaming(
 
     acc.finish()
 }
+
+#[cfg(test)]
+mod retry_after_header_tests {
+    use super::parse_retry_after_header_ms;
+
+    #[test]
+    fn parses_delta_seconds() {
+        assert_eq!(parse_retry_after_header_ms("30"), Some(30_000));
+        assert_eq!(parse_retry_after_header_ms("  0 "), Some(0));
+        // Not in the grammar, but some providers send it.
+        assert_eq!(parse_retry_after_header_ms("1.5"), Some(1_500));
+    }
+
+    #[test]
+    fn parses_the_http_date_form_relative_to_now() {
+        let future = chrono::Utc::now() + chrono::Duration::seconds(120);
+        let header = future.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let parsed = parse_retry_after_header_ms(&header).expect("an HTTP-date parses");
+        // Allow a generous window for clock/second-truncation slack.
+        assert!(
+            (110_000..=121_000).contains(&parsed),
+            "expected roughly 120s, got {parsed}ms from {header}"
+        );
+    }
+
+    #[test]
+    fn a_past_http_date_means_retry_immediately_not_a_wrapped_value() {
+        let past = chrono::Utc::now() - chrono::Duration::seconds(600);
+        let header = past.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        assert_eq!(parse_retry_after_header_ms(&header), Some(0));
+    }
+
+    #[test]
+    fn rejects_garbage_rather_than_guessing() {
+        assert_eq!(parse_retry_after_header_ms(""), None);
+        assert_eq!(parse_retry_after_header_ms("soon"), None);
+        assert_eq!(parse_retry_after_header_ms("-5"), None);
+    }
+}
