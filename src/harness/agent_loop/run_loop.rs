@@ -333,6 +333,17 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     continue;
                 }
 
+                // This turn resolved without scheduling a truncated-empty
+                // retry, so the recovery state must not leak into later turns:
+                // a stale `boosted_max_tokens` would override the caller's
+                // per-turn cap on every subsequent call, and a spent retry
+                // counter would deny recovery to a later turn that needs it.
+                reset_truncated_empty_recovery(
+                    &mut truncated_empty_retries_used,
+                    &mut boosted_max_tokens,
+                    &mut truncation_base,
+                );
+
                 // The model says it is not finished (`ModelResponse::continue_turn`).
                 // Hand the floor back and ask for another reply instead of taking
                 // this response as the turn's answer. Checked after truncated-empty
@@ -374,6 +385,15 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 run.final_response = Some(response);
                 break;
             }
+
+            // A tool-calling response is a resolved turn too: clear the
+            // recovery state before the tools run so the next turn starts from
+            // the caller's configured cap and a full retry budget.
+            reset_truncated_empty_recovery(
+                &mut truncated_empty_retries_used,
+                &mut boosted_max_tokens,
+                &mut truncation_base,
+            );
 
             // Execute requested tools: serial admission -> serial or
             // concurrent execution -> ordered fold. Multi-call turns run
@@ -434,4 +454,19 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         }
         Some((Arc::clone(cache), cache_key(request)))
     }
+}
+
+/// Clears the per-turn truncated-empty recovery state (see
+/// [`crate::harness::runtime::RunPolicy::truncated_empty_retries`]).
+///
+/// The state is scoped to a single logical turn: the boosted token cap and the
+/// retry counter must not carry over into the turns that follow a recovered one.
+fn reset_truncated_empty_recovery(
+    retries_used: &mut u32,
+    boosted_max_tokens: &mut Option<u32>,
+    truncation_base: &mut Option<u32>,
+) {
+    *retries_used = 0;
+    *boosted_max_tokens = None;
+    *truncation_base = None;
 }

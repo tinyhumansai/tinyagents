@@ -213,9 +213,9 @@ pub struct BudgetSpend {
     /// reconciled in `after_model`. Shared trackers (handed to concurrent
     /// sub-agent runs) can have more than one outstanding reservation at
     /// once, so this is a running total, not a single call's estimate;
-    /// each in-flight call's own reservation is tracked separately by its
-    /// [`BudgetMiddleware`] instance and released from this total when it
-    /// reconciles (or is abandoned).
+    /// each in-flight call's own reservation is tracked separately, per run, by
+    /// its [`BudgetMiddleware`] and released from this total when it reconciles
+    /// (or is abandoned).
     pub reserved_input_total: u64,
 }
 
@@ -243,11 +243,19 @@ pub struct BudgetMiddleware {
     pub(crate) limits: BudgetLimits,
     pub(crate) tracker: BudgetTracker,
     pub(crate) pricing: std::collections::HashMap<String, crate::registry::catalog::ModelPricing>,
-    /// This run's own outstanding preflight reservation (input tokens),
-    /// awaiting reconciliation in `after_model`. Local to this middleware
-    /// instance (one per run) so concurrent runs sharing the same
-    /// [`BudgetTracker`] never clobber each other's reservation.
-    pub(crate) pending_reservation: std::sync::Mutex<u64>,
+    /// Outstanding preflight reservations (input tokens) awaiting
+    /// reconciliation in `after_model`, keyed by
+    /// [`RunContext::instance_id`][crate::harness::context::RunContext::instance_id].
+    ///
+    /// One middleware instance serves every run on the harness it is registered
+    /// with (`invoke` takes `&self`), so a single scalar here would be
+    /// overwritten whenever two runs interleave their model calls — each would
+    /// then release the other's amount and permanently skew
+    /// [`BudgetTracker::reserved_input_total`][crate::harness::middleware::BudgetSpend::reserved_input_total].
+    /// Keying by the run context's process-unique instance id (not its
+    /// caller-supplied `run_id`, which concurrent runs may share) keeps each
+    /// run releasing exactly what it reserved.
+    pub(crate) pending_reservations: std::sync::Mutex<std::collections::HashMap<u64, u64>>,
 }
 
 // ── ToolPolicyMiddleware ──────────────────────────────────────────────────────

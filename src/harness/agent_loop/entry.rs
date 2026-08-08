@@ -205,8 +205,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 status.set_last_event(record.id);
                 status.mark_failed(error.to_string());
                 // Surface the failure to every middleware. Inner errors are
-                // ignored so the originating error is never masked.
-                let _ = self.middleware.run_on_error(&mut ctx, &error).await;
+                // ignored so the originating error is never masked. A failure
+                // raised *inside* a lifecycle hook was already fanned out by the
+                // stack before it propagated here, so skip it rather than
+                // delivering the same failure twice.
+                if !ctx.take_on_error_dispatched() {
+                    let _ = self.middleware.run_on_error(&mut ctx, &error).await;
+                }
                 Err(error)
             }
         }

@@ -844,11 +844,20 @@ impl StreamAccumulator {
         let tool_calls = self
             .tool_chunks
             .into_iter()
-            .map(|(id, args, name)| ToolCall {
-                name: name.unwrap_or_default(),
-                arguments: serde_json::from_str(&args).unwrap_or(Value::Null),
-                id,
-                invalid: None,
+            .map(|(id, args, name)| {
+                let name = name.unwrap_or_default();
+                // Mirror the non-streaming adapters' argument semantics: an
+                // empty fragment is a well-formed zero-argument call, while an
+                // unparseable one is marked invalid with the raw text preserved
+                // so the agent loop can feed the parse error back to the model
+                // instead of silently executing a `null`/`{}` argument set.
+                if args.trim().is_empty() {
+                    return ToolCall::new(id, name, Value::Object(serde_json::Map::new()));
+                }
+                match serde_json::from_str(&args) {
+                    Ok(arguments) => ToolCall::new(id, name, arguments),
+                    Err(err) => ToolCall::invalid(id, name, args, err.to_string()),
+                }
             })
             .collect();
         let message = AssistantMessage {

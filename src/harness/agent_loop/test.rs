@@ -776,6 +776,65 @@ async fn truncated_empty_response_retries_then_succeeds() {
 }
 
 #[tokio::test]
+async fn truncated_empty_boost_does_not_leak_into_later_turns() {
+    // Regression test: the boosted token cap and the retry counter are per-turn
+    // recovery state, but they used to live for the whole run — so every turn
+    // after a recovered one was dispatched at the boosted cap (overriding the
+    // caller's `max_turn_output_tokens`) and a later truncation got no retry.
+    let model = Arc::new(crate::harness::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+        tool_call_response("c1", "fake", json!({})),
+        text_response("done", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness
+        .register_model("mock", Arc::clone(&model) as _)
+        .register_tool(Arc::new(FakeTool::new("fake", "tool output")));
+
+    let ctx = RunContext::new(
+        RunConfig::new("truncated-leak").with_max_turn_output_tokens(2048),
+        (),
+    );
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("the recovered run finishes");
+
+    assert_eq!(run.text(), Some("done".to_string()));
+    let sent: Vec<Option<u32>> = model.requests().iter().map(|r| r.max_tokens).collect();
+    assert_eq!(
+        sent,
+        vec![Some(2048), Some(4096), Some(2048)],
+        "only the retry of the truncated turn carries the boost; the next turn \
+         is back at the configured per-turn cap"
+    );
+}
+
+#[tokio::test]
+async fn truncated_empty_retry_budget_is_restored_for_a_later_turn() {
+    // The retry budget is per turn too: a second truncated-empty completion in a
+    // later turn must still be recoverable with the default single retry.
+    let model = Arc::new(crate::harness::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+        tool_call_response("c1", "fake", json!({})),
+        truncated_empty_response(2048),
+        text_response("done", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness
+        .register_model("mock", Arc::clone(&model) as _)
+        .register_tool(Arc::new(FakeTool::new("fake", "tool output")));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("both truncated turns recover");
+
+    assert_eq!(run.text(), Some("done".to_string()));
+    assert_eq!(run.model_calls, 4);
+}
+
+#[tokio::test]
 async fn truncated_empty_retry_budget_stays_unset_when_request_had_none() {
     // With no per-turn token cap the budget cannot be doubled, but the retry is
     // still worthwhile because the failure is stochastic. The retried request
@@ -2719,6 +2778,52 @@ async fn request_cache_policy_overrides_run_policy_to_disable_caching() {
         2,
         "request-level cache_policy disabling caching must bypass the cache"
     );
+}
+
+/// Middleware whose `before_model` hook always fails, counting how many times
+/// the failure is delivered back to it through `on_error`.
+struct FailingHookMiddleware {
+    on_error_calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl Middleware<(), ()> for FailingHookMiddleware {
+    fn name(&self) -> &str {
+        "failing_hook"
+    }
+    async fn before_model(
+        &self,
+        _ctx: &mut RunContext<()>,
+        _state: &(),
+        _request: &mut ModelRequest,
+    ) -> Result<()> {
+        Err(TinyAgentsError::Model("hook failed".to_string()))
+    }
+    async fn on_error(&self, _ctx: &mut RunContext<()>, _error: &TinyAgentsError) -> Result<()> {
+        *self.on_error_calls.lock().unwrap() += 1;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn hook_failure_delivers_on_error_exactly_once() {
+    // Regression test: the stack fans `on_error` out itself before propagating a
+    // failed lifecycle hook, and the driver used to run the same hook again for
+    // the propagated error — so a guardrail counting failures, alerting, or
+    // compensating did it twice for one failure.
+    let calls = Arc::new(Mutex::new(0usize));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("hi")));
+    harness.push_middleware(Arc::new(FailingHookMiddleware {
+        on_error_calls: calls.clone(),
+    }));
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect_err("the failing hook aborts the run");
+    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
+    assert_eq!(*calls.lock().unwrap(), 1, "one failure, one on_error");
 }
 
 /// Middleware that requests an early stop-with-final control outcome after the

@@ -804,6 +804,48 @@ async fn reservation_is_released_when_model_call_errors() {
         .expect("reservation was released so a new call fits the budget again");
 }
 
+#[tokio::test]
+async fn concurrent_runs_on_one_middleware_release_their_own_reservations() {
+    // Regression test: one `BudgetMiddleware` serves every run on the harness it
+    // is registered with (`invoke` takes `&self`), so a single scalar slot for
+    // the outstanding reservation was clobbered whenever two runs interleaved —
+    // one release subtracted the sibling's amount and the other subtracted
+    // nothing, permanently inflating `reserved_input_total` until the preflight
+    // rejected every future call. Both runs deliberately share a `run_id`, as
+    // `invoke_default` mints the same one for every run.
+    use crate::harness::middleware::Middleware;
+
+    let mw = BudgetMiddleware::new(BudgetLimits::default());
+    let tracker = mw.tracker();
+    let mut small: RunContext = RunContext::new(RunConfig::new("run"), ());
+    let mut large: RunContext = RunContext::new(RunConfig::new("run"), ());
+
+    let mut small_req = ModelRequest::new(vec![Message::user("x".repeat(40))]);
+    let mut large_req = ModelRequest::new(vec![Message::user("y".repeat(400))]);
+    mw.before_model(&mut small, &(), &mut small_req)
+        .await
+        .unwrap();
+    mw.before_model(&mut large, &(), &mut large_req)
+        .await
+        .unwrap();
+    let reserved = tracker.snapshot().reserved_input_total;
+    assert_eq!(reserved, 110, "both reservations are on the shared tracker");
+
+    let mut response = ModelResponse::assistant("ok");
+    mw.after_model(&mut small, &(), &mut response)
+        .await
+        .unwrap();
+    mw.after_model(&mut large, &(), &mut response)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        tracker.snapshot().reserved_input_total,
+        0,
+        "each run must release exactly what it reserved"
+    );
+}
+
 #[test]
 fn poisoned_tracker_stays_fail_closed() {
     // A poisoned mutex still holds a valid last-written spend value; a

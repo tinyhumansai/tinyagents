@@ -146,7 +146,7 @@ impl BudgetMiddleware {
             limits,
             tracker: BudgetTracker::new(),
             pricing: std::collections::HashMap::new(),
-            pending_reservation: std::sync::Mutex::new(0),
+            pending_reservations: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -170,6 +170,29 @@ impl BudgetMiddleware {
     /// Returns the shared tracker (for reading accumulated spend).
     pub fn tracker(&self) -> BudgetTracker {
         self.tracker.clone()
+    }
+
+    /// Records `estimated` as `run`'s outstanding preflight reservation.
+    ///
+    /// A run only ever has one model call in flight, so an existing entry means
+    /// a prior reservation was abandoned; add to it rather than dropping it, so
+    /// the shared tracker is never left holding an unreleasable amount.
+    fn record_reservation(&self, run: u64, estimated: u64) {
+        let mut guard = self
+            .pending_reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard.entry(run).or_insert(0) += estimated;
+    }
+
+    /// Takes `run`'s outstanding reservation, leaving nothing behind. Returns 0
+    /// when the run has none (a second release for one reservation is a no-op).
+    fn take_reservation(&self, run: u64) -> u64 {
+        self.pending_reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&run)
+            .unwrap_or(0)
     }
 
     fn price(&self, response: &ModelResponse) -> crate::harness::cost::CostTotals {
@@ -243,12 +266,9 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for BudgetMidd
         }
 
         // Remember this run's own outstanding reservation for reconciliation
-        // in `after_model` (local to this middleware instance, so concurrent
-        // runs sharing the tracker never clobber each other's amount).
-        *self
-            .pending_reservation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = estimated;
+        // in `after_model`, keyed by the run so concurrent runs on this
+        // middleware never release each other's amount.
+        self.record_reservation(ctx.instance_id(), estimated);
 
         ctx.emit(AgentEvent::BudgetReserved {
             estimated_input_tokens: estimated,
@@ -266,12 +286,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for BudgetMidd
         // usage came back, so a call that fails to report usage (or errors
         // out before this hook) never leaks a permanent reservation that
         // starves later calls on a shared tracker.
-        let reserved = std::mem::take(
-            &mut *self
-                .pending_reservation
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
+        let reserved = self.take_reservation(ctx.instance_id());
         {
             let mut guard = self.tracker.lock_recovering();
             guard.reserved_input_total = guard.reserved_input_total.saturating_sub(reserved);
@@ -323,7 +338,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for BudgetMidd
         Ok(())
     }
 
-    async fn on_error(&self, _ctx: &mut RunContext<Ctx>, _error: &TinyAgentsError) -> Result<()> {
+    async fn on_error(&self, ctx: &mut RunContext<Ctx>, _error: &TinyAgentsError) -> Result<()> {
         // A model call that fails (retries/fallback exhausted, hard provider
         // error, middleware timeout, ...) short-circuits with `?` before
         // `after_model` ever runs, so the reservation `before_model` added to
@@ -331,12 +346,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for BudgetMidd
         // here so a run of failures cannot permanently inflate
         // `reserved_input_total` and starve every future call on a
         // process-lifetime-shared `BudgetTracker`.
-        let reserved = std::mem::take(
-            &mut *self
-                .pending_reservation
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
+        let reserved = self.take_reservation(ctx.instance_id());
         if reserved > 0 {
             let mut guard = self.tracker.lock_recovering();
             guard.reserved_input_total = guard.reserved_input_total.saturating_sub(reserved);

@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::Result;
+use crate::harness::cancel::CancellationToken;
 use crate::harness::context::RunContext;
 use crate::harness::events::EventSink;
 use crate::harness::ids::{RunId, ThreadId};
@@ -186,6 +187,11 @@ pub struct ToolExecutionContext {
     pub max_turn_output_tokens: Option<u32>,
     /// Shared event sink for nested run observability.
     pub events: EventSink,
+    /// The caller run's cancellation token. A recursive tool such as a
+    /// sub-agent installs this on its child run so one `cancel()` unwinds the
+    /// whole nested-run tree, as
+    /// [`crate::harness::cancel`] documents.
+    pub cancellation: CancellationToken,
     /// Whether the caller run is being driven through the streaming loop path.
     /// A sub-agent tool uses this to run its child in the matching mode so the
     /// child's deltas propagate onto the shared [`EventSink`].
@@ -207,6 +213,7 @@ impl ToolExecutionContext {
             depth: ctx.config.depth,
             max_turn_output_tokens: ctx.config.max_turn_output_tokens,
             events: ctx.events.clone(),
+            cancellation: ctx.cancellation.clone(),
             streaming: ctx.streaming,
             workspace: ctx.workspace.clone(),
         }

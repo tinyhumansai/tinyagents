@@ -147,7 +147,12 @@ impl<State: Send + Sync, Ctx: Send + Sync> MiddlewareStack<State, Ctx> {
     /// Fans `on_error` out to every middleware, ignoring their results so the
     /// original error is never masked. No start/completed events are emitted on
     /// this internal recovery path.
+    ///
+    /// Marks the context so a driver that also handles the propagated error
+    /// (the agent loop does) skips its own dispatch: one failure must deliver
+    /// exactly one `on_error` per middleware.
     async fn fan_out_on_error(&self, ctx: &mut RunContext<Ctx>, error: &TinyAgentsError) {
+        ctx.mark_on_error_dispatched();
         for mw in self.middlewares.iter() {
             let _ = mw.on_error(ctx, error).await;
         }

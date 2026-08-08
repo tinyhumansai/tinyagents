@@ -775,6 +775,50 @@ fn finish_names_reconstructed_tool_call_from_the_call_opening_delta_name() {
     assert_eq!(call.arguments, serde_json::json!({ "q": "rust" }));
 }
 
+#[test]
+fn finish_marks_unparseable_reconstructed_tool_arguments_invalid() {
+    // A stream cut mid-arguments (or a model emitting malformed JSON) used to
+    // reconstruct as `arguments: null` with `invalid: None`, hiding the parse
+    // failure from the agent loop's tool-error recovery path — which then either
+    // aborted the run on schema validation or executed the tool with `{}`.
+    use crate::harness::tool::ToolDelta;
+
+    let mut acc = StreamAccumulator::new();
+    acc.push(&ModelStreamItem::ToolCallDelta(ToolDelta {
+        call_id: "call-1".into(),
+        content: r#"{"path": "/tm"#.into(),
+        tool_name: Some("read_file".into()),
+    }));
+
+    let finished = acc.finish().unwrap();
+    let call = &finished.message.tool_calls[0];
+    assert!(call.is_invalid(), "unparseable arguments must be flagged");
+    assert_eq!(
+        call.arguments,
+        serde_json::Value::String(r#"{"path": "/tm"#.to_string()),
+        "the raw fragment is preserved for the model to correct"
+    );
+}
+
+#[test]
+fn finish_reconstructs_empty_tool_arguments_as_an_empty_object() {
+    // A zero-argument call whose deltas carried no argument text is well-formed,
+    // not malformed: it must reconstruct as `{}` rather than an invalid call.
+    use crate::harness::tool::ToolDelta;
+
+    let mut acc = StreamAccumulator::new();
+    acc.push(&ModelStreamItem::ToolCallDelta(ToolDelta {
+        call_id: "call-1".into(),
+        content: String::new(),
+        tool_name: Some("ping".into()),
+    }));
+
+    let finished = acc.finish().unwrap();
+    let call = &finished.message.tool_calls[0];
+    assert!(!call.is_invalid());
+    assert_eq!(call.arguments, serde_json::json!({}));
+}
+
 /// Round-trips a [`ModelStreamItem`] through JSON and asserts the re-serialized
 /// form is byte-for-byte stable, proving every variant survives serde.
 fn roundtrip_stream_item(item: ModelStreamItem) {
