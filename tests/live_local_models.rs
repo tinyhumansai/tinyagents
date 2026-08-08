@@ -79,11 +79,11 @@ const TIMEOUT_MS: u64 = 180_000;
 /// that never reached the answer.
 ///
 /// The crate already treats this as a first-class failure mode — see
-/// [`RunPolicy::empty_response_retries`], whose documentation names `qwen3` via
+/// [`RunPolicy::truncated_empty_retries`], whose documentation names `qwen3` via
 /// Ollama specifically — so the tests must not reintroduce it by being frugal.
 /// A budget this size is what a host talking to local models should use.
 ///
-/// [`RunPolicy::empty_response_retries`]: tinyagents::harness::runtime::RunPolicy::empty_response_retries
+/// [`RunPolicy::truncated_empty_retries`]: tinyagents::harness::runtime::RunPolicy::truncated_empty_retries
 const MAX_TOKENS: u32 = 1024;
 
 /// The weather the fake tool always reports. Distinctive enough that finding it
@@ -268,19 +268,26 @@ async fn reachable_runtimes() -> Vec<LocalRuntime> {
 
 /// The [`RunPolicy`] a host should use to drive a small local model.
 ///
-/// The crate default is [`InvalidArgsPolicy::Fail`], which aborts the entire
-/// run the first time a model calls a registered tool with schema-invalid
-/// arguments. That is a reasonable default for a frontier model, where the case
-/// is nearly always a genuine bug — but a 3B quantised model omits a required
-/// argument often enough that `Fail` makes the loop unusably brittle: one bad
-/// call and the run dies rather than the model getting a chance to correct
-/// itself. [`InvalidArgsPolicy::NormalizeThenReturnToolError`] repairs the
-/// common provider-shape defects and otherwise hands the validation error back
-/// to the model as a tool result, and the recovery still consumes a tool-call
-/// budget slot so the loop stays bounded.
+/// The crate default is now [`InvalidArgsPolicy::ReturnToolError`], which hands
+/// the validation error back to the model as a tool result instead of aborting
+/// the run. That change removed the original reason this helper existed: the
+/// default used to be [`InvalidArgsPolicy::Fail`], which killed the whole run
+/// the first time a model called a registered tool with schema-invalid
+/// arguments — reasonable for a frontier model, where that is nearly always a
+/// genuine bug, but unusably brittle for a 3B quantised model that omits a
+/// required argument often enough to end most runs on the first tool call.
 ///
-/// This is observed behaviour, not a hypothetical: with the default policy,
-/// `llama3.2:3b` fails this file's tool-loop test with
+/// The helper still earns its keep, for a narrower reason.
+/// [`InvalidArgsPolicy::NormalizeThenReturnToolError`] additionally repairs the
+/// common provider-shape defects — JSON emitted as a string, a scalar sent
+/// where an array is declared — *before* deciding the call is invalid. Those
+/// defects are characteristic of small local models specifically, so the extra
+/// normalization pass is worth requesting locally and not worth paying for by
+/// default. Either way the recovery consumes a tool-call budget slot, so the
+/// correction loop stays bounded.
+///
+/// This is observed behaviour, not a hypothetical: under the old default,
+/// `llama3.2:3b` failed this file's tool-loop test with
 /// `tool `get_weather` arguments.city is required`.
 fn local_run_policy() -> RunPolicy {
     RunPolicy {
@@ -790,18 +797,24 @@ fn local_presets_need_no_credential_and_default_to_their_own_ports() {
     );
 }
 
-/// Pins the default that makes local tool loops brittle, and the opt-in that
-/// fixes them.
+/// Pins the recovering crate default, and the stronger normalizing policy a
+/// local host still opts into on top of it.
 ///
-/// If the crate default ever changes to a recovering policy, this test fails
-/// and [`local_run_policy`]'s rationale (and the docs pointing hosts at it)
-/// should be revisited rather than the assertion simply flipped.
+/// This test previously asserted the default was [`InvalidArgsPolicy::Fail`]
+/// and said that if the default ever became a recovering policy, this
+/// assertion should not simply be flipped — [`local_run_policy`]'s rationale
+/// had to be revisited first. The default did change, and it was: the helper's
+/// doc comment no longer justifies itself by "the default aborts the run", but
+/// by the provider-shape normalization pass that `ReturnToolError` alone does
+/// not perform. The assertion below is updated only because that reasoning was
+/// re-derived, not to make a red test green.
 #[test]
-fn invalid_tool_arguments_abort_the_run_unless_recovery_is_opted_into() {
+fn invalid_tool_arguments_recover_by_default_and_local_hosts_add_normalization() {
     assert_eq!(
         RunPolicy::default().invalid_args,
-        InvalidArgsPolicy::Fail,
-        "the crate default aborts a run on schema-invalid tool arguments"
+        InvalidArgsPolicy::ReturnToolError,
+        "the crate default hands the validation error back to the model \
+         rather than aborting the run"
     );
     assert_eq!(
         local_run_policy().invalid_args,

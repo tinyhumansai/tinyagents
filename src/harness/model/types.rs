@@ -75,6 +75,104 @@ pub enum ResponseFormat {
     },
 }
 
+/// How much effort a reasoning model should spend before answering.
+///
+/// Provider-neutral by design. There was no reasoning knob at all before: the
+/// only route was raw [`ModelRequest::provider_options`], which is
+/// provider-shaped by definition — an OpenAI `reasoning_effort` string, an
+/// OpenAI Responses `reasoning: {effort, summary}` object, and an Anthropic
+/// `thinking: {type, budget_tokens}` object are three incompatible spellings of
+/// one idea, and a caller that hardcodes one cannot switch providers. Worse, on
+/// the OpenAI **Responses** path `provider_options` was dropped from the wire
+/// body entirely, so the one format that supports `reasoning` could not receive
+/// it.
+///
+/// Anthropic's surface is the argument for an enum over a raw dict: it accepts
+/// both a `thinking` object and a `reasoning_effort` literal, has a documented
+/// precedence chain between them, and rejects `budget_tokens` outright on newer
+/// models. A neutral enum lets each adapter lower to whatever its provider
+/// currently accepts without every caller tracking that churn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    /// The smallest amount of reasoning the provider offers.
+    Minimal,
+    /// Below-default effort.
+    Low,
+    /// The provider's default effort.
+    #[default]
+    Medium,
+    /// Above-default effort; slower and more expensive.
+    High,
+    /// Reasoning explicitly disabled.
+    ///
+    /// Distinct from leaving [`ReasoningConfig::effort`] as `None`, which means
+    /// "no opinion — use the provider default". On OpenAI this additionally
+    /// lifts the gpt-5 restriction that pins `temperature` when reasoning is on.
+    None,
+}
+
+impl ReasoningEffort {
+    /// The wire token OpenAI's `reasoning_effort` / `reasoning.effort` fields
+    /// expect.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReasoningEffort::Minimal => "minimal",
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Medium => "medium",
+            ReasoningEffort::High => "high",
+            ReasoningEffort::None => "none",
+        }
+    }
+}
+
+/// Provider-neutral reasoning/thinking configuration for one call.
+///
+/// Adapters lower this to whatever their provider accepts:
+///
+/// | Target | Lowered to |
+/// |---|---|
+/// | OpenAI Chat Completions | `reasoning_effort: "<effort>"` |
+/// | OpenAI Responses | `reasoning: { effort, summary }` |
+/// | Anthropic-shaped gateways | `thinking: { type, budget_tokens }` |
+///
+/// [`ModelRequest::provider_options`] remains the escape hatch and **wins on
+/// key conflicts**, so a caller who needs a shape this struct cannot express is
+/// never blocked by it.
+///
+/// Require it of a resolved model with
+/// [`CapabilitySet::reasoning_effort`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningConfig {
+    /// How hard to think. `None` leaves the provider default alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
+    /// An explicit thinking-token budget, for providers that take one
+    /// (Anthropic's `thinking.budget_tokens`). Ignored by providers that only
+    /// accept a coarse effort level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
+    /// Requested reasoning-summary verbosity (`"auto"`, `"concise"`,
+    /// `"detailed"`), for the OpenAI Responses `reasoning.summary` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+impl ReasoningConfig {
+    /// A config requesting the given effort and nothing else.
+    pub fn effort(effort: ReasoningEffort) -> Self {
+        Self {
+            effort: Some(effort),
+            ..Self::default()
+        }
+    }
+
+    /// Whether this config asks for anything at all.
+    pub fn is_empty(&self) -> bool {
+        self.effort.is_none() && self.budget_tokens.is_none() && self.summary.is_none()
+    }
+}
+
 /// Lifecycle status of a model, used by [`ModelProfile`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -176,6 +274,15 @@ pub struct ModelProfile {
     /// Emits reasoning/thinking output.
     #[serde(default)]
     pub reasoning: bool,
+    /// Accepts a **configurable** reasoning effort
+    /// ([`ReasoningConfig`]), not merely emitting reasoning output.
+    ///
+    /// Separate from [`Self::reasoning`] because the two really do come apart:
+    /// a distilled deepseek-r1 on Ollama emits `<think>` blocks (so `reasoning`
+    /// is true) while accepting no effort knob at all, and a caller that needs
+    /// to *dial* reasoning must be able to require the knob.
+    #[serde(default)]
+    pub reasoning_effort: bool,
     /// Maximum input (context) tokens, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_input_tokens: Option<u64>,
@@ -214,6 +321,9 @@ pub struct CapabilitySet {
     /// Requires reasoning output.
     #[serde(default)]
     pub reasoning: bool,
+    /// Requires a configurable reasoning effort ([`ReasoningConfig`]).
+    #[serde(default)]
+    pub reasoning_effort: bool,
     /// Requires image input (vision).
     #[serde(default)]
     pub image_in: bool,
@@ -401,8 +511,17 @@ pub struct ModelRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_policy: Option<CachePolicy>,
     /// Optional provider continuation/response id for stateful follow-ups.
+    ///
+    /// Read by the OpenAI Responses adapter, which sends it as
+    /// `previous_response_id`. It previously had **no reader anywhere in the
+    /// crate** — only a builder — so a caller could set it and nothing would
+    /// happen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_id: Option<String>,
+    /// Provider-neutral reasoning/thinking configuration. See
+    /// [`ReasoningConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningConfig>,
 }
 
 /// A provider-neutral chat model response.
@@ -450,6 +569,25 @@ pub struct ModelResponse {
     /// this needs no cap of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continue_turn: Option<String>,
+    /// `true` when this response was served from a local
+    /// [`ResponseCache`][crate::harness::cache::ResponseCache] rather than
+    /// produced by a provider call.
+    ///
+    /// # Why accounting needs this
+    ///
+    /// A cached response retains the `usage` the provider originally reported.
+    /// Replaying it verbatim re-bills those tokens on every hit: the run's
+    /// usage totals inflate and a cost-budget middleware prices spend that
+    /// never happened, which can abort a run over money nobody paid. LangChain
+    /// zeroes usage on the cache-hit path for exactly this reason. This flag
+    /// lets the accounting sites tell a replay from a real call without
+    /// destroying the `usage` a caller may legitimately want to inspect.
+    ///
+    /// `#[serde(default)]` plus a skip-when-false so entries written before the
+    /// flag existed still deserialize, and so a serialized response is
+    /// byte-identical to the historical shape when it is a real call.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub served_from_cache: bool,
 }
 
 /// An incremental streamed chunk of a model response.
@@ -492,6 +630,21 @@ pub struct ProviderError {
     /// Whether retrying the same request may succeed.
     #[serde(default)]
     pub retryable: bool,
+    /// Server-supplied wait before retrying, in milliseconds, parsed from the
+    /// HTTP `Retry-After` response header.
+    ///
+    /// A `429`/`503` that names how long the client must wait is authoritative:
+    /// retrying sooner burns an attempt for certain.
+    /// [`retry_after_hint`][crate::harness::retry::retry_after_hint] reads this
+    /// field **first**, falling back to parsing the error message text only
+    /// when it is `None` — until this field existed, a provider that sent the
+    /// header but did not echo it into the JSON body was simply not honored.
+    ///
+    /// Both header forms are normalised here: delta-seconds (`Retry-After: 30`)
+    /// and the HTTP-date form (`Retry-After: Wed, 21 Oct 2015 07:28:00 GMT`),
+    /// the latter converted to a delay relative to receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
     /// Raw provider payload, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<Value>,
@@ -557,6 +710,39 @@ pub trait ChatModel<State: Send + Sync>: Send + Sync {
     /// structured-output strategy for [`ResponseFormat::Auto`] and to validate
     /// [`ModelRequest::required_capabilities`].
     fn profile(&self) -> Option<&ModelProfile> {
+        None
+    }
+
+    /// Returns a stable string identifying *which* model, at *which* endpoint,
+    /// under *which* credential this handle talks to — folded into the response
+    /// cache key by
+    /// [`scoped_cache_key`][crate::harness::cache::scoped_cache_key].
+    ///
+    /// # Why the request is not enough
+    ///
+    /// [`ModelRequest::model`] is an optional *hint* that the agent loop does
+    /// not even set on the requests it builds; the real model is chosen by
+    /// [`ModelRegistry::resolve_request`] afterwards, and the endpoint and
+    /// credential live inside this trait object and never appear in the request
+    /// at all. A cache keyed on the request alone therefore has no provider or
+    /// model identity in it, and one shared cache serves a hosted harness's
+    /// answer to a local one. LangChain avoids this by looking up on
+    /// `(prompt, llm_string)`, where `llm_string` serializes the whole model
+    /// object.
+    ///
+    /// # Contract
+    ///
+    /// * Return `None` (the default) to decline; the key then folds a fixed
+    ///   `anonymous-model` marker, which still separates identifying models
+    ///   from each other but cannot separate two anonymous ones.
+    /// * The value must be **stable across process restarts** — a cache that is
+    ///   only valid within one process lifetime is not a cache.
+    /// * The value must **never contain a raw credential**. It is folded into
+    ///   keys that end up in logs, events, and durable cache files. Use
+    ///   [`credential_fingerprint`][crate::harness::cache::credential_fingerprint]
+    ///   (or the whole-identity helper
+    ///   [`model_cache_identity`][crate::harness::cache::model_cache_identity]).
+    fn cache_identity(&self) -> Option<String> {
         None
     }
 

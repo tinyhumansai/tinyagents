@@ -92,6 +92,7 @@ fn pending_activation_send_arg_roundtrips() {
         pending_activations: Some(vec![super::PendingActivation {
             node: NodeId::from("w"),
             send_arg: Some(json!({ "item": 42 })),
+            task_id: "1:0:w".to_string(),
         }]),
         barrier_arrivals: vec![super::BarrierArrivals {
             node: NodeId::from("join"),
@@ -463,6 +464,23 @@ mod file_backend {
         assert!(cp.get("a/b c", None).await.unwrap().is_none());
         // Deleting a missing thread is a no-op.
         cp.delete_thread("missing").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_uppercase_thread_files_remain_readable_and_copyable() {
+        let tmp = TempDir::new("legacy-uppercase");
+        let cp = FileCheckpointer::<i32>::new(tmp.path());
+        cp.put(checkpoint("Run", "c1", None, 1)).await.unwrap();
+
+        // Simulate the pre-upgrade filename scheme, which kept uppercase
+        // letters unescaped (`Run.jsonl` rather than `%52un.jsonl`).
+        std::fs::rename(tmp.path().join("%52un.jsonl"), tmp.path().join("Run.jsonl")).unwrap();
+
+        assert_eq!(cp.get("Run", None).await.unwrap().unwrap().state, 1);
+        cp.copy_thread("Run", "copy").await.unwrap();
+        assert_eq!(cp.get("copy", None).await.unwrap().unwrap().state, 1);
+        cp.delete_thread("Run").await.unwrap();
+        assert!(cp.get("Run", None).await.unwrap().is_none());
     }
 
     #[tokio::test]

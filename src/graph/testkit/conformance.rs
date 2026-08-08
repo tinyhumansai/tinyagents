@@ -362,3 +362,397 @@ where
         "pending → running → completed history replays"
     );
 }
+
+// ── Checkpointer: lineage, thread ops and pending writes ─────────────────────
+//
+// The original `checkpointer_contract` covered put/get/list/list_threads/
+// delete_thread/prune and nothing else — no `get_tuple`, no `state_history`, no
+// `copy_thread`, no `delete_checkpoints`, and nothing at all about pending
+// writes. That gap is not incidental: it is precisely why a dead
+// `pending_writes` field, an unguarded lineage walk and a `copy_thread` that
+// silently corrupts a non-empty target all survived in-tree. These suites port
+// the invariants from LangGraph's `checkpoint-conformance` spec.
+
+use crate::graph::checkpoint::{CheckpointConfig, PendingWrite, WRITES_IDX_RESUME};
+
+/// Builds a checkpoint in `namespace` rather than at the root.
+fn scoped_checkpoint(
+    thread: &str,
+    id: &str,
+    parent: Option<&str>,
+    step: usize,
+    namespace: &[&str],
+) -> Checkpoint<i32> {
+    let mut checkpoint = contract_checkpoint(thread, id, parent, step);
+    checkpoint.namespace = namespace.iter().map(|s| s.to_string()).collect();
+    checkpoint
+}
+
+fn config(thread: &str, id: &str, namespace: &[&str]) -> CheckpointConfig {
+    CheckpointConfig {
+        thread_id: thread.to_string(),
+        checkpoint_id: Some(id.to_string()),
+        namespace: namespace.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// Runs the **pending-writes** contract against `cp`.
+///
+/// Pins the partial-failure protocol: idempotent data writes, upserting
+/// control-plane writes, namespace isolation, an empty ledger for a fresh
+/// checkpoint, and removal along with the checkpoint/thread they belong to.
+///
+/// A backend that does not implement the protocol at all (the trait's default
+/// no-op bodies) will fail the very first assertion — which is the point: the
+/// suite certifies the protocol, it does not quietly accept its absence.
+pub async fn checkpointer_writes_contract<C>(cp: C)
+where
+    C: Checkpointer<i32>,
+{
+    let thread = "writes";
+    cp.put(contract_checkpoint(thread, "w1", None, 1))
+        .await
+        .expect("put w1");
+
+    // A brand-new checkpoint carries no writes.
+    let fresh = cp
+        .get_tuple(config(thread, "w1", &[]))
+        .await
+        .expect("get_tuple")
+        .expect("some");
+    assert!(
+        fresh.pending_writes.is_empty(),
+        "a newly written checkpoint starts with an empty pending-writes ledger"
+    );
+
+    // Data writes land and read back in order.
+    let writes = vec![
+        PendingWrite::data("n", "task-a", 0, "out", serde_json::json!("first")),
+        PendingWrite::data("n", "task-a", 1, "out", serde_json::json!("second")),
+    ];
+    cp.put_writes(&config(thread, "w1", &[]), &writes)
+        .await
+        .expect("put_writes");
+    let stored = cp
+        .get_writes(&config(thread, "w1", &[]))
+        .await
+        .expect("get_writes");
+    assert_eq!(stored.len(), 2, "both data writes stored");
+
+    // Re-putting the same `(task_id, idx)` data writes must not duplicate them.
+    cp.put_writes(&config(thread, "w1", &[]), &writes)
+        .await
+        .expect("duplicate put_writes");
+    let stored = cp
+        .get_writes(&config(thread, "w1", &[]))
+        .await
+        .expect("get_writes after duplicate");
+    assert_eq!(
+        stored.len(),
+        2,
+        "a duplicate (task_id, idx) data write is ignored, not appended"
+    );
+    assert_eq!(
+        stored[0].payload,
+        serde_json::json!("first"),
+        "an ignored duplicate leaves the original value in place"
+    );
+
+    // A control-plane write (negative idx) upserts: exactly one row, latest value.
+    for value in ["v1", "v2"] {
+        cp.put_writes(
+            &config(thread, "w1", &[]),
+            &[PendingWrite::data(
+                "n",
+                "task-a",
+                WRITES_IDX_RESUME,
+                "__resume__",
+                serde_json::json!(value),
+            )],
+        )
+        .await
+        .expect("put control-plane write");
+    }
+    let stored = cp
+        .get_writes(&config(thread, "w1", &[]))
+        .await
+        .expect("get_writes after control-plane");
+    let control: Vec<&PendingWrite> = stored.iter().filter(|w| w.is_control_plane()).collect();
+    assert_eq!(
+        control.len(),
+        1,
+        "a control-plane write stores exactly one row (upsert, not append)"
+    );
+    assert_eq!(
+        control[0].payload,
+        serde_json::json!("v2"),
+        "the control-plane upsert keeps the latest value"
+    );
+
+    // `get_tuple` surfaces the ledger.
+    let tuple = cp
+        .get_tuple(config(thread, "w1", &[]))
+        .await
+        .expect("get_tuple")
+        .expect("some");
+    assert_eq!(
+        tuple.pending_writes.len(),
+        stored.len(),
+        "get_tuple surfaces the persisted pending writes"
+    );
+
+    // Namespace isolation: same thread, same checkpoint id, same channel, but a
+    // different namespace is a different ledger.
+    cp.put(scoped_checkpoint(thread, "w1", None, 1, &["child"]))
+        .await
+        .expect("put child-namespace w1");
+    cp.put_writes(
+        &config(thread, "w1", &["child"]),
+        &[PendingWrite::data(
+            "n",
+            "task-a",
+            0,
+            "out",
+            serde_json::json!("child"),
+        )],
+    )
+    .await
+    .expect("put child-namespace writes");
+    let child = cp
+        .get_writes(&config(thread, "w1", &["child"]))
+        .await
+        .expect("child writes");
+    assert_eq!(child.len(), 1, "the child namespace has its own ledger");
+    assert_eq!(child[0].payload, serde_json::json!("child"));
+    let root = cp
+        .get_writes(&config(thread, "w1", &[]))
+        .await
+        .expect("root writes");
+    assert_eq!(
+        root.len(),
+        stored.len(),
+        "writing the child namespace did not touch the root ledger"
+    );
+
+    // `delete_checkpoints` takes the checkpoint's writes with it.
+    cp.put(contract_checkpoint(thread, "w2", Some("w1"), 2))
+        .await
+        .expect("put w2");
+    cp.put_writes(
+        &config(thread, "w2", &[]),
+        &[PendingWrite::completion_marker("n", "task-b")],
+    )
+    .await
+    .expect("put w2 writes");
+    cp.delete_checkpoints(thread, &["w2".to_string()])
+        .await
+        .expect("delete_checkpoints");
+    assert!(
+        cp.get_writes(&config(thread, "w2", &[]))
+            .await
+            .expect("writes after delete_checkpoints")
+            .is_empty(),
+        "deleting a checkpoint deletes its writes"
+    );
+
+    // `delete_thread` clears every namespace's ledger, not just the root.
+    cp.delete_thread(thread).await.expect("delete_thread");
+    for namespace in [&[][..], &["child"][..]] {
+        assert!(
+            cp.get_writes(&config(thread, "w1", namespace))
+                .await
+                .expect("writes after delete_thread")
+                .is_empty(),
+            "delete_thread removes the writes of every namespace ({namespace:?})"
+        );
+    }
+}
+
+/// Runs the **lineage and thread-operation** contract against `cp`.
+///
+/// Covers `get_tuple` addressing, `state_history` ordering/limit/cycle safety,
+/// `copy_thread` semantics (including the empty-target rule), and per-namespace
+/// pruning.
+pub async fn checkpointer_lineage_contract<C>(cp: C)
+where
+    C: Checkpointer<i32>,
+{
+    let thread = "lineage";
+    for i in 1..=3 {
+        let parent = (i > 1).then(|| format!("c{}", i - 1));
+        cp.put(contract_checkpoint(
+            thread,
+            &format!("c{i}"),
+            parent.as_deref(),
+            i,
+        ))
+        .await
+        .expect("put lineage");
+    }
+    // An embedded subgraph shares the thread but keeps its own lineage.
+    cp.put(scoped_checkpoint(thread, "s1", None, 1, &["child"]))
+        .await
+        .expect("put child s1");
+    cp.put(scoped_checkpoint(thread, "s2", Some("s1"), 2, &["child"]))
+        .await
+        .expect("put child s2");
+
+    // `get_tuple` resolves the addressing config and the parent config.
+    let tuple = cp
+        .get_tuple(config(thread, "c2", &[]))
+        .await
+        .expect("get_tuple")
+        .expect("some");
+    assert_eq!(tuple.config.checkpoint_id.as_deref(), Some("c2"));
+    assert_eq!(
+        tuple
+            .parent_config
+            .as_ref()
+            .and_then(|c| c.checkpoint_id.as_deref()),
+        Some("c1"),
+        "get_tuple carries the parent's config"
+    );
+    // A `None` id addresses the latest checkpoint *in the namespace*.
+    let latest = cp
+        .get_tuple(CheckpointConfig::latest(thread))
+        .await
+        .expect("get_tuple latest")
+        .expect("some");
+    assert_eq!(
+        latest.checkpoint.checkpoint_id, "c3",
+        "an unaddressed get_tuple resolves the latest checkpoint in the namespace, \
+         not the thread's global latest"
+    );
+
+    // `state_history` is strictly newest-first along the parent spine, scoped
+    // to the namespace, and `limit` caps from the newest end.
+    let history = cp
+        .state_history(thread, &[], None)
+        .await
+        .expect("state_history");
+    let ids: Vec<&str> = history
+        .iter()
+        .map(|t| t.checkpoint.checkpoint_id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["c3", "c2", "c1"], "state_history is newest-first");
+    let limited = cp
+        .state_history(thread, &[], Some(2))
+        .await
+        .expect("state_history limited");
+    assert_eq!(
+        limited
+            .iter()
+            .map(|t| t.checkpoint.checkpoint_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["c3", "c2"],
+        "limit keeps the most recent hops"
+    );
+    let child_history = cp
+        .state_history(thread, &["child".to_string()], None)
+        .await
+        .expect("child state_history");
+    assert_eq!(
+        child_history
+            .iter()
+            .map(|t| t.checkpoint.checkpoint_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["s2", "s1"],
+        "state_history is namespace-scoped"
+    );
+
+    // A self-referential parent pointer must terminate the walk rather than
+    // spin forever. `parent_checkpoint_id` is caller data, not a structurally
+    // guaranteed DAG edge.
+    let cyclic_thread = "cycle";
+    let mut cyclic = contract_checkpoint(cyclic_thread, "loop1", None, 1);
+    cyclic.parent_checkpoint_id = Some("loop1".to_string());
+    cp.put(cyclic).await.expect("put cyclic");
+    let walked = cp
+        .state_history(cyclic_thread, &[], None)
+        .await
+        .expect("state_history over a cycle terminates");
+    assert_eq!(
+        walked.len(),
+        1,
+        "a lineage cycle is visited once, not forever"
+    );
+
+    // `copy_thread` preserves order, ids and namespaces, and leaves the source
+    // untouched.
+    cp.copy_thread(thread, "lineage-copy")
+        .await
+        .expect("copy_thread");
+    let source_after: Vec<String> = cp
+        .list(thread)
+        .await
+        .expect("list source")
+        .into_iter()
+        .map(|m| m.checkpoint_id)
+        .collect();
+    let copied = cp.list("lineage-copy").await.expect("list copy");
+    assert_eq!(
+        source_after.len(),
+        5,
+        "copy_thread leaves the source thread unchanged"
+    );
+    assert_eq!(
+        copied
+            .iter()
+            .map(|m| m.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        source_after,
+        "copy_thread preserves checkpoint ids and their order"
+    );
+    assert!(
+        copied
+            .iter()
+            .any(|m| m.namespace == vec!["child".to_string()]),
+        "copy_thread preserves namespaces"
+    );
+
+    // Copying onto a non-empty thread is rejected: reusing ids across two
+    // lineages in one thread is silent corruption, not a merge.
+    let err = cp.copy_thread(thread, "lineage-copy").await;
+    assert!(
+        err.is_err(),
+        "copy_thread into a non-empty target must be rejected, not interleaved"
+    );
+
+    // `prune` keeps the latest per namespace (plus ancestors), so an embedded
+    // subgraph's lineage survives a prune driven by the parent's recency.
+    cp.prune(thread, 1).await.expect("prune");
+    let kept = cp.list(thread).await.expect("list pruned");
+    let namespaces: Vec<&Vec<String>> = kept.iter().map(|m| &m.namespace).collect();
+    assert!(
+        namespaces.iter().any(|ns| ns.is_empty()),
+        "prune keeps the root namespace's latest"
+    );
+    assert!(
+        namespaces
+            .iter()
+            .any(|ns| ns.as_slice() == ["child".to_string()]),
+        "prune keeps the latest of EVERY namespace, not a thread-wide window"
+    );
+
+    // A pruned-but-kept checkpoint keeps its writes.
+    let survivor = kept
+        .iter()
+        .find(|m| m.namespace.is_empty())
+        .expect("a root-namespace survivor");
+    let survivor_config = config(thread, &survivor.checkpoint_id, &[]);
+    cp.put_writes(
+        &survivor_config,
+        &[PendingWrite::completion_marker("n", "task-keep")],
+    )
+    .await
+    .expect("put survivor writes");
+    cp.prune(thread, 1).await.expect("prune again");
+    assert_eq!(
+        cp.get_writes(&survivor_config)
+            .await
+            .expect("survivor writes")
+            .len(),
+        1,
+        "prune preserves the writes of the checkpoints it keeps"
+    );
+}

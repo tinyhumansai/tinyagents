@@ -232,6 +232,7 @@ async fn harness_run_threads_workspace_and_enforces_out_of_root() {
             raw: None,
             resolved_model: None,
             continue_turn: None,
+            served_from_cache: false,
         }
     }
     fn text_response(text: &str) -> ModelResponse {
@@ -247,6 +248,7 @@ async fn harness_run_threads_workspace_and_enforces_out_of_root() {
             raw: None,
             resolved_model: None,
             continue_turn: None,
+            served_from_cache: false,
         }
     }
 

@@ -30,7 +30,7 @@ impl CloudEmbeddingModel {
         bearer: BearerResolver,
     ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: super::http::default_client(),
             base_url: base_url.into().trim().trim_end_matches('/').to_owned(),
             model: model.into(),
             dimensions,

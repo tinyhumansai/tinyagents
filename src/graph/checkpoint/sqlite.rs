@@ -32,7 +32,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::{Checkpoint, CheckpointMetadata, CheckpointSource, Checkpointer};
+use super::{
+    Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource, CheckpointTuple,
+    Checkpointer, PendingWrite, merge_writes,
+};
 use crate::harness::ids::{CheckpointId, NodeId};
 use crate::{Result, TinyAgentsError};
 
@@ -118,7 +121,26 @@ impl<State> SqliteCheckpointer<State> {
 }
 
 /// Table + indexes. `seq` preserves insertion order; the indexes serve thread
-/// listing and `(thread_id, checkpoint_id)` parent-chain lookups.
+/// listing, `(thread_id, checkpoint_id)` parent-chain lookups, and — since the
+/// namespace-scoped overrides landed — `(thread_id, namespace, …)` scoped
+/// lookups.
+///
+/// # `namespace` is a first-class, indexed column
+///
+/// It holds the canonical JSON encoding of the namespace vector, which
+/// `serde_json` emits deterministically, so equality on the column is exactly
+/// equality on the namespace. It was already stored this way; what was missing
+/// were the indexes, and therefore the ability to *push the scope down into
+/// SQL* at all. Without them `get_scoped`, `get_tuple` and `state_history` all
+/// fell back to the trait defaults, which scan the whole thread once per
+/// lineage hop — O(H²) per namespaced read on the one backend that had no
+/// business being in that class. Both are `CREATE INDEX IF NOT EXISTS`, so an
+/// existing database picks them up on the next open with no migration step.
+///
+/// `checkpoint_writes` is the partial-failure ledger. Its primary key
+/// `(thread_id, namespace, checkpoint_id, task_id, idx)` mirrors LangGraph's
+/// writes table and is what makes `put_writes` idempotent in SQL rather than in
+/// application code.
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS checkpoints (
     seq                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,6 +157,23 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 );
 CREATE INDEX IF NOT EXISTS idx_checkpoints_thread ON checkpoints (thread_id, seq);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_lookup ON checkpoints (thread_id, checkpoint_id);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_scoped ON checkpoints (thread_id, namespace, seq);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_scoped_lookup
+    ON checkpoints (thread_id, namespace, checkpoint_id, seq);
+
+CREATE TABLE IF NOT EXISTS checkpoint_writes (
+    thread_id     TEXT    NOT NULL,
+    namespace     TEXT    NOT NULL,
+    checkpoint_id TEXT    NOT NULL,
+    task_id       TEXT    NOT NULL,
+    idx           INTEGER NOT NULL,
+    node          TEXT    NOT NULL,
+    channel       TEXT    NOT NULL,
+    payload       TEXT    NOT NULL,
+    PRIMARY KEY (thread_id, namespace, checkpoint_id, task_id, idx)
+);
+CREATE INDEX IF NOT EXISTS idx_checkpoint_writes_thread
+    ON checkpoint_writes (thread_id, checkpoint_id);
 ";
 
 /// The projected listing columns read from one `checkpoints` row.
@@ -259,6 +298,134 @@ where
         }
     }
 
+    async fn get_scoped(
+        &self,
+        thread_id: &str,
+        checkpoint_id: Option<&str>,
+        namespace: &[String],
+    ) -> Result<Option<Checkpoint<State>>> {
+        // Pushed down to one indexed query. The trait default lists the whole
+        // thread and then re-`get`s the winner, which costs a full thread scan
+        // per call — and `state_history` calls it once per lineage hop.
+        let namespace_json =
+            serde_json::to_string(namespace).map_err(|e| sqlite_err("encode namespace", e))?;
+        let conn = self.lock()?;
+        let record: Option<String> = match checkpoint_id {
+            Some(id) => conn
+                .query_row(
+                    "SELECT record FROM checkpoints
+                     WHERE thread_id = ?1 AND namespace = ?2 AND checkpoint_id = ?3
+                     ORDER BY seq DESC LIMIT 1",
+                    params![thread_id, namespace_json, id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| sqlite_err("query scoped checkpoint", e))?,
+            None => conn
+                .query_row(
+                    "SELECT record FROM checkpoints
+                     WHERE thread_id = ?1 AND namespace = ?2
+                     ORDER BY seq DESC LIMIT 1",
+                    params![thread_id, namespace_json],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| sqlite_err("query latest scoped checkpoint", e))?,
+        };
+        match record {
+            Some(json) => Ok(Some(
+                serde_json::from_str(&json).map_err(|e| sqlite_err("decode record", e))?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    async fn state_history(
+        &self,
+        thread_id: &str,
+        namespace: &[String],
+        limit: Option<usize>,
+    ) -> Result<Vec<CheckpointTuple<State>>> {
+        // One indexed range read of the namespace's rows, then the lineage walk
+        // in memory — instead of the default's `get_tuple` (and therefore
+        // `get_scoped`) per hop.
+        let namespace_json =
+            serde_json::to_string(namespace).map_err(|e| sqlite_err("encode namespace", e))?;
+        let (records, writes) = {
+            let conn = self.lock()?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT record FROM checkpoints
+                     WHERE thread_id = ?1 AND namespace = ?2 ORDER BY seq ASC",
+                )
+                .map_err(|e| sqlite_err("prepare state_history", e))?;
+            let rows = stmt
+                .query_map(params![thread_id, namespace_json], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|e| sqlite_err("query state_history", e))?;
+            let mut records: Vec<Checkpoint<State>> = Vec::new();
+            for row in rows {
+                let json = row.map_err(|e| sqlite_err("read record row", e))?;
+                records
+                    .push(serde_json::from_str(&json).map_err(|e| sqlite_err("decode record", e))?);
+            }
+            let writes = read_writes_by_checkpoint(&conn, thread_id, &namespace_json)?;
+            (records, writes)
+        };
+        if records.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Last write wins for a re-used id, matching `get`.
+        let mut by_id: std::collections::HashMap<String, Checkpoint<State>> =
+            std::collections::HashMap::with_capacity(records.len());
+        let mut cursor: Option<String> = None;
+        for record in records {
+            cursor = Some(record.checkpoint_id.clone());
+            by_id.insert(record.checkpoint_id.clone(), record);
+        }
+
+        let mut out = Vec::new();
+        while let Some(id) = cursor {
+            if let Some(limit) = limit
+                && out.len() >= limit
+            {
+                break;
+            }
+            // `remove` doubles as the cycle guard: each id is visited once.
+            let Some(checkpoint) = by_id.remove(&id) else {
+                break;
+            };
+            cursor = checkpoint.parent_checkpoint_id.clone();
+            let config = CheckpointConfig {
+                thread_id: checkpoint.thread_id.clone(),
+                checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
+                namespace: checkpoint.namespace.clone(),
+            };
+            let parent_config =
+                checkpoint
+                    .parent_checkpoint_id
+                    .as_ref()
+                    .map(|parent| CheckpointConfig {
+                        thread_id: checkpoint.thread_id.clone(),
+                        checkpoint_id: Some(parent.clone()),
+                        namespace: checkpoint.namespace.clone(),
+                    });
+            let pending_writes = writes
+                .get(&checkpoint.checkpoint_id)
+                .cloned()
+                .unwrap_or_else(|| checkpoint.pending_writes.clone());
+            out.push(CheckpointTuple {
+                config,
+                checkpoint,
+                parent_config,
+                pending_writes,
+            });
+        }
+        Ok(out)
+    }
+
     async fn list(&self, thread_id: &str) -> Result<Vec<CheckpointMetadata>> {
         let conn = self.lock()?;
         let mut stmt = conn
@@ -327,12 +494,24 @@ where
     }
 
     async fn delete_thread(&self, thread_id: &str) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute(
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| sqlite_err("begin delete_thread", e))?;
+        tx.execute(
             "DELETE FROM checkpoints WHERE thread_id = ?1",
             params![thread_id],
         )
         .map_err(|e| sqlite_err("delete thread", e))?;
+        // Writes go with the thread — and across *every* namespace, not just
+        // the root one, or an embedded subgraph's ledger outlives its thread.
+        tx.execute(
+            "DELETE FROM checkpoint_writes WHERE thread_id = ?1",
+            params![thread_id],
+        )
+        .map_err(|e| sqlite_err("delete thread writes", e))?;
+        tx.commit()
+            .map_err(|e| sqlite_err("commit delete_thread", e))?;
         Ok(())
     }
 
@@ -352,8 +531,173 @@ where
                     params![thread_id, id],
                 )
                 .map_err(|e| sqlite_err("delete checkpoint", e))?;
+            tx.execute(
+                "DELETE FROM checkpoint_writes WHERE thread_id = ?1 AND checkpoint_id = ?2",
+                params![thread_id, id],
+            )
+            .map_err(|e| sqlite_err("delete checkpoint writes", e))?;
         }
         tx.commit().map_err(|e| sqlite_err("commit delete", e))?;
         Ok(removed)
     }
+
+    async fn put_writes(&self, config: &CheckpointConfig, writes: &[PendingWrite]) -> Result<()> {
+        let checkpoint_id = super::require_checkpoint_id(config)?;
+        if writes.is_empty() {
+            return Ok(());
+        }
+        let namespace_json = serde_json::to_string(&config.namespace)
+            .map_err(|e| sqlite_err("encode namespace", e))?;
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| sqlite_err("begin put_writes", e))?;
+        let mut stored = 0usize;
+        for write in writes {
+            // The replace-vs-ignore rule pushed into SQL: a control-plane write
+            // (`idx < 0`) legitimately changes on a retry and upserts, while a
+            // data write is append-once so a retried `put_writes` is a no-op.
+            // Doing it with two conflict clauses rather than a read-then-write
+            // keeps it correct under concurrent writers.
+            let sql = if write.is_control_plane() {
+                "INSERT INTO checkpoint_writes
+                    (thread_id, namespace, checkpoint_id, task_id, idx, node, channel, payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(thread_id, namespace, checkpoint_id, task_id, idx) DO UPDATE SET
+                    node = excluded.node,
+                    channel = excluded.channel,
+                    payload = excluded.payload"
+            } else {
+                "INSERT INTO checkpoint_writes
+                    (thread_id, namespace, checkpoint_id, task_id, idx, node, channel, payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(thread_id, namespace, checkpoint_id, task_id, idx) DO NOTHING"
+            };
+            let payload = serde_json::to_string(&write.payload)
+                .map_err(|e| sqlite_err("encode write payload", e))?;
+            stored += tx
+                .execute(
+                    sql,
+                    params![
+                        config.thread_id,
+                        namespace_json,
+                        checkpoint_id,
+                        write.task_id,
+                        write.idx,
+                        write.node.as_str(),
+                        write.channel,
+                        payload,
+                    ],
+                )
+                .map_err(|e| sqlite_err("insert checkpoint write", e))?;
+        }
+        tx.commit()
+            .map_err(|e| sqlite_err("commit put_writes", e))?;
+        tracing::debug!(
+            "[checkpoint:sqlite] put_writes thread={} checkpoint={checkpoint_id} offered={} stored={stored}",
+            config.thread_id,
+            writes.len()
+        );
+        Ok(())
+    }
+
+    async fn get_writes(&self, config: &CheckpointConfig) -> Result<Vec<PendingWrite>> {
+        let Some(checkpoint_id) = self.resolve_write_target(config).await? else {
+            return Ok(Vec::new());
+        };
+        let namespace_json = serde_json::to_string(&config.namespace)
+            .map_err(|e| sqlite_err("encode namespace", e))?;
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT node, task_id, idx, channel, payload FROM checkpoint_writes
+                 WHERE thread_id = ?1 AND namespace = ?2 AND checkpoint_id = ?3
+                 ORDER BY rowid ASC",
+            )
+            .map_err(|e| sqlite_err("prepare get_writes", e))?;
+        let rows = stmt
+            .query_map(
+                params![config.thread_id, namespace_json, checkpoint_id],
+                map_write_row,
+            )
+            .map_err(|e| sqlite_err("query get_writes", e))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| sqlite_err("read write row", e))??);
+        }
+        Ok(out)
+    }
+}
+
+/// Decodes one `checkpoint_writes` row into a [`PendingWrite`].
+///
+/// Returns a nested `Result` because the payload decode can fail with a serde
+/// error that `rusqlite`'s row-mapper signature has no room for.
+#[allow(clippy::type_complexity)]
+fn map_write_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<PendingWrite>> {
+    let node: String = row.get(0)?;
+    let task_id: String = row.get(1)?;
+    let idx: i64 = row.get(2)?;
+    let channel: String = row.get(3)?;
+    let payload_json: String = row.get(4)?;
+    Ok(
+        match serde_json::from_str::<serde_json::Value>(&payload_json) {
+            Ok(payload) => Ok(PendingWrite {
+                node: NodeId::from(node),
+                task_id,
+                idx,
+                channel,
+                payload,
+            }),
+            Err(e) => Err(sqlite_err("decode write payload", e)),
+        },
+    )
+}
+
+/// Reads every write in `thread_id`/`namespace`, grouped by checkpoint id.
+///
+/// One query for the whole lineage, so `state_history` does not issue a
+/// `get_writes` per hop.
+fn read_writes_by_checkpoint(
+    conn: &Connection,
+    thread_id: &str,
+    namespace_json: &str,
+) -> Result<std::collections::HashMap<String, Vec<PendingWrite>>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT checkpoint_id, node, task_id, idx, channel, payload FROM checkpoint_writes
+             WHERE thread_id = ?1 AND namespace = ?2 ORDER BY rowid ASC",
+        )
+        .map_err(|e| sqlite_err("prepare writes-by-checkpoint", e))?;
+    let rows = stmt
+        .query_map(params![thread_id, namespace_json], |row| {
+            let checkpoint_id: String = row.get(0)?;
+            let node: String = row.get(1)?;
+            let task_id: String = row.get(2)?;
+            let idx: i64 = row.get(3)?;
+            let channel: String = row.get(4)?;
+            let payload_json: String = row.get(5)?;
+            Ok((checkpoint_id, node, task_id, idx, channel, payload_json))
+        })
+        .map_err(|e| sqlite_err("query writes-by-checkpoint", e))?;
+    let mut out: std::collections::HashMap<String, Vec<PendingWrite>> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let (checkpoint_id, node, task_id, idx, channel, payload_json) =
+            row.map_err(|e| sqlite_err("read write row", e))?;
+        let payload = serde_json::from_str(&payload_json)
+            .map_err(|e| sqlite_err("decode write payload", e))?;
+        let write = PendingWrite {
+            node: NodeId::from(node),
+            task_id,
+            idx,
+            channel,
+            payload,
+        };
+        let slot = out.entry(checkpoint_id).or_default();
+        // `merge_writes` keeps the shared dedupe semantics even here, where the
+        // primary key already guarantees uniqueness — one rule, one place.
+        merge_writes(slot, std::slice::from_ref(&write));
+    }
+    Ok(out)
 }

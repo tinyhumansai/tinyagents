@@ -166,3 +166,164 @@ fn stream_chunk_null_values_does_not_corrupt_to_empty_object() {
     assert_eq!(value["type"], json!("values"));
     assert_eq!(value["content"], json!(null));
 }
+
+// ---------------------------------------------------------------------------
+// C6: AgentEvent -> StreamChunk projection
+// ---------------------------------------------------------------------------
+
+mod project {
+    use crate::harness::events::AgentEvent;
+    use crate::harness::ids::{CallId, RunId};
+    use crate::harness::message::MessageDelta;
+    use crate::harness::stream::{
+        StreamChunk, StreamMode, StreamSink, project_event, project_event_for_modes, projected_mode,
+    };
+
+    fn delta_event() -> AgentEvent {
+        AgentEvent::ModelDelta {
+            run_id: RunId::new("r1"),
+            call_id: CallId::new("c1"),
+            delta: MessageDelta::text("hello"),
+        }
+    }
+
+    #[test]
+    fn model_deltas_project_onto_messages_mode() {
+        // Before this projection existed, `StreamMode` / `StreamChunk` /
+        // `StreamSink` were referenced NOWHERE outside their own module, and
+        // every caller re-implemented delta reassembly against raw events.
+        let chunk = project_event(&delta_event()).expect("a delta must project");
+        assert_eq!(chunk.mode(), StreamMode::Messages);
+        assert_eq!(chunk, StreamChunk::Message(MessageDelta::text("hello")));
+    }
+
+    #[test]
+    fn an_interrupting_control_is_the_producer_of_stream_chunk_interrupt() {
+        // `StreamChunk::Interrupt` was defined but never constructed anywhere
+        // in the crate.
+        let event = AgentEvent::ControlApplied {
+            control: "interrupt".into(),
+            detail: "approval_node: needs sign-off".into(),
+        };
+        let chunk = project_event(&event).expect("must project");
+        assert_eq!(chunk.mode(), StreamMode::Interrupts);
+        match chunk {
+            StreamChunk::Interrupt(value) => {
+                assert_eq!(value["control"], "interrupt");
+                assert_eq!(value["detail"], "approval_node: needs sign-off");
+            }
+            other => panic!("expected an Interrupt chunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_interrupting_control_stays_in_the_debug_channel() {
+        let event = AgentEvent::ControlApplied {
+            control: "stop_with_final".into(),
+            detail: "done".into(),
+        };
+        assert_eq!(projected_mode(&event), Some(StreamMode::Debug));
+    }
+
+    #[test]
+    fn state_updates_project_onto_updates_mode() {
+        let chunk = project_event(&AgentEvent::StateUpdate).expect("must project");
+        assert_eq!(chunk.mode(), StreamMode::Updates);
+    }
+
+    #[test]
+    fn every_other_event_falls_through_to_debug_and_keeps_its_payload() {
+        let event = AgentEvent::ToolStarted {
+            call_id: CallId::new("c9"),
+            tool_name: "search".into(),
+        };
+        let chunk = project_event(&event).expect("must project");
+        assert_eq!(chunk.mode(), StreamMode::Debug);
+        match chunk {
+            // The typed payload survives, not just the kind string.
+            StreamChunk::Debug(text) => {
+                assert!(text.contains("tool_started"), "got {text}");
+                assert!(text.contains("search"), "got {text}");
+            }
+            other => panic!("expected a Debug chunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_closed_is_a_terminator_not_content() {
+        assert!(project_event(&AgentEvent::StreamClosed).is_none());
+        assert!(projected_mode(&AgentEvent::StreamClosed).is_none());
+        assert!(project_event_for_modes(&AgentEvent::StreamClosed, &[StreamMode::Debug]).is_none());
+    }
+
+    #[test]
+    fn one_event_never_projects_into_two_modes() {
+        // A consumer subscribed to several modes must not see the same event
+        // twice in two shapes.
+        for event in [
+            delta_event(),
+            AgentEvent::StateUpdate,
+            AgentEvent::ControlApplied {
+                control: "interrupt".into(),
+                detail: "d".into(),
+            },
+            AgentEvent::MemoryLoaded,
+        ] {
+            let all = [
+                StreamMode::Values,
+                StreamMode::Updates,
+                StreamMode::Messages,
+                StreamMode::Debug,
+                StreamMode::Interrupts,
+                StreamMode::Custom,
+            ];
+            let hits = all
+                .iter()
+                .filter(|mode| project_event_for_modes(&event, &[**mode]).is_some())
+                .count();
+            assert_eq!(hits, 1, "{} projected into {hits} modes", event.kind());
+        }
+    }
+
+    #[test]
+    fn mode_filtering_happens_producer_side() {
+        let event = delta_event();
+        assert!(project_event_for_modes(&event, &[StreamMode::Messages]).is_some());
+        assert!(project_event_for_modes(&event, &[StreamMode::Debug]).is_none());
+        assert!(project_event_for_modes(&event, &[]).is_none());
+        // Multiplexed mode sets work the way LangGraph's do.
+        assert!(
+            project_event_for_modes(&event, &[StreamMode::Debug, StreamMode::Messages]).is_some()
+        );
+    }
+
+    #[test]
+    fn push_event_bridges_the_event_bus_into_a_sink() {
+        let sink = StreamSink::new([StreamMode::Messages]);
+        assert!(sink.push_event(&delta_event()));
+        assert!(!sink.push_event(&AgentEvent::StateUpdate));
+        assert!(!sink.push_event(&AgentEvent::StreamClosed));
+
+        let chunks = sink.drain();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].mode(), StreamMode::Messages);
+    }
+
+    #[test]
+    fn values_and_custom_are_never_produced_by_the_projection() {
+        // Documented gap: a full state snapshot is graph state, which the event
+        // stream does not carry, and Custom is the caller's own channel.
+        for event in [
+            delta_event(),
+            AgentEvent::StateUpdate,
+            AgentEvent::MemorySaved,
+            AgentEvent::RunCompleted {
+                run_id: RunId::new("r1"),
+            },
+        ] {
+            let mode = projected_mode(&event);
+            assert_ne!(mode, Some(StreamMode::Values));
+            assert_ne!(mode, Some(StreamMode::Custom));
+        }
+    }
+}

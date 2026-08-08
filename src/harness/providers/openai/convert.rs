@@ -7,6 +7,88 @@
 
 use super::*;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Process-global counter handing every decoded response a distinct **epoch**.
+///
+/// Synthetic tool-call ids used to be `tool-{slot}`, keyed only to the call's
+/// position in its own response. Any runtime that omits `id` (several Ollama
+/// builds do) therefore emitted `tool-0` on *every* assistant turn, so one run's
+/// transcript contained several distinct calls all declaring the same id — an
+/// unresolvable pairing for the agent loop. Prefixing with a monotonic epoch
+/// makes the id unique for the life of the process while staying stable within
+/// the response that minted it (the epoch is drawn once, at the top of decoding,
+/// and reused for every slot and every streamed delta of that response).
+static SYNTHETIC_ID_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Draws the next synthetic-id epoch. Call **once** per decoded response (unary
+/// parse, or accumulator construction on the streaming path) and thread the
+/// value through every `tool_call_id` / `tool_call_from_wire` call for that
+/// response.
+pub(super) fn next_synthetic_id_epoch() -> u64 {
+    SYNTHETIC_ID_EPOCH.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Prefix for ids this crate synthesizes on the **native/provider** boundary.
+///
+/// Deliberately distinct from the prompt-guided text protocol's `call_{index}`
+/// ids (`crate::harness::tool::prompt`) so a transcript that mixes both — a
+/// model that degraded from native to prompt-guided mid-run — can never produce
+/// two different calls carrying the same id.
+const SYNTHETIC_ID_PREFIX: &str = "tacall";
+
+/// Characters a tool-call id may contain before the provider boundary rewrites
+/// it. Mirrors LangChain's `_TOOL_CALL_ID_PATTERN` (`^[a-zA-Z0-9_-]+$`).
+fn is_conforming_tool_call_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Rewrites a non-conforming provider tool-call id into the conforming
+/// alphabet, **deterministically**.
+///
+/// Some gateways emit ids that other providers reject on the way back
+/// (`functions.write_todos:0` is the canonical example). Rewriting at the
+/// provider boundary keeps the id and its paired tool result consistent, because
+/// both are derived from the same [`ToolCall`]. Determinism is the whole point:
+/// the same wire id must always map to the same rewritten id, or a replayed
+/// transcript would stop pairing.
+///
+/// Offending bytes become `_`, and a short hash of the original is appended so
+/// two distinct ids that sanitize to the same string stay distinguishable.
+fn normalize_tool_call_id(id: &str) -> String {
+    if is_conforming_tool_call_id(id) {
+        return id.to_string();
+    }
+    let sanitized: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // FNV-1a over the original bytes: tiny, dependency-free, and stable across
+    // processes and crate versions (unlike `DefaultHasher`, whose output is not
+    // guaranteed stable).
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let normalized = format!("{sanitized}_{hash:x}");
+    tracing::debug!(
+        target: "tinyagents::providers::openai",
+        normalized = %normalized,
+        "[openai] rewrote a non-conforming provider tool-call id"
+    );
+    normalized
+}
+
 /// Translates one harness [`Message`] into an OpenAI wire message.
 ///
 /// User messages are rendered as OpenAI content-parts when they carry non-text
@@ -168,10 +250,38 @@ pub(super) fn degraded_json_object_format() -> Value {
     })
 }
 
+/// The schema projection applied to a `response_format` JSON Schema.
+///
+/// OpenAI's strict mode is not "the same schema, validated harder": it rejects
+/// any object that does not carry `additionalProperties: false` and list *every*
+/// declared property in `required`. `strict: true` used to be hardcoded here and
+/// paired with the caller's **raw** schema, so a perfectly valid JSON Schema
+/// 400d — including this crate's own documented example. The sibling
+/// `degraded_json_object_format` had it right with `strict: false`; the
+/// constraint was understood in one place and not the other.
+///
+/// Delegates to [`prepare_parameters`], the shared sanitizer, so the
+/// response-format schema and the tool-parameter schemas are projected by
+/// exactly one implementation.
+fn prepare_response_schema(schema: &Value, strict: bool) -> Value {
+    let preparation = if strict {
+        crate::harness::tool::SchemaPreparation::openai().with_strict()
+    } else {
+        crate::harness::tool::SchemaPreparation::openai()
+    };
+    crate::harness::tool::prepare_parameters(schema, &preparation)
+}
+
 /// Translates a [`ResponseFormat`] into the OpenAI `response_format` JSON value.
 ///
 /// Returns `None` for [`ResponseFormat::Text`] so the field is omitted entirely.
-pub(super) fn translate_response_format(format: &ResponseFormat) -> Option<Value> {
+///
+/// `strict` selects OpenAI strict structured output for the schema forms. It is
+/// **not** hardcoded: hosted OpenAI defaults it on, local runtimes default it
+/// off (they reject the key outright, and their schema support is looser), and
+/// a 400 implicating the schema degrades it for a single retry. When `strict` is
+/// on the schema first goes through [`prepare_strict_schema`].
+pub(super) fn translate_response_format(format: &ResponseFormat, strict: bool) -> Option<Value> {
     match format {
         ResponseFormat::Text => None,
         ResponseFormat::JsonObject => Some(json!({ "type": "json_object" })),
@@ -179,12 +289,13 @@ pub(super) fn translate_response_format(format: &ResponseFormat) -> Option<Value
         // schema request directly. (The agent loop normally resolves `Auto`
         // before reaching the provider; this keeps direct calls correct too.)
         ResponseFormat::JsonSchema { name, schema } | ResponseFormat::Auto { name, schema } => {
+            let schema = prepare_response_schema(schema, strict);
             Some(json!({
                 "type": "json_schema",
                 "json_schema": {
                     "name": name,
                     "schema": schema,
-                    "strict": true,
+                    "strict": strict,
                 }
             }))
         }
@@ -207,7 +318,7 @@ pub(super) fn translate_response_format(format: &ResponseFormat) -> Option<Value
 /// configured [`ReasoningTagExtraction`].
 #[cfg(test)]
 pub(super) fn parse_response(value: Value) -> Result<ModelResponse> {
-    parse_chat_response(value, None)
+    parse_chat_response(value, None, CacheTokenAccounting::default())
 }
 
 /// Like [`parse_response`], but also normalizes reasoning into a leading
@@ -219,8 +330,12 @@ pub(super) fn parse_response(value: Value) -> Result<ModelResponse> {
 pub(super) fn parse_chat_response(
     value: Value,
     reasoning_tags: Option<&ReasoningTagExtraction>,
+    accounting: CacheTokenAccounting,
 ) -> Result<ModelResponse> {
     let parsed: ChatCompletionResponse = serde_json::from_value(value.clone())?;
+    // One epoch for the whole response, so every synthesized id in it shares a
+    // prefix and no later response can reuse it.
+    let epoch = next_synthetic_id_epoch();
 
     let choice = parsed.choices.into_iter().next().ok_or_else(|| {
         TinyAgentsError::Model("openai response contained no choices".to_string())
@@ -275,11 +390,12 @@ pub(super) fn parse_chat_response(
         .enumerate()
         .map(|(index, call)| {
             // Local servers routinely omit `id`; synthesize the same
-            // `tool-{index}` fallback the streaming path uses so the agent loop
+            // run-unique fallback the streaming path uses so the agent loop
             // can still correlate the tool result back to this call. An empty
             // id is treated as absent.
             tool_call_from_wire(
                 "openai response",
+                epoch,
                 index,
                 &call.id,
                 &call.function.name,
@@ -288,7 +404,9 @@ pub(super) fn parse_chat_response(
         })
         .collect::<Vec<_>>();
 
-    let usage = parsed.usage.map(convert_usage);
+    let usage = parsed
+        .usage
+        .map(|wire| convert_usage_with(wire, accounting));
 
     let message = AssistantMessage {
         id: parsed.id,
@@ -304,25 +422,33 @@ pub(super) fn parse_chat_response(
         raw: Some(value),
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     })
 }
 
-/// Returns the effective call id for a streamed tool-call slot: the
-/// provider-assigned id when present, or a stable `tool-{slot}` fallback keyed to
-/// the slot's position so delta ids and the final call id always agree.
-pub(super) fn tool_call_id(slot: usize, id: &str) -> String {
+/// Returns the effective call id for a tool-call slot.
+///
+/// * A provider-assigned id is kept, after [`normalize_tool_call_id`] rewrites
+///   any character the conforming alphabet (`[A-Za-z0-9_-]`) rejects.
+/// * An absent id is synthesized as `tacall-{epoch}-{slot}`. `epoch` comes from
+///   [`next_synthetic_id_epoch`] and is drawn **once per decoded response**, so
+///   the id is stable across the streamed deltas and the terminal response of
+///   one call while never repeating on a later turn — the defect the old
+///   `tool-{slot}` form had, which made every id-less Ollama turn emit `tool-0`.
+pub(super) fn tool_call_id(epoch: u64, slot: usize, id: &str) -> String {
     if id.is_empty() {
-        format!("tool-{slot}")
+        format!("{SYNTHETIC_ID_PREFIX}-{epoch}-{slot}")
     } else {
-        id.to_string()
+        normalize_tool_call_id(id)
     }
 }
 
 /// Builds a provider-neutral [`ToolCall`] from the wire fields, tolerating the
 /// defects small local models produce.
 ///
-/// `slot` is the tool call's position in the response (used to synthesize a
-/// stable `tool-{slot}` id when the provider omits one — Ollama did so until
+/// `epoch` + `slot` identify the call: `slot` is its position in the response
+/// and `epoch` the response's [`next_synthetic_id_epoch`] draw, which together
+/// synthesize a run-unique id when the provider omits one (Ollama did so until
 /// v0.12.11). When the arguments cannot be parsed even after repair, the call is
 /// marked [`ToolCall::invalid`] with the raw arguments preserved rather than
 /// failing the whole model call: the agent loop feeds the error back to the
@@ -331,12 +457,13 @@ pub(super) fn tool_call_id(slot: usize, id: &str) -> String {
 /// become a never-resolving tool call that stalls the loop.
 pub(super) fn tool_call_from_wire(
     context: &str,
+    epoch: u64,
     slot: usize,
     id: &str,
     name: &str,
     raw: &str,
 ) -> ToolCall {
-    let call_id = tool_call_id(slot, id);
+    let call_id = tool_call_id(epoch, slot, id);
     match parse_tool_arguments(raw) {
         Ok(arguments) => ToolCall {
             id: call_id,
@@ -467,30 +594,77 @@ fn strip_tool_call_markers(raw: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// Converts an OpenAI [`UsageWire`] into the harness-neutral [`Usage`].
-pub(super) fn convert_usage(wire: UsageWire) -> Usage {
+/// Whether a provider's reported input-token count already contains the tokens
+/// it served from (or wrote into) its prompt cache.
+///
+/// This is a real cross-provider divergence, not a detail:
+///
+/// * **OpenAI** reports `prompt_tokens` as the *total* input, with
+///   `prompt_tokens_details.cached_tokens` a breakdown of it. Subtracting cache
+///   reads to price the uncached remainder is correct.
+/// * **Anthropic** reports `input_tokens` *excluding* cache reads and cache
+///   writes — the true input total is `input + cache_read + cache_creation`.
+///
+/// An OpenAI-compatible gateway fronting an Anthropic model can pass either
+/// convention through, and guessing wrong silently under-bills (OpenAI
+/// semantics assumed over Anthropic data) or double-counts. Select the right one
+/// with [`OpenAiModel::with_cache_token_accounting`][cta].
+///
+/// [cta]: super::OpenAiModel::with_cache_token_accounting
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CacheTokenAccounting {
+    /// OpenAI semantics: the reported input count already contains cache
+    /// read/creation tokens. The default.
+    #[default]
+    IncludedInInput,
+    /// Anthropic semantics: cache read/creation tokens are reported *outside*
+    /// the input count, so the true input total is recomputed as
+    /// `input + cache_read + cache_creation`.
+    ExcludedFromInput,
+}
+
+/// Converts an OpenAI [`UsageWire`] into [`Usage`] under an explicit
+/// [`CacheTokenAccounting`] convention.
+///
+/// Maps both cache directions, unlike the original which only read
+/// `cached_tokens`: `cache_creation_tokens` is a first-class, summed and priced
+/// field on [`Usage`] that no provider ever populated, so cache **writes** were
+/// invisible to every cost report in the crate.
+pub(super) fn convert_usage_with(wire: UsageWire, accounting: CacheTokenAccounting) -> Usage {
+    let prompt_details = wire.prompt_tokens_details.unwrap_or_default();
+    let cache_read_tokens = prompt_details.cached_tokens;
+    let cache_creation_tokens = prompt_details.cache_creation_tokens();
+
+    let input_tokens = match accounting {
+        CacheTokenAccounting::IncludedInInput => wire.prompt_tokens,
+        CacheTokenAccounting::ExcludedFromInput => wire
+            .prompt_tokens
+            .saturating_add(cache_read_tokens)
+            .saturating_add(cache_creation_tokens),
+    };
+
     // OpenAI-compatible endpoints sometimes omit `total_tokens` entirely
     // (deserializes to `0` via `#[serde(default)]`); fall back to
     // `prompt + completion` so `total_tokens` is never a misleading zero for
-    // a call that clearly consumed tokens.
-    let total_tokens = if wire.total_tokens > 0 {
-        wire.total_tokens
-    } else {
-        wire.prompt_tokens + wire.completion_tokens
-    };
+    // a call that clearly consumed tokens. Under Anthropic semantics the
+    // recomputed `input_tokens` is what the total must be built from.
+    let total_tokens =
+        if wire.total_tokens > 0 && accounting == CacheTokenAccounting::IncludedInInput {
+            wire.total_tokens
+        } else {
+            input_tokens + wire.completion_tokens
+        };
+
     Usage {
-        input_tokens: wire.prompt_tokens,
+        input_tokens,
         output_tokens: wire.completion_tokens,
         total_tokens,
-        cache_read_tokens: wire
-            .prompt_tokens_details
-            .map(|d| d.cached_tokens)
-            .unwrap_or(0),
+        cache_read_tokens,
+        cache_creation_tokens,
         reasoning_tokens: wire
             .completion_tokens_details
             .map(|d| d.reasoning_tokens)
             .unwrap_or(0),
-        ..Usage::default()
     }
 }
 

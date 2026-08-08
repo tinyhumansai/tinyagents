@@ -228,6 +228,7 @@ impl<State: Send + Sync> ChatModel<State> for MockModel {
                     raw: None,
                     resolved_model: None,
                     continue_turn: None,
+                    served_from_cache: false,
                 }
             }
 
@@ -329,6 +330,7 @@ impl MockModel {
             raw: None,
             resolved_model: None,
             continue_turn: None,
+            served_from_cache: false,
         }
     }
 }

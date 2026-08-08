@@ -19,13 +19,23 @@
 //! All policy decisions are explicit data types, never hidden behaviour. Callers
 //! choose when to call, what to pass, and how to handle the result.
 
+pub mod pairing;
+mod render;
+mod trim;
 mod types;
 
+pub use pairing::{
+    advance_past_orphan_tools, find_safe_cutoff_point, is_tool_calling_assistant,
+    retract_orphan_tool_calls, tool_pairing_is_intact,
+};
+pub use render::render_message_for_summary;
+pub use trim::{trim_messages, trim_messages_to_token_budget_with, trim_messages_with};
 pub use types::*;
 
 use crate::error::{Result, TinyAgentsError};
-use crate::harness::message::Message;
+use crate::harness::message::{Message, estimate_slice_tokens};
 use async_trait::async_trait;
+use trim::partition_system;
 
 // ---------------------------------------------------------------------------
 // Token estimation
@@ -47,206 +57,28 @@ pub fn estimate_tokens(text: &str) -> u64 {
     if chars == 0 { 0 } else { (chars / 4).max(1) }
 }
 
-/// Estimate the total tokens for a [`Message`] using the same `chars / 4`
-/// heuristic as [`estimate_tokens`], counting weight directly over the message
-/// content rather than allocating the concatenated string first.
-///
-/// Uses [`Message::estimated_char_weight`] (all content blocks) rather than
-/// `char_len` (visible text only): images, structured JSON, and model reasoning
-/// occupy real context, so counting only text would under-estimate a
-/// multimodal or tool-heavy transcript to near-zero and silently prevent
-/// [`SummarizationPolicy::should_summarize`] from ever triggering.
-fn message_token_estimate(msg: &Message) -> u64 {
-    let chars = msg.estimated_char_weight() as u64;
-    if chars == 0 { 0 } else { (chars / 4).max(1) }
-}
-
-/// Estimate the total tokens for a slice of messages.
-fn slice_token_estimate(messages: &[Message]) -> u64 {
-    messages.iter().map(message_token_estimate).sum()
-}
-
-// ---------------------------------------------------------------------------
-// Trimming
-// ---------------------------------------------------------------------------
-
-/// Partition `messages` into system and non-system messages, preserving order.
-///
-/// Returns `(system, non_system)`.
-fn partition_system(messages: &[Message]) -> (Vec<Message>, Vec<Message>) {
-    let system = messages
-        .iter()
-        .filter(|m| matches!(m, Message::System(_)))
-        .cloned()
-        .collect();
-    let non_system = messages
-        .iter()
-        .filter(|m| !matches!(m, Message::System(_)))
-        .cloned()
-        .collect();
-    (system, non_system)
-}
-
-/// Trim a message slice according to `strategy`, returning the retained subset.
-///
-/// System messages are preserved by default:
-///
-/// - [`TrimStrategy::KeepLast`] and [`TrimStrategy::KeepFirstAndLast`] always
-///   keep all system messages and apply the rule only to non-system messages.
-/// - [`TrimStrategy::MaxTokens`] drops non-system messages first (from the
-///   front) and only starts dropping system messages if the budget still
-///   cannot be met after all non-system messages are removed.
-///
-/// The returned `Vec<Message>` preserves the relative order of messages as
-/// they appeared in the input.
-pub fn trim_messages(messages: &[Message], strategy: &TrimStrategy) -> Vec<Message> {
-    match strategy {
-        TrimStrategy::KeepLast(n) => {
-            let (system, non_system) = partition_system(messages);
-            let keep_start = non_system.len().saturating_sub(*n);
-            let mut result = system;
-            result.extend_from_slice(&non_system[keep_start..]);
-            result
-        }
-
-        TrimStrategy::KeepFirstAndLast { first, last } => {
-            let (system, non_system) = partition_system(messages);
-            let len = non_system.len();
-            let first = *first;
-            let last = *last;
-
-            let mut result = system;
-            if first + last >= len {
-                // No overlap: keep everything.
-                result.extend(non_system);
-            } else {
-                result.extend_from_slice(&non_system[..first]);
-                result.extend_from_slice(&non_system[len - last..]);
-            }
-            result
-        }
-
-        TrimStrategy::MaxTokens(limit) => {
-            let (system, non_system) = partition_system(messages);
-            let limit = *limit;
-
-            // Precompute each message's token estimate once. The previous
-            // implementation re-summed the entire slice on every dropped
-            // message and used `remove(0)` (itself O(n)), making trimming
-            // O(n^2). Here we sum once and drop from the front by advancing an
-            // index while subtracting the running total.
-            let sys_tokens: Vec<u64> = system.iter().map(message_token_estimate).collect();
-            let non_sys_tokens: Vec<u64> = non_system.iter().map(message_token_estimate).collect();
-            let sys_total: u64 = sys_tokens.iter().sum();
-
-            // Drop non-system messages from the front until within budget or
-            // exhausted.
-            let mut non_sys_start = 0;
-            let mut non_sys_total: u64 = non_sys_tokens.iter().sum();
-            while non_sys_start < non_system.len() && sys_total + non_sys_total > limit {
-                non_sys_total -= non_sys_tokens[non_sys_start];
-                non_sys_start += 1;
-            }
-
-            // Still over budget: drop system messages from the front as a last
-            // resort.
-            let mut sys_start = 0;
-            let mut sys_running = sys_total;
-            while sys_start < system.len() && sys_running + non_sys_total > limit {
-                sys_running -= sys_tokens[sys_start];
-                sys_start += 1;
-            }
-
-            let mut result =
-                Vec::with_capacity((system.len() - sys_start) + (non_system.len() - non_sys_start));
-            result.extend_from_slice(&system[sys_start..]);
-            result.extend_from_slice(&non_system[non_sys_start..]);
-            result
-        }
-    }
-}
-
-/// Trim messages to a token budget while preserving their original order.
-///
-/// `estimate` lets callers account for provider-specific payloads without
-/// teaching the harness about their wire representation. The built-in
-/// [`Message::estimated_char_weight`] already assigns a flat weight to native
-/// image blocks; hosts may additionally recognize inline image markers or use a
-/// real tokenizer. Oldest non-system messages are evicted first. System
-/// messages are either retained unconditionally or evicted oldest-first only
-/// after all other messages, according to [`TokenTrimPolicy::preserve_system`].
-///
-/// When `drop_leading_orphan_tools` is enabled, leading tool-result messages are
-/// removed after budget eviction so the retained transcript starts on a valid
-/// provider turn boundary. The returned messages always retain their original
-/// relative order.
-pub fn trim_messages_to_token_budget_with(
-    messages: &[Message],
-    policy: TokenTrimPolicy,
-    estimate: impl Fn(&Message) -> u64,
-) -> Vec<Message> {
-    let estimates: Vec<u64> = messages.iter().map(estimate).collect();
-    let mut total: u64 = estimates.iter().copied().sum();
-    if total <= policy.limit && !policy.drop_leading_orphan_tools {
-        return messages.to_vec();
-    }
-
-    let mut retained = vec![true; messages.len()];
-    for (index, message) in messages.iter().enumerate() {
-        if total <= policy.limit {
-            break;
-        }
-        if !matches!(message, Message::System(_)) {
-            retained[index] = false;
-            total = total.saturating_sub(estimates[index]);
-        }
-    }
-
-    if !policy.preserve_system && total > policy.limit {
-        for (index, message) in messages.iter().enumerate() {
-            if total <= policy.limit {
-                break;
-            }
-            if matches!(message, Message::System(_)) && retained[index] {
-                retained[index] = false;
-                total = total.saturating_sub(estimates[index]);
-            }
-        }
-    }
-
-    let mut result: Vec<Message> = messages
-        .iter()
-        .zip(retained)
-        .filter(|(_, keep)| *keep)
-        .map(|(message, _)| message.clone())
-        .collect();
-
-    if policy.drop_leading_orphan_tools {
-        while let Some(index) = result
-            .iter()
-            .position(|message| !matches!(message, Message::System(_)))
-        {
-            if matches!(result[index], Message::Tool(_)) {
-                result.remove(index);
-            } else {
-                break;
-            }
-        }
-    }
-    result
-}
-
 // ---------------------------------------------------------------------------
 // ConcatSummarizer
 // ---------------------------------------------------------------------------
 
 #[async_trait]
 impl Summarizer for ConcatSummarizer {
-    /// Summarize `messages` by concatenating their text content into a single
-    /// system message.
+    /// Summarize `messages` by concatenating them into a single system message.
     ///
-    /// Each message's text is prefixed by a role label and positional id so
-    /// the summary is human-readable.  No LLM call is made.
+    /// Each message is rendered by [`render_message_for_summary`] and prefixed
+    /// with a positional id, so the summary is human-readable. No LLM call is
+    /// made.
+    ///
+    /// # Why not `Message::text()`
+    ///
+    /// [`Message::text`] returns only visible text blocks, so an assistant turn
+    /// that only called tools, a JSON tool result, and model reasoning all
+    /// render as an empty string. Because this is the crate's **default**
+    /// summarizer, building it on `text()` meant that out of the box,
+    /// compaction of a tool-driven run replaced the real history with a column
+    /// of bare role labels. Rendering tool calls, tool results, and reasoning
+    /// keeps the compacted transcript worth keeping — the same reason LangChain
+    /// summarizes through `get_buffer_string(..., format="xml")`.
     ///
     /// # Provenance
     ///
@@ -260,7 +92,7 @@ impl Summarizer for ConcatSummarizer {
             ));
         }
 
-        let original_token_estimate = slice_token_estimate(messages);
+        let original_token_estimate = estimate_slice_tokens(messages);
 
         let mut parts: Vec<String> = Vec::with_capacity(messages.len() + 1);
         parts.push("=== Conversation Summary ===".to_string());
@@ -269,14 +101,8 @@ impl Summarizer for ConcatSummarizer {
             .iter()
             .enumerate()
             .map(|(i, msg)| {
-                let role = match msg {
-                    Message::System(_) => "system",
-                    Message::User(_) => "user",
-                    Message::Assistant(_) => "assistant",
-                    Message::Tool(_) => "tool",
-                };
                 let id = format!("msg-{i}");
-                parts.push(format!("[{id}] {role}: {}", msg.text()));
+                parts.push(format!("[{id}] {}", render_message_for_summary(msg)));
                 id
             })
             .collect();
@@ -358,7 +184,7 @@ impl SummarizationPolicy {
     ///   returns `true` when the estimate **exceeds**
     ///   [`trigger_tokens`][Self::trigger_tokens].
     pub fn should_summarize(&self, messages: &[Message]) -> bool {
-        let tokens = slice_token_estimate(messages);
+        let tokens = estimate_slice_tokens(messages);
         match self.context_window {
             Some(_) => tokens >= self.trigger_budget(),
             None => tokens > self.trigger_tokens,
@@ -378,6 +204,23 @@ impl SummarizationPolicy {
     ///
     /// System messages are never placed in `to_summarize` — they must be kept
     /// verbatim to avoid losing persistent instructions.
+    ///
+    /// # Tool-call pairing
+    ///
+    /// The split point is **not** a blind `len - keep_last` index. That index
+    /// routinely lands between an assistant tool-call turn and the tool results
+    /// answering it, putting the assistant message in `to_summarize` and its
+    /// `tool` messages in `to_keep`; the rebuilt request then opens with a
+    /// `role:"tool"` message that answers nothing, which OpenAI rejects with a
+    /// `400` and Anthropic rejects as a `tool_result` with no matching
+    /// `tool_use`. Since only long tool-driven runs reach a compaction
+    /// threshold at all, the blind index failed on essentially every run that
+    /// used it.
+    ///
+    /// [`find_safe_cutoff_point`] moves the split back to include the owning
+    /// assistant turn (or, for a transcript with no such turn, forward past the
+    /// unpairable results), so `to_keep` is always a slice a provider accepts.
+    /// `keep_last` is therefore a **minimum**, not an exact count.
     pub fn plan(&self, messages: &[Message]) -> (Vec<Message>, Vec<Message>) {
         let (system, non_system) = partition_system(messages);
 
@@ -388,7 +231,14 @@ impl SummarizationPolicy {
             return (Vec::new(), to_keep);
         }
 
-        let split = non_system.len() - self.keep_last;
+        let requested_split = non_system.len() - self.keep_last;
+        let split = find_safe_cutoff_point(&non_system, requested_split);
+        if split != requested_split {
+            tracing::debug!(
+                "[summarization::plan] keep_last={} moved split {requested_split} -> {split} to preserve tool-call pairing",
+                self.keep_last
+            );
+        }
         let to_summarize = non_system[..split].to_vec();
         let to_keep_recent = non_system[split..].to_vec();
 

@@ -18,6 +18,47 @@
 //! a middleware) feeds each tool outcome in via [`NoProgressTracker::record`]
 //! and turns the returned [`NoProgress`] verdict into a steering nudge
 //! (`Nudge`) or a halt (`Halt`).
+//!
+//! # Driving this from an `after_tool` hook (wave 2)
+//!
+//! The ladder is complete and tested but **nothing in the crate drives it**, so
+//! a model looping on the same failing tool call is bounded only by
+//! `RunLimits::max_tool_calls` (50) — roughly 48 wasted round trips. The
+//! middleware that closes that gap lives in `middleware/library/`; here is the
+//! exact contract it must implement.
+//!
+//! Hold one [`NoProgressTracker`] per turn behind a shared reference (`record`
+//! takes `&self` and is interior-mutable, so an `&self` hook needs no
+//! `RefCell`). In `after_tool`:
+//!
+//! 1. Fingerprint the call arguments with [`fingerprint_arguments`]. **Do not
+//!    roll your own** — the identical-repeat rung compares fingerprints, so two
+//!    drivers disagreeing on canonicalisation would silently change when the
+//!    ladder trips.
+//! 2. Build the attempt:
+//!    - success → [`ToolAttempt::success`]
+//!    - failure → [`ToolAttempt::failure`], then
+//!      - `.hard_reject()` when the failure is a security/approval denial (a
+//!        blocked call re-issued unchanged can never succeed),
+//!      - `.recoverable_miss()` for the unknown-tool recovery sentinel, i.e.
+//!        the case that raises [`crate::harness::events::AgentEvent::UnknownToolCall`].
+//! 3. Pass `step` = the run's current model-call count
+//!    (`LimitTracker::model_calls()`). It is used only for the "no progress
+//!    since step X" wording, so an approximation is harmless — but it must be
+//!    monotonic or the message misleads.
+//! 4. Route the verdict:
+//!    - [`NoProgress::Continue`] → do nothing.
+//!    - [`NoProgress::Nudge`] → append the message as a **system** message to
+//!      the working transcript so the next model call sees it, and continue.
+//!      Injecting it as a tool result instead would attribute the harness's
+//!      instruction to the tool.
+//!    - [`NoProgress::Halt`] → stop the turn and surface the message as the
+//!      final response. The tracker has already reset itself, so a resumed run
+//!      does not immediately re-trip on latched state.
+//!
+//! [`NoProgress::message`], [`NoProgress::is_nudge`], [`NoProgress::is_halt`]
+//! and [`NoProgress::as_str`] exist so step 4 needs no enum match, and
+//! `as_str()` gives a stable telemetry label.
 
 mod successful_repeat;
 mod types;
@@ -47,6 +88,77 @@ const NO_PROGRESS_NUDGE_THRESHOLD: usize = 4;
 /// Consecutive identical **hard policy rejections** before halting — a blocked
 /// call re-issued unchanged can never succeed.
 const HARD_REJECT_HALT_THRESHOLD: usize = 2;
+
+/// Computes the stable argument fingerprint the identical-repeat rung compares
+/// on.
+///
+/// The ladder's central question is "did the model re-issue the *same* call?",
+/// which is only answerable if every driver canonicalises arguments the same
+/// way. JSON object key order is not significant but `serde_json::Value`'s
+/// default `to_string` preserves insertion order, so two logically identical
+/// argument objects can render differently — enough to make a genuine repeat
+/// look novel and let the loop run to the tool-call cap instead.
+///
+/// This sorts object keys recursively, then hashes, so the result is:
+///
+/// - **order-independent** for objects,
+/// - **order-sensitive** for arrays (list order *is* semantic),
+/// - short and allocation-cheap to carry in a [`ToolAttempt`].
+///
+/// # Example
+///
+/// ```
+/// use tinyagents::harness::no_progress::fingerprint_arguments;
+/// use serde_json::json;
+///
+/// let a = fingerprint_arguments(&json!({"path": "/tmp", "depth": 2}));
+/// let b = fingerprint_arguments(&json!({"depth": 2, "path": "/tmp"}));
+/// assert_eq!(a, b, "key order must not change the fingerprint");
+///
+/// let c = fingerprint_arguments(&json!({"path": "/var", "depth": 2}));
+/// assert_ne!(a, c);
+/// ```
+pub fn fingerprint_arguments(arguments: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hash_canonical(arguments, &mut hasher);
+    // 16 hex chars (64 bits) is far more than enough to separate the handful of
+    // distinct calls within one turn, and keeps the signature string short.
+    hasher
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Feeds `value` into `hasher` with object keys visited in sorted order.
+fn hash_canonical(value: &serde_json::Value, hasher: &mut impl sha2::Digest) {
+    match value {
+        serde_json::Value::Object(map) => {
+            hasher.update(b"{");
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort_unstable();
+            for key in keys {
+                hasher.update(key.as_bytes());
+                hasher.update(b":");
+                hash_canonical(&map[key], hasher);
+                hasher.update(b",");
+            }
+            hasher.update(b"}");
+        }
+        serde_json::Value::Array(items) => {
+            hasher.update(b"[");
+            for item in items {
+                hash_canonical(item, hasher);
+                hasher.update(b",");
+            }
+            hasher.update(b"]");
+        }
+        other => hasher.update(other.to_string().as_bytes()),
+    }
+}
 
 impl NoProgressTracker {
     /// Build a tracker whose identical-repeat halt threshold is

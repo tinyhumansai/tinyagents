@@ -25,6 +25,7 @@ use async_trait::async_trait;
 use crate::error::{Result, TinyAgentsError};
 use crate::harness::cache::CacheLayoutEvent;
 use crate::harness::context::RunContext;
+use crate::harness::ids::RunId;
 use crate::harness::model::{ModelDelta, ModelRequest, ModelResponse};
 use crate::harness::summarization::{SummarizationPolicy, Summarizer, SummaryRecord, TrimStrategy};
 use crate::harness::tool::{ToolCall, ToolDelta, ToolResult};
@@ -66,6 +67,20 @@ pub struct AgentRun {
     pub tool_calls: usize,
     /// Number of loop iterations (model/tool super-steps) executed.
     pub steps: usize,
+    /// Set when the run stopped because steering latched a **pause** rather
+    /// than because the model finished.
+    ///
+    /// A paused run has no `final_response`, exactly like a run whose model
+    /// returned an empty answer — which is why the two were previously
+    /// indistinguishable. Check this field (or
+    /// [`HarnessRunStatus`][crate::harness::events::HarnessRunStatus], which
+    /// reports `Interrupted` for a paused run) before treating a missing final
+    /// response as a completed-but-empty answer. The pause stays latched on the
+    /// [`SteeringHandle`][crate::harness::steering::SteeringHandle], so
+    /// [`SteeringHandle::resume`][crate::harness::steering::SteeringHandle::resume]
+    /// lifts it and a fresh invocation continues from
+    /// [`AgentRun::messages`].
+    pub paused: Option<crate::harness::steering::PauseState>,
 }
 
 // ── Middleware trait ──────────────────────────────────────────────────────────
@@ -613,7 +628,18 @@ pub const DEFAULT_CACHE_GUARD_EVENT_CAP: usize = 1024;
 
 pub struct PromptCacheGuardMiddleware {
     pub(crate) label: &'static str,
-    pub(crate) previous: Mutex<Option<crate::harness::cache::PromptCacheLayout>>,
+    /// The previous pass's layout, tagged with the run it was observed in.
+    ///
+    /// The run id is load-bearing. A KV-cache prefix is only meaningful
+    /// *within* one conversation, so comparing the last request of one run
+    /// against the first request of the next compares two unrelated
+    /// transcripts and reports an invalidation that never happened. A single
+    /// guard instance is routinely shared across runs — a sub-agent's
+    /// middleware stack is built once and its agent invoked many times — so
+    /// this is the common case, not an edge case. It went unnoticed while
+    /// stability was compared by segment id alone, because any two requests
+    /// carrying the same segment ids compared equal regardless of content.
+    pub(crate) previous: Mutex<Option<(RunId, crate::harness::cache::PromptCacheLayout)>>,
     pub(crate) events: Mutex<VecDeque<CacheLayoutEvent>>,
     pub(crate) max_events: usize,
 }

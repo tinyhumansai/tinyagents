@@ -10,8 +10,10 @@
 //! See [`types`] for definitions. This module provides ergonomic constructors
 //! and a [`Message::text`] accessor.
 
+mod tokens;
 mod types;
 
+pub use tokens::*;
 pub use types::*;
 
 /// Approximate token-estimation weight of a single image content block, in
@@ -134,6 +136,7 @@ impl Message {
             tool_call_id: tool_call_id.into(),
             content: vec![ContentBlock::Text(content.into())],
             trusted_verbatim: false,
+            artifact: None,
         })
     }
 
@@ -144,12 +147,33 @@ impl Message {
     /// carries structured metadata the message shape would otherwise drop, and
     /// [`ToolMessage::trusted_verbatim`] is the part a host must not lose — it
     /// is what tells the host this content may not be reshaped.
+    ///
+    /// [`ToolResult::raw`][crate::harness::tool::ToolResult::raw] is carried
+    /// across into [`ToolMessage::artifact`], so a tool can return a small
+    /// model-facing summary in `content` and still leave the full structured
+    /// payload reachable from `run.messages` (LangChain's
+    /// `response_format="content_and_artifact"`). The artifact is host-side
+    /// only — provider conversion serialises [`Message::text`], never the
+    /// artifact.
     pub fn tool_from_result(result: &crate::harness::tool::ToolResult) -> Self {
         Message::Tool(ToolMessage {
             tool_call_id: result.call_id.clone(),
             content: vec![ContentBlock::Text(result.content.clone())],
             trusted_verbatim: result.is_trusted_verbatim(),
+            artifact: result.raw.clone(),
         })
+    }
+
+    /// Returns the structured artifact carried by a tool message, if any.
+    ///
+    /// `None` for every non-tool message and for tool messages whose producing
+    /// [`ToolResult`][crate::harness::tool::ToolResult] set no `raw` payload.
+    /// See [`ToolMessage::artifact`].
+    pub fn artifact(&self) -> Option<&serde_json::Value> {
+        match self {
+            Message::Tool(m) => m.artifact.as_ref(),
+            _ => None,
+        }
     }
 
     /// Returns the concatenated text of all text content blocks.
@@ -183,14 +207,36 @@ impl Message {
     }
 
     /// Approximate character weight of the message across *all* content blocks
-    /// (text, JSON, images, reasoning, provider extensions), for token
-    /// estimation and context-window gating.
+    /// (text, JSON, images, reasoning, provider extensions) **plus the
+    /// structural payload that lives outside `content`**: an assistant
+    /// message's [`tool_calls`][AssistantMessage::tool_calls] and a tool
+    /// message's [`tool_call_id`][ToolMessage::tool_call_id].
     ///
     /// Distinct from [`char_len`](Self::char_len), which counts only visible
     /// text: a transcript dominated by images, large tool-result JSON, or model
     /// reasoning under-counts badly under `char_len`, so compaction/trim would
     /// silently never trigger even as the real context window overflows. See
     /// [`ContentBlock::estimated_char_weight`].
+    ///
+    /// # Why tool calls must be counted here
+    ///
+    /// An assistant turn that *only* calls tools carries **empty `content`**:
+    /// the tool name and its argument JSON — often the largest part of the turn
+    /// — live in `tool_calls`. Counting `content` alone estimated such a
+    /// message at zero, so a 50-turn tool-driven run whose assistant messages
+    /// each carry a 2 KB argument blob estimated to near-nothing and never
+    /// tripped [`SummarizationPolicy::should_summarize`][crate::harness::summarization::SummarizationPolicy::should_summarize],
+    /// letting the window overflow uncompacted — exactly the failure this
+    /// estimator exists to prevent.
+    ///
+    /// Mirrors LangChain's `count_tokens_approximately`, which adds
+    /// `repr(tool_calls)` for AI messages and the `tool_call_id` for tool
+    /// messages. The role label and per-message overhead are *not* added here;
+    /// they belong to the message-level counters in
+    /// [`crate::harness::message::count_tokens_approximately`].
+    ///
+    /// The [`ToolMessage::artifact`] payload is deliberately **not** counted: it
+    /// never reaches the provider, so it occupies no context window.
     pub fn estimated_char_weight(&self) -> usize {
         let content = match self {
             Message::System(m) => &m.content,
@@ -198,10 +244,41 @@ impl Message {
             Message::Assistant(m) => &m.content,
             Message::Tool(m) => &m.content,
         };
-        content
+        let content_weight: usize = content
             .iter()
             .map(ContentBlock::estimated_char_weight)
-            .sum()
+            .sum();
+
+        let structural_weight = match self {
+            Message::Assistant(m) => tool_calls_char_weight(&m.tool_calls),
+            Message::Tool(m) => m.tool_call_id.chars().count(),
+            _ => 0,
+        };
+
+        content_weight + structural_weight
+    }
+}
+
+/// Approximate character weight of an assistant message's tool-call array.
+///
+/// Serialises the calls to JSON (the closest analogue of LangChain's
+/// `repr(tool_calls)`) and counts characters. Falls back to a per-call estimate
+/// from the name plus the raw argument value when serialisation fails, so the
+/// weight is never silently zero.
+fn tool_calls_char_weight(tool_calls: &[crate::harness::tool::ToolCall]) -> usize {
+    if tool_calls.is_empty() {
+        return 0;
+    }
+    match serde_json::to_string(tool_calls) {
+        Ok(rendered) => rendered.chars().count(),
+        Err(_) => tool_calls
+            .iter()
+            .map(|call| {
+                call.name.chars().count()
+                    + call.id.chars().count()
+                    + call.arguments.to_string().chars().count()
+            })
+            .sum(),
     }
 }
 

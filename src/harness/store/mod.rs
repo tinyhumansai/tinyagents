@@ -15,6 +15,9 @@
 //!
 //! # Primary types
 //! - [`Store`] — the core async trait every backend implements.
+//! - [`namespaced::NamespacedStore`] — the hierarchical, TTL-aware,
+//!   batch-oriented long-term store. Additive: `Store` is unchanged, and
+//!   [`namespaced::FlatNamespacedStore`] adapts the new trait back to it.
 //! - [`InMemoryStore`] — ephemeral in-process store for tests and examples.
 //! - [`FileStore`] — file-system-backed store for local development.
 //! - [`StoreRegistry`] — named bag of stores injected into `RunContext`.
@@ -24,6 +27,7 @@
 //! `"artifacts"`. The registry does not enforce a naming scheme, but
 //! consistent names make multi-store applications easier to audit.
 
+pub mod namespaced;
 mod types;
 
 use std::collections::HashMap;
@@ -310,7 +314,64 @@ impl JsonlAppendStore {
     pub fn new(root_dir: impl Into<std::path::PathBuf>) -> Self {
         Self {
             root_dir: root_dir.into(),
-            offsets: Default::default(),
+            append_guard: Default::default(),
+        }
+    }
+
+    /// Returns the offset the next append to `path` should carry.
+    ///
+    /// Reads the **last complete line** of the file rather than parsing all of
+    /// it: an exponentially growing tail window is pulled from the end until a
+    /// line boundary is found. A trailing partial line (a torn write) is
+    /// skipped, so a crash mid-append cannot make the stream restart its
+    /// numbering. An absent or empty file starts at `0`.
+    fn next_offset(path: &std::path::Path) -> Result<u64> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut file = match fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => {
+                return Err(TinyAgentsError::Validation(format!(
+                    "append store open error: {e}"
+                )));
+            }
+        };
+        let len = file
+            .metadata()
+            .map_err(|e| TinyAgentsError::Validation(format!("append store stat error: {e}")))?
+            .len();
+        if len == 0 {
+            return Ok(0);
+        }
+        let mut window = 4096u64;
+        loop {
+            let start = len.saturating_sub(window);
+            file.seek(SeekFrom::Start(start)).map_err(|e| {
+                TinyAgentsError::Validation(format!("append store seek error: {e}"))
+            })?;
+            let mut buf = String::new();
+            file.read_to_string(&mut buf).map_err(|e| {
+                TinyAgentsError::Validation(format!("append store read error: {e}"))
+            })?;
+            // Only lines that are certainly complete: when the window did not
+            // reach the start of the file, its first line may be cut in half.
+            let complete_from = usize::from(start > 0);
+            let lines: Vec<&str> = buf.lines().skip(complete_from).collect();
+            for line in lines.iter().rev() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if let Ok(record) = serde_json::from_str::<StoreRecord>(line) {
+                    return Ok(record.offset + 1);
+                }
+                // A torn trailing line: keep walking backwards.
+            }
+            if start == 0 {
+                // Whole file scanned and nothing decoded: treat it as empty.
+                return Ok(0);
+            }
+            window = window.saturating_mul(4);
         }
     }
 
@@ -344,30 +405,22 @@ impl AppendStore for JsonlAppendStore {
     async fn append(&self, stream: &str, value: Value) -> Result<u64> {
         let path = self.stream_path(stream)?;
         let root_dir = self.root_dir.clone();
-        let offsets = Arc::clone(&self.offsets);
-        let stream = stream.to_string();
+        let guard = Arc::clone(&self.append_guard);
 
         // The append is pure blocking file I/O. Run it off the async runtime so
         // it never stalls a tokio worker (`spawn_blocking` when a runtime is
         // present, inline otherwise — e.g. a synchronous sink draining outside a
-        // runtime). The offset cache means we only read the file once per stream
-        // instead of re-parsing the whole file on every append (previously
-        // O(n²) per stream).
+        // runtime).
         let work = move || -> Result<u64> {
             fs::create_dir_all(&root_dir).map_err(|e| {
                 TinyAgentsError::Validation(format!("append store mkdir error: {e}"))
             })?;
-            // Hold the offset guard across the write so concurrent appends to the
-            // same store instance get distinct, ordered offsets.
-            let mut cache = offsets.lock().map_err(|e| {
+            // Hold the guard across read-tail + write so concurrent appends
+            // through this instance get distinct, ordered offsets.
+            let _guard = guard.lock().map_err(|e| {
                 TinyAgentsError::Validation(format!("append store lock poisoned: {e}"))
             })?;
-            let offset = match cache.get(&stream) {
-                Some(&next) => next,
-                // First append for this stream in this instance: learn the length
-                // from disk once, then track it in memory.
-                None => Self::read_records(&path)?.len() as u64,
-            };
+            let offset = Self::next_offset(&path)?;
             let record = StoreRecord {
                 offset,
                 value,
@@ -385,7 +438,6 @@ impl AppendStore for JsonlAppendStore {
             std::io::Write::write_all(&mut file, line.as_bytes()).map_err(|e| {
                 TinyAgentsError::Validation(format!("append store write error: {e}"))
             })?;
-            cache.insert(stream, offset + 1);
             Ok(offset)
         };
 
@@ -399,16 +451,22 @@ impl AppendStore for JsonlAppendStore {
 
     async fn read_from(&self, stream: &str, offset: u64) -> Result<Vec<(u64, Value)>> {
         let path = self.stream_path(stream)?;
+        // Resolve BY OFFSET, not by position. `.skip(offset)` is positional, so
+        // it disagreed with the offsets it then handed back the moment a stream
+        // contained anything other than a dense 0..n sequence — which is exactly
+        // what the documented contract (`entries whose offset is >= offset`)
+        // promises to handle, and what `InMemoryAppendStore` already did.
         Ok(Self::read_records(&path)?
             .into_iter()
-            .skip(offset as usize)
+            .filter(|r| r.offset >= offset)
             .map(|r| (r.offset, r.value))
             .collect())
     }
 
     async fn len(&self, stream: &str) -> Result<u64> {
+        // The offset the next append will receive, per the trait contract.
         let path = self.stream_path(stream)?;
-        Ok(Self::read_records(&path)?.len() as u64)
+        Self::next_offset(&path)
     }
 }
 

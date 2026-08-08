@@ -34,12 +34,52 @@ pub use types::*;
 // below; it is not re-exported by `pub use types::*`.
 use types::{EventSinkInner, JournalRecorder};
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
 
 use crate::harness::cost::CostTotals;
 use crate::harness::ids::{ComponentId, ExecutionStatus, HarnessPhase, RunId, ThreadId};
 use crate::harness::usage::UsageTotals;
+
+// ---------------------------------------------------------------------------
+// Lock helpers
+// ---------------------------------------------------------------------------
+
+/// Locks a mutex, **recovering** from poisoning instead of panicking.
+///
+/// A listener may panic (this module explicitly tolerates that, see
+/// [`DispatchGuard`]), and a panic while any of these locks is held poisons it.
+/// Every structure guarded here is a plain buffer/counter with no cross-field
+/// invariant a half-finished update could break, so the poisoned state is still
+/// perfectly usable — whereas `.expect("lock poisoned")` converts one listener's
+/// panic into a permanently unusable event bus for the entire process.
+///
+/// This also brings the events module in line with
+/// [`SteeringHandle`][crate::harness::steering::SteeringHandle], which already
+/// recovers from poisoning for exactly the same reason. The two used to
+/// disagree.
+fn lock_recovering<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Clears [`EventSinkInner::dispatching`] on drop, including while a panic is
+/// unwinding.
+///
+/// The flag used to be reset only on the normal exit path (when the queue
+/// drained). A listener that panicked unwound straight past that reset, leaving
+/// `dispatching == true` forever: every later `emit` saw a drain already in
+/// progress, pushed onto `pending`, and returned. The run kept emitting, no
+/// listener ever received anything again, and `pending` grew without bound —
+/// a silent, unrecoverable observability outage from one bad callback.
+struct DispatchGuard<'a> {
+    inner: &'a Mutex<EventSinkInner>,
+}
+
+impl Drop for DispatchGuard<'_> {
+    fn drop(&mut self) {
+        lock_recovering(self.inner).dispatching = false;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // EventSink impls
@@ -78,7 +118,7 @@ impl EventSink {
     /// Subscribes a new listener. The listener will receive every subsequent
     /// [`AgentEvent`] emitted through this sink (or any of its clones).
     pub fn subscribe(&self, listener: Arc<dyn EventListener>) {
-        let mut inner = self.inner.lock().expect("EventSink lock poisoned");
+        let mut inner = lock_recovering(&self.inner);
         inner.listeners.push(listener);
     }
 
@@ -88,7 +128,7 @@ impl EventSink {
     /// transient listener to a long-lived shared sink. Returns `true` when the
     /// listener was present.
     pub fn unsubscribe(&self, listener: &Arc<dyn EventListener>) -> bool {
-        let mut inner = self.inner.lock().expect("EventSink lock poisoned");
+        let mut inner = lock_recovering(&self.inner);
         let before = inner.listeners.len();
         inner
             .listeners
@@ -98,11 +138,7 @@ impl EventSink {
 
     #[cfg(test)]
     pub(crate) fn listener_count(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("EventSink lock poisoned")
-            .listeners
-            .len()
+        lock_recovering(&self.inner).listeners.len()
     }
 
     /// Emits an event, assigning a monotonic [`EventId`] and offset, then
@@ -120,9 +156,13 @@ impl EventSink {
     /// a listener runs, so callbacks may safely emit to the same sink (the
     /// re-entrant record is queued and delivered by the active drain loop)
     /// when they guard against unbounded event recursion.
+    /// A panicking listener does **not** wedge the sink: the `dispatching` flag
+    /// is released by a [`DispatchGuard`] on unwind, so later emits still
+    /// dispatch (the panicking listener's own record is lost, and any records
+    /// still queued behind it are delivered by whichever emitter drains next).
     pub fn emit(&self, event: AgentEvent) -> EventRecord {
         let (record, should_drain) = {
-            let mut inner = self.inner.lock().expect("EventSink lock poisoned");
+            let mut inner = lock_recovering(&self.inner);
             let offset = inner.next_offset;
             inner.next_offset += 1;
             let id = crate::harness::ids::EventId::new(format!("{}-evt-{offset}", inner.stream_id));
@@ -136,15 +176,15 @@ impl EventSink {
             (record, should_drain)
         };
         if should_drain {
+            // Held for the whole drain: `dispatching` is cleared on the normal
+            // exit path *and* while a listener panic unwinds through here.
+            let _guard = DispatchGuard { inner: &self.inner };
             loop {
                 let next = {
-                    let mut inner = self.inner.lock().expect("EventSink lock poisoned");
+                    let mut inner = lock_recovering(&self.inner);
                     match inner.pending.pop_front() {
                         Some(entry) => entry,
-                        None => {
-                            inner.dispatching = false;
-                            break;
-                        }
+                        None => break,
                     }
                 };
                 let (queued, listeners) = next;
@@ -158,11 +198,7 @@ impl EventSink {
 
     /// Returns the number of currently registered listeners.
     pub fn len(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("EventSink lock poisoned")
-            .listeners
-            .len()
+        lock_recovering(&self.inner).listeners.len()
     }
 
     /// Returns `true` when no listeners are registered.
@@ -191,18 +227,12 @@ impl RecordingListener {
 
     /// Returns a snapshot of all collected [`EventRecord`]s in arrival order.
     pub fn events(&self) -> Vec<EventRecord> {
-        self.records
-            .lock()
-            .expect("RecordingListener lock poisoned")
-            .clone()
+        lock_recovering(&self.records).clone()
     }
 
     /// Returns the number of events collected so far.
     pub fn len(&self) -> usize {
-        self.records
-            .lock()
-            .expect("RecordingListener lock poisoned")
-            .len()
+        lock_recovering(&self.records).len()
     }
 
     /// Returns `true` when no events have been collected yet.
@@ -213,10 +243,7 @@ impl RecordingListener {
 
 impl EventListener for RecordingListener {
     fn on_event(&self, record: &EventRecord) {
-        self.records
-            .lock()
-            .expect("RecordingListener lock poisoned")
-            .push(record.clone());
+        lock_recovering(&self.records).push(record.clone());
     }
 }
 
@@ -259,9 +286,7 @@ impl EventJournal {
     /// Callers can use this to replay run history from any known checkpoint.
     /// A `from_offset` of `0` replays the full journal.
     pub fn replay_from(&self, from_offset: u64) -> Vec<EventRecord> {
-        self.records
-            .lock()
-            .expect("EventJournal lock poisoned")
+        lock_recovering(&self.records)
             .iter()
             .filter(|r| r.offset >= from_offset)
             .cloned()
@@ -270,10 +295,7 @@ impl EventJournal {
 
     /// Returns the total number of events in the journal.
     pub fn len(&self) -> usize {
-        self.records
-            .lock()
-            .expect("EventJournal lock poisoned")
-            .len()
+        lock_recovering(&self.records).len()
     }
 
     /// Returns `true` when the journal contains no events.
@@ -284,10 +306,7 @@ impl EventJournal {
 
 impl EventListener for JournalRecorder {
     fn on_event(&self, record: &EventRecord) {
-        self.records
-            .lock()
-            .expect("EventJournal lock poisoned")
-            .push(record.clone());
+        lock_recovering(&self.records).push(record.clone());
     }
 }
 

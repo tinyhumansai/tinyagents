@@ -62,6 +62,7 @@ fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> Mod
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -120,13 +121,40 @@ async fn provider_schema_rejects_non_json_text() {
 }
 
 #[tokio::test]
-async fn provider_schema_parse_type_mismatch_errors() {
-    // Valid JSON, but the shape does not match `Answer` (score is a string).
+async fn provider_schema_rejects_a_value_that_violates_the_schema() {
+    // Valid JSON, but the shape does not match the declared schema (`score` is
+    // a string). This used to extract *successfully* — the extractor stored its
+    // schema and never read it — and the mismatch only surfaced later, at
+    // `parse::<Answer>()`. It is now caught at the boundary, with the failing
+    // instance path named, so `run.structured` can never hold a value the
+    // schema rejects.
     let extractor = StructuredExtractor::new(
         StructuredStrategy::ProviderSchema,
         "answer",
         object_schema(),
     );
+    let response = ModelResponse::assistant(r#"{"value":"x","score":"not-a-number"}"#);
+
+    let err = extractor
+        .extract(&response)
+        .expect_err("a schema violation must fail closed");
+    assert!(
+        matches!(err, TinyAgentsError::StructuredOutput(_)),
+        "expected a StructuredOutput error, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("schema 'answer'.score"),
+        "the error must name the failing instance path: {err}"
+    );
+}
+
+#[tokio::test]
+async fn parse_type_mismatch_still_errors_for_a_schema_free_extractor() {
+    // The `parse::<T>()` mismatch path is still reachable: an extractor with no
+    // declared schema validates nothing, so the deserialisation boundary is
+    // where the mismatch is caught.
+    let extractor =
+        StructuredExtractor::new(StructuredStrategy::ProviderSchema, "answer", json!({}));
     let response = ModelResponse::assistant(r#"{"value":"x","score":"not-a-number"}"#);
 
     let output = extractor.extract(&response).expect("valid JSON extracts");
@@ -163,6 +191,7 @@ async fn tool_call_strategy_reads_named_tool_arguments() {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     };
 
     let output = extractor
@@ -337,6 +366,7 @@ async fn provider_schema_reads_text_content_blocks() {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     };
 
     let parsed: Answer = extractor

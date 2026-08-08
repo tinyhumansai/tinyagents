@@ -20,7 +20,7 @@ use crate::harness::cancel::CancellationToken;
 use crate::harness::context::RunContext;
 use crate::harness::events::EventSink;
 use crate::harness::ids::{RunId, ThreadId};
-use crate::harness::tool::{context_detail_from_args, humanize_tool_name};
+use crate::harness::tool::{ToolErrorPolicy, context_detail_from_args, humanize_tool_name};
 
 /// The model-visible syntax a tool declaration prefers.
 ///
@@ -463,6 +463,50 @@ pub trait Tool<State: Send + Sync>: Send + Sync {
             (ToolTimeout::Inherit, Some(timeout_ms)) => ToolTimeout::Millis(timeout_ms),
             (timeout, _) => timeout,
         }
+    }
+
+    /// Names of arguments this tool receives from the **host**, never from the
+    /// model.
+    ///
+    /// These keys are projected out of the model-facing declaration by
+    /// [`ToolRegistry::schemas`] — removed from both `properties` and
+    /// `required` — so the model neither sees them nor is asked to supply them.
+    /// The host fills them in at execution time.
+    ///
+    /// This is the declarative replacement for reaching around the argument
+    /// schema into [`ToolExecutionContext`], which is what a tool needing the
+    /// caller's thread id or recursion depth has to do today. Port of
+    /// LangChain's `InjectedToolArg` / `InjectedToolCallId`.
+    ///
+    /// # Execution-time contract
+    ///
+    /// A model-supplied value for an injected key must be **stripped before
+    /// schema validation**, then replaced by the host's real value — see the
+    /// ordering rule in [`crate::harness::tool::injected`]. Getting that order
+    /// wrong lets a model forge a hidden argument.
+    ///
+    /// The default is an empty list: a tool opts in.
+    fn injected_arguments(&self) -> &[&str] {
+        &[]
+    }
+
+    /// What the harness should do when this tool returns `Err`.
+    ///
+    /// The default is [`ToolErrorPolicy::Fail`], preserving today's behaviour
+    /// exactly: an `Err` propagates and ends the run. A tool whose failures are
+    /// routine and recoverable — a lookup that misses, a network call that
+    /// times out — should return [`ToolErrorPolicy::ReturnToError`] so the
+    /// model sees the failure and can adapt, or
+    /// [`ToolErrorPolicy::Message`] to show a fixed message instead of an error
+    /// text that may not be safe to expose.
+    ///
+    /// [`TinyAgentsError::Cancelled`][crate::error::TinyAgentsError::Cancelled]
+    /// and
+    /// [`TinyAgentsError::Interrupted`][crate::error::TinyAgentsError::Interrupted]
+    /// are re-raised regardless of this policy; see
+    /// [`ToolErrorPolicy::apply`].
+    fn error_policy(&self) -> ToolErrorPolicy {
+        ToolErrorPolicy::default()
     }
 
     /// Executes the tool against application state and a validated call.

@@ -49,6 +49,7 @@ fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> Mod
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -65,6 +66,7 @@ fn text_response(text: &str) -> ModelResponse {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 

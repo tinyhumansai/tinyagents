@@ -41,7 +41,11 @@ pub fn upsert_agent_run(workspace_dir: &Path, upsert: AgentRunUpsert) -> Result<
         upsert.parent_thread_id.as_deref().unwrap_or("-")
     );
 
-    crate::session::store::with_connection(workspace_dir, |conn| {
+    // One transaction for the write *and* the read-back. Committing the insert
+    // on an autocommit connection, closing it, then re-opening to `get_*` hands
+    // the caller whatever a concurrent writer left behind rather than what this
+    // call wrote — an upsert that reports someone else's row.
+    crate::session::store::with_transaction(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         conn.execute(
             "INSERT INTO agent_runs (
@@ -95,10 +99,8 @@ pub fn upsert_agent_run(workspace_dir: &Path, upsert: AgentRunUpsert) -> Result<
             ],
         )
         .storage_context("upsert agent run")?;
-        Ok(())
-    })?;
-
-    get_agent_run(workspace_dir, &upsert.id)?.storage_context("agent run missing after upsert")
+        get_agent_run_inner(conn, &upsert.id)?.storage_context("agent run missing after upsert")
+    })
 }
 
 pub fn upsert_workflow_run(workspace_dir: &Path, upsert: WorkflowRunUpsert) -> Result<WorkflowRun> {
@@ -111,7 +113,11 @@ pub fn upsert_workflow_run(workspace_dir: &Path, upsert: WorkflowRunUpsert) -> R
     let child_run_ids_json =
         serde_json::to_string(&upsert.child_run_ids).storage_context("serialize child run ids")?;
 
-    crate::session::store::with_connection(workspace_dir, |conn| {
+    // One transaction for the write *and* the read-back. Committing the insert
+    // on an autocommit connection, closing it, then re-opening to `get_*` hands
+    // the caller whatever a concurrent writer left behind rather than what this
+    // call wrote — an upsert that reports someone else's row.
+    crate::session::store::with_transaction(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         conn.execute(
             "INSERT INTO workflow_runs (
@@ -143,11 +149,9 @@ pub fn upsert_workflow_run(workspace_dir: &Path, upsert: WorkflowRunUpsert) -> R
             ],
         )
         .storage_context("upsert workflow run")?;
-        Ok(())
-    })?;
-
-    get_workflow_run(workspace_dir, &upsert.id)?
-        .storage_context("workflow run missing after upsert")
+        get_workflow_run_inner(conn, &upsert.id)?
+            .storage_context("workflow run missing after upsert")
+    })
 }
 
 pub fn append_run_event(workspace_dir: &Path, event: RunEventAppend) -> Result<RunEvent> {
@@ -443,18 +447,24 @@ pub fn list_recent_run_events(
     })
 }
 
+/// Connection-scoped workflow-run lookup, so an upsert can read its own write
+/// back inside the same transaction.
+fn get_workflow_run_inner(conn: &Connection, id: &str) -> Result<Option<WorkflowRun>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, definition_id, parent_thread_id, input_json, phase_states_json,
+                child_run_ids_json, status, summary, started_at, updated_at, completed_at
+         FROM workflow_runs WHERE id = ?1",
+    )?;
+    Ok(stmt
+        .query_row(params![id], map_workflow_run_row)
+        .optional()?)
+}
+
 pub fn get_workflow_run(workspace_dir: &Path, id: &str) -> Result<Option<WorkflowRun>> {
     tracing::debug!("{LOG_PREFIX} get_workflow_run.entry id={id}");
     crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
-        let mut stmt = conn.prepare(
-            "SELECT id, definition_id, parent_thread_id, input_json, phase_states_json,
-                    child_run_ids_json, status, summary, started_at, updated_at, completed_at
-             FROM workflow_runs WHERE id = ?1",
-        )?;
-        let run = stmt
-            .query_row(params![id], map_workflow_run_row)
-            .optional()?;
+        let run = get_workflow_run_inner(conn, id)?;
         tracing::debug!(
             "{LOG_PREFIX} get_workflow_run.exit id={id} found={}",
             run.is_some()
@@ -563,7 +573,11 @@ pub fn upsert_agent_team(workspace_dir: &Path, upsert: AgentTeamUpsert) -> Resul
         upsert.lead_agent_id,
         upsert.status.as_str()
     );
-    crate::session::store::with_connection(workspace_dir, |conn| {
+    // One transaction for the write *and* the read-back. Committing the insert
+    // on an autocommit connection, closing it, then re-opening to `get_*` hands
+    // the caller whatever a concurrent writer left behind rather than what this
+    // call wrote — an upsert that reports someone else's row.
+    let team = crate::session::store::with_transaction(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         conn.execute(
             "INSERT INTO agent_teams (
@@ -589,10 +603,8 @@ pub fn upsert_agent_team(workspace_dir: &Path, upsert: AgentTeamUpsert) -> Resul
             ],
         )
         .storage_context("upsert agent team")?;
-        Ok(())
+        get_agent_team_inner(conn, &upsert.id)?.storage_context("agent team missing after upsert")
     })?;
-    let team = get_agent_team(workspace_dir, &upsert.id)?
-        .storage_context("agent team missing after upsert")?;
     tracing::debug!("{LOG_PREFIX} upsert_agent_team.exit id={}", team.id);
     Ok(team)
 }
@@ -700,7 +712,11 @@ pub fn upsert_agent_team_member(
         upsert.name,
         upsert.member_status.as_str()
     );
-    crate::session::store::with_connection(workspace_dir, |conn| {
+    // One transaction for the write *and* the read-back. Committing the insert
+    // on an autocommit connection, closing it, then re-opening to `get_*` hands
+    // the caller whatever a concurrent writer left behind rather than what this
+    // call wrote — an upsert that reports someone else's row.
+    let member = crate::session::store::with_transaction(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         conn.execute(
             "INSERT INTO agent_team_members (
@@ -729,10 +745,9 @@ pub fn upsert_agent_team_member(
             ],
         )
         .storage_context("upsert agent team member")?;
-        Ok(())
+        get_agent_team_member_inner(conn, &upsert.id)?
+            .storage_context("agent team member missing after upsert")
     })?;
-    let member = get_agent_team_member(workspace_dir, &upsert.id)?
-        .storage_context("agent team member missing after upsert")?;
     tracing::debug!(
         "{LOG_PREFIX} upsert_agent_team_member.exit id={}",
         member.id
@@ -800,7 +815,11 @@ pub fn upsert_agent_team_task(
         upsert.status.as_str(),
         upsert.depends_on.len()
     );
-    crate::session::store::with_connection(workspace_dir, |conn| {
+    // One transaction for the write *and* the read-back. Committing the insert
+    // on an autocommit connection, closing it, then re-opening to `get_*` hands
+    // the caller whatever a concurrent writer left behind rather than what this
+    // call wrote — an upsert that reports someone else's row.
+    let task = crate::session::store::with_transaction(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         conn.execute(
             "INSERT INTO agent_team_tasks (
@@ -854,10 +873,9 @@ pub fn upsert_agent_team_task(
             ],
         )
         .storage_context("upsert agent team task")?;
-        Ok(())
+        get_agent_team_task_inner(conn, &upsert.id)?
+            .storage_context("agent team task missing after upsert")
     })?;
-    let task = get_agent_team_task(workspace_dir, &upsert.id)?
-        .storage_context("agent team task missing after upsert")?;
     tracing::debug!("{LOG_PREFIX} upsert_agent_team_task.exit id={}", task.id);
     Ok(task)
 }
@@ -961,19 +979,31 @@ pub fn claim_agent_team_task(
             return Ok(ClaimOutcome::Blocked { unmet });
         }
 
-        // 3. Compare-and-swap on the unclaimed guard.
+        // 3. Compare-and-swap on the unclaimed guard **and the status**.
+        //
+        // `claimed_by_member_id IS NULL` alone is not a guard: `upsert_agent_team_task`
+        // deliberately NULLs that column whenever the new status is not
+        // `in_progress`, so every `done` task also satisfies it. A stale worker
+        // re-claiming a finished task therefore flipped it straight back to
+        // `in_progress` — and stranded everything downstream, because the
+        // completion gate re-checks that each dependency is still `done` and now
+        // reports it unfinished. A terminal task is not claimable, whatever its
+        // claim column says.
         let now = Utc::now();
         let rows_affected = conn
             .execute(
                 "UPDATE agent_team_tasks
                  SET claimed_by_member_id = ?1, claim_token = ?2, status = 'in_progress', updated_at = ?3
-                 WHERE id = ?4 AND team_id = ?5 AND claimed_by_member_id IS NULL",
+                 WHERE id = ?4 AND team_id = ?5 AND claimed_by_member_id IS NULL
+                   AND status IN ('todo', 'ready', 'blocked')",
                 params![member_id, claim_token, now.to_rfc3339(), task_id, team_id],
             )
             .storage_context("compare-and-swap claim agent team task")?;
         if rows_affected == 0 {
             tracing::debug!(
-                "{LOG_PREFIX} claim_agent_team_task.already_claimed team={team_id} task={task_id}"
+                "{LOG_PREFIX} claim_agent_team_task.already_claimed team={team_id} task={task_id} \
+                 status={}",
+                task.status.as_str()
             );
             return Ok(ClaimOutcome::AlreadyClaimed);
         }

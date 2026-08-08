@@ -59,6 +59,7 @@ fn tool_call_response(id: &str, name: &str, input: u64, output: u64) -> ModelRes
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -76,6 +77,7 @@ fn text_response(text: &str, input: u64, output: u64) -> ModelResponse {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -293,6 +295,7 @@ async fn cost_pricing_records_and_enforces_money_budget() {
             source: ModelResolutionSource::RegistryDefault,
         }),
         continue_turn: None,
+        served_from_cache: false,
     };
 
     stack
@@ -519,6 +522,7 @@ async fn cached_input_budget_blocks_next_call() {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     };
     stack
         .run_after_model(&mut ctx, &(), &mut resp)

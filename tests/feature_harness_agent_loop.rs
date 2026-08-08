@@ -46,6 +46,7 @@ fn multi_tool_call_response(calls: Vec<ToolCall>) -> ModelResponse {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -66,6 +67,7 @@ fn text_response(text: &str) -> ModelResponse {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 

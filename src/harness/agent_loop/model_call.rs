@@ -7,6 +7,9 @@
 //! the full loop lifecycle, limits, and backoff design.
 
 use super::*;
+use crate::harness::cache::{
+    CachePolicy, CacheSkipReason, apply_prompt_cache_breakpoints, scoped_cache_key,
+};
 
 impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// Invokes a model, consulting the local response cache around the
@@ -20,14 +23,38 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// [`AgentEvent::CacheMiss`] is emitted, the provider is invoked normally,
     /// and the successful response is written back to the cache.
     ///
+    /// # Key composition
+    ///
+    /// The key is **not** the request hash alone. [`Self::response_cache_decision`]
+    /// produces the request half ([`cache_key`]); this method folds in the
+    /// *resolved* model's
+    /// [`cache_identity`][crate::harness::model::ChatModel::cache_identity], the
+    /// `streaming` flag, and the policy namespace via
+    /// [`scoped_cache_key`][crate::harness::cache::scoped_cache_key]. All three
+    /// were previously absent from the key:
+    ///
+    /// * the request's `model` field is never set by the loop and the endpoint
+    ///   and credential live inside the `Arc<dyn ChatModel>`, so one shared
+    ///   cache served a hosted harness's answer to a local one;
+    /// * `streaming` is a parameter of this function, not a request field, so a
+    ///   warm streaming run could be served an entry written by a unary run.
+    ///
     /// # Accounting
     ///
     /// A cache hit is still counted as a model "step"/call by the caller
     /// ([`Self::run_loop`] increments `model_calls`/`steps` and emits
-    /// [`AgentEvent::ModelCompleted`] after this returns) so usage and limit
-    /// bookkeeping stay consistent whether or not a call was served from cache.
-    /// The behavioral guarantee is only that the underlying provider is not
-    /// contacted on a hit.
+    /// [`AgentEvent::ModelCompleted`] after this returns) so limit bookkeeping
+    /// stays consistent whether or not a call was served from cache. The hit is
+    /// stamped [`ModelResponse::served_from_cache`] so *token/cost* accounting
+    /// can tell a replay from a real call and not re-bill it.
+    ///
+    /// # Failure policy
+    ///
+    /// A cache is an optimization. Neither a failed lookup nor a failed write
+    /// fails the run: a read error degrades to a miss, and a write error is
+    /// logged and dropped — the provider call has already succeeded and been
+    /// paid for, so discarding its answer because the cache was unavailable is
+    /// strictly worse than not caching at all.
     async fn invoke_model_with_retry(
         &self,
         state: &State,
@@ -37,16 +64,60 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         binding: ResolvedModelBinding<State>,
         streaming: bool,
     ) -> Result<ModelResponse> {
-        let decision = self.response_cache_decision(request);
+        let policy = self.effective_cache_policy(request);
+        // The identity of the model that is actually about to be called — known
+        // only *after* resolution, which is why the key cannot be finalized by
+        // the request-hashing half alone.
+        let identity = binding.model.cache_identity();
+        let primary_name = binding.resolved.name.clone();
+
+        let decision = self.response_cache_decision(request).map(|(cache, base)| {
+            let key = scoped_cache_key(
+                &base,
+                identity.as_deref(),
+                streaming,
+                policy.namespace.as_deref(),
+            );
+            (cache, key)
+        });
+
+        if decision.is_none() {
+            let reason = self.cache_skip_reason(request);
+            tracing::debug!(
+                call_id = %call_id.as_str(),
+                reason = reason.as_str(),
+                "[cache] response cache not consulted for this model call"
+            );
+        }
 
         if let Some((cache, key)) = decision.as_ref() {
-            if let Some(mut cached) = cache.get(key).await? {
+            // A read failure is a miss, not a run failure: `InMemoryResponseCache`
+            // reports a poisoned mutex as a `Validation` error, and the trait is
+            // explicitly designed for third-party implementations whose failure
+            // modes we do not control.
+            let looked_up = match cache.get(key).await {
+                Ok(hit) => hit,
+                Err(error) => {
+                    tracing::warn!(
+                        call_id = %call_id.as_str(),
+                        %error,
+                        "[cache] response-cache lookup failed; treating as a miss"
+                    );
+                    None
+                }
+            };
+            if let Some(mut cached) = looked_up {
                 ctx.emit(AgentEvent::CacheHit {
                     call_id: call_id.clone(),
                     key: key.clone(),
                 });
+                cached.served_from_cache = true;
                 if cached.resolved_model.is_none() {
                     cached.resolved_model = Some(binding.resolved.clone());
+                }
+                if streaming {
+                    self.replay_cached_response_as_deltas(state, ctx, call_id, &cached)
+                        .await?;
                 }
                 return Ok(cached);
             }
@@ -56,15 +127,154 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             });
         }
 
+        // Provider prompt-cache breakpoints are injected *after* the key is
+        // derived (they mutate `provider_options`, which the key covers) and
+        // only when the policy asks for prefix protection, so the common path
+        // never pays for a request clone.
+        let mut breakpointed;
+        let effective_request = if policy.protect_prompt_prefix {
+            breakpointed = request.clone();
+            apply_prompt_cache_breakpoints(&mut breakpointed);
+            &breakpointed
+        } else {
+            request
+        };
+
         let response = self
-            .invoke_model_resolving(state, ctx, request, call_id, binding, streaming)
+            .invoke_model_resolving(state, ctx, effective_request, call_id, binding, streaming)
             .await?;
 
         if let Some((cache, key)) = decision.as_ref() {
-            cache.put(key, response.clone()).await?;
+            // Only the *primary* model's answer may be stored under this key.
+            // `invoke_model_resolving` walks the fallback chain on failure and
+            // can return a different model's response; writing that under the
+            // primary's key poisons it — permanently, when no TTL is set — so
+            // every later run of the primary silently gets the fallback's
+            // answer, and reports model B after `ModelStarted` announced A.
+            let served_by = response
+                .resolved_model
+                .as_ref()
+                .map(|resolved| resolved.name.as_str());
+            if served_by.is_some_and(|name| name != primary_name) {
+                tracing::debug!(
+                    call_id = %call_id.as_str(),
+                    primary = %primary_name,
+                    served_by = served_by.unwrap_or_default(),
+                    "[cache] skipping write: a fallback model answered, not the keyed model"
+                );
+            } else if let Err(error) = cache
+                .put_with_ttl(key, response.clone(), policy.ttl())
+                .await
+            {
+                // The provider call already succeeded and was paid for.
+                // Discarding its answer because the cache is unavailable would
+                // be strictly worse than not caching.
+                tracing::warn!(
+                    call_id = %call_id.as_str(),
+                    %error,
+                    "[cache] response-cache write failed; returning the response uncached"
+                );
+            }
         }
 
         Ok(response)
+    }
+
+    /// Resolves the effective [`CachePolicy`] for `request`: the per-request
+    /// policy when present, otherwise the harness-level
+    /// [`RunPolicy::cache`][crate::harness::runtime::RunPolicy].
+    pub(super) fn effective_cache_policy(&self, request: &ModelRequest) -> CachePolicy {
+        request
+            .cache_policy
+            .clone()
+            .unwrap_or_else(|| self.policy.cache.clone())
+    }
+
+    /// Explains why [`Self::response_cache_decision`] declined to consult the
+    /// cache, for the diagnostic log line on the skip path.
+    ///
+    /// `docs/modules/harness/cache.md` specifies a richer decision surface than
+    /// the bare `CacheHit`/`CacheMiss` pair; without this a caller seeing a 0%
+    /// hit rate cannot tell "no cache attached" from "policy off" from "every
+    /// request was multi-turn".
+    pub(super) fn cache_skip_reason(&self, request: &ModelRequest) -> CacheSkipReason {
+        if self.response_cache.is_none() {
+            return CacheSkipReason::NoCacheAttached;
+        }
+        if !self.effective_cache_policy(request).response_cache_enabled {
+            return CacheSkipReason::PolicyDisabled;
+        }
+        CacheSkipReason::MultiTurnTranscript
+    }
+
+    /// Replays a cache hit as synthetic stream deltas so a warm streaming run
+    /// is observationally identical to a cold one.
+    ///
+    /// A cache hit short-circuits before [`Self::invoke_model_streaming_once`],
+    /// so a streaming run served from cache used to emit **zero**
+    /// [`AgentEvent::ModelDelta`] events and run **zero**
+    /// [`on_model_delta`][crate::harness::middleware::Middleware::on_model_delta]
+    /// hooks — a UI rendering deltas showed nothing at all, contradicting the
+    /// streaming contract documented on the harness entry points. LangChain
+    /// replays hits as synthetic stream events for exactly this reason.
+    ///
+    /// The replay emits one text delta (when the cached message has text) and
+    /// one delta per cached tool call, mirroring what the provider stream would
+    /// have produced. It is a replay, not a re-derivation: no provider is
+    /// contacted.
+    async fn replay_cached_response_as_deltas(
+        &self,
+        state: &State,
+        ctx: &mut RunContext<Ctx>,
+        call_id: &CallId,
+        cached: &ModelResponse,
+    ) -> Result<()> {
+        let text = cached.text();
+        let tool_calls = cached.tool_calls().to_vec();
+        tracing::debug!(
+            call_id = %call_id.as_str(),
+            text_len = text.len(),
+            tool_calls = tool_calls.len(),
+            "[cache] replaying a cache hit as synthetic stream deltas"
+        );
+
+        let mut deltas: Vec<MessageDelta> = Vec::new();
+        if !text.is_empty() {
+            deltas.push(MessageDelta {
+                text,
+                reasoning: String::new(),
+                tool_call: None,
+            });
+        }
+        for call in &tool_calls {
+            deltas.push(MessageDelta {
+                text: String::new(),
+                reasoning: String::new(),
+                tool_call: Some(crate::harness::tool::ToolDelta {
+                    call_id: call.id.clone(),
+                    content: serde_json::to_string(&call.arguments).unwrap_or_default(),
+                    tool_name: Some(call.name.clone()),
+                }),
+            });
+        }
+
+        for delta in deltas {
+            let mut model_delta = ModelDelta {
+                call_id: call_id.as_str().to_string(),
+                content: delta.text.clone(),
+                reasoning: delta.reasoning.clone(),
+                tool_call: delta.tool_call.clone(),
+            };
+            ctx.emit(AgentEvent::ModelDelta {
+                run_id: ctx.config.run_id.clone(),
+                call_id: call_id.clone(),
+                delta,
+            });
+            self.middleware
+                .run_on_model_delta(ctx, state, &mut model_delta)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Invokes a model with retry and fallback (no caching).
@@ -99,6 +309,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         loop {
             // Retry loop for the current model.
             let mut attempt = 0usize;
+            // Counts the deltas the *current* streaming attempt has already
+            // handed to consumers. A stream that dies after 200 tokens has
+            // already delivered them; the retry replays from scratch, so a UI
+            // concatenating `ModelDelta.text` renders partial garbage followed
+            // by the full answer. `StreamAccumulator` is discarded internally,
+            // but consumers are never told to discard too — see the warning
+            // below and the `AgentEvent` handoff noted in the module docs.
+            let mut deltas_emitted = 0usize;
             let outcome = loop {
                 // Observe cancellation before (re)issuing a model attempt so a
                 // cancel requested during a retry/rate-limit wait stops the run
@@ -116,8 +334,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 // awaited unbounded.
                 let remaining = self.call_budget(ctx);
                 let attempt_result = if streaming {
-                    let fut =
-                        self.invoke_model_streaming_once(state, ctx, &model, request, call_id);
+                    let fut = self.invoke_model_streaming_once(
+                        state,
+                        ctx,
+                        &model,
+                        request,
+                        call_id,
+                        &mut deltas_emitted,
+                    );
                     Self::with_call_budget(remaining, run_id.as_str(), "model call", fut).await
                 } else {
                     // Race the wall-clock-bounded unary call against cooperative
@@ -164,6 +388,23 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                             // whole exponential schedule one step too high.
                             let backoff_attempt = attempt;
                             attempt += 1;
+                            if streaming && deltas_emitted > 0 {
+                                // The retry re-emits the whole response from
+                                // the beginning. Until `AgentEvent` grows a
+                                // dedicated discard marker, `RetryScheduled`
+                                // for a streaming call *is* the signal that
+                                // every delta seen so far for this `call_id`
+                                // must be dropped.
+                                tracing::warn!(
+                                    call_id = %call_id.as_str(),
+                                    discarded_deltas = deltas_emitted,
+                                    attempt,
+                                    "[stream] retrying a streaming call that already emitted \
+                                     deltas; consumers must discard everything received so far \
+                                     for this call_id"
+                                );
+                            }
+                            deltas_emitted = 0;
                             ctx.emit(AgentEvent::RetryScheduled {
                                 call_id: call_id.clone(),
                                 attempt,
@@ -171,7 +412,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                             // Sleep for the backoff only when the policy opts in
                             // (`with_backoff_sleep`); otherwise this is a no-op so
                             // the loop stays fast and deterministic in tests.
-                            self.policy.retry.sleep_backoff(backoff_attempt).await;
+                            self.policy
+                                .retry
+                                .sleep_backoff_for_error(backoff_attempt, &error)
+                                .await;
                             continue;
                         }
                         break Err(error);
@@ -326,6 +570,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// [`ModelResponse`] via [`StreamAccumulator`]. The merged response is
     /// equivalent to what the unary [`crate::harness::model::ChatModel::invoke`]
     /// path would have produced, so the rest of the loop is unaffected.
+    ///
+    /// `deltas_emitted` is incremented for every delta actually handed to
+    /// consumers, so the retry path can tell whether a failed attempt already
+    /// published output that now has to be discarded.
     async fn invoke_model_streaming_once(
         &self,
         state: &State,
@@ -333,6 +581,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         model: &Arc<dyn ChatModel<State>>,
         request: &ModelRequest,
         call_id: &CallId,
+        deltas_emitted: &mut usize,
     ) -> Result<ModelResponse> {
         let mut stream = model.stream(state, request.clone()).await?;
         let mut accumulator = StreamAccumulator::new();
@@ -385,6 +634,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     call_id: call_id.clone(),
                     delta: message_delta,
                 });
+                *deltas_emitted += 1;
                 self.middleware
                     .run_on_model_delta(ctx, state, &mut model_delta)
                     .await?;
@@ -403,12 +653,85 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
 /// can proceed, short-circuit, retry, or fall back around the *whole* real model
 /// call. The resolved binding is rebuilt per invocation so a wrap middleware
 /// that retries `next` issues a fresh provider call each time.
+///
+/// # The binding is re-resolved from the request
+///
+/// [`ModelCallBase::call`] used to rebuild the binding purely from
+/// [`Self::resolved`] / [`Self::model`], both captured **before** the wrap onion
+/// ran, and ignore [`ModelRequest::model`] entirely. A wrap middleware steers by
+/// mutating that field — it is the only lever it has — so
+/// [`ModelFallbackMiddleware`][crate::harness::middleware::ModelFallbackMiddleware]
+/// re-invoked *the same failing model* once per configured fallback name,
+/// emitting a misleading `FallbackSelected { from, to }` for each, and then
+/// returned the original error. The asymmetry was easy to miss because
+/// `before_model` **does** honour `request.model`: lifecycle resolution happens
+/// after that hook, but before this one.
 pub(super) struct ModelCallBase<'h, State: Send + Sync, Ctx: Send + Sync> {
     pub(super) harness: &'h AgentHarness<State, Ctx>,
     pub(super) call_id: CallId,
     pub(super) resolved: ResolvedModel,
     pub(super) model: Arc<dyn ChatModel<State>>,
     pub(super) streaming: bool,
+}
+
+impl<State: Send + Sync, Ctx: Send + Sync> ModelCallBase<'_, State, Ctx> {
+    /// Produces the binding for one invocation, honouring a model override that
+    /// a wrap middleware wrote into `request.model`.
+    ///
+    /// * `request.model` absent, or equal to the already-resolved name: reuse
+    ///   the captured binding (the common path — no registry lookup).
+    /// * `request.model` names something the registry resolves as a genuine
+    ///   [`ModelResolutionSource::RequestOverride`]: use it. This is what makes
+    ///   a wrap-layer fallback actually switch models.
+    /// * `request.model` names something unresolvable (unregistered, missing a
+    ///   required capability, provider-retired): fall back to the captured
+    ///   binding and emit [`AgentEvent::ModelOverrideSkipped`], matching the
+    ///   fail-closed behaviour `run_loop` already has for a pre-wrap override.
+    ///   Silently substituting a different model is the one outcome that is
+    ///   never acceptable.
+    fn rebind(
+        &self,
+        ctx: &mut RunContext<Ctx>,
+        request: &ModelRequest,
+    ) -> ResolvedModelBinding<State> {
+        let captured = || ResolvedModelBinding {
+            resolved: self.resolved.clone(),
+            model: Arc::clone(&self.model),
+        };
+        let Some(requested) = request.model.as_deref() else {
+            return captured();
+        };
+        if requested == self.resolved.name {
+            return captured();
+        }
+        match self.harness.models.resolve_request(request, None, None) {
+            Some(binding)
+                if binding.resolved.source == ModelResolutionSource::RequestOverride
+                    && binding.resolved.name == requested =>
+            {
+                tracing::debug!(
+                    call_id = %self.call_id.as_str(),
+                    from = %self.resolved.name,
+                    to = %binding.resolved.name,
+                    "[model] wrap layer overrode the model; re-resolved the binding"
+                );
+                binding
+            }
+            _ => {
+                tracing::warn!(
+                    call_id = %self.call_id.as_str(),
+                    requested = %requested,
+                    resolved = %self.resolved.name,
+                    "[model] wrap layer named an unresolvable model; keeping the resolved binding"
+                );
+                ctx.emit(AgentEvent::ModelOverrideSkipped {
+                    requested: requested.to_string(),
+                    resolved: self.resolved.name.clone(),
+                });
+                captured()
+            }
+        }
+    }
 }
 
 impl<State: Send + Sync, Ctx: Send + Sync> ModelBaseCall<State, Ctx>
@@ -421,10 +744,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> ModelBaseCall<State, Ctx>
         request: ModelRequest,
     ) -> BoxModelFuture<'a> {
         Box::pin(async move {
-            let binding = ResolvedModelBinding {
-                resolved: self.resolved.clone(),
-                model: Arc::clone(&self.model),
-            };
+            let binding = self.rebind(ctx, &request);
             self.harness
                 .invoke_model_with_retry(
                     state,

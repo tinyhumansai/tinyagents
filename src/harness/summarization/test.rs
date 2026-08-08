@@ -370,3 +370,317 @@ mod smoke {
         assert_eq!(to_keep.len(), 2);
     }
 }
+
+/// Regression tests for the structural repair of transcript cut points.
+///
+/// Every test here is written against the concrete provider failure it
+/// prevents: a `role:"tool"` message with no preceding assistant `tool_calls`
+/// (OpenAI `400`, Anthropic "tool_result with no matching tool_use"), or the
+/// mirror image, an assistant `tool_calls` entry nothing ever answers.
+///
+/// Before the repair landed, `plan` and all three [`TrimStrategy`] variants cut
+/// at a blind index and produced exactly those shapes.
+#[cfg(test)]
+mod pairing {
+    use crate::harness::message::{AssistantMessage, ContentBlock, Message};
+    use crate::harness::summarization::{
+        MessageRole, SummarizationPolicy, TrimOptions, TrimStrategy, tool_pairing_is_intact,
+        trim_messages, trim_messages_with,
+    };
+    use crate::harness::tool::ToolCall;
+    use serde_json::json;
+
+    /// An assistant turn that only calls tools: no visible text at all, which
+    /// is precisely the shape that used to estimate to zero tokens and to be
+    /// severed from its results by a blind cut.
+    fn assistant_calling(ids: &[&str]) -> Message {
+        Message::Assistant(AssistantMessage {
+            id: None,
+            content: Vec::new(),
+            tool_calls: ids
+                .iter()
+                .map(|id| ToolCall::new(*id, "lookup", json!({"q": "rust"})))
+                .collect(),
+            usage: None,
+        })
+    }
+
+    /// `[system, user, assistant(tool_calls=[c1]), tool(c1), assistant("done")]`
+    /// — the canonical transcript that a `keep_last = 2` cut splits.
+    fn tool_transcript() -> Vec<Message> {
+        vec![
+            Message::system("sys"),
+            Message::user("weather?"),
+            assistant_calling(&["c1"]),
+            Message::tool("c1", "sunny"),
+            Message::assistant("done"),
+        ]
+    }
+
+    #[test]
+    fn plan_does_not_orphan_a_tool_result() {
+        let policy = SummarizationPolicy {
+            keep_last: 2,
+            ..Default::default()
+        };
+        let (to_summarize, to_keep) = policy.plan(&tool_transcript());
+
+        // The assistant tool-call turn must travel with its result.
+        assert!(
+            tool_pairing_is_intact(&to_keep),
+            "kept slice orphans a tool result: {to_keep:?}"
+        );
+        assert!(
+            !to_summarize
+                .iter()
+                .any(|m| matches!(m, Message::Assistant(a) if !a.tool_calls.is_empty())),
+            "the assistant tool-call turn was summarized away from its result"
+        );
+        // keep_last is a minimum: the repair kept one extra message.
+        assert_eq!(to_keep.len(), 4);
+    }
+
+    #[test]
+    fn keep_last_does_not_orphan_a_tool_result() {
+        let trimmed = trim_messages(&tool_transcript(), &TrimStrategy::KeepLast(2));
+        assert!(
+            tool_pairing_is_intact(&trimmed),
+            "KeepLast orphaned a tool result: {trimmed:?}"
+        );
+    }
+
+    #[test]
+    fn keep_first_and_last_does_not_orphan_either_end() {
+        // Head block ends on an assistant tool-call turn; tail block starts on
+        // a tool result. Both ends are broken without repair.
+        let messages = vec![
+            Message::user("one"),
+            assistant_calling(&["c1"]),
+            Message::tool("c1", "r1"),
+            Message::user("two"),
+            assistant_calling(&["c2"]),
+            Message::tool("c2", "r2"),
+            Message::assistant("done"),
+        ];
+        let trimmed = trim_messages(
+            &messages,
+            &TrimStrategy::KeepFirstAndLast { first: 2, last: 2 },
+        );
+        assert!(
+            tool_pairing_is_intact(&trimmed),
+            "KeepFirstAndLast produced an unpaired slice: {trimmed:?}"
+        );
+    }
+
+    #[test]
+    fn max_tokens_drops_orphan_tool_results_rather_than_readmitting_tokens() {
+        let messages = vec![
+            Message::user("a".repeat(400)),
+            assistant_calling(&["c1"]),
+            Message::tool("c1", "r1"),
+            Message::assistant("done"),
+        ];
+        let trimmed = trim_messages(&messages, &TrimStrategy::MaxTokens(4));
+        assert!(
+            tool_pairing_is_intact(&trimmed),
+            "MaxTokens orphaned a tool result: {trimmed:?}"
+        );
+        // Forward repair: the assistant tool-call turn is NOT re-admitted, so
+        // the budget-bound trim cannot grow back.
+        assert!(
+            !trimmed
+                .iter()
+                .any(|m| matches!(m, Message::Assistant(a) if !a.tool_calls.is_empty()))
+        );
+    }
+
+    #[test]
+    fn unpairable_tool_results_are_dropped_when_no_assistant_exists() {
+        // An imported/truncated transcript whose assistant turn is already
+        // gone: there is nothing to move back to, so the results are shed.
+        let messages = vec![
+            Message::tool("ghost", "r1"),
+            Message::tool("ghost2", "r2"),
+            Message::assistant("done"),
+        ];
+        let trimmed = trim_messages(&messages, &TrimStrategy::KeepLast(2));
+        assert!(tool_pairing_is_intact(&trimmed), "{trimmed:?}");
+        assert_eq!(trimmed.len(), 1);
+    }
+
+    #[test]
+    fn opting_out_of_repair_restores_the_unsafe_cut() {
+        // Pins that the repair is what makes the difference, not some other
+        // change of behaviour: without it the old orphaning cut comes back.
+        let trimmed = trim_messages_with(
+            &tool_transcript(),
+            &TrimStrategy::KeepLast(2),
+            &TrimOptions::default().without_pair_repair(),
+        );
+        assert!(
+            !tool_pairing_is_intact(&trimmed),
+            "expected the unrepaired cut to orphan a tool result"
+        );
+    }
+
+    #[test]
+    fn role_boundaries_trim_to_the_requested_roles() {
+        let messages = vec![
+            Message::assistant("lead-in"),
+            Message::user("question"),
+            Message::assistant("answer"),
+            Message::user("trailing"),
+        ];
+        let trimmed = trim_messages_with(
+            &messages,
+            &TrimStrategy::KeepLast(4),
+            &TrimOptions::default()
+                .starting_on([MessageRole::User])
+                .ending_on([MessageRole::Assistant]),
+        );
+        assert_eq!(trimmed.len(), 2);
+        assert_eq!(trimmed[0].text(), "question");
+        assert_eq!(trimmed[1].text(), "answer");
+    }
+
+    #[test]
+    fn end_on_boundary_does_not_leave_an_unanswered_tool_call() {
+        let messages = vec![
+            Message::user("go"),
+            Message::assistant("thinking"),
+            assistant_calling(&["c1"]),
+            Message::tool("c1", "r1"),
+        ];
+        // Ending on an assistant turn would naively stop on the tool-call turn
+        // whose result was just dropped.
+        let trimmed = trim_messages_with(
+            &messages,
+            &TrimStrategy::KeepLast(4),
+            &TrimOptions::default().ending_on([MessageRole::Assistant]),
+        );
+        assert!(tool_pairing_is_intact(&trimmed), "{trimmed:?}");
+        assert_eq!(trimmed.last().map(Message::text), Some("thinking".into()));
+    }
+
+    #[test]
+    fn tool_pairing_is_intact_detects_both_orphan_shapes() {
+        assert!(tool_pairing_is_intact(&tool_transcript()));
+        // Orphaned result.
+        assert!(!tool_pairing_is_intact(&[Message::tool("c1", "r")]));
+        // Unanswered call.
+        assert!(!tool_pairing_is_intact(&[assistant_calling(&["c1"])]));
+    }
+
+    #[test]
+    fn a_tool_only_assistant_turn_is_not_free() {
+        // REASON-3: an assistant message with no content but a 2 KB argument
+        // blob used to weigh zero, so no compaction gate could ever fire.
+        let heavy = Message::Assistant(AssistantMessage {
+            id: None,
+            content: Vec::new(),
+            tool_calls: vec![ToolCall::new(
+                "c1",
+                "search",
+                json!({"query": "x".repeat(2000)}),
+            )],
+            usage: None,
+        });
+        assert!(
+            heavy.estimated_char_weight() > 2000,
+            "tool-call arguments must be counted, got {}",
+            heavy.estimated_char_weight()
+        );
+
+        let policy = SummarizationPolicy {
+            trigger_tokens: 100,
+            ..Default::default()
+        };
+        assert!(
+            policy.should_summarize(&[heavy]),
+            "a 2 KB tool-call turn must trip a 100-token trigger"
+        );
+    }
+
+    #[test]
+    fn a_tool_result_id_is_counted() {
+        let bare = Message::Tool(crate::harness::message::ToolMessage {
+            tool_call_id: "call_abcdefghijklmnop".into(),
+            content: Vec::new(),
+            trusted_verbatim: false,
+            artifact: None,
+        });
+        assert_eq!(bare.estimated_char_weight(), "call_abcdefghijklmnop".len());
+    }
+
+    #[test]
+    fn reasoning_only_turns_still_weigh() {
+        let msg = Message::Assistant(AssistantMessage {
+            id: None,
+            content: vec![ContentBlock::thinking("z".repeat(120))],
+            tool_calls: Vec::new(),
+            usage: None,
+        });
+        assert_eq!(msg.estimated_char_weight(), 120);
+    }
+}
+
+/// Tests for [`render_message_for_summary`] and the default summarizer built on
+/// it.
+#[cfg(test)]
+mod rendering {
+    use crate::harness::message::{AssistantMessage, Message};
+    use crate::harness::summarization::{ConcatSummarizer, Summarizer, render_message_for_summary};
+    use crate::harness::tool::ToolCall;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn default_summarizer_keeps_tool_history() {
+        // REASON-8: every one of these messages rendered to a bare role label
+        // under `Message::text()`, so the default summarizer replaced real
+        // history with nothing.
+        let messages = vec![
+            Message::Assistant(AssistantMessage {
+                id: None,
+                content: Vec::new(),
+                tool_calls: vec![ToolCall::new("c1", "get_weather", json!({"city": "Paris"}))],
+                usage: None,
+            }),
+            Message::tool("c1", r#"{"temp_c":21}"#),
+        ];
+
+        let record = ConcatSummarizer.summarize(&messages).await.unwrap();
+        let text = record.summary.text();
+
+        assert!(text.contains("get_weather"), "tool name lost: {text}");
+        assert!(text.contains("Paris"), "tool arguments lost: {text}");
+        assert!(text.contains("temp_c"), "tool result lost: {text}");
+        assert!(text.contains("c1"), "correlation id lost: {text}");
+    }
+
+    #[test]
+    fn reasoning_and_json_are_rendered() {
+        let msg = Message::Assistant(AssistantMessage {
+            id: None,
+            content: vec![
+                crate::harness::message::ContentBlock::thinking("weighing options"),
+                crate::harness::message::ContentBlock::Json(json!({"k": "v"})),
+            ],
+            tool_calls: Vec::new(),
+            usage: None,
+        });
+        let rendered = render_message_for_summary(&msg);
+        assert!(rendered.contains("weighing options"), "{rendered}");
+        assert!(rendered.contains("\"k\""), "{rendered}");
+    }
+
+    #[test]
+    fn oversized_payloads_are_elided_not_reproduced() {
+        let msg = Message::tool("c1", "y".repeat(9_000));
+        let rendered = render_message_for_summary(&msg);
+        assert!(rendered.contains("chars elided"), "no elision marker");
+        assert!(
+            rendered.chars().count() < 3_000,
+            "summary reproduced the payload"
+        );
+    }
+}

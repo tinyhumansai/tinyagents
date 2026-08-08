@@ -107,25 +107,65 @@ stable prefix fingerprint even if the full request changes.
 
 ## Cache Policy
 
+As implemented today (`harness::cache::CachePolicy`):
+
 ```rust
 pub struct CachePolicy {
-    pub enabled: bool,
-    pub ttl: Option<Duration>,
-    pub scope: CacheScope,
-    pub include_tools: bool,
-    pub include_model_responses: bool,
-    pub preserve_provider_prefix: bool,
-    pub stable_prefix_min_tokens: Option<usize>,
+    pub response_cache_enabled: bool,
+    pub protect_prompt_prefix: bool,
+    pub ttl_ms: Option<u64>,
+    pub namespace: Option<String>,
 }
 ```
 
-Cache keys must include every behavior-affecting input: model, messages, tools,
-tool schemas, response format, provider options, and relevant metadata. Unsafe
-or side-effecting tool calls should not be cached by default.
+`ttl_ms` and `namespace` cover the `ttl` / `scope` this spec asks for. The
+remaining aspirational fields (`include_tools`, `include_model_responses`,
+`stable_prefix_min_tokens`) are **not implemented**; tools are always part of
+the key and there is no minimum-prefix threshold.
 
-The local response cache key is a SHA-256 digest of canonical request JSON.
-Prompt text is not embedded directly in the key, but every serialized
-behavior-affecting request field participates in the digest.
+Unsafe or side-effecting tool calls should not be cached by default.
+
+### Key composition
+
+The key is a two-part composition, never the prompt alone:
+
+```text
+scoped_cache_key(cache_key(request), model.cache_identity(), streaming, namespace)
+```
+
+- `cache_key(request)` is a SHA-256 digest over per-message and per-tool frames
+  plus an **explicit allowlist projection** of the behaviour-affecting
+  parameters. The projection destructures `ModelRequest` exhaustively, so adding
+  a request field is a compile error until someone decides whether it belongs in
+  the key. Fields that cannot change the answer — `tags`, `timeout_ms`,
+  `metadata`, `cache_policy`, `prompt_fingerprint`, `cache_segments` — are
+  deliberately excluded; folding them in gave a caller who put a run id in
+  `metadata` a permanent 0% hit rate.
+- `cache_identity()` names the provider family, model id, API base URL, optional
+  scope, and a **fingerprint** of the credential. It is computed *after* model
+  resolution, because the real model is chosen by `ModelRegistry::resolve_request`
+  and the endpoint and credential live inside the `Arc<dyn ChatModel>`, never in
+  the request. Without it one shared cache serves a hosted harness's answer to a
+  local one.
+- `streaming` is a parameter of the call rather than a request field, so it is
+  folded explicitly; a warm streaming run is not served an entry written by a
+  unary run.
+
+Raw credentials never reach a key: `credential_fingerprint` hashes them first.
+
+### Write rules
+
+- Only the **primary** model's answer is written under its own key. When the
+  fallback chain answers, the write is skipped — otherwise the primary's key is
+  poisoned (permanently, absent a TTL) with a different model's response.
+- A cache read or write failure is logged and ignored. The provider call has
+  already succeeded and been paid for; discarding its answer because the cache
+  was unavailable is strictly worse than not caching.
+- A cache hit is stamped `ModelResponse::served_from_cache` so token/cost
+  accounting can tell a replay from a real call and not re-bill it.
+- A cache hit on a **streaming** run is replayed as synthetic `ModelDelta`
+  events (text, then one per tool call) so warm and cold runs are
+  observationally identical.
 
 ## Cache Key Inputs
 
@@ -167,5 +207,25 @@ Every lookup should produce a decision:
 - write skipped
 - write completed
 
+Implemented today: `AgentEvent::CacheHit` / `AgentEvent::CacheMiss` are emitted
+as events, and the "no lookup happened at all" half is reported as a
+`CacheSkipReason` (`no_cache_attached`, `policy_disabled`,
+`multi_turn_transcript`) on a `[cache]`-prefixed debug log. A cache also exposes
+`ResponseCache::stats() -> CacheStats` (hits, misses, writes, evictions,
+expirations, entries, bytes). The remaining decisions are not yet distinct
+events.
+
 The usage feature should record provider prompt-cache hits separately from local
 response-cache hits.
+
+## Backends
+
+- `InMemoryResponseCache` — bounded on **both** an entry count and an
+  approximate byte budget (an entry count alone does not bound memory when
+  responses are long-context). Recency is an ordered map, not a linear scan.
+- `SqliteResponseCache` (feature `sqlite`) — durable, WAL, `(ns, key)` primary
+  key with an `expiry` column and a lazy purge on read. Namespaces do not
+  cross-serve and clear independently.
+- `SingleFlight` — collapses concurrent identical misses into one provider call
+  so N simultaneous callers do not all pay for the same answer. Errors are not
+  shared: a follower whose leader failed runs its own call.

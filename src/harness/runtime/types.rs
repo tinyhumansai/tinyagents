@@ -49,20 +49,30 @@ use crate::harness::tool::{ToolRegistry, ToolTimeoutSettings};
 /// How the agent loop reacts when the model calls a tool that is not
 /// registered.
 ///
-/// The default is [`UnknownToolPolicy::Fail`], preserving the historical
-/// fail-fast behavior. The recoverable variants let a run keep going so the
-/// model can correct itself — each recovery still consumes a tool-call budget
-/// slot, so [`RunLimits::max_tool_calls`] bounds any unknown-tool loop.
+/// The default is [`UnknownToolPolicy::ReturnToolError`]: a hallucinated tool
+/// name is a routine model mistake, not a harness fault, so the run keeps going
+/// and the model gets told which tools actually exist. Each recovery still
+/// consumes a tool-call budget slot, so [`RunLimits::max_tool_calls`] bounds any
+/// unknown-tool loop.
+///
+/// # Why the default flipped
+///
+/// `Fail` used to be the default, which made the crate inconsistent with
+/// itself: an **unparseable** arguments blob has always recovered
+/// unconditionally (see `agent_loop/tools.rs`), so `{city:` survived while a
+/// merely unknown tool name killed the whole run. It also diverged from
+/// LangGraph, whose `ToolNode` answers an unknown name with a synthetic
+/// `status="error"` message listing the valid tools. `Fail` remains available
+/// for callers that genuinely want a hard stop.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum UnknownToolPolicy {
     /// Abort the run with
-    /// [`TinyAgentsError::ToolNotFound`][crate::error::TinyAgentsError::ToolNotFound]
-    /// (the default, historical behavior).
-    #[default]
+    /// [`TinyAgentsError::ToolNotFound`][crate::error::TinyAgentsError::ToolNotFound].
     Fail,
     /// Inject a tool-error result (naming the originally requested tool and
     /// listing the registered tools) back into the transcript and continue the
-    /// loop, letting the model retry with a valid tool.
+    /// loop, letting the model retry with a valid tool. The default.
+    #[default]
     ReturnToolError,
     /// Rewrite an unknown call to a fixed compatibility tool name and retry the
     /// lookup once. If the rewrite target is also unregistered, fall back to
@@ -76,22 +86,22 @@ pub enum UnknownToolPolicy {
 /// How the agent loop reacts when the model calls a *registered* tool with
 /// arguments that fail schema validation.
 ///
-/// The default is [`InvalidArgsPolicy::Fail`], preserving the historical
-/// fail-fast behavior where a missing `required` field, wrong type, or bad
-/// `enum` aborts the whole turn. The recoverable variant lets a run keep going
-/// so the model can self-correct — the recovery still consumes a tool-call
-/// budget slot, so [`RunLimits::max_tool_calls`] bounds any invalid-args loop.
-/// Mirrors [`UnknownToolPolicy`] for the schema-validation seam.
+/// The default is [`InvalidArgsPolicy::ReturnToolError`]: a missing `required`
+/// field, wrong type, or bad `enum` is model output the model can fix, so the
+/// validation detail plus the expected schema go back into the transcript
+/// instead of aborting the turn. The recovery consumes a tool-call budget slot,
+/// so [`RunLimits::max_tool_calls`] bounds any invalid-args loop. Mirrors
+/// [`UnknownToolPolicy`] for the schema-validation seam — including why the
+/// default flipped away from `Fail`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum InvalidArgsPolicy {
     /// Abort the run with
-    /// [`TinyAgentsError::Validation`][crate::error::TinyAgentsError::Validation]
-    /// (the default, historical behavior).
-    #[default]
+    /// [`TinyAgentsError::Validation`][crate::error::TinyAgentsError::Validation].
     Fail,
     /// Inject a tool-error result (carrying the validation detail and the
     /// tool's expected parameter schema) back into the transcript and continue
-    /// the loop, letting the model retry with corrected arguments.
+    /// the loop, letting the model retry with corrected arguments. The default.
+    #[default]
     ReturnToolError,
     /// First normalize common provider-shape defects, then apply
     /// [`Self::ReturnToolError`] if the resulting arguments still fail schema
@@ -220,6 +230,7 @@ impl Default for RunPolicy {
             cache: CachePolicy {
                 response_cache_enabled: true,
                 protect_prompt_prefix: false,
+                ..CachePolicy::default()
             },
             // Opt-in: preserve the historical blank-final behavior by default.
             error_on_empty_response: false,

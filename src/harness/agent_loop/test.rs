@@ -348,6 +348,7 @@ fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> Mod
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -372,6 +373,7 @@ fn invalid_tool_call_response(id: &str, name: &str, raw: &str) -> ModelResponse 
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -389,6 +391,7 @@ fn text_response(text: &str, input: u64, output: u64) -> ModelResponse {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -410,6 +413,7 @@ fn truncated_empty_response(reasoning_tokens: u64) -> ModelResponse {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -530,6 +534,7 @@ impl ChatModel<()> for ProviderFailingModel {
                 provider: "test-provider".to_string(),
                 status: Some(self.status),
                 retryable: self.retryable,
+                retry_after_ms: None,
                 message: "boom".to_string(),
                 ..crate::harness::model::ProviderError::default()
             },
@@ -1097,14 +1102,20 @@ async fn usage_accumulates_across_calls() {
     assert_eq!(run.usage.usage.output_tokens, 5);
 }
 
+/// `UnknownToolPolicy::Fail` is opt-in now (the default recovers), so this
+/// pins the opted-in fail-closed behavior rather than the default.
 #[tokio::test]
-async fn tool_not_found_errors() {
+async fn tool_not_found_errors_under_the_fail_policy() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model(
         "mock",
         Arc::new(MockModel::with_tool_call("missing", json!({}))),
     );
     // No tool registered.
+    harness.with_policy(RunPolicy {
+        unknown_tool: UnknownToolPolicy::Fail,
+        ..RunPolicy::default()
+    });
 
     let err = harness
         .invoke_default(&(), vec![Message::user("go")])
@@ -1177,8 +1188,10 @@ async fn unknown_tool_rewrite_retargets_to_real_tool() {
     assert_eq!(*lookup.calls.lock().unwrap(), 1);
 }
 
+/// `InvalidArgsPolicy::Fail` is opt-in now (the default recovers), so this pins
+/// the opted-in fail-closed behavior rather than the default.
 #[tokio::test]
-async fn invalid_tool_arguments_fail_before_tool_execution() {
+async fn invalid_tool_arguments_fail_before_tool_execution_under_the_fail_policy() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model(
         "mock",
@@ -1191,6 +1204,10 @@ async fn invalid_tool_arguments_fail_before_tool_execution() {
     harness.register_tool(Arc::new(StrictLookupTool {
         calls: Arc::clone(&calls),
     }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::Fail,
+        ..RunPolicy::default()
+    });
 
     let err = harness
         .invoke_default(&(), vec![Message::user("lookup")])
@@ -2752,6 +2769,7 @@ async fn request_cache_policy_overrides_run_policy_to_disable_caching() {
             request.cache_policy = Some(CachePolicy {
                 response_cache_enabled: false,
                 protect_prompt_prefix: false,
+                ..CachePolicy::default()
             });
             Ok(())
         }
@@ -3099,6 +3117,7 @@ fn multi_tool_call_response(calls: Vec<(&str, &str)>) -> ModelResponse {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 

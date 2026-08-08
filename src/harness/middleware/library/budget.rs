@@ -126,15 +126,17 @@ impl BudgetLimits {
     }
 }
 
-/// Estimates the input tokens a request will consume by summing a
-/// heuristic token estimate over every message's text. Used for budget
-/// preflight reservation, which only needs an order-of-magnitude bound.
+/// Estimates the input tokens a request will consume, for budget preflight
+/// reservation.
+///
+/// Uses the crate's shared
+/// [`count_tokens_approximately`][crate::harness::message::count_tokens_approximately]
+/// estimator. Summing `estimate_tokens(&m.text())` counted only textual content
+/// blocks, so a request dominated by large JSON tool results or image blocks
+/// preflighted at close to zero tokens and sailed past a token budget it in
+/// fact blew through.
 fn estimated_input_tokens(request: &ModelRequest) -> u64 {
-    request
-        .messages
-        .iter()
-        .map(|m| crate::harness::summarization::estimate_tokens(&m.text()))
-        .sum()
+    crate::harness::message::count_tokens_approximately(&request.messages)
 }
 
 impl BudgetMiddleware {
@@ -290,6 +292,20 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for BudgetMidd
         {
             let mut guard = self.tracker.lock_recovering();
             guard.reserved_input_total = guard.reserved_input_total.saturating_sub(reserved);
+        }
+
+        // A cache replay spent nothing: no provider call was made, no tokens
+        // were consumed, no money changed hands. Folding its (replayed) usage
+        // into the tracker bills phantom spend, and enough hits can abort a run
+        // on a budget it never actually touched. The reservation is still
+        // released above — that part is real bookkeeping.
+        if response.served_from_cache {
+            tracing::debug!(
+                target: "tinyagents::middleware",
+                label = self.label,
+                "[budget] skipping accounting for a cache-served response"
+            );
+            return Ok(());
         }
 
         let Some(usage) = response.usage else {

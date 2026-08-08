@@ -96,6 +96,35 @@ pub enum TinyAgentsError {
     #[error("model error: {0}")]
     Provider(Box<crate::harness::model::ProviderError>),
 
+    /// The request did not fit in the model's context window.
+    ///
+    /// Distinguished from the generic [`TinyAgentsError::Provider`] because the
+    /// remedy is specific and mechanical — compact or drop transcript history
+    /// and retry — where a generic provider failure has none. A caller that can
+    /// summarise its own transcript (see
+    /// [`crate::harness::summarization`]) can match on this variant instead of
+    /// string-matching a provider message that differs per vendor and changes
+    /// without notice. Port of LangChain's `ContextOverflowError`.
+    ///
+    /// # Detection is best-effort, and asymmetric
+    ///
+    /// Hosted providers raise an explicit 400 for this, which
+    /// [`crate::harness::providers::openai::CONTEXT_OVERFLOW_CODE`] classifies.
+    /// **Local servers usually truncate the front of the prompt silently
+    /// instead**, so the absence of this error is not evidence that the prompt
+    /// fitted — pair it with a probed real context window
+    /// ([`crate::harness::providers::openai::LocalProbe`]) rather than relying
+    /// on it alone.
+    #[error("context overflow: {message}")]
+    ContextOverflow {
+        /// Provider family identifier, for example `openai` or `ollama`.
+        provider: String,
+        /// Provider model id, when known.
+        model: Option<String>,
+        /// The provider's own message, preserved verbatim.
+        message: String,
+    },
+
     /// A tool invocation returned an error. The payload describes the failure.
     #[error("tool error: {0}")]
     Tool(String),
@@ -233,6 +262,56 @@ pub enum TinyAgentsError {
     /// underlying driver message.
     #[error("storage error: {0}")]
     Storage(String),
+}
+
+impl TinyAgentsError {
+    /// Builds the right error for a structured provider failure, promoting a
+    /// recognised context overflow to [`TinyAgentsError::ContextOverflow`].
+    ///
+    /// Provider adapters classify the overflow and stamp
+    /// [`CONTEXT_OVERFLOW_CODE`][code] on
+    /// [`ProviderError::code`][pc]; this is where that code becomes a type. Use
+    /// it in place of `TinyAgentsError::Provider(Box::new(error))` at every
+    /// site that has a `ProviderError` in hand — the generic variant is still
+    /// correct for everything else, and is what this returns when the code is
+    /// absent or unrecognised.
+    ///
+    /// [code]: crate::harness::providers::openai::CONTEXT_OVERFLOW_CODE
+    /// [pc]: crate::harness::model::ProviderError::code
+    pub fn from_provider_error(error: crate::harness::model::ProviderError) -> Self {
+        if error.code.as_deref() == Some(crate::harness::providers::openai::CONTEXT_OVERFLOW_CODE) {
+            tracing::debug!(
+                "[error] promoting provider `{}` context-overflow code to a typed error",
+                error.provider
+            );
+            return Self::ContextOverflow {
+                provider: error.provider,
+                model: error.model,
+                message: error.message,
+            };
+        }
+        Self::Provider(Box::new(error))
+    }
+
+    /// Whether this error means the request did not fit the model's context
+    /// window.
+    ///
+    /// Recognises **both** the typed [`TinyAgentsError::ContextOverflow`] and a
+    /// [`TinyAgentsError::Provider`] still carrying the classification code, so
+    /// a caller's compact-and-retry logic behaves identically no matter which
+    /// construction site produced the error. Call sites are migrating to
+    /// [`Self::from_provider_error`]; until every one has, the two shapes must
+    /// classify the same or the same failure would be handled two ways.
+    pub fn is_context_overflow(&self) -> bool {
+        match self {
+            Self::ContextOverflow { .. } => true,
+            Self::Provider(error) => {
+                error.code.as_deref()
+                    == Some(crate::harness::providers::openai::CONTEXT_OVERFLOW_CODE)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Converts a raw `rusqlite` failure into [`TinyAgentsError::Storage`] so the

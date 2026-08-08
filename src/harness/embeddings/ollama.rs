@@ -28,7 +28,7 @@ pub struct OllamaEmbeddingModel {
 impl OllamaEmbeddingModel {
     pub fn try_new(base_url: &str, model: &str, dimensions: usize) -> Result<Self> {
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: super::http::default_client(),
             base_url: normalize_base_url(base_url)?,
             model: normalize_model(model)?,
             dimensions: Arc::new(AtomicUsize::new(if dimensions == 0 {
@@ -42,7 +42,7 @@ impl OllamaEmbeddingModel {
 
     pub(super) fn try_new_unresolved(base_url: &str, model: &str) -> Result<Self> {
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: super::http::default_client(),
             base_url: normalize_base_url(base_url)?,
             model: normalize_model(model)?,
             dimensions: Arc::new(AtomicUsize::new(0)),

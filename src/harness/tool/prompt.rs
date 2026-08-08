@@ -536,10 +536,58 @@ fn replace_text_blocks(content: Vec<ContentBlock>, cleaned: String) -> Vec<Conte
 /// *schema* vocabulary reaches for, and is what `llama3.2:3b` emits.
 const CALL_ARGUMENT_KEYS: [&str; 4] = ["arguments", "parameters", "args", "input"];
 
-/// Parse a single tool-call body into a [`ToolCall`] with a synthetic 1-based id.
-fn parse_one(inner: &str, index: usize) -> Option<ToolCall> {
+/// Parse a single tool-call body into a [`ToolCall`] with a synthetic id.
+///
+/// `slot` is the call's 1-based position within the response it was recovered
+/// from; it appears in the id only for readability. Uniqueness comes from the
+/// process-wide counter in [`next_synthetic_call_id`], not from `slot`.
+fn parse_one(inner: &str, slot: usize) -> Option<ToolCall> {
     let value = parse_relaxed_object(inner)?;
-    tool_call_from_object(&value, index)
+    tool_call_from_object(&value, slot)
+}
+
+/// Monotonic source of unique synthetic tool-call ids.
+///
+/// # Why a global counter and not a per-response index
+///
+/// The recovered id previously came from the call's position **within one
+/// response** (`call_1`, `call_2`, …), which resets on every model turn. That is
+/// wrong for anything but a single-turn run: two turns of the same run both emit
+/// `call_1`, so the next request contains two assistant messages declaring the
+/// same tool-call id and two tool messages answering it. The pairing is then
+/// unresolvable — a provider cannot tell which result answers which call, and
+/// neither can the harness's own pairing repair.
+///
+/// This is **not** confined to prompt-guided models.
+/// [`should_recover`] returns `true` for a *native* profile whenever tools were
+/// offered and the response carried no structured calls, so a native run that
+/// hits the text-mode fallback twice collides exactly the same way.
+///
+/// A process-wide `AtomicU64` makes every recovered id unique for the lifetime
+/// of the process, which is strictly stronger than per-run uniqueness and needs
+/// no run context threaded into a pure parsing function.
+static SYNTHETIC_CALL_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Prefix of every synthetic id minted here.
+///
+/// Deliberately **not** `call_` and **not** `tool-`: those are the shapes real
+/// providers emit and the shape the OpenAI adapter mints for its own
+/// positional fallback (`tool-{slot}`), so a distinct prefix makes a collision
+/// between the two schemes impossible by construction and makes a synthetic id
+/// obvious in a transcript or a log.
+pub const SYNTHETIC_CALL_ID_PREFIX: &str = "ptc";
+
+/// Returns a fresh, process-unique synthetic tool-call id of the form
+/// `ptc_{sequence}_{slot}` — "prompt tool call".
+///
+/// `slot` is the 1-based position of the call within its response and is
+/// included only so a human reading a transcript can see the ordering; the
+/// `sequence` component is what guarantees uniqueness.
+pub fn next_synthetic_call_id(slot: usize) -> String {
+    let sequence = SYNTHETIC_CALL_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let id = format!("{SYNTHETIC_CALL_ID_PREFIX}_{sequence}_{slot}");
+    tracing::trace!("[tool::prompt] minted synthetic tool-call id {id}");
+    id
 }
 
 /// Parses a JSON object, repairing the relaxed spellings small local models
@@ -557,7 +605,11 @@ fn parse_relaxed_object(raw: &str) -> Option<Value> {
 
 /// Builds a [`ToolCall`] from an already-parsed call object, or `None` when the
 /// object does not name a tool.
-fn tool_call_from_object(value: &Value, index: usize) -> Option<ToolCall> {
+///
+/// The id is minted by [`next_synthetic_call_id`] and is unique for the life of
+/// the process, so two calls recovered in different turns of the same run can
+/// never share one.
+fn tool_call_from_object(value: &Value, slot: usize) -> Option<ToolCall> {
     let name = value.get("name")?.as_str()?.trim().to_string();
     if name.is_empty() {
         return None;
@@ -567,7 +619,7 @@ fn tool_call_from_object(value: &Value, index: usize) -> Option<ToolCall> {
         .find_map(|key| value.get(*key).cloned())
         .unwrap_or_else(|| Value::Object(Map::new()));
     Some(ToolCall {
-        id: format!("call_{index}"),
+        id: next_synthetic_call_id(slot),
         name,
         arguments,
         invalid: None,

@@ -161,6 +161,78 @@ pub enum AgentEvent {
         error: Option<String>,
     },
 
+    /// A tool invocation failed and the run is propagating the error rather
+    /// than turning it into a tool result.
+    ///
+    /// This is the terminal partner of [`AgentEvent::ToolStarted`] on the error
+    /// path. Without it, every `?` that escapes the tool-dispatch path leaves a
+    /// `ToolStarted` with no matching terminal event, and any exporter pairing
+    /// started/completed by `call_id` silently drops the failed call — the
+    /// spans that matter most. The middleware stack already maintains this
+    /// invariant deliberately (`run_stack_hook!` emits `MiddlewareCompleted`
+    /// *before* inspecting the result, "the onion's balance invariant"); this
+    /// variant extends the same guarantee to tools.
+    ///
+    /// Distinct from [`AgentEvent::ToolCompleted`] with `error: Some(_)`, which
+    /// means the tool ran, failed, and the failure was fed back to the model as
+    /// a tool result. `ToolFailed` means the run itself is aborting.
+    ToolFailed {
+        /// Identifier for the tool call that failed; pairs with the
+        /// [`AgentEvent::ToolStarted`] of the same id.
+        call_id: CallId,
+        /// Name of the tool that was invoked.
+        tool_name: String,
+        /// Wall-clock time the tool call *started*, in Unix-epoch milliseconds,
+        /// mirroring [`AgentEvent::ToolCompleted::started_at_ms`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at_ms: Option<u64>,
+        /// Wall-clock duration until the failure, in milliseconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        /// Human-readable failure description.
+        error: String,
+    },
+
+    /// A model call failed and the run is propagating the error.
+    ///
+    /// The terminal partner of [`AgentEvent::ModelStarted`] on the error path;
+    /// see [`AgentEvent::ToolFailed`] for the rationale. Emitted once the retry
+    /// ladder is exhausted — an *individual* failed attempt that will be retried
+    /// is already covered by [`AgentEvent::RetryScheduled`].
+    ModelFailed {
+        /// Identifier for the model call that failed; pairs with the
+        /// [`AgentEvent::ModelStarted`] of the same id.
+        call_id: CallId,
+        /// Registry name or provider model id the call was dispatched to.
+        model: String,
+        /// Wall-clock time the model call *started*, in Unix-epoch milliseconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at_ms: Option<u64>,
+        /// Number of attempts made before giving up (`1` when the call was not
+        /// retried). Lets an exporter distinguish "failed once" from "failed
+        /// after exhausting the retry policy".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempts: Option<usize>,
+        /// Human-readable failure description.
+        error: String,
+    },
+
+    /// A sub-agent child run failed.
+    ///
+    /// The terminal partner of [`AgentEvent::SubAgentStarted`] /
+    /// [`AgentEvent::SubAgentReused`] on the error path; see
+    /// [`AgentEvent::ToolFailed`] for the rationale. Without it a failing branch
+    /// of the recursion tree simply stops appearing in the stream, and a
+    /// consumer cannot tell a crashed child from one still running.
+    SubAgentFailed {
+        /// Name of the sub-agent whose run failed.
+        name: String,
+        /// Depth of the child run in the recursion tree.
+        depth: usize,
+        /// Human-readable failure description.
+        error: String,
+    },
+
     /// The model called a tool that is not registered, and the run's
     /// [`UnknownToolPolicy`][crate::harness::runtime::UnknownToolPolicy]
     /// recovered from it instead of aborting.
@@ -608,6 +680,9 @@ impl AgentEvent {
             AgentEvent::ToolsFiltered { .. } => "tool.filtered",
             AgentEvent::ToolStarted { .. } => "tool.started",
             AgentEvent::ToolCompleted { .. } => "tool.completed",
+            AgentEvent::ToolFailed { .. } => "tool.failed",
+            AgentEvent::ModelFailed { .. } => "model.failed",
+            AgentEvent::SubAgentFailed { .. } => "subagent.failed",
             AgentEvent::UnknownToolCall { .. } => "tool.unknown",
             AgentEvent::InvalidToolArgs { .. } => "tool.invalid_args",
             AgentEvent::BudgetWarning { .. } => "budget.warning",

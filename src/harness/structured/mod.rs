@@ -24,6 +24,22 @@
 //! [`ResponseFormat`] to include in a [`ModelRequest`], then call
 //! [`StructuredExtractor::extract`] on the completed [`ModelResponse`].
 //!
+//! # Repair, validation, and non-fatal extraction
+//!
+//! Extraction is not a bare `serde_json::from_str` any more. Three things
+//! happen around it, each in its own submodule:
+//!
+//! * [`repair`] climbs a conservative ladder — code fence, prose slice,
+//!   relaxed JSON, truncation close — so a fenced, chatty, or cut-off answer is
+//!   recovered instead of ending a run. It never invents structure: a rung is
+//!   accepted only when the repaired text parses strictly.
+//! * [`validate`] checks the parsed value against the declared schema, so
+//!   `{"wrong_key": 1}` against a `score` schema is a reported error naming the
+//!   failing instance path — not a silent success.
+//! * [`StructuredExtractor::extract_outcome`] returns a [`StructuredOutcome`]
+//!   instead of `Result`, recording a failure as data so a caller can repair,
+//!   re-ask, or return the raw response rather than losing the run.
+//!
 //! # Example
 //!
 //! ```rust
@@ -42,8 +58,11 @@
 //! assert_eq!(output.value["score"], 42);
 //! ```
 
+mod repair;
 mod types;
+mod validate;
 
+pub use repair::JsonRepair;
 pub use types::*;
 
 use serde::de::DeserializeOwned;
@@ -62,7 +81,23 @@ impl StructuredStrategy {
     /// Returns [`StructuredStrategy::ProviderSchema`] when the model advertises
     /// native structured output *and* JSON Schema support, or when no profile is
     /// available (the conservative default). Otherwise returns
-    /// [`StructuredStrategy::ToolCall`], which works on any tool-calling model.
+    /// [`StructuredStrategy::ToolCall`] — but **only for a model that can
+    /// actually call tools**.
+    ///
+    /// # Why the `tool_calling` check matters
+    ///
+    /// This used to select `ToolCall` for *any* profile lacking native
+    /// structured output, including profiles that declare `tool_calling:
+    /// false`. That strategy declares an artificial tool and forces
+    /// [`ToolChoice::Tool`][tc]; on a model with no tool support the harness
+    /// runs prompt-guided instead, so the wire `tools` array is empty and the
+    /// forced choice is dropped — leaving a request that asks for nothing in
+    /// particular and an extractor waiting for a tool call that can never
+    /// arrive. Provider-schema mode at least asks for JSON and, with the repair
+    /// ladder in [`super::structured::repair`], parses what a JSON-mode model
+    /// actually returns.
+    ///
+    /// [tc]: crate::harness::model::ToolChoice::Tool
     ///
     /// # Example
     ///
@@ -90,12 +125,24 @@ impl StructuredStrategy {
     ///     StructuredStrategy::for_profile(Some(&profile)),
     ///     StructuredStrategy::ProviderSchema
     /// );
+    ///
+    /// // A model that can do neither -> JSON in the text, not a tool call.
+    /// let plain = ModelProfile::default();
+    /// assert_eq!(
+    ///     StructuredStrategy::for_profile(Some(&plain)),
+    ///     StructuredStrategy::ProviderSchema
+    /// );
     /// ```
     pub fn for_profile(profile: Option<&ModelProfile>) -> StructuredStrategy {
         match profile {
-            Some(p) if !(p.native_structured_output && p.json_schema) => {
-                StructuredStrategy::ToolCall
+            Some(p) if p.native_structured_output && p.json_schema => {
+                StructuredStrategy::ProviderSchema
             }
+            Some(p) if p.tool_calling => StructuredStrategy::ToolCall,
+            // No native schema support and no tool calling: ask for JSON in the
+            // text and lean on the repair ladder. A dedicated `JsonMode` arm
+            // (plain JSON object + schema in the prompt, LangChain's third
+            // `method`) is the refinement — see the module docs.
             _ => StructuredStrategy::ProviderSchema,
         }
     }
@@ -133,8 +180,8 @@ impl StructuredExtractor {
     /// * `strategy` – whether to use provider-schema or tool-call extraction.
     /// * `schema_name` – the schema's logical name; used as the tool name when
     ///   matching tool calls in [`StructuredStrategy::ToolCall`] mode.
-    /// * `schema` – the JSON Schema document (retained for future local
-    ///   validation, not yet applied).
+    /// * `schema` – the JSON Schema document. Enforced: every extracted value
+    ///   is validated against it (see [`validate`]).
     pub fn new(
         strategy: StructuredStrategy,
         schema_name: impl Into<String>,
@@ -149,7 +196,7 @@ impl StructuredExtractor {
 
     /// Returns the JSON Schema document this extractor was configured with.
     ///
-    /// Retained for local validation and for echoing the schema back into a
+    /// Used for local validation and for echoing the schema back into a
     /// [`ResponseFormat`] when re-requesting structured output.
     pub fn schema(&self) -> &Value {
         &self.schema
@@ -170,17 +217,65 @@ impl StructuredExtractor {
     ///   the structured value.  Returns [`TinyAgentsError::Validation`] when no
     ///   matching call is found.
     ///
+    /// # Validation
+    ///
+    /// Both strategies validate the extracted value against this extractor's
+    /// schema before returning it (see [`validate`]). A value that parses but
+    /// does not conform is an error naming the failing instance path — not a
+    /// success carrying the wrong shape.
+    ///
     /// # Errors
     ///
     /// See strategy descriptions above.
     pub fn extract(&self, response: &ModelResponse) -> Result<StructuredOutput> {
-        match self.strategy {
-            StructuredStrategy::ProviderSchema => self.extract_provider_schema(response),
-            StructuredStrategy::ToolCall => self.extract_tool_call(response),
+        let output = match self.strategy {
+            StructuredStrategy::ProviderSchema => self.extract_provider_schema(response)?,
+            StructuredStrategy::ToolCall => self.extract_tool_call(response)?,
+        };
+        validate::validate_value(&self.schema, &output.value, &self.instance_root())?;
+        Ok(output)
+    }
+
+    /// Extracts without failing: records the error instead of raising it.
+    ///
+    /// The difference is who decides what a failed extraction costs. `extract`
+    /// decides for the caller — it returns `Err`, and on the agent loop's final
+    /// turn that discards the entire run. This returns a
+    /// [`StructuredOutcome`] instead, so a caller can log the failure and
+    /// return the raw response, hand [`StructuredOutcome::error`] back to the
+    /// model as a repair prompt (LangChain's `OutputFixingParser`), or re-ask
+    /// with the original prompt (`RetryOutputParser`) — none of which are
+    /// possible once the run has already been thrown away.
+    ///
+    /// Mirrors LangChain's `include_raw=True`.
+    pub fn extract_outcome(&self, response: &ModelResponse) -> StructuredOutcome {
+        match self.extract(response) {
+            Ok(output) => StructuredOutcome {
+                value: Some(output.value),
+                raw: response.clone(),
+                error: None,
+            },
+            Err(error) => {
+                let error = error.to_string();
+                tracing::debug!(
+                    "[structured] extraction failed for schema '{}': {error}",
+                    self.schema_name
+                );
+                StructuredOutcome {
+                    value: None,
+                    raw: response.clone(),
+                    error: Some(error),
+                }
+            }
         }
     }
 
     // -- private helpers --
+
+    /// The label validation errors are rooted at, for example `schema 'review'`.
+    fn instance_root(&self) -> String {
+        format!("schema '{}'", self.schema_name)
+    }
 
     fn extract_provider_schema(&self, response: &ModelResponse) -> Result<StructuredOutput> {
         let raw = response.text();
@@ -212,12 +307,25 @@ impl StructuredExtractor {
             }));
         }
 
-        let value: Value = serde_json::from_str(&raw).map_err(|e| {
-            TinyAgentsError::StructuredOutput(format!(
-                "schema '{}': response text is not valid JSON: {e}",
-                self.schema_name
-            ))
-        })?;
+        // Climb the repair ladder rather than a bare `from_str`. The crate
+        // already repairs the *other* JSON a model emits (tool-call arguments);
+        // there is no reason a fenced, chatty, or truncated structured answer
+        // should end a run when the same repairs recover it.
+        let Some((value, repair)) = repair::parse_lenient(&raw) else {
+            return Err(TinyAgentsError::StructuredOutput(format!(
+                "schema '{}': response text is not valid JSON and no conservative repair \
+                 recovered it (finish_reason = {:?})",
+                self.schema_name,
+                response.finish_reason.as_deref().unwrap_or("unknown")
+            )));
+        };
+        if repair.is_repaired() {
+            tracing::debug!(
+                "[structured] schema '{}': recovered the value with repair `{}`",
+                self.schema_name,
+                repair.as_str()
+            );
+        }
         Ok(StructuredOutput {
             value,
             raw_text: Some(raw),
@@ -235,6 +343,27 @@ impl StructuredExtractor {
                     self.schema_name
                 ))
             })?;
+
+        // A provider that could not parse the call's arguments preserves them
+        // as a raw string (`ToolCall::invalid`). Running the same repair ladder
+        // here means a small local model's malformed arguments are recovered
+        // rather than handed on as a JSON string masquerading as the value.
+        if let Some(raw) = call.arguments.as_str()
+            && let Some((value, repair)) = repair::parse_lenient(raw)
+        {
+            if repair.is_repaired() {
+                tracing::debug!(
+                    "[structured] schema '{}': recovered tool-call arguments with repair `{}`",
+                    self.schema_name,
+                    repair.as_str()
+                );
+            }
+            return Ok(StructuredOutput {
+                value,
+                raw_text: Some(raw.to_string()),
+            });
+        }
+
         Ok(StructuredOutput {
             value: call.arguments.clone(),
             raw_text: None,

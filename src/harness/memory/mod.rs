@@ -105,7 +105,19 @@ impl<S: Store> StoreChatHistory<S> {
 
     /// Wraps `store` as a chat-history backend.
     pub fn new(store: S) -> Self {
-        Self { store }
+        Self {
+            store,
+            append_locks: Default::default(),
+        }
+    }
+
+    /// Returns the append lock for `thread_id`, creating it on first use.
+    fn append_lock(&self, thread_id: &str) -> Result<std::sync::Arc<tokio::sync::Mutex<()>>> {
+        let mut locks = self
+            .append_locks
+            .lock()
+            .map_err(|e| TinyAgentsError::Memory(format!("chat history lock poisoned: {e}")))?;
+        Ok(locks.entry(thread_id.to_string()).or_default().clone())
     }
 
     /// Returns a reference to the backing store.
@@ -127,6 +139,9 @@ impl<S: Store> ChatHistory for StoreChatHistory<S> {
     }
 
     async fn append(&self, thread_id: &str, message: Message) -> Result<()> {
+        // Serialize the read-modify-write per thread; see `append_locks`.
+        let lock = self.append_lock(thread_id)?;
+        let _guard = lock.lock().await;
         let mut messages = self.messages(thread_id).await?;
         messages.push(message);
         let value = serde_json::to_value(&messages)?;

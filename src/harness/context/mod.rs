@@ -55,9 +55,11 @@ fn next_context_instance_id() -> u64 {
 impl RunConfig {
     /// Creates a run configuration with sensible defaults.
     ///
-    /// Defaults: no thread, no tags, `null` metadata, no timeout,
-    /// `max_model_calls = 25`, and `max_tool_calls = 50`. These mirror the
-    /// crate-wide [`RunLimits`] defaults.
+    /// Defaults: no thread, no tags, `null` metadata, no timeout, and **unset**
+    /// call caps (`max_model_calls`/`max_tool_calls` are `None`), which resolve
+    /// to the crate-wide [`RunLimits`] defaults of 25 and 50. Leaving them unset
+    /// is what lets a harness-wide `RunPolicy` raise them; see
+    /// [`RunConfig::max_model_calls`].
     pub fn new(run_id: impl Into<String>) -> Self {
         Self {
             run_id: RunId::new(run_id),
@@ -65,8 +67,8 @@ impl RunConfig {
             tags: Vec::new(),
             metadata: serde_json::Value::Null,
             timeout_ms: None,
-            max_model_calls: 25,
-            max_tool_calls: 50,
+            max_model_calls: None,
+            max_tool_calls: None,
             max_turn_output_tokens: None,
             depth: 0,
             max_depth: RunLimits::default().max_depth,
@@ -97,16 +99,37 @@ impl RunConfig {
         self
     }
 
-    /// Sets the maximum number of model calls permitted for this run.
+    /// Sets the maximum number of model calls permitted for this run,
+    /// **explicitly**.
+    ///
+    /// An explicitly-set cap is a ceiling: the agent loop reconciles it with the
+    /// harness [`RunPolicy`][crate::harness::runtime::RunPolicy] by taking the
+    /// stricter of the two, so a policy default can only ever tighten it.
     pub fn with_max_model_calls(mut self, n: usize) -> Self {
-        self.max_model_calls = n;
+        self.max_model_calls = Some(n);
         self
     }
 
-    /// Sets the maximum number of tool invocations permitted for this run.
+    /// Sets the maximum number of tool invocations permitted for this run,
+    /// **explicitly**. Same ceiling semantics as
+    /// [`RunConfig::with_max_model_calls`].
     pub fn with_max_tool_calls(mut self, n: usize) -> Self {
-        self.max_tool_calls = n;
+        self.max_tool_calls = Some(n);
         self
+    }
+
+    /// The model-call cap actually applied to this run: the explicitly-set
+    /// value, or the crate-default [`RunLimits`] cap when unset.
+    pub fn effective_max_model_calls(&self) -> usize {
+        self.max_model_calls
+            .unwrap_or_else(|| RunLimits::default().max_model_calls)
+    }
+
+    /// The tool-call cap actually applied to this run: the explicitly-set
+    /// value, or the crate-default [`RunLimits`] cap when unset.
+    pub fn effective_max_tool_calls(&self) -> usize {
+        self.max_tool_calls
+            .unwrap_or_else(|| RunLimits::default().max_tool_calls)
     }
 
     /// Sets the maximum output tokens requested for each model turn.
@@ -167,8 +190,8 @@ impl RunConfig {
     /// defaults.
     fn to_run_limits(&self) -> RunLimits {
         RunLimits::default()
-            .with_max_model_calls(self.max_model_calls)
-            .with_max_tool_calls(self.max_tool_calls)
+            .with_max_model_calls(self.effective_max_model_calls())
+            .with_max_tool_calls(self.effective_max_tool_calls())
             .with_max_wall_clock_ms(self.timeout_ms)
             .with_max_depth(self.max_depth)
     }

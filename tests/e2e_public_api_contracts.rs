@@ -345,11 +345,17 @@ async fn retry_rate_limit_and_summarization_contracts_are_deterministic() {
     assert!(!retry.should_retry(2));
     assert_eq!(retry.backoff_for_attempt(0), Duration::from_millis(50));
     assert_eq!(retry.backoff_for_attempt(2), Duration::from_millis(90));
+    // Jitter is additive (LOOP-2), not multiplicative: `rand01 = 0.5` is the
+    // band midpoint and so reproduces the un-jittered value exactly. This used
+    // to assert 45ms — `base * rand01` — the form that let a hardcoded
+    // `rand01 = 0.0` on the production path disable backoff altogether.
     let jittered = retry.clone().with_jitter(true);
     assert_eq!(
         jittered.backoff_for_attempt_with(1, 0.5),
-        Duration::from_millis(45)
+        Duration::from_millis(90)
     );
+    // And the band never reaches zero.
+    assert!(jittered.backoff_for_attempt_with(1, 0.0) > Duration::ZERO);
 
     assert!(is_retryable(&TinyAgentsError::Model("timeout".into())));
     assert!(is_retryable(&TinyAgentsError::Tool("temporary".into())));

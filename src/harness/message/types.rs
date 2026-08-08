@@ -119,6 +119,43 @@ pub struct ToolMessage {
     /// crate omits unset fields.
     #[serde(default, skip_serializing_if = "is_false")]
     pub trusted_verbatim: bool,
+
+    /// The structured payload the producing tool returned alongside its
+    /// model-facing text, carried across from
+    /// [`ToolResult::raw`][crate::harness::tool::ToolResult::raw] by
+    /// [`Message::tool_from_result`].
+    ///
+    /// This is the crate's equivalent of LangChain's
+    /// `response_format="content_and_artifact"`: the model sees only
+    /// [`Message::text`] (a summary, a row count, a path), while application
+    /// code reading back `run.messages` can recover the full object — a parsed
+    /// dataframe, a binary handle, a large search result set — without the tool
+    /// having to inline megabytes of JSON into the transcript just to make it
+    /// reachable.
+    ///
+    /// # Wire contract
+    ///
+    /// **The artifact never reaches the provider.** Provider conversion
+    /// serialises a tool message from [`Message::text`] (its
+    /// [`ContentBlock::Text`] blocks) only, so an artifact is host-side state.
+    /// Any future provider adapter must keep that property: putting the
+    /// artifact on the wire would defeat the entire point of the field and can
+    /// blow the context window with the payload the summary was meant to
+    /// replace.
+    ///
+    /// `#[serde(default)]` so transcripts persisted before this field existed
+    /// still deserialise, and `skip_serializing_if` so a message with no
+    /// artifact stays byte-identical when persisted.
+    ///
+    /// # Note on `trusted_verbatim`
+    ///
+    /// [`ToolResult::mark_trusted_verbatim`][crate::harness::tool::ToolResult::mark_trusted_verbatim]
+    /// records its opt-in *inside* `raw` under
+    /// [`TRUSTED_VERBATIM_KEY`][crate::harness::tool::TRUSTED_VERBATIM_KEY], so
+    /// an artifact copied from such a result also carries that key. The copy is
+    /// deliberately verbatim: the crate does not edit a payload the tool owns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<Value>,
 }
 
 /// A structured conversation message.

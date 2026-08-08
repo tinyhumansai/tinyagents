@@ -96,6 +96,31 @@ and completion read state and then act on it, so they take the write lock up
 front with `BEGIN IMMEDIATE` — racing claims serialize at `BEGIN` rather than
 failing at `COMMIT` after one has already decided it won.
 
+**That serialization depends on a busy timeout, which we now set ourselves.**
+SQLite's own default is zero — with no busy handler a `BEGIN IMMEDIATE` that
+meets a competing writer fails immediately with `SQLITE_BUSY` instead of
+waiting. It was never actually zero here: `rusqlite`'s `Connection::open`
+installs a 5s timeout unconditionally. `store::BUSY_TIMEOUT` sets the same value
+explicitly, so a correctness property the claim/gate/sequence logic relies on is
+not silently supplied by a transitive dependency's undocumented default.
+
+**An upsert reads its own write back inside the same transaction.** Inserting on
+an autocommit connection, closing it, then re-opening to `get_*` returns
+whatever a concurrent writer left behind rather than what this call wrote.
+
+**Schema changes go through the versioned migration list** in `migrations.rs`,
+not through more `CREATE TABLE IF NOT EXISTS` at the top of an operation. The
+list index *is* the version, so it may only be appended to; retire a migration
+by replacing its body with `"SELECT 1;"` rather than deleting it. Without a
+version marker no column could ever be added to a workspace database that
+already existed.
+
+**Nothing is deleted unless a host asks.** `retention.rs` owns the only delete
+paths (sessions, messages, tool calls, run events, telemetry) plus
+`reindex_fts`, which rebuilds the search index for rows whose FTS entry was lost
+before the row/index pairs became transactional. Retention is a policy decision,
+so none of it runs on a schedule of its own.
+
 **A claim is meaningful only while a task is `in_progress`.** An upsert that
 moves a task off that status clears `claimed_by_member_id` and `claim_token`;
 leaving them set strands the task, since a new claim sees `AlreadyClaimed`,

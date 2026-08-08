@@ -12,8 +12,7 @@ use crate::harness::middleware::{
     PromptCacheGuardMiddleware,
 };
 use crate::harness::summarization::{
-    ConcatSummarizer, SummarizationPolicy, Summarizer, SummaryRecord, TrimStrategy,
-    estimate_tokens, trim_messages,
+    ConcatSummarizer, SummarizationPolicy, Summarizer, SummaryRecord, TrimStrategy, trim_messages,
 };
 
 // ── MessageTrimMiddleware ─────────────────────────────────────────────────────
@@ -44,10 +43,18 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for MessageTri
 
 // ── ContextCompressionMiddleware ──────────────────────────────────────────────
 
-/// Estimate the total tokens of a message slice using the same per-message
-/// heuristic the [`SummarizationPolicy`] uses internally.
+/// Estimate the total tokens of a message slice.
+///
+/// Uses the crate's shared
+/// [`count_tokens_approximately`][crate::harness::message::count_tokens_approximately]
+/// estimator rather than summing `estimate_tokens(&m.text())`. `text()` returns
+/// only the *textual* content blocks, so a transcript of large JSON tool
+/// results or image blocks estimated to nearly zero and the micro-compaction
+/// budget gate never tripped on exactly the transcripts it exists to shrink.
+/// The shared estimator charges every content block, tool call, and tool-call
+/// id, and calibrates against reported usage metadata when it is present.
 fn total_message_tokens(messages: &[crate::harness::message::Message]) -> u64 {
-    messages.iter().map(|m| estimate_tokens(&m.text())).sum()
+    crate::harness::message::count_tokens_approximately(messages)
 }
 
 impl ContextCompressionMiddleware {
@@ -330,6 +337,21 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for Microcompa
                 continue;
             }
             if let Message::Tool(t) = &request.messages[i] {
+                // `ToolMessage::trusted_verbatim` means the producing tool
+                // asked for its content to reach the model byte-for-byte, and
+                // its doc names blanking as exactly the rewrite a host must not
+                // perform. Blanking one produced content that reads fine and is
+                // wrong — an input schema the model copies argument names out
+                // of, a signature, a diff — so leave it intact and reclaim
+                // tokens elsewhere.
+                if t.trusted_verbatim {
+                    tracing::debug!(
+                        target: "tinyagents::middleware",
+                        tool_call_id = %t.tool_call_id,
+                        "[microcompact] skipping a trusted_verbatim tool result"
+                    );
+                    continue;
+                }
                 let id = t.tool_call_id.clone();
                 request.messages[i] = Message::tool(id, self.placeholder.clone());
                 cleared += 1;
@@ -401,15 +423,27 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for PromptCach
 
     async fn before_model(
         &self,
-        _ctx: &mut RunContext<Ctx>,
+        ctx: &mut RunContext<Ctx>,
         _state: &State,
         request: &mut ModelRequest,
     ) -> Result<()> {
         let layout = PromptCacheLayout::from_request(request);
+        let run_id = ctx.run_id().clone();
         let mut previous = self.previous.lock().expect("previous mutex poisoned");
-        if let Some(prev) = previous.as_ref()
+        // Only compare within one run. See the field docs on
+        // `PromptCacheGuardMiddleware::previous`: a prefix cache is scoped to a
+        // single conversation, so a baseline carried over from a previous run
+        // would report an invalidation that never happened.
+        if let Some((prev_run, prev)) = previous.as_ref()
+            && prev_run == &run_id
             && !prev.is_prefix_stable_against(&layout)
         {
+            tracing::debug!(
+                "[cache] prompt_cache_guard: prefix invalidated run={run_id} \
+                 before={} after={}",
+                prev.fingerprint(),
+                layout.fingerprint()
+            );
             let event = CacheLayoutEvent::new(prev, &layout);
             let mut events = self.events.lock().expect("events mutex poisoned");
             if self.max_events > 0 {
@@ -419,7 +453,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for PromptCach
                 events.push_back(event);
             }
         }
-        *previous = Some(layout);
+        *previous = Some((run_id, layout));
         Ok(())
     }
 }

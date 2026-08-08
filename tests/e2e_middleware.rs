@@ -35,7 +35,7 @@ use tinyagents::harness::middleware::{
 };
 use tinyagents::harness::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyagents::harness::retry::RetryPolicy;
-use tinyagents::harness::runtime::{AgentHarness, RunPolicy};
+use tinyagents::harness::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy};
 use tinyagents::harness::testkit::{EventRecorder, FakeTool, ScriptedModel, Trajectory};
 use tinyagents::harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
 use tinyagents::harness::usage::Usage;
@@ -143,6 +143,7 @@ fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> Mod
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -160,6 +161,7 @@ fn text_response(text: &str) -> ModelResponse {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -343,6 +345,12 @@ async fn invalid_tool_arguments_are_rejected_before_execution() {
         .register_tool(Arc::new(StrictLookupTool {
             calls: Arc::clone(&calls),
         }));
+    // `ReturnToolError` is the default now, so the fail-closed schema boundary
+    // this test pins has to be opted into.
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::Fail,
+        ..RunPolicy::default()
+    });
 
     let ctx =
         RunContext::new(RunConfig::new("mw-e2e-tool-schema"), ()).with_events(recorder.sink());

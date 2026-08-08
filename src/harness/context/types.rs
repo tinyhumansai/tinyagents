@@ -43,7 +43,13 @@ use crate::harness::store::StoreRegistry;
 ///     .with_tag("nightly")
 ///     .with_max_model_calls(10);
 /// assert_eq!(config.run_id.as_str(), "run-1");
-/// assert_eq!(config.max_model_calls, 10);
+/// assert_eq!(config.max_model_calls, Some(10));
+/// assert_eq!(config.effective_max_model_calls(), 10);
+///
+/// // An unset cap reads as `None` but still resolves to the crate default.
+/// let defaulted = RunConfig::new("run-2");
+/// assert_eq!(defaulted.max_model_calls, None);
+/// assert_eq!(defaulted.effective_max_model_calls(), 25);
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunConfig {
@@ -57,10 +63,38 @@ pub struct RunConfig {
     pub metadata: serde_json::Value,
     /// Wall-clock timeout in milliseconds. `None` means no deadline.
     pub timeout_ms: Option<u64>,
-    /// Maximum number of model calls permitted for this run.
-    pub max_model_calls: usize,
-    /// Maximum number of tool invocations permitted for this run.
-    pub max_tool_calls: usize,
+    /// Maximum number of model calls permitted for this run, when the caller
+    /// set one explicitly.
+    ///
+    /// `None` means "unset": the run falls back to
+    /// [`RunConfig::effective_max_model_calls`] (the crate-default cap of 25)
+    /// and a harness-wide
+    /// [`RunPolicy::limits`][crate::harness::runtime::RunPolicy] is free to
+    /// raise *or* lower it.
+    ///
+    /// # Why this is an `Option`
+    ///
+    /// The agent loop reconciles this cap with the harness policy's, and the
+    /// two directions are only safe to distinguish when "the caller asked for
+    /// 2" is distinguishable from "nobody asked, so it defaulted to 25":
+    ///
+    /// - **Explicitly set** (`Some`) → the loop takes the **stricter** of the
+    ///   two caps, so a permissive policy default can never silently widen a
+    ///   budget the caller deliberately narrowed.
+    /// - **Unset** (`None`) → the policy is the only real source of truth and
+    ///   wins outright, including when it raises the cap above the default.
+    ///
+    /// While this was a bare `usize` the loop could not tell those apart and
+    /// resolved every case by plain assignment, so
+    /// `RunConfig::new("r").with_max_model_calls(2)` against a default policy
+    /// ran **25** model calls.
+    #[serde(default)]
+    pub max_model_calls: Option<usize>,
+    /// Maximum number of tool invocations permitted for this run, when the
+    /// caller set one explicitly. See [`RunConfig::max_model_calls`] for the
+    /// set-versus-unset semantics; the tool cap follows the identical rule.
+    #[serde(default)]
+    pub max_tool_calls: Option<usize>,
     /// Maximum output tokens requested for each model turn in this run.
     ///
     /// When set, the agent loop applies this as an upper bound to

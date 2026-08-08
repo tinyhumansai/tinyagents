@@ -182,6 +182,62 @@ where
             ));
         }
 
+        // Partial-failure guard. The boundary that produced this checkpoint
+        // recorded a completion marker per task that had already finished; a
+        // node named by *both* the pending set and that ledger has therefore
+        // already run, and re-running it would repeat its side effects. On a
+        // checkpoint the executor itself wrote the two sets are disjoint, so
+        // this is a no-op — it earns its keep on a checkpoint that was
+        // hand-built, time-travelled to, or edited through `update_state`,
+        // where `next_nodes` can legitimately disagree with what ran.
+        let completed_config = CheckpointConfig {
+            thread_id: thread_id.to_string(),
+            checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
+            namespace: self.namespace.clone(),
+        };
+        let recorded = checkpointer.get_writes(&completed_config).await?;
+        let done: HashSet<String> = if recorded.is_empty() {
+            checkpoint
+                .pending_writes
+                .iter()
+                .map(|w| w.task_id.clone())
+                .collect()
+        } else {
+            recorded.iter().map(|w| w.task_id.clone()).collect()
+        };
+        let active: Vec<Activation> = if done.is_empty() {
+            active
+        } else {
+            let filtered: Vec<Activation> = active
+                .iter()
+                // A node name is not a task identity: a Send fan-out can have
+                // several live activations of one node. Legacy checkpoints
+                // have no persisted task id, so leave them runnable.
+                .filter(|a| a.task_id.is_empty() || !done.contains(&a.task_id))
+                .cloned()
+                .collect();
+            if filtered.is_empty() {
+                // Every pending node claims to have run. Trust the pending set
+                // rather than turning a resumable checkpoint into a hard error:
+                // a wrong re-run is recoverable, a stuck thread is not.
+                tracing::warn!(
+                    "[graph:resume] every pending node of checkpoint `{}` has a completion \
+                     marker; resuming them anyway rather than stranding the thread",
+                    checkpoint.checkpoint_id
+                );
+                active
+            } else {
+                if filtered.len() != active.len() {
+                    tracing::debug!(
+                        "[graph:resume] checkpoint `{}`: skipping {} already-completed task(s)",
+                        checkpoint.checkpoint_id,
+                        active.len() - filtered.len()
+                    );
+                }
+                filtered
+            }
+        };
+
         // The resume value belongs to the node(s) that actually interrupted. The
         // pending set is deliberately wider than that at an interrupt boundary
         // (it also carries the successors of branches that completed before the
@@ -242,6 +298,7 @@ where
             active.push(Activation {
                 node,
                 send_arg: input.payload,
+                task_id: String::new(),
             });
         }
         if active.is_empty() {
@@ -479,6 +536,14 @@ where
                 }
             }
             steps += 1;
+            // Assign identities before any branch runs. A failure checkpoint
+            // carries these identities with its pending activations, letting a
+            // later resume skip only the completed fan-out task.
+            for (index, activation) in active.iter_mut().enumerate() {
+                if activation.task_id.is_empty() {
+                    activation.task_id = format!("{steps}:{index}:{}", activation.node);
+                }
+            }
             self.emit(GraphEvent::StepStarted {
                 step: steps,
                 active: activation_nodes(&active),
@@ -602,7 +667,6 @@ where
                 };
                 let mut pending = successors;
                 pending.extend(active[failed_index..].iter().cloned());
-                let completed_nodes = activation_nodes(&active[..failed_index]);
                 // Settle any in-flight Async background writes before the
                 // failure-boundary persist so earlier boundaries are durable
                 // when the run aborts. Like the persist error below, a
@@ -618,7 +682,7 @@ where
                         &run_id,
                         &state,
                         &pending,
-                        &completed_nodes,
+                        &active[..failed_index],
                         &barrier_arrivals,
                         parent_checkpoint.clone(),
                         steps,
@@ -706,7 +770,7 @@ where
                         &run_id,
                         &state,
                         &pending,
-                        &activation_nodes(&active[..index]),
+                        &active[..index],
                         vec![emitted.clone()],
                         std::slice::from_ref(&active[index].node),
                         &barrier_arrivals,
@@ -759,7 +823,6 @@ where
             // Select the next active set from commands or static/conditional
             // edges, evaluated against the freshly-committed state. Barrier
             // arrivals accumulate into `barrier_arrivals` (persisted below).
-            let completed_nodes = activation_nodes(&active);
             let next = match self.route_completed(&active, &goto_map, &state, &mut barrier_arrivals)
             {
                 Ok(next) => next,
@@ -811,7 +874,7 @@ where
                         &run_id,
                         &state,
                         &next,
-                        &completed_nodes,
+                        &active,
                         &barrier_arrivals,
                         parent_checkpoint.clone(),
                         steps,
@@ -842,7 +905,7 @@ where
                         &run_id,
                         &state,
                         &next,
-                        &completed_nodes,
+                        &active,
                         Vec::new(),
                         &[],
                         &barrier_arrivals,
@@ -983,7 +1046,7 @@ where
         run_id: &RunId,
         state: &State,
         pending: &[Activation],
-        completed_tasks: &[NodeId],
+        completed_tasks: &[Activation],
         barrier_arrivals: &HashMap<NodeId, HashSet<NodeId>>,
         parent: Option<String>,
         step: usize,
@@ -1003,8 +1066,8 @@ where
             namespace: self.namespace.clone(),
             state: state.clone(),
             next_nodes: activation_nodes(pending),
-            completed_tasks: completed_tasks.to_vec(),
-            pending_writes: Vec::new(),
+            completed_tasks: activation_nodes(completed_tasks),
+            pending_writes: Self::completion_writes(completed_tasks, step),
             interrupts: Vec::new(),
             pending_activations: Some(pending.iter().map(PendingActivation::from).collect()),
             barrier_arrivals: barriers_to_persisted(barrier_arrivals),
@@ -1017,7 +1080,17 @@ where
                 "error": error.to_string(),
             }),
         };
+        let writes = checkpoint.pending_writes.clone();
+        let config = CheckpointConfig {
+            thread_id: checkpoint.thread_id.clone(),
+            checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
+            namespace: checkpoint.namespace.clone(),
+        };
         let id = checkpointer.put(checkpoint).await?;
+        // Also record the ledger through the write protocol, so backends that
+        // implement it can answer "did this task run?" without loading the
+        // whole state payload.
+        checkpointer.put_writes(&config, &writes).await?;
         self.emit(GraphEvent::CheckpointSaved {
             checkpoint_id: id.clone(),
         });
@@ -1458,7 +1531,7 @@ where
         run_id: &RunId,
         state: &State,
         pending: &[Activation],
-        completed_tasks: &[NodeId],
+        completed_tasks: &[Activation],
         interrupts: Vec<Interrupt>,
         interrupted: &[NodeId],
         barrier_arrivals: &HashMap<NodeId, HashSet<NodeId>>,
@@ -1486,7 +1559,14 @@ where
             recursion,
             child_runs,
         );
+        let writes = checkpoint.pending_writes.clone();
+        let config = CheckpointConfig {
+            thread_id: checkpoint.thread_id.clone(),
+            checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
+            namespace: checkpoint.namespace.clone(),
+        };
         let id = checkpointer.put(checkpoint).await?;
+        checkpointer.put_writes(&config, &writes).await?;
         self.emit(GraphEvent::CheckpointSaved {
             checkpoint_id: id.clone(),
         });
@@ -1521,7 +1601,7 @@ where
         run_id: &RunId,
         state: &State,
         pending: &[Activation],
-        completed_tasks: &[NodeId],
+        completed_tasks: &[Activation],
         barrier_arrivals: &HashMap<NodeId, HashSet<NodeId>>,
         parent: Option<String>,
         step: usize,
@@ -1573,6 +1653,35 @@ where
         }
     }
 
+    /// Records completion markers for the tasks that finished in the step a
+    /// boundary checkpoint closes.
+    ///
+    /// A graph's `Update` carries no `Serialize` bound, so the executor cannot
+    /// persist *what* a task wrote — but it does not need to: the applied value
+    /// is already durable in the checkpoint's `state`. What was missing was the
+    /// other half, the per-task record of *that* it ran, which is what lets a
+    /// resume distinguish "already done" from "not yet started". See
+    /// [`PendingWrite`](crate::graph::checkpoint::PendingWrite)'s docs for why
+    /// that distinction is the whole point of
+    /// the ledger.
+    ///
+    /// The task id is persisted on the activation itself, so a resume can
+    /// match a marker to one fan-out task rather than every task with its node.
+    fn completion_writes(
+        completed_tasks: &[Activation],
+        _step: usize,
+    ) -> Vec<crate::graph::checkpoint::PendingWrite> {
+        completed_tasks
+            .iter()
+            .map(|activation| {
+                crate::graph::checkpoint::PendingWrite::completion_marker(
+                    activation.node.clone(),
+                    activation.task_id.clone(),
+                )
+            })
+            .collect()
+    }
+
     /// Builds the loop-boundary [`Checkpoint`] record shared by the sync and
     /// async persist paths, minting a fresh checkpoint id.
     #[allow(clippy::too_many_arguments)]
@@ -1582,7 +1691,7 @@ where
         run_id: &RunId,
         state: &State,
         pending: &[Activation],
-        completed_tasks: &[NodeId],
+        completed_tasks: &[Activation],
         interrupts: Vec<Interrupt>,
         interrupted: &[NodeId],
         barrier_arrivals: &HashMap<NodeId, HashSet<NodeId>>,
@@ -1617,8 +1726,8 @@ where
             namespace: self.namespace.clone(),
             state: state.clone(),
             next_nodes: activation_nodes(pending),
-            completed_tasks: completed_tasks.to_vec(),
-            pending_writes: Vec::new(),
+            completed_tasks: activation_nodes(completed_tasks),
+            pending_writes: Self::completion_writes(completed_tasks, step),
             pending_activations: Some(pending.iter().map(PendingActivation::from).collect()),
             barrier_arrivals: barriers_to_persisted(barrier_arrivals),
             interrupts,

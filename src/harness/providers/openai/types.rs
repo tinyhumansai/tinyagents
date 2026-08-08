@@ -50,6 +50,16 @@ pub struct ChatCompletionRequest {
     /// Deterministic generation seed. Omitted when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
+    /// `reasoning_effort` — the Chat Completions spelling of the
+    /// provider-neutral [`ReasoningConfig`][rc]. Omitted when unset.
+    ///
+    /// Before this field the only route to it was raw `provider_options`, which
+    /// is provider-shaped by definition; it stays available as the escape hatch
+    /// and **wins** over this typed field on a key conflict.
+    ///
+    /// [rc]: crate::harness::model::ReasoningConfig
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     /// Request Server-Sent-Events streaming. Omitted (false) for unary calls.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stream: bool,
@@ -406,6 +416,36 @@ pub struct PromptTokensDetailsWire {
     /// Input tokens served from OpenAI's prompt cache.
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub cached_tokens: u64,
+    /// Input tokens **written into** the prompt cache, as OpenAI-compatible
+    /// gateways report it. Two spellings are in the wild and neither is
+    /// universal, so both are accepted and reconciled by
+    /// [`Self::cache_creation_tokens`]:
+    ///
+    /// * `cache_write_tokens` — the spelling LangChain reads on the
+    ///   Chat Completions path.
+    /// * `cache_creation_tokens` — the spelling gateways that mirror
+    ///   Anthropic's `cache_creation_input_tokens` tend to use.
+    ///
+    /// Before this existed, [`Usage::cache_creation_tokens`][ucc] was summed and
+    /// priced by the cost feature but written by **no** provider in the crate,
+    /// so cache writes were billed as ordinary input everywhere.
+    ///
+    /// [ucc]: crate::harness::usage::Usage::cache_creation_tokens
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub cache_write_tokens: u64,
+    /// Alternate spelling of [`Self::cache_write_tokens`]; see its docs.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub cache_creation_tokens: u64,
+}
+
+impl PromptTokensDetailsWire {
+    /// The cache-write token count, taking whichever of the two accepted
+    /// spellings the provider actually sent (they are never both non-zero in
+    /// practice; the larger wins so a zero-valued alias cannot mask the real
+    /// figure).
+    pub fn cache_creation_tokens(&self) -> u64 {
+        self.cache_write_tokens.max(self.cache_creation_tokens)
+    }
 }
 
 /// The `completion_tokens_details` breakdown of a [`UsageWire`].

@@ -50,16 +50,32 @@ pub(super) struct OpenAiStreamAcc {
     /// opened slot, so id-less argument continuations for that index keep
     /// following the call most recently opened there.
     index_slots: std::collections::HashMap<u32, usize>,
+    /// Synthetic tool-call id epoch for **this** response, drawn once in
+    /// [`new`](Self::new). Every `tool-call` id this accumulator synthesizes —
+    /// both the streamed [`ToolDelta::call_id`] and the terminal response's
+    /// [`ToolCall`] id — carries it, so the two agree within the response while
+    /// no other response in the process can mint the same id.
+    id_epoch: u64,
+    /// Whether the provider reports input tokens **excluding** cache
+    /// read/creation tokens (Anthropic semantics). See
+    /// [`CacheTokenAccounting`].
+    cache_accounting: CacheTokenAccounting,
 }
 
 impl OpenAiStreamAcc {
     /// Builds an accumulator with the given inline reasoning-tag extraction
-    /// config (`None` disables inline extraction).
-    pub(super) fn new(reasoning_tags: Option<ReasoningTagExtraction>) -> Self {
+    /// config (`None` disables inline extraction) and cache-token accounting
+    /// convention.
+    pub(super) fn new(
+        reasoning_tags: Option<ReasoningTagExtraction>,
+        cache_accounting: CacheTokenAccounting,
+    ) -> Self {
         let extractor = reasoning_tags.as_ref().map(ReasoningTagStream::new);
         Self {
             reasoning_tags,
             extractor,
+            id_epoch: next_synthetic_id_epoch(),
+            cache_accounting,
             ..Self::default()
         }
     }
@@ -73,7 +89,7 @@ impl OpenAiStreamAcc {
             self.id = Some(id);
         }
         if let Some(usage_wire) = chunk.usage {
-            let usage = convert_usage(usage_wire);
+            let usage = convert_usage_with(usage_wire, self.cache_accounting);
             self.usage = Some(usage);
             pending.push_back(ModelStreamItem::UsageDelta(usage));
         }
@@ -138,7 +154,7 @@ impl OpenAiStreamAcc {
                     }
                     if let Some(args) = function.arguments.filter(|a| !a.is_empty()) {
                         slot.args.push_str(&args);
-                        let call_id = tool_call_id(idx, &slot.id);
+                        let call_id = tool_call_id(self.id_epoch, idx, &slot.id);
                         pending.push_back(ModelStreamItem::ToolCallDelta(ToolDelta {
                             call_id,
                             content: args,
@@ -222,6 +238,7 @@ impl OpenAiStreamAcc {
     /// than failing the whole stream, so the agent loop can feed the error back
     /// to the model and the call still resolves instead of stalling the loop.
     fn into_response(self) -> ModelResponse {
+        let id_epoch = self.id_epoch;
         let mut content = Vec::new();
         // Recompute the inline-tag split over the raw accumulated content so the
         // terminal response is byte-identical to the non-streaming path, then
@@ -252,7 +269,7 @@ impl OpenAiStreamAcc {
             content.push(ContentBlock::Text(visible_text));
         }
         // Enumerate over the full slot vector *before* filtering so the synthetic
-        // fallback id (`tool-{idx}`) matches the one streamed in `ToolCallDelta`
+        // fallback id (`tacall-{epoch}-{idx}`) matches the one streamed in `ToolCallDelta`
         // items — filtering first would renumber the slots and desynchronize the
         // delta ids from the final call ids.
         let tool_calls = self
@@ -260,7 +277,9 @@ impl OpenAiStreamAcc {
             .into_iter()
             .enumerate()
             .filter(|(_, b)| !b.name.is_empty() || !b.args.is_empty())
-            .map(|(idx, b)| tool_call_from_wire("openai stream", idx, &b.id, &b.name, &b.args))
+            .map(|(idx, b)| {
+                tool_call_from_wire("openai stream", id_epoch, idx, &b.id, &b.name, &b.args)
+            })
             .collect::<Vec<_>>();
         let message = AssistantMessage {
             id: self.id,
@@ -275,6 +294,7 @@ impl OpenAiStreamAcc {
             raw: None,
             resolved_model: None,
             continue_turn: None,
+            served_from_cache: false,
         }
     }
 }

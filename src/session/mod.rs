@@ -65,14 +65,21 @@
 //! coordination guarantees.
 
 mod context;
-mod ops;
+mod migrations;
+pub mod ops;
+pub mod retention;
 pub mod run_ledger;
 mod store;
 pub mod types;
 
 pub use ops::{
-    get_session, list_children, list_messages, list_sessions, list_tool_calls, mark_interrupted,
-    record_message, record_session_end, record_session_start, record_tool_call, search_sessions,
+    DEFAULT_FTS_SNIPPET_BYTES, fts_snippet_bytes, get_session, list_children, list_messages,
+    list_sessions, list_tool_calls, mark_interrupted, record_message, record_session_end,
+    record_session_start, record_tool_call, search_sessions, set_fts_snippet_bytes,
+};
+pub use retention::{
+    RetentionReport, apply_retention, prune_run_events_before, prune_run_telemetry_before,
+    prune_sessions_before, prune_tool_calls_before, reindex_fts, trim_session_messages,
 };
 pub use store::{db_path, with_connection, with_transaction};
 pub use types::{

@@ -94,6 +94,22 @@ pub struct InMemoryChatHistory {
 pub struct StoreChatHistory<S: Store> {
     /// The backing long-term store.
     pub(crate) store: S,
+    /// Per-thread append locks.
+    ///
+    /// [`ChatHistory::append`] over a key-value store is a read-modify-write:
+    /// load the thread, push, write the whole list back. Two concurrent appends
+    /// that both read before either writes produce a last-writer-wins result in
+    /// which one message is silently gone — and the two `ChatHistory` backends
+    /// then give *different* guarantees for the same trait method, because
+    /// `InMemoryChatHistory::append` holds its lock for the whole operation.
+    ///
+    /// A per-thread async mutex closes that gap and keeps the two consistent.
+    /// It is an **in-process** guarantee, which is the same scope
+    /// `InMemoryChatHistory` offers; across processes sharing one `FileStore`
+    /// directory the read-modify-write is still racy, and closing *that* needs a
+    /// compare-and-swap primitive the `Store` trait does not have. Prefer
+    /// `replace` (a single write) when the full list is already in hand.
+    pub(crate) append_locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 /// A thin thread-scoped wrapper over a [`ChatHistory`] with an optional

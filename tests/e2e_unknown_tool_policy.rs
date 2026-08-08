@@ -39,6 +39,7 @@ fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> Mod
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -55,6 +56,7 @@ fn text_response(text: &str) -> ModelResponse {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -80,7 +82,7 @@ fn single_unknown_tool_event(events: &[AgentEvent]) -> (String, String) {
     found.expect("an UnknownToolCall event should have been recorded")
 }
 
-// ── 1. Fail policy (default) ──────────────────────────────────────────────────
+// ── 1. Fail policy (opt-in) ───────────────────────────────────────────────────
 
 #[tokio::test]
 async fn fail_policy_errors_on_unregistered_tool() {
@@ -89,7 +91,12 @@ async fn fail_policy_errors_on_unregistered_tool() {
         "mock",
         Arc::new(MockModel::with_tool_call("missing", json!({}))),
     );
-    // Default policy is UnknownToolPolicy::Fail; no tool registered.
+    // `ReturnToolError` is the default now (a hallucinated tool name is a
+    // routine model mistake), so a hard stop has to be asked for.
+    harness.with_policy(RunPolicy {
+        unknown_tool: UnknownToolPolicy::Fail,
+        ..RunPolicy::default()
+    });
 
     let err = harness
         .invoke_default(&(), vec![Message::user("go")])

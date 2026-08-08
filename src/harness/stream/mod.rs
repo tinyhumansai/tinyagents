@@ -17,16 +17,32 @@
 //! - [`stream`] — a convenience helper that filters a slice of chunks by a
 //!   set of modes and returns the matching subset.
 //!
-//! The stream module is **independent** of `crate::harness::events`: it
-//! provides a higher-level projection API without importing the event bus.
-//! Integration between event delivery and stream chunks is the responsibility
-//! of the harness runtime.
+//! - [`project_event`] / [`project_event_for_modes`] / [`projected_mode`] — the
+//!   [`AgentEvent`] → [`StreamChunk`] projection (see the `project` module docs
+//!   for the routing table).
+//!
+//! The chunk *types* are independent of `crate::harness::events`; only the
+//! projection depends on it. Callers that never touch events still pay nothing
+//! for the coupling.
+//!
+//! # Wiring note for the agent loop (wave 2)
+//!
+//! `invoke_stream` should build a `StreamSink` from the caller's requested
+//! [`StreamMode`]s and call [`StreamSink::push_event`] (or
+//! [`project_event_for_modes`] directly) for every emitted [`AgentEvent`],
+//! instead of handing raw events to the caller. [`StreamMode::Values`] is the
+//! one mode the projection cannot supply — a full state snapshot is graph
+//! state, so the graph runtime pushes [`StreamChunk::Values`] itself.
 
+mod project;
 mod types;
 
+pub use project::{project_event, project_event_for_modes, projected_mode};
 pub use types::*;
 
 use std::collections::HashSet;
+
+use crate::harness::events::AgentEvent;
 
 // ---------------------------------------------------------------------------
 // StreamSink impls
@@ -81,6 +97,24 @@ impl StreamSink {
     pub fn push(&self, chunk: StreamChunk) {
         if self.active_modes.contains(&chunk.mode()) {
             self.buffer.borrow_mut().push(chunk);
+        }
+    }
+
+    /// Projects `event` and buffers the resulting chunk when its mode is
+    /// active. Returns `true` when a chunk was buffered.
+    ///
+    /// The one-line adapter between the event bus and this sink: a streaming
+    /// run loop calls this for every emitted [`AgentEvent`] and the sink's
+    /// active-mode set does the filtering. Projection is skipped entirely for
+    /// inactive modes (see [`project_event_for_modes`]).
+    pub fn push_event(&self, event: &AgentEvent) -> bool {
+        let modes: Vec<StreamMode> = self.active_modes.iter().copied().collect();
+        match project_event_for_modes(event, &modes) {
+            Some(chunk) => {
+                self.buffer.borrow_mut().push(chunk);
+                true
+            }
+            None => false,
         }
     }
 

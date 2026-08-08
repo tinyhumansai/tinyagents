@@ -23,7 +23,7 @@ pub struct CohereEmbeddingModel {
 impl CohereEmbeddingModel {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: super::http::default_client(),
             api_key: api_key.into(),
             model: COHERE_DEFAULT_MODEL.to_owned(),
             dimensions: COHERE_DEFAULT_DIMENSIONS,
