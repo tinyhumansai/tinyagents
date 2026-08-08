@@ -611,6 +611,21 @@ pub struct ProviderError {
     /// Whether retrying the same request may succeed.
     #[serde(default)]
     pub retryable: bool,
+    /// Server-supplied wait before retrying, in milliseconds, parsed from the
+    /// HTTP `Retry-After` response header.
+    ///
+    /// A `429`/`503` that names how long the client must wait is authoritative:
+    /// retrying sooner burns an attempt for certain.
+    /// [`retry_after_hint`][crate::harness::retry::retry_after_hint] reads this
+    /// field **first**, falling back to parsing the error message text only
+    /// when it is `None` — until this field existed, a provider that sent the
+    /// header but did not echo it into the JSON body was simply not honored.
+    ///
+    /// Both header forms are normalised here: delta-seconds (`Retry-After: 30`)
+    /// and the HTTP-date form (`Retry-After: Wed, 21 Oct 2015 07:28:00 GMT`),
+    /// the latter converted to a delay relative to receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
     /// Raw provider payload, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<Value>,
