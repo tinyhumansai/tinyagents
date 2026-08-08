@@ -627,7 +627,18 @@ pub const DEFAULT_CACHE_GUARD_EVENT_CAP: usize = 1024;
 
 pub struct PromptCacheGuardMiddleware {
     pub(crate) label: &'static str,
-    pub(crate) previous: Mutex<Option<crate::harness::cache::PromptCacheLayout>>,
+    /// The previous pass's layout, tagged with the run it was observed in.
+    ///
+    /// The run id is load-bearing. A KV-cache prefix is only meaningful
+    /// *within* one conversation, so comparing the last request of one run
+    /// against the first request of the next compares two unrelated
+    /// transcripts and reports an invalidation that never happened. A single
+    /// guard instance is routinely shared across runs — a sub-agent's
+    /// middleware stack is built once and its agent invoked many times — so
+    /// this is the common case, not an edge case. It went unnoticed while
+    /// stability was compared by segment id alone, because any two requests
+    /// carrying the same segment ids compared equal regardless of content.
+    pub(crate) previous: Mutex<Option<(RunId, crate::harness::cache::PromptCacheLayout)>>,
     pub(crate) events: Mutex<VecDeque<CacheLayoutEvent>>,
     pub(crate) max_events: usize,
 }
