@@ -277,6 +277,7 @@ async fn model_request_response_registry_and_stream_contracts_are_stable() {
             code: Some("internal".into()),
             message: "nope".into(),
             retryable: true,
+            retry_after_ms: None,
             raw: Some(json!({ "error": "nope" })),
         },
     )]));
@@ -455,6 +456,7 @@ fn structured_output_supports_provider_schema_and_tool_fallbacks() {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     };
     let tool_output = StructuredExtractor::new(StructuredStrategy::ToolCall, "score", schema)
         .extract(&tool_response)

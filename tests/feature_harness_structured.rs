@@ -62,6 +62,7 @@ fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> Mod
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     }
 }
 
@@ -163,6 +164,7 @@ async fn tool_call_strategy_reads_named_tool_arguments() {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     };
 
     let output = extractor
@@ -337,6 +339,7 @@ async fn provider_schema_reads_text_content_blocks() {
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     };
 
     let parsed: Answer = extractor

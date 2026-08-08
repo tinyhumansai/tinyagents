@@ -468,6 +468,7 @@ pub(super) async fn sse_next(mut state: SseState) -> Option<(ModelStreamItem, Ss
                     model: Some(state.model.clone()),
                     message: error.to_string(),
                     retryable: true,
+                    retry_after_ms: None,
                     ..ProviderError::default()
                 };
                 return Some((ModelStreamItem::ProviderFailed(provider_error), state));

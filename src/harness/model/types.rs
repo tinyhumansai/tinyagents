@@ -569,6 +569,7 @@ pub struct ModelResponse {
     /// this needs no cap of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continue_turn: Option<String>,
+ served_from_cache: false,
     /// `true` when this response was served from a local
     /// [`ResponseCache`][crate::harness::cache::ResponseCache] rather than
     /// produced by a provider call.
@@ -630,6 +631,7 @@ pub struct ProviderError {
     /// Whether retrying the same request may succeed.
     #[serde(default)]
     pub retryable: bool,
+ retry_after_ms: None,
     /// Server-supplied wait before retrying, in milliseconds, parsed from the
     /// HTTP `Retry-After` response header.
     ///
