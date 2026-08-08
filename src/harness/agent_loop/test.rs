@@ -1102,14 +1102,20 @@ async fn usage_accumulates_across_calls() {
     assert_eq!(run.usage.usage.output_tokens, 5);
 }
 
+/// `UnknownToolPolicy::Fail` is opt-in now (the default recovers), so this
+/// pins the opted-in fail-closed behavior rather than the default.
 #[tokio::test]
-async fn tool_not_found_errors() {
+async fn tool_not_found_errors_under_the_fail_policy() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model(
         "mock",
         Arc::new(MockModel::with_tool_call("missing", json!({}))),
     );
     // No tool registered.
+    harness.with_policy(RunPolicy {
+        unknown_tool: UnknownToolPolicy::Fail,
+        ..RunPolicy::default()
+    });
 
     let err = harness
         .invoke_default(&(), vec![Message::user("go")])
@@ -1182,8 +1188,10 @@ async fn unknown_tool_rewrite_retargets_to_real_tool() {
     assert_eq!(*lookup.calls.lock().unwrap(), 1);
 }
 
+/// `InvalidArgsPolicy::Fail` is opt-in now (the default recovers), so this pins
+/// the opted-in fail-closed behavior rather than the default.
 #[tokio::test]
-async fn invalid_tool_arguments_fail_before_tool_execution() {
+async fn invalid_tool_arguments_fail_before_tool_execution_under_the_fail_policy() {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model(
         "mock",
@@ -1196,6 +1204,10 @@ async fn invalid_tool_arguments_fail_before_tool_execution() {
     harness.register_tool(Arc::new(StrictLookupTool {
         calls: Arc::clone(&calls),
     }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::Fail,
+        ..RunPolicy::default()
+    });
 
     let err = harness
         .invoke_default(&(), vec![Message::user("lookup")])
