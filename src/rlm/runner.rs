@@ -154,7 +154,18 @@ impl<State: Send + Sync + 'static> RlmRunner<State> {
         let mut nudged = false;
 
         let outcome = loop {
-            if steps.len() >= self.config.policy.max_cells {
+            // Gate on the *session-cumulative* cell count (matching
+            // `RlmSession::eval`'s own enforcement, and `docs/modules/rlm`'s
+            // documented "counters are session-cumulative" contract) rather
+            // than `steps.len()`, which resets to zero on every `run()` call.
+            // With `steps.len()` the two checks only agreed on the very
+            // first run: a second `run()` on the same (long-lived,
+            // `&mut self`) runner would see an empty `steps`, pay for a full
+            // driver-model call, and only then have `self.session.eval`
+            // return a hard `LimitExceeded` error instead of the graceful
+            // `CellBudgetExhausted` outcome the same condition produces on
+            // the first run.
+            if self.session.cells_run() >= self.config.policy.max_cells {
                 break RlmOutcome {
                     answer: None,
                     stop_reason: RlmStopReason::CellBudgetExhausted,

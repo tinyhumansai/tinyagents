@@ -71,6 +71,15 @@ pub(super) struct CellBuffers {
     calls: Arc<Mutex<Vec<ReplCallRecord>>>,
     answer: Arc<Mutex<Option<String>>>,
     host_error: Arc<Mutex<Option<TinyAgentsError>>>,
+    /// The most recent *recoverable* capability error raised this cell (see
+    /// `builtins::raise`/`builtins::is_fatal`), regardless of whether the
+    /// script caught it. Unlike `host_error`, this is never consulted by
+    /// `on_progress` or the success path, so a `try`/`catch`ed error has no
+    /// further effect once the script continues normally — only
+    /// [`ReplSession::eval_cell`]'s error path reads it, to recover the typed
+    /// error for a capability failure the script left uncaught instead of
+    /// falling back to a stringly-wrapped [`TinyAgentsError::Validation`].
+    last_capability_error: Arc<Mutex<Option<TinyAgentsError>>>,
     vars_snapshot: Arc<Mutex<BTreeMap<String, String>>>,
     /// The wall-clock instant the current cell's [`ReplPolicy::timeout`]
     /// expires at, if the policy configures one. Set at the start of
@@ -530,7 +539,20 @@ impl<State: Send + Sync + 'static, Ctx> ReplSession<State, Ctx> {
                 if let Some(host_err) = self.buffers.take_host_error() {
                     return Err(host_err);
                 }
-                return Err(map_rhai_error(*err));
+                // The script left a *recoverable* capability error uncaught.
+                // `raise` stashed its typed form (without aborting the cell);
+                // recover it here rather than reporting the generic,
+                // stringly-wrapped Rhai runtime error — but only when the
+                // propagated error is actually that same failure (an
+                // unrelated later error must not be misreported as the
+                // earlier, already-handled one).
+                let mapped = map_rhai_error(*err);
+                if let Some(last) = self.buffers.take_last_capability_error()
+                    && matches!(&mapped, TinyAgentsError::Validation(msg) if msg.contains(&last.to_string()))
+                {
+                    return Err(last);
+                }
+                return Err(mapped);
             }
         };
 
@@ -583,6 +605,10 @@ impl CellBuffers {
         self.calls.lock().expect("calls poisoned").clear();
         *self.answer.lock().expect("answer poisoned") = None;
         *self.host_error.lock().expect("host_error poisoned") = None;
+        *self
+            .last_capability_error
+            .lock()
+            .expect("last_capability_error poisoned") = None;
         *self.deadline.lock().expect("deadline poisoned") = None;
         *self
             .max_output_bytes
@@ -625,6 +651,14 @@ impl CellBuffers {
 
     fn take_host_error(&self) -> Option<TinyAgentsError> {
         self.host_error.lock().expect("host_error poisoned").take()
+    }
+
+    /// Takes the most recently stashed recoverable capability error, if any.
+    fn take_last_capability_error(&self) -> Option<TinyAgentsError> {
+        self.last_capability_error
+            .lock()
+            .expect("last_capability_error poisoned")
+            .take()
     }
 
     // ── Accessors used by the capability built-ins (in `builtins.rs`). ──
@@ -681,6 +715,17 @@ impl CellBuffers {
     /// with, so `eval_cell` can surface it verbatim.
     pub(super) fn set_host_error(&self, err: TinyAgentsError) {
         *self.host_error.lock().expect("host_error poisoned") = Some(err);
+    }
+
+    /// Stashes a *recoverable* capability error (see `builtins::is_fatal`)
+    /// without aborting the cell, so an uncaught occurrence can still be
+    /// reported with its precise type by [`ReplSession::eval_cell`]'s error
+    /// path.
+    pub(super) fn set_last_capability_error(&self, err: TinyAgentsError) {
+        *self
+            .last_capability_error
+            .lock()
+            .expect("last_capability_error poisoned") = Some(err);
     }
 
     /// Returns the pre-cell namespace snapshot for `show_vars()`.

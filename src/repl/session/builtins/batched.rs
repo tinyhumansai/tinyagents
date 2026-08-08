@@ -41,7 +41,7 @@ pub(super) fn model_query_batched_impl<State: Send + Sync + 'static>(
             .registry
             .model(&model_name)
             .ok_or_else(|| raise(ctx, TinyAgentsError::ModelNotFound(model_name.clone())))?;
-        let request = build_model_request(&model_name, params);
+        let request = build_model_request(params);
         let structured = map_bool(params, "structured").unwrap_or(false);
         // Stream a "started" event for every fan-out leg up front, so a live
         // observer sees the whole batch dispatch before any leg completes.

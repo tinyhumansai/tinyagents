@@ -235,11 +235,41 @@ type AgentBatchItem = (String, String, Duration);
 
 // ── Error / recording helpers ───────────────────────────────────────────────
 
+/// Returns whether a capability error must abort the cell (a policy bound
+/// tripped) instead of surfacing inside the script as an ordinary, catchable
+/// runtime error. Mirrors [`crate::rlm::host::is_fatal`] — kept as a separate
+/// copy here since the `repl` and `rlm` cargo features are independent, so
+/// this module cannot assume the `rlm` module is compiled in.
+fn is_fatal(err: &TinyAgentsError) -> bool {
+    matches!(
+        err,
+        TinyAgentsError::LimitExceeded(_)
+            | TinyAgentsError::Timeout(_)
+            | TinyAgentsError::Cancelled
+            | TinyAgentsError::SubAgentDepth(_)
+    )
+}
+
 /// Stashes the precise crate error so `eval_cell` can surface it verbatim, and
 /// returns the stringly-typed Rhai runtime error the engine propagates.
+///
+/// Only *fatal* errors (see [`is_fatal`] — a policy bound such as a call
+/// limit, timeout, cancellation, or recursion depth) are stashed as the
+/// cell-aborting `host_error`: `on_progress` polls that flag and terminates
+/// the script at the next statement, and `eval_cell`'s success path prefers
+/// it even when the script otherwise completed normally. A *recoverable*
+/// capability failure (unknown tool/model/agent, a tool-reported error, …)
+/// must remain an ordinary catchable Rhai runtime error so `try`/`catch` in
+/// the script actually works — it is stashed only into the non-aborting
+/// `last_capability_error` slot, which `eval_cell`'s error path consults to
+/// recover the typed error for an error the script left uncaught.
 fn raise<State: Send + Sync>(ctx: &HostContext<State>, err: TinyAgentsError) -> Box<EvalAltResult> {
     let message = err.to_string();
-    ctx.buffers.set_host_error(err);
+    if is_fatal(&err) {
+        ctx.buffers.set_host_error(err);
+    } else {
+        ctx.buffers.set_last_capability_error(err);
+    }
     Box::new(EvalAltResult::ErrorRuntime(
         Dynamic::from(message),
         Position::NONE,
@@ -418,7 +448,17 @@ fn check_depth<State: Send + Sync>(ctx: &HostContext<State>) -> Result<(), Box<E
 // ── Request builders ────────────────────────────────────────────────────────
 
 /// Builds a [`ModelRequest`] from a `model_query` argument map.
-fn build_model_request(model: &str, params: &Map) -> ModelRequest {
+///
+/// `model` here is the *registry* alias the script named (`map_str(params,
+/// "model")`), not a provider model id — `CapabilityRegistry::register_model`
+/// allows them to differ. Leave `ModelRequest::model` unset: the resolved
+/// `ChatModel` already carries its own provider configuration, and a provider
+/// transport that reads `request.model` (falling back to its own model only
+/// when unset) would otherwise send the registry alias itself as the model id
+/// on the wire. Mirrors `RlmHost::handle_llm` / `RlmRunner::run` in
+/// `src/rlm/`, which build `ModelRequest { messages, ..Default::default() }`
+/// for exactly this reason.
+fn build_model_request(params: &Map) -> ModelRequest {
     let mut messages = Vec::new();
     if let Some(system) = map_str(params, "system") {
         messages.push(Message::system(system));
@@ -428,7 +468,6 @@ fn build_model_request(model: &str, params: &Map) -> ModelRequest {
     }
     ModelRequest {
         messages,
-        model: Some(model.to_string()),
         ..Default::default()
     }
 }
