@@ -2159,6 +2159,51 @@ impl OpenAiModel {
     }
 }
 
+/// Parses an HTTP `Retry-After` header value into a delay in milliseconds.
+///
+/// [RFC 9110 §10.2.3] defines two forms and both appear in the wild:
+///
+/// * **delta-seconds** — `Retry-After: 30`. Used by OpenAI, Anthropic, and most
+///   gateways on a 429.
+/// * **HTTP-date** — `Retry-After: Wed, 21 Oct 2015 07:28:00 GMT`. Used by some
+///   CDNs and proxies fronting a provider, and by 503 maintenance responses.
+///   Converted to a delay relative to *now*; a date already in the past yields
+///   `0` (retry immediately), never a negative or wrapped value.
+///
+/// Returns `None` for an unparseable value rather than guessing, so the caller
+/// falls through to the existing exponential backoff.
+///
+/// [RFC 9110 §10.2.3]: https://www.rfc-editor.org/rfc/rfc9110#field.retry-after
+pub(super) fn parse_retry_after_header_ms(raw: &str) -> Option<u64> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return None;
+    }
+    // delta-seconds. Fractional seconds are not in the grammar but some
+    // providers send them, so accept a float too.
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(seconds.saturating_mul(1000));
+    }
+    if let Ok(seconds) = value.parse::<f64>()
+        && seconds.is_finite()
+        && seconds >= 0.0
+    {
+        return Some((seconds * 1000.0) as u64);
+    }
+    // HTTP-date. `parse_from_rfc2822` covers the IMF-fixdate form (including
+    // the obsolete `GMT` zone token); the explicit format is the fallback for
+    // servers that omit the day-of-week comma.
+    let parsed = chrono::DateTime::parse_from_rfc2822(value)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(value, "%a, %d %b %Y %H:%M:%S GMT")
+                .map(|naive| naive.and_utc())
+        })
+        .ok()?;
+    let delta = parsed.signed_duration_since(chrono::Utc::now());
+    Some(delta.num_milliseconds().max(0) as u64)
+}
+
 /// Maps a [`ProviderKind`] onto the [`LocalRuntimeKind`] it denotes, or `None`
 /// for a hosted provider.
 ///
