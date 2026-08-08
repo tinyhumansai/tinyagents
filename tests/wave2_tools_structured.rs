@@ -192,8 +192,13 @@ fn a_provider_error_carrying_the_overflow_code_classifies_the_same() {
     use tinyagents::harness::model::ProviderError;
     use tinyagents::harness::providers::openai::CONTEXT_OVERFLOW_CODE;
 
-    let mut provider_error = ProviderError::new("openai", "context length exceeded");
-    provider_error.code = Some(CONTEXT_OVERFLOW_CODE.to_string());
+    let provider_error = ProviderError {
+        provider: "openai".to_string(),
+        status: Some(400),
+        code: Some(CONTEXT_OVERFLOW_CODE.to_string()),
+        message: "context length exceeded".to_string(),
+        ..ProviderError::default()
+    };
     let error = TinyAgentsError::from_provider_error(provider_error);
 
     assert!(error.is_context_overflow(), "{error:?}");
@@ -204,7 +209,12 @@ fn a_provider_error_carrying_the_overflow_code_classifies_the_same() {
 fn an_unrelated_provider_error_is_not_a_context_overflow() {
     use tinyagents::harness::model::ProviderError;
 
-    let error = TinyAgentsError::from_provider_error(ProviderError::new("openai", "rate limited"));
+    let error = TinyAgentsError::from_provider_error(ProviderError {
+        provider: "openai".to_string(),
+        status: Some(429),
+        message: "rate limited".to_string(),
+        ..ProviderError::default()
+    });
     assert!(!error.is_context_overflow());
     assert!(matches!(error, TinyAgentsError::Provider(_)));
 }
