@@ -41,7 +41,11 @@ fn seed() -> u64 {
     let bump = SEED_COUNTER.fetch_add(1, Ordering::Relaxed);
     // Golden-ratio odd constant keeps the mix well-distributed for small bumps.
     let mixed = nanos ^ bump.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    if mixed == 0 { 0xDEAD_BEEF_CAFE_F00D } else { mixed }
+    if mixed == 0 {
+        0xDEAD_BEEF_CAFE_F00D
+    } else {
+        mixed
+    }
 }
 
 /// Advances the thread-local generator and returns the raw 64-bit output.

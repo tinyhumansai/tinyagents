@@ -356,10 +356,15 @@ mod test {
         apply(&conn).expect("upgrade");
         // The version-3 index only exists because the migration ran.
         let exists: bool = conn
-            .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_agent_teams_updated'")
+            .prepare(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_agent_teams_updated'",
+            )
             .expect("prepare")
             .exists([])
             .expect("exists");
-        assert!(exists, "migration 3 added the agent_teams(updated_at) index");
+        assert!(
+            exists,
+            "migration 3 added the agent_teams(updated_at) index"
+        );
     }
 }

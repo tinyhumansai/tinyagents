@@ -85,8 +85,11 @@ pub fn prune_sessions_before(workspace_dir: &Path, older_than: DateTime<Utc>) ->
         };
         let mut removed = 0usize;
         for id in &ids {
-            conn.execute("DELETE FROM sessions_fts WHERE session_id = ?1", params![id])
-                .storage_context("delete session FTS rows")?;
+            conn.execute(
+                "DELETE FROM sessions_fts WHERE session_id = ?1",
+                params![id],
+            )
+            .storage_context("delete session FTS rows")?;
             removed += conn
                 .execute("DELETE FROM sessions WHERE id = ?1", params![id])
                 .storage_context("delete session")?;
@@ -154,7 +157,10 @@ pub fn prune_run_events_before(workspace_dir: &Path, older_than: DateTime<Utc>) 
     tracing::debug!("{LOG_PREFIX} prune_run_events_before.entry cutoff={cutoff}");
     let removed = with_transaction(workspace_dir, |conn| {
         Ok(conn
-            .execute("DELETE FROM run_events WHERE timestamp < ?1", params![cutoff])
+            .execute(
+                "DELETE FROM run_events WHERE timestamp < ?1",
+                params![cutoff],
+            )
             .storage_context("prune run events")?)
     })?;
     tracing::debug!("{LOG_PREFIX} prune_run_events_before.exit removed={removed}");
@@ -163,7 +169,10 @@ pub fn prune_run_events_before(workspace_dir: &Path, older_than: DateTime<Utc>) 
 
 /// Deletes run-telemetry rows last updated before `older_than`, returning how
 /// many.
-pub fn prune_run_telemetry_before(workspace_dir: &Path, older_than: DateTime<Utc>) -> Result<usize> {
+pub fn prune_run_telemetry_before(
+    workspace_dir: &Path,
+    older_than: DateTime<Utc>,
+) -> Result<usize> {
     let cutoff = older_than.to_rfc3339();
     tracing::debug!("{LOG_PREFIX} prune_run_telemetry_before.entry cutoff={cutoff}");
     let removed = with_transaction(workspace_dir, |conn| {
@@ -245,8 +254,8 @@ pub fn reindex_fts(workspace_dir: &Path) -> Result<usize> {
 
         // One row per message, carrying the (capped) content snippet.
         {
-            let mut stmt = conn
-                .prepare("SELECT session_id, content FROM session_messages ORDER BY id ASC")?;
+            let mut stmt =
+                conn.prepare("SELECT session_id, content FROM session_messages ORDER BY id ASC")?;
             let rows = stmt.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;

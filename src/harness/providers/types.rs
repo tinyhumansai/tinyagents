@@ -36,6 +36,16 @@ pub enum ProviderKind {
     /// [`ProviderSpec::with_model`], or discover it at runtime with
     /// [`OpenAiModel::list_models`](crate::harness::providers::openai::OpenAiModel::list_models).
     LmStudio,
+    /// A local llama.cpp `llama-server` exposing `/v1/chat/completions`.
+    ///
+    /// Carries **no default model**, for the same reason as
+    /// [`ProviderKind::LmStudio`]: the id is whichever GGUF was loaded.
+    LlamaCpp,
+    /// A local vLLM OpenAI-compatible server.
+    ///
+    /// Carries no default model — vLLM serves whatever weights it was started
+    /// with, usually under the full HuggingFace repo id.
+    Vllm,
     /// DeepSeek OpenAI-compatible endpoint.
     DeepSeek,
     /// Groq OpenAI-compatible endpoint.
@@ -60,6 +70,8 @@ impl ProviderKind {
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Ollama => "ollama",
             ProviderKind::LmStudio => "lmstudio",
+            ProviderKind::LlamaCpp => "llama_cpp",
+            ProviderKind::Vllm => "vllm",
             ProviderKind::DeepSeek => "deepseek",
             ProviderKind::Groq => "groq",
             ProviderKind::Xai => "xai",
@@ -83,6 +95,10 @@ impl ProviderKind {
                 "anthropic" => Some(ProviderKind::Anthropic),
                 "ollama" => Some(ProviderKind::Ollama),
                 "lmstudio" | "lm_studio" | "lm-studio" => Some(ProviderKind::LmStudio),
+                "llamacpp" | "llama_cpp" | "llama-cpp" | "llamaserver" => {
+                    Some(ProviderKind::LlamaCpp)
+                }
+                "vllm" => Some(ProviderKind::Vllm),
                 "deepseek" => Some(ProviderKind::DeepSeek),
                 "groq" => Some(ProviderKind::Groq),
                 "xai" => Some(ProviderKind::Xai),
@@ -158,6 +174,11 @@ impl ProviderSpec {
             // `list_models`), which fails loudly at construction instead of
             // silently on the first request.
             ProviderKind::LmStudio => Self::new(kind, "", "http://localhost:1234/v1", None, false),
+            // Same "no default model" rule as LM Studio, and the same reason:
+            // the served id is whatever weights the operator started the server
+            // with. Both are local runtimes, so neither requires an API key.
+            ProviderKind::LlamaCpp => Self::new(kind, "", "http://localhost:8080/v1", None, false),
+            ProviderKind::Vllm => Self::new(kind, "", "http://localhost:8000/v1", None, false),
             ProviderKind::DeepSeek => Self::new(
                 kind,
                 "deepseek-chat",

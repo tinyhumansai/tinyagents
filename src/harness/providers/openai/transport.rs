@@ -140,6 +140,41 @@ pub struct OpenAiModel {
     /// guaranteed-400 round trip before falling back. See
     /// [`Self::latch_stream_required`].
     stream_required: AtomicBool,
+    /// Whether a JSON-Schema `response_format` is sent with OpenAI **strict**
+    /// structured output (`"strict": true`).
+    ///
+    /// Used to be hardcoded `true` for every endpoint and every schema. Strict
+    /// mode is far narrower than JSON Schema — it requires
+    /// `additionalProperties: false` on every object and *every* property listed
+    /// in `required` — so a caller's ordinary schema 400s. Local runtimes reject
+    /// the key outright. Defaults `true` for hosted OpenAI (unchanged wire
+    /// shape), `false` for local runtimes, overridable with
+    /// [`Self::with_strict_json_schema`], and latched `false` by a 400 that
+    /// implicates the schema (see [`degrade_for_400`]).
+    json_schema_strict: AtomicBool,
+    /// Whether the endpoint accepts native `tools` on the wire.
+    ///
+    /// This is the **transport** half of the tool decision; the *advertised*
+    /// half is [`ModelProfile::tool_calling`]. They used to be the same value,
+    /// hard-disabled for every local runtime, which forced prompt-guided tools
+    /// on every local call and excluded every local model from any
+    /// `CapabilitySet { tool_calling: true }` resolution. Now it is discovered:
+    /// seeded optimistically (or from [`Self::probe_local_profile`]) and latched
+    /// `false` by a 400 implicating `tools`, exactly like
+    /// [`Self::stream_required`]. See [`Self::with_native_tools_on_wire`].
+    native_tools_on_wire: AtomicBool,
+    /// How the provider counts cache tokens against its input total. See
+    /// [`CacheTokenAccounting`].
+    cache_accounting: CacheTokenAccounting,
+    /// Whether this instance points at a local runtime (Ollama, LM Studio,
+    /// llama.cpp server, vLLM, …). Local runtimes get the degrade knobs
+    /// pre-set, a native-API escape hatch for `num_ctx`, a `model not found`
+    /// error rewrite with real remediation, and are the only targets
+    /// [`Self::probe_local_profile`] will probe.
+    local_runtime: Option<LocalRuntimeKind>,
+    /// Optional `keep_alive` residency hint baked onto every local request. See
+    /// [`Self::with_keep_alive`].
+    keep_alive: Option<String>,
 }
 
 /// The auth headers `(name, value)` for a given [`AuthStyle`] + credential.
@@ -288,11 +323,30 @@ pub(super) fn merge_system_into_user(messages: &[Message]) -> Vec<Message> {
     merged
 }
 
-/// Returns `true` for OpenAI o-series reasoning models (`o1`/`o3`/`o4`), which
-/// reject `max_tokens` and require `max_completion_tokens` instead.
+/// Returns `true` for OpenAI reasoning models, which reject `max_tokens` and
+/// require `max_completion_tokens` instead.
+///
+/// Covers the o-series (`o1`/`o3`/`o4`) **and the gpt-5 family**. gpt-5 was
+/// missing entirely: its cap was routed to `max_tokens`, which OpenAI rejects
+/// outright (`Unsupported parameter: 'max_tokens' … use
+/// 'max_completion_tokens'`), and it was additionally profiled as
+/// `reasoning: false` / `native_structured_output: false`, so a
+/// `CapabilitySet { reasoning: true }` filtered it out and structured output
+/// picked the tool-call fallback over native schema mode.
 pub(super) fn is_reasoning_model(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
-    lower.starts_with("o1") || lower.starts_with("o3") || lower.starts_with("o4")
+    lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+        || is_gpt5_family(&lower)
+}
+
+/// Returns `true` for the gpt-5 family, tolerating the gateway-prefixed ids
+/// routers use (`openai/gpt-5-mini` on OpenRouter).
+///
+/// Takes an already-lowercased id; callers inside this module always have one.
+pub(super) fn is_gpt5_family(lower: &str) -> bool {
+    lower.starts_with("gpt-5") || lower.starts_with("gpt5") || lower.contains("/gpt-5")
 }
 
 /// Derives a static [`ModelProfile`] for an OpenAI(-compatible) model id.
@@ -309,6 +363,25 @@ pub(super) fn is_reasoning_model(model: &str) -> bool {
 /// engages on a real window instead of silently falling back to a fixed
 /// threshold.
 pub(super) fn derive_profile(provider: &str, model: &str) -> ModelProfile {
+    derive_profile_for(provider, model, false)
+}
+
+/// [`derive_profile`], with `local` selecting the local-runtime policy.
+///
+/// The only difference is [`ModelProfile::max_input_tokens`], and it matters a
+/// great deal. The generic hint table matches **bare substrings**, so
+/// `llama3.2:3b` served by Ollama resolved through `("llama3", Substring,
+/// 128_000)` and advertised a 128 000-token window against a server whose
+/// default `num_ctx` is 2048. Compaction fires at `window * threshold`, so it
+/// never fired and the server truncated the front of the prompt silently.
+///
+/// A local profile therefore reports `None` — "unknown" — which this crate
+/// already supports end to end and which is strictly better than a wrong
+/// number. LangChain reaches the same conclusion by shipping no ChatOllama
+/// profile at all and hard-failing its summarization middleware with a message
+/// telling you to pass absolute token counts. The real answer is to ask the
+/// server: [`OpenAiModel::probe_local_profile`].
+pub(super) fn derive_profile_for(provider: &str, model: &str, local: bool) -> ModelProfile {
     let lower = model.to_ascii_lowercase();
     let reasoning = is_reasoning_model(model);
     let native_structured = lower.contains("gpt-4o") || lower.contains("gpt-4.1") || reasoning;
@@ -327,7 +400,15 @@ pub(super) fn derive_profile(provider: &str, model: &str) -> ModelProfile {
         native_structured_output: native_structured,
         json_schema: true,
         reasoning,
-        max_input_tokens: crate::harness::model::context_window_for_model_id(model),
+        // Every OpenAI reasoning model accepts `reasoning_effort`; models that
+        // merely *emit* reasoning (a deepseek-r1 distill leaking `<think>`
+        // through a local runtime) do not, which is why this is a separate flag.
+        reasoning_effort: reasoning && !local,
+        max_input_tokens: if local {
+            None
+        } else {
+            crate::harness::model::context_window_for_model_id(model)
+        },
         ..ModelProfile::default()
     }
 }
@@ -368,6 +449,11 @@ impl OpenAiModel {
             reasoning_tags: Some(ReasoningTagExtraction::default()),
             reasoning_tags_overridden: false,
             stream_required: AtomicBool::new(false),
+            json_schema_strict: AtomicBool::new(true),
+            native_tools_on_wire: AtomicBool::new(true),
+            cache_accounting: CacheTokenAccounting::default(),
+            local_runtime: None,
+            keep_alive: None,
         }
     }
 
@@ -435,6 +521,20 @@ impl OpenAiModel {
                 provider = %self.provider,
                 model = %self.model,
                 "[openai] provider rejects response_format:json_object; latching degraded shape for subsequent calls"
+            );
+        }
+        if degrade.json_schema_strict && self.json_schema_strict.swap(false, Ordering::Relaxed) {
+            tracing::info!(
+                provider = %self.provider,
+                model = %self.model,
+                "[openai] provider rejects strict json_schema; latching strict:false for subsequent calls"
+            );
+        }
+        if degrade.native_tools && self.native_tools_on_wire.swap(false, Ordering::Relaxed) {
+            tracing::info!(
+                provider = %self.provider,
+                model = %self.model,
+                "[openai] provider rejects native tools; latching prompt-guided tools for subsequent calls"
             );
         }
     }
@@ -639,43 +739,132 @@ impl OpenAiModel {
     /// Overrides the default model id.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
-        let local_capabilities = self.local_capabilities_locked.then_some((
-            self.profile.tool_calling,
-            self.profile.parallel_tool_calls,
-            self.profile.streaming_tool_chunks,
-            self.profile.modalities.image_in,
-        ));
-        self.profile = derive_profile(&self.provider, &self.model);
-        if let Some((tool_calling, parallel_tool_calls, streaming_tool_chunks, image_in)) =
-            local_capabilities
-        {
-            self.profile.tool_calling = tool_calling;
-            self.profile.parallel_tool_calls = parallel_tool_calls;
-            self.profile.streaming_tool_chunks = streaming_tool_chunks;
-            self.profile.modalities.image_in = image_in;
-        }
+        self.rederive_profile();
         self
     }
 
     /// Overrides the provider family id used in profiles and normalized errors.
     pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
         self.provider = provider.into();
-        let local_capabilities = self.local_capabilities_locked.then_some((
+        self.rederive_profile();
+        self
+    }
+
+    /// Re-derives [`Self::profile`] after the model id or provider id changed,
+    /// preserving the local-runtime capability overrides when they are locked.
+    ///
+    /// `max_input_tokens` is part of what is preserved. It used not to be:
+    /// [`Self::with_model`] kept the locked tool/vision overrides but
+    /// **re-derived** the window from the model id, so the wrong hosted-sized
+    /// window survived every model swap on a local handle.
+    fn rederive_profile(&mut self) {
+        let locked = self.local_capabilities_locked.then_some((
             self.profile.tool_calling,
             self.profile.parallel_tool_calls,
             self.profile.streaming_tool_chunks,
             self.profile.modalities.image_in,
+            self.profile.max_input_tokens,
         ));
-        self.profile = derive_profile(&self.provider, &self.model);
-        if let Some((tool_calling, parallel_tool_calls, streaming_tool_chunks, image_in)) =
-            local_capabilities
+        self.profile =
+            derive_profile_for(&self.provider, &self.model, self.local_runtime.is_some());
+        if let Some((
+            tool_calling,
+            parallel_tool_calls,
+            streaming_tool_chunks,
+            image_in,
+            max_input_tokens,
+        )) = locked
         {
             self.profile.tool_calling = tool_calling;
             self.profile.parallel_tool_calls = parallel_tool_calls;
             self.profile.streaming_tool_chunks = streaming_tool_chunks;
             self.profile.modalities.image_in = image_in;
+            self.profile.max_input_tokens = max_input_tokens;
         }
+    }
+
+    /// Declares whether a JSON-Schema `response_format` is sent with OpenAI
+    /// **strict** structured output.
+    ///
+    /// `true` on hosted OpenAI, `false` on every local runtime (they reject the
+    /// key, and LangChain pops it for Ollama for exactly that reason). Strict
+    /// mode demands `additionalProperties: false` on every object and every
+    /// property listed in `required`, so a caller's ordinary schema 400s under
+    /// it; independent of this flag, a 400 implicating the schema degrades to
+    /// `strict: false` for a single retry and latches.
+    pub fn with_strict_json_schema(self, strict: bool) -> Self {
+        self.json_schema_strict.store(strict, Ordering::Relaxed);
         self
+    }
+
+    /// Declares whether the endpoint accepts native `tools` on the wire.
+    ///
+    /// Distinct from [`with_native_tool_calling`](Self::with_native_tool_calling),
+    /// which changes what the *profile advertises* (and therefore what
+    /// [`CapabilitySet`][cs] resolution will accept). This one changes only
+    /// which branch the transport takes. Pass `false` for a server known to 400
+    /// on `tools`; otherwise leave it alone — a 400 implicating `tools` flips it
+    /// automatically and latches, so the discovery is paid once per process.
+    ///
+    /// [cs]: crate::harness::model::CapabilitySet
+    pub fn with_native_tools_on_wire(self, enabled: bool) -> Self {
+        self.native_tools_on_wire.store(enabled, Ordering::Relaxed);
+        self
+    }
+
+    /// Whether native `tools` go on the wire for the next call: the model must
+    /// advertise tool calling **and** the transport must not have latched a
+    /// rejection.
+    pub fn native_tools_enabled(&self) -> bool {
+        self.profile.tool_calling && self.native_tools_on_wire.load(Ordering::Relaxed)
+    }
+
+    /// Declares how the provider counts cache tokens against its input total.
+    ///
+    /// Defaults to OpenAI semantics ([`CacheTokenAccounting::IncludedInInput`]).
+    /// Set [`CacheTokenAccounting::ExcludedFromInput`] for a gateway that
+    /// forwards Anthropic's convention, where `input_tokens` omits cache reads
+    /// and writes — assuming OpenAI semantics over Anthropic data silently
+    /// under-bills.
+    pub fn with_cache_token_accounting(mut self, accounting: CacheTokenAccounting) -> Self {
+        self.cache_accounting = accounting;
+        self
+    }
+
+    /// Bakes a `keep_alive` residency hint onto this local handle.
+    ///
+    /// Ollama unloads an idle model after 5 minutes by default, so the next turn
+    /// pays a cold multi-gigabyte load inside the 600 s unary deadline. The
+    /// value is Ollama's own format (`"30m"`, `"-1"` for forever, `"0"` to
+    /// unload immediately) and is delivered by [`Self::warm_up`], which speaks
+    /// the native API — `keep_alive` has no OpenAI-wire spelling.
+    pub fn with_keep_alive(mut self, keep_alive: impl Into<String>) -> Self {
+        self.keep_alive = Some(keep_alive.into());
+        self
+    }
+
+    /// Requests an explicit context window for the loaded local model.
+    ///
+    /// Shorthand for the documented `{"options": {"num_ctx": n}}` escape hatch,
+    /// merged into [`Self::default_provider_options`], **and** — crucially —
+    /// the value [`Self::warm_up`] delivers over the native API, which is the
+    /// only path a server actually reads it on. It also updates the advertised
+    /// [`ModelProfile::max_input_tokens`], because a window you asked for and a
+    /// window you advertise must be the same number or compaction is gated on
+    /// fiction.
+    pub fn with_local_num_ctx(mut self, num_ctx: u32) -> Self {
+        let merged = merge_provider_options(
+            &self.default_provider_options,
+            &json!({ "options": { "num_ctx": num_ctx } }),
+        );
+        self.default_provider_options = merged;
+        self.profile.max_input_tokens = Some(u64::from(num_ctx));
+        self
+    }
+
+    /// The local runtime this handle points at, or `None` for a hosted endpoint.
+    pub fn local_runtime_kind(&self) -> Option<LocalRuntimeKind> {
+        self.local_runtime
     }
 
     /// Overrides the API base URL. A trailing slash is trimmed so the joined
@@ -737,15 +926,16 @@ impl OpenAiModel {
         // Authorization header, a base URL normalised to the `/v1` root, and
         // the request-shape degradations these servers require. Ollama and LM
         // Studio differ only in their default port.
-        if let Some(default_root) = local_runtime_default_root(&spec.kind) {
+        if let Some(kind) = local_runtime_kind(&spec.kind) {
             let auth = if spec.requires_api_key {
                 AuthStyle::Bearer
             } else {
                 AuthStyle::None
             };
             return Ok(Self::local_runtime(
+                kind,
                 &spec.provider,
-                normalize_local_v1_base_url(spec.base_url, default_root)?,
+                normalize_local_v1_base_url(spec.base_url, kind.default_root())?,
                 api_key,
                 spec.model,
             )
@@ -809,6 +999,280 @@ impl OpenAiModel {
 
         let listing: ModelListWire = serde_json::from_str(&text)?;
         Ok(listing.data)
+    }
+
+    // -----------------------------------------------------------------------
+    // Local-runtime probing and warm-up (C10 / C11 / C12 / C14)
+    // -----------------------------------------------------------------------
+
+    /// Asks a **live local server** what the loaded model can actually do.
+    ///
+    /// Returns the raw [`LocalProbe`] without touching this handle; use
+    /// [`Self::apply_local_probe`] to fold it into the profile, or
+    /// [`Self::probed`] to do both in one step.
+    ///
+    /// # Why this exists
+    ///
+    /// [`list_models`](Self::list_models) has existed for a while and is called
+    /// from nowhere in this crate, and [`ModelListing`] discards everything but
+    /// `id`/`created`/`owned_by` — so the two facts that matter most about a
+    /// local model were unreachable. This reaches them:
+    ///
+    /// | Runtime | Endpoint | Yields |
+    /// |---|---|---|
+    /// | Ollama | `POST {root}/api/show` | `model_info.*.context_length`, `capabilities: [tools, vision, thinking]` |
+    /// | LM Studio | `GET {root}/api/v0/models` | `max_context_length`, `loaded_context_length`, `type` |
+    /// | others | — | nothing; returns an empty probe rather than an error |
+    ///
+    /// This is the root fix for three separate defects: the invented context
+    /// window, the unconditionally-disabled native tools, and the "only two
+    /// runtimes get local treatment" gap.
+    ///
+    /// # Opt-in on purpose
+    ///
+    /// It is **never** called during construction. It costs a network round
+    /// trip, and a constructor that blocks on one is unusable where this crate
+    /// is embedded. Call it once at startup (or lazily on first use) and cache
+    /// the result on the handle.
+    ///
+    /// # Errors
+    ///
+    /// [`TinyAgentsError::Validation`] when this handle is not a local runtime,
+    /// and [`TinyAgentsError::Model`] on transport failure or an undecodable
+    /// body. A **non-2xx** status is not an error: it yields an empty probe, so
+    /// an older server without the endpoint degrades to "learned nothing"
+    /// rather than failing the caller's startup.
+    pub async fn probe_local_profile(&self) -> Result<LocalProbe> {
+        let Some(kind) = self.local_runtime else {
+            return Err(TinyAgentsError::Validation(format!(
+                "probe_local_profile is only meaningful for a local runtime; \
+                 `{}` at {} is not one",
+                self.provider, self.base_url
+            )));
+        };
+        let root = kind.native_root(&self.base_url);
+        let (endpoint, builder) = match kind {
+            LocalRuntimeKind::Ollama => {
+                let url = format!("{root}/api/show");
+                let builder = self
+                    .authorized(self.client.post(&url))
+                    .json(&ollama_show_body(&self.model));
+                (url, builder)
+            }
+            LocalRuntimeKind::LmStudio => {
+                let url = format!("{root}/api/v0/models");
+                let builder = self.authorized(self.client.get(&url));
+                (url, builder)
+            }
+            // llama.cpp-server and vLLM expose no richer metadata endpoint this
+            // crate can rely on. They still get every other piece of local
+            // treatment; they simply learn nothing here.
+            LocalRuntimeKind::LlamaCpp | LocalRuntimeKind::Vllm => {
+                tracing::debug!(
+                    provider = %self.provider,
+                    kind = kind.as_str(),
+                    "[openai] no probe endpoint for this local runtime; returning an empty probe"
+                );
+                return Ok(LocalProbe::default());
+            }
+        };
+
+        tracing::debug!(
+            provider = %self.provider,
+            model = %self.model,
+            endpoint = %endpoint,
+            "[openai] probing local runtime capabilities"
+        );
+        let response = builder
+            .timeout(PROBE_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| probe_error(&endpoint, e))?;
+        if !response.status().is_success() {
+            tracing::debug!(
+                provider = %self.provider,
+                endpoint = %endpoint,
+                status = response.status().as_u16(),
+                "[openai] local probe endpoint unavailable; continuing without a probe"
+            );
+            return Ok(LocalProbe::default());
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| probe_error(&endpoint, e))?;
+
+        let probe = match kind {
+            LocalRuntimeKind::Ollama => probe_from_ollama_show(&body),
+            LocalRuntimeKind::LmStudio => probe_from_lm_studio_models(&body, &self.model),
+            _ => LocalProbe::default(),
+        };
+        tracing::info!(
+            provider = %self.provider,
+            model = %self.model,
+            max_input_tokens = ?probe.effective_context_window(),
+            tool_calling = ?probe.tool_calling,
+            vision = ?probe.vision,
+            "[openai] local probe complete"
+        );
+        Ok(probe)
+    }
+
+    /// Folds a [`LocalProbe`] into this handle's profile and transport knobs.
+    ///
+    /// Only fields the probe actually learned are written; a `None` leaves the
+    /// current value alone, so a server that reports nothing cannot erase a
+    /// caller's explicit configuration. Pure and synchronous, so the
+    /// probe-to-profile policy is unit-testable without a live server.
+    pub fn apply_local_probe(mut self, probe: &LocalProbe) -> Self {
+        if let Some(window) = probe.effective_context_window() {
+            self.profile.max_input_tokens = Some(window);
+        }
+        if let Some(tool_calling) = probe.tool_calling {
+            self.profile.tool_calling = tool_calling;
+            self.profile.parallel_tool_calls = tool_calling;
+            self.profile.streaming_tool_chunks = tool_calling;
+            self.native_tools_on_wire
+                .store(tool_calling, Ordering::Relaxed);
+        }
+        if let Some(vision) = probe.vision {
+            self.profile.modalities.image_in = vision;
+        }
+        if let Some(reasoning) = probe.reasoning {
+            self.profile.reasoning = reasoning;
+        }
+        self
+    }
+
+    /// [`probe_local_profile`](Self::probe_local_profile) +
+    /// [`apply_local_probe`](Self::apply_local_probe) in one await, for the
+    /// common startup shape:
+    ///
+    /// ```no_run
+    /// # use tinyagents::harness::providers::openai::OpenAiModel;
+    /// # async fn f() -> tinyagents::Result<()> {
+    /// let model = OpenAiModel::ollama().with_model("llama3.2:3b").probed().await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn probed(self) -> Result<Self> {
+        let probe = self.probe_local_profile().await?;
+        Ok(self.apply_local_probe(&probe))
+    }
+
+    /// Verifies the configured model is actually served, with a remediation
+    /// naming the fix.
+    ///
+    /// The embeddings adapter has always done this ("Run `ollama pull {model}`
+    /// or choose an installed embedding model"); the chat path surfaced an
+    /// opaque 404 through [`Self::parse_error_body`]. LangChain gates the same
+    /// check behind an opt-in flag, and so does this: it costs a round trip, so
+    /// it is a method you call rather than something construction does to you.
+    ///
+    /// # Errors
+    ///
+    /// [`TinyAgentsError::Validation`] when the model is not among the served
+    /// ids, listing what *is* available. Transport failures surface unchanged
+    /// from [`Self::list_models`].
+    pub async fn validate_model(&self) -> Result<()> {
+        let listed = self.list_models().await?;
+        if listed.is_empty() {
+            // An empty listing is "this server does not enumerate", not
+            // "nothing is served". Refusing here would be a false negative.
+            tracing::debug!(
+                provider = %self.provider,
+                "[openai] model listing is empty; skipping model validation"
+            );
+            return Ok(());
+        }
+        if listed.iter().any(|entry| entry.id == self.model) {
+            return Ok(());
+        }
+        let mut available: Vec<&str> = listed.iter().map(|entry| entry.id.as_str()).collect();
+        available.sort_unstable();
+        let remediation = match self.local_runtime {
+            Some(LocalRuntimeKind::Ollama) => {
+                format!(" Run `ollama pull {}` to install it.", self.model)
+            }
+            _ => String::new(),
+        };
+        Err(TinyAgentsError::Validation(format!(
+            "{} at {} does not serve model `{}`.{} Available: {}",
+            self.provider,
+            self.base_url,
+            self.model,
+            remediation,
+            available.join(", ")
+        )))
+    }
+
+    /// Loads the model with this handle's local options and holds it resident.
+    ///
+    /// This is the **only** path on which `num_ctx` and `keep_alive` reach the
+    /// server. Both are `/api/chat` fields; the chat adapter speaks
+    /// `POST {base_url}/chat/completions`, where Ollama's compatibility layer
+    /// simply ignores them — so
+    /// [`with_default_provider_options`](Self::with_default_provider_options)
+    /// documenting `{"options": {"num_ctx": 8192}}` as the local escape hatch
+    /// described a field that, on that path, went nowhere. (The existing tests
+    /// asserted only that the request JSON *contained* it, never that a server
+    /// honoured it, which is how that survived.)
+    ///
+    /// Call it once before the first real turn. It doubles as the warm-up that
+    /// keeps Ollama from unloading after its 5-minute idle default and charging
+    /// the next turn a cold multi-gigabyte load inside the 600 s unary deadline.
+    ///
+    /// **Scope, stated plainly:** this configures the loaded *runner*, which
+    /// Ollama then reuses for subsequent `/v1` requests that do not demand
+    /// conflicting options. That is a property of the server's runner reuse, not
+    /// a guarantee of the OpenAI wire format. A full native `/api/chat` chat
+    /// adapter is the complete fix and remains a follow-up.
+    ///
+    /// A no-op (returning `Ok(())`) for a runtime with no native API.
+    ///
+    /// # Errors
+    ///
+    /// [`TinyAgentsError::Model`] on transport failure. A non-2xx status is
+    /// logged and swallowed: a warm-up that the server declined must not fail
+    /// the caller's startup.
+    pub async fn warm_up(&self) -> Result<()> {
+        let Some(kind) = self.local_runtime.filter(|k| k.has_native_api()) else {
+            return Ok(());
+        };
+        let url = format!("{}/api/chat", kind.native_root(&self.base_url));
+        let body = ollama_load_body(
+            &self.model,
+            local_options_object(&self.default_provider_options),
+            self.keep_alive.as_deref(),
+        );
+        tracing::debug!(
+            provider = %self.provider,
+            model = %self.model,
+            url = %url,
+            num_ctx = ?body.pointer("/options/num_ctx"),
+            keep_alive = ?self.keep_alive,
+            "[openai] warming up local runtime over the native API"
+        );
+        let response = self
+            .authorized(self.client.post(&url))
+            .json(&body)
+            .timeout(
+                self.effective_request_timeout(None, false)
+                    .unwrap_or(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)),
+            )
+            .send()
+            .await
+            .map_err(|e| {
+                TinyAgentsError::Model(format!("[openai] warm-up of {url} failed: {e}"))
+            })?;
+        if !response.status().is_success() {
+            tracing::warn!(
+                provider = %self.provider,
+                url = %url,
+                status = response.status().as_u16(),
+                "[openai] local warm-up declined; continuing without it"
+            );
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -928,12 +1392,59 @@ impl OpenAiModel {
 
     /// An Ollama server exposed through its OpenAI-compatible HTTP API.
     pub fn ollama_at(base_url: impl Into<String>, model: impl Into<String>) -> Result<Self> {
+        let kind = LocalRuntimeKind::Ollama;
         Ok(Self::local_runtime(
+            kind,
             "ollama",
-            normalize_local_v1_base_url(base_url.into(), "http://localhost:11434")?,
+            normalize_local_v1_base_url(base_url.into(), kind.default_root())?,
             "",
             model,
         ))
+    }
+
+    /// A llama.cpp `llama-server` exposed through its OpenAI-compatible HTTP
+    /// API (default root `http://localhost:8080`).
+    ///
+    /// llama.cpp-server used to fall through to the hosted `Compatible` path,
+    /// which gave it Bearer auth, a full hosted capability profile, no `/v1`
+    /// normalisation, and none of the request-shape degrade knobs — despite
+    /// being the runtime the `json_object` and named-`tool_choice` degrades were
+    /// written for.
+    pub fn llama_cpp(base_url: impl Into<String>, model: impl Into<String>) -> Result<Self> {
+        let kind = LocalRuntimeKind::LlamaCpp;
+        Ok(Self::local_runtime(
+            kind,
+            kind.as_str(),
+            normalize_local_v1_base_url(base_url.into(), kind.default_root())?,
+            "",
+            model,
+        ))
+    }
+
+    /// A vLLM OpenAI-compatible server (default root `http://localhost:8000`).
+    ///
+    /// Same rationale as [`Self::llama_cpp`]: a self-hosted server is a local
+    /// runtime whatever its name, and gets the local treatment.
+    pub fn vllm(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Result<Self> {
+        let kind = LocalRuntimeKind::Vllm;
+        let api_key = api_key.into();
+        let auth = if api_key.trim().is_empty() {
+            AuthStyle::None
+        } else {
+            AuthStyle::Bearer
+        };
+        Ok(Self::local_runtime(
+            kind,
+            kind.as_str(),
+            normalize_local_v1_base_url(base_url.into(), kind.default_root())?,
+            api_key,
+            model,
+        )
+        .with_auth_style(auth))
     }
 
     /// An LM Studio server exposed through its OpenAI-compatible HTTP API.
@@ -951,31 +1462,61 @@ impl OpenAiModel {
         } else {
             AuthStyle::Bearer
         };
+        let kind = LocalRuntimeKind::LmStudio;
         Ok(Self::local_runtime(
-            "lm_studio",
-            normalize_local_v1_base_url(base_url.into(), "http://localhost:1234")?,
+            kind,
+            kind.as_str(),
+            normalize_local_v1_base_url(base_url.into(), kind.default_root())?,
             api_key,
             model,
         )
         .with_auth_style(auth))
     }
 
+    /// The shared local-runtime preset.
+    ///
+    /// Three things changed here, each fixing a defect the old preset baked in:
+    ///
+    /// * **`tool_calling` stays `true`.** It used to be hard-disabled for every
+    ///   local runtime unconditionally, which (a) forced the prompt-guided
+    ///   branch on every call — injecting the protocol block plus every tool's
+    ///   serialized JSON Schema into the system prompt, against a real 2048-token
+    ///   window, which then truncated from the front and dropped the very prompt
+    ///   carrying the protocol — and (b) cleared `parallel_tool_calls` and
+    ///   `streaming_tool_chunks`, so any `CapabilitySet { tool_calling: true }`
+    ///   excluded **every** local model from resolution. LangChain's ChatOllama
+    ///   sends tools natively with no capability check at all. The pessimism is
+    ///   replaced by discovery: [`Self::probe_local_profile`] asks the server,
+    ///   and a 400 implicating `tools` latches the transport onto the
+    ///   prompt-guided branch for the rest of the process.
+    /// * **The window is `None`, not a guess.** See [`derive_profile_for`].
+    /// * **The degrade knobs are pre-set.** `named_tool_choice` and
+    ///   `json_object` are the two shapes the module doc and README name as
+    ///   "local servers reject this"; auto-degrade recovered from them, but only
+    ///   after one wasted 400 per process — precisely the cost the
+    ///   `stream_required` latch exists to eliminate. `strict` JSON Schema is
+    ///   off for the same reason.
     fn local_runtime(
+        kind: LocalRuntimeKind,
         provider: &str,
         base_url: String,
         api_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
-        Self::compatible_provider(provider, api_key, base_url, model)
+        let mut model = Self::compatible_provider(provider, api_key, base_url, model)
             .with_auth_style(AuthStyle::None)
-            .with_native_tool_calling(false)
             .with_vision(false)
-            .lock_local_capabilities()
-    }
-
-    fn lock_local_capabilities(mut self) -> Self {
-        self.local_capabilities_locked = true;
-        self
+            .with_named_tool_choice(false)
+            .with_json_object_format(false)
+            .with_strict_json_schema(false);
+        model.local_runtime = Some(kind);
+        model.local_capabilities_locked = true;
+        model.rederive_profile();
+        // `rederive_profile` re-derives from the (now local) policy, so re-apply
+        // the vision override it just reset — the lock only preserves values
+        // captured *before* the re-derive.
+        model.profile.modalities.image_in = false;
+        model
     }
 
     #[cfg(test)]
@@ -1005,6 +1546,8 @@ impl OpenAiModel {
         Degrade {
             named_tool_choice: !self.named_tool_choice_supported.load(Ordering::Relaxed),
             json_object: !self.json_object_format_supported.load(Ordering::Relaxed),
+            json_schema_strict: !self.json_schema_strict.load(Ordering::Relaxed),
+            native_tools: !self.native_tools_enabled(),
         }
     }
 
@@ -1034,7 +1577,12 @@ impl OpenAiModel {
         // handed tools gets the tool protocol embedded in its system prompt and no
         // native `tools` on the wire (many local runtimes 400 on `tools`). The
         // model's `<tool_call>` blocks are parsed back in [`Self::invoke`]/stream.
-        let prompt_guided_tools = !self.profile.tool_calling && !request.tools.is_empty();
+        // Native tools go on the wire unless the profile says the model has none
+        // *or* this attempt is degrading them away. `degrade.native_tools`
+        // carries both the instance latch (via `baseline_degrade`) and a
+        // freshly-discovered 400, so one condition covers both.
+        let native_tools = !degrade.native_tools;
+        let prompt_guided_tools = !native_tools && !request.tools.is_empty();
         let prompt_messages;
         let instructed_messages;
         let coalesced_messages: &[Message] = if prompt_guided_tools {
@@ -1056,7 +1604,7 @@ impl OpenAiModel {
         // applied after the coalescing above so folded tool results are already
         // in their final user-turn shape when we look for a real query.
         let user_normalized_messages;
-        let base_messages: &[Message] = if self.profile.tool_calling {
+        let base_messages: &[Message] = if native_tools {
             coalesced_messages
         } else {
             user_normalized_messages =
@@ -1121,7 +1669,7 @@ impl OpenAiModel {
                 // `json_schema` that still guarantees a JSON object.
                 Some(degraded_json_object_format())
             } else {
-                translate_response_format(format)
+                translate_response_format(format, !degrade.json_schema_strict)
             }
         });
 
@@ -1143,6 +1691,24 @@ impl OpenAiModel {
             &self.temperature_unsupported,
         );
 
+        // Provider options are the escape hatch and win on key conflicts, so a
+        // caller who spelled `reasoning_effort` there suppresses the typed
+        // field entirely — emitting both would put the key on the wire twice.
+        let merged_provider_options =
+            merge_provider_options(&self.default_provider_options, &request.provider_options);
+        let reasoning_effort = if merged_provider_options
+            .get("reasoning_effort")
+            .is_some_and(|v| !v.is_null())
+        {
+            None
+        } else {
+            request
+                .reasoning
+                .as_ref()
+                .and_then(|config| config.effort)
+                .map(|effort| effort.as_str().to_string())
+        };
+
         Ok(ChatCompletionRequest {
             model,
             messages,
@@ -1155,12 +1721,10 @@ impl OpenAiModel {
             max_completion_tokens,
             stop: request.stop_sequences.clone(),
             seed: request.seed,
+            reasoning_effort,
             stream: false,
             stream_options: None,
-            extra: provider_extra_options(&merge_provider_options(
-                &self.default_provider_options,
-                &request.provider_options,
-            ))?,
+            extra: provider_extra_options(&merged_provider_options)?,
         })
     }
 
@@ -1218,6 +1782,12 @@ impl OpenAiModel {
     }
 
     /// Builds the `/v1/responses` request body from a provider-neutral request.
+    ///
+    /// Carries the **whole** request. The previous version built only
+    /// `{model, input, instructions, stream, store, max_output_tokens}` and
+    /// dropped tools, tool choice, response format, sampling, stop sequences,
+    /// seed, the continuation id, and `provider_options` — which is how
+    /// `reasoning` became unreachable on the one wire format that supports it.
     fn translate_responses_request(&self, request: &ModelRequest) -> responses::ResponsesRequest {
         let model = request.model.clone().unwrap_or_else(|| self.model.clone());
         let (instructions, input) = responses::build_responses_input(&request.messages);
@@ -1226,6 +1796,45 @@ impl OpenAiModel {
         } else {
             request.max_tokens
         };
+        let strict = self.json_schema_strict.load(Ordering::Relaxed);
+
+        let extra = provider_extra_options(&merge_provider_options(
+            &self.default_provider_options,
+            &request.provider_options,
+        ))
+        .unwrap_or_default();
+        // Same precedence rule as the Chat Completions path: a `reasoning` key
+        // in `provider_options` is the escape hatch and wins, so the typed
+        // field stands down rather than emitting the key twice.
+        let reasoning = if extra.contains_key("reasoning") {
+            None
+        } else {
+            request
+                .reasoning
+                .as_ref()
+                .and_then(responses::translate_reasoning)
+        };
+        // Reasoning replay is only possible under `store: false` when the
+        // reasoning item carries `encrypted_content`, and that only arrives when
+        // it is explicitly requested. Asking for reasoning without asking for
+        // this yields reasoning that cannot survive to the next turn.
+        let include = if reasoning.is_some() {
+            vec![responses::INCLUDE_ENCRYPTED_REASONING.to_string()]
+        } else {
+            Vec::new()
+        };
+
+        let tools = if self.native_tools_enabled() {
+            request
+                .tools
+                .iter()
+                .map(responses::translate_tool)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let tool_choice = (!tools.is_empty()).then(|| translate_tool_choice(&request.tool_choice));
+
         responses::ResponsesRequest {
             model,
             input,
@@ -1233,6 +1842,28 @@ impl OpenAiModel {
             stream: None,
             store: Some(false),
             max_output_tokens,
+            tools,
+            tool_choice,
+            text: request
+                .response_format
+                .as_ref()
+                .and_then(|format| responses::translate_text_format(format, strict)),
+            temperature: effective_temperature(
+                &self.model,
+                request.temperature,
+                self.temperature_override,
+                &self.temperature_unsupported,
+            ),
+            top_p: request.top_p,
+            seed: request.seed,
+            stop: request.stop_sequences.clone(),
+            previous_response_id: request.continuation_id.clone(),
+            reasoning,
+            include,
+            // `provider_options` is the escape hatch and wins on key conflicts,
+            // exactly as `merge_provider_options` already arranges for the Chat
+            // Completions path. It was dropped entirely here.
+            extra,
         }
     }
 
@@ -1436,6 +2067,19 @@ impl OpenAiModel {
         )
     }
 
+    /// Decodes a non-2xx body into a structured [`ProviderError`].
+    ///
+    /// Two classifications are applied on top of the raw decode:
+    ///
+    /// * **Local missing-model 404s** are rewritten with a remediation naming
+    ///   the fix (`ollama pull …`), matching what the embeddings adapter has
+    ///   always done. The chat path used to surface the server's bare
+    ///   `{"error":"model 'x' not found"}`.
+    /// * **Context overflow** is stamped with a stable
+    ///   [`CONTEXT_OVERFLOW_CODE`], so a caller can compact and retry on a code
+    ///   instead of string-matching a provider message. A typed
+    ///   `TinyAgentsError` variant would live in `src/error.rs`; promoting the
+    ///   code to one is a follow-up.
     pub(super) fn parse_error_body(&self, status: u16, text: &str) -> ProviderError {
         let raw = serde_json::from_str::<Value>(text).ok();
         let error_obj = raw.as_ref().and_then(|value| value.get("error"));
@@ -1450,27 +2094,57 @@ impl OpenAiModel {
             .filter(|message| !message.trim().is_empty())
             .unwrap_or(text)
             .to_string();
-        let code = error_obj
+        let mut code = error_obj
             .and_then(|error| error.get("code").or_else(|| error.get("type")))
             .and_then(Value::as_str)
             .map(str::to_string);
+
+        let message = match self.local_runtime.and_then(|kind| {
+            missing_model_remediation(kind, status, text, &self.model, &self.base_url)
+        }) {
+            Some(remediated) => {
+                tracing::info!(
+                    provider = %self.provider,
+                    model = %self.model,
+                    "[openai] rewrote a local missing-model 404 with remediation"
+                );
+                remediated
+            }
+            None => message,
+        };
+
+        if is_context_overflow(status, &message) {
+            tracing::warn!(
+                provider = %self.provider,
+                model = %self.model,
+                max_input_tokens = ?self.profile.max_input_tokens,
+                "[openai] classified failure as a context overflow"
+            );
+            code = Some(CONTEXT_OVERFLOW_CODE.to_string());
+        }
+
         self.provider_error(message, Some(status), code, raw)
     }
 }
 
-/// The server root a local-runtime provider falls back to when its spec carries
-/// a blank `base_url`, or `None` for providers that are not local runtimes.
+/// Maps a [`ProviderKind`] onto the [`LocalRuntimeKind`] it denotes, or `None`
+/// for a hosted provider.
 ///
-/// This is the single place that decides "is this kind a local runtime?", so a
-/// new local provider is one arm here rather than a condition to keep in sync
-/// across the transport.
-fn local_runtime_default_root(
+/// The single place that decides "is this kind a local runtime?", so a new local
+/// provider is one arm here rather than a condition to keep in sync across the
+/// transport. It used to recognise only Ollama and LM Studio, leaving
+/// llama.cpp-server and vLLM to be constructed as [`ProviderKind::Compatible`]
+/// — `requires_api_key: true`, Bearer auth, a full hosted profile, no `/v1`
+/// normalisation, and no degrade knobs.
+pub(super) fn local_runtime_kind(
     kind: &crate::harness::providers::ProviderKind,
-) -> Option<&'static str> {
+) -> Option<LocalRuntimeKind> {
     use crate::harness::providers::ProviderKind;
     match kind {
-        ProviderKind::Ollama => Some("http://localhost:11434"),
-        ProviderKind::LmStudio => Some("http://localhost:1234"),
+        ProviderKind::Ollama => Some(LocalRuntimeKind::Ollama),
+        ProviderKind::LmStudio => Some(LocalRuntimeKind::LmStudio),
+        ProviderKind::LlamaCpp => Some(LocalRuntimeKind::LlamaCpp),
+        ProviderKind::Vllm => Some(LocalRuntimeKind::Vllm),
         _ => None,
     }
 }
@@ -1527,6 +2201,22 @@ pub(super) struct Degrade {
     /// Degrade `response_format:{"type":"json_object"}` to a permissive
     /// `json_schema`.
     pub json_object: bool,
+    /// Degrade a `json_schema` `response_format` from `strict: true` to
+    /// `strict: false`.
+    ///
+    /// A `JsonSchema` request had **no** degradation path at all: only
+    /// `JsonObject` was considered, so a 400 on a strict-schema request was
+    /// terminal even though the retry that fixes it is one boolean away.
+    pub json_schema_strict: bool,
+    /// Drop native `tools` from the wire and embed the tool protocol in the
+    /// prompt instead.
+    ///
+    /// The third latch, and the one that replaces "every local runtime is
+    /// assumed to have no tool support, forever". Seeded from the probe (or
+    /// optimistically `false` = "send tools"), flipped by a 400 implicating
+    /// `tools`, and retried once prompt-guided. Follows the `stream_required`
+    /// latch pattern exactly.
+    pub native_tools: bool,
 }
 
 /// Statuses an OpenAI-compatible proxy uses to reject a non-streaming request.
@@ -1625,6 +2315,21 @@ pub(super) fn degrade_for_400(
         && matches!(request.response_format, Some(ResponseFormat::JsonObject))
     {
         degrade.json_object = true;
+    }
+    if !already.json_schema_strict
+        && (lower.contains("response_format")
+            || lower.contains("json_schema")
+            || lower.contains("strict")
+            || lower.contains("additionalproperties"))
+        && matches!(
+            request.response_format,
+            Some(ResponseFormat::JsonSchema { .. } | ResponseFormat::Auto { .. })
+        )
+    {
+        degrade.json_schema_strict = true;
+    }
+    if !already.native_tools && !request.tools.is_empty() && mentions_tools_unsupported(message) {
+        degrade.native_tools = true;
     }
 
     (degrade != already).then_some(degrade)
@@ -1800,14 +2505,18 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         })?;
 
         let value: Value = serde_json::from_str(&text)?;
-        let response = parse_chat_response(value, self.effective_reasoning_tags())?;
+        let response = parse_chat_response(
+            value,
+            self.effective_reasoning_tags(),
+            self.cache_accounting,
+        )?;
         // Recover the model's `<tool_call>` blocks into `message.tool_calls` for
         // prompt-guided models, and as a fallback for native models that emitted
         // the call as text despite being flagged native (empty structured
         // `tool_calls`). Native responses that already carry structured calls are
         // returned unchanged.
         if crate::harness::tool::should_recover(
-            self.profile.tool_calling,
+            self.native_tools_enabled(),
             !request.tools.is_empty(),
             response.message.tool_calls.len(),
         ) {
@@ -1875,9 +2584,13 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
                 TinyAgentsError::Model(format!("openai non-stream stream-body read failed: {e}"))
             })?;
             let value: Value = serde_json::from_str(&text)?;
-            let mut parsed = parse_chat_response(value, self.effective_reasoning_tags())?;
+            let mut parsed = parse_chat_response(
+                value,
+                self.effective_reasoning_tags(),
+                self.cache_accounting,
+            )?;
             if crate::harness::tool::should_recover(
-                self.profile.tool_calling,
+                self.native_tools_enabled(),
                 !request.tools.is_empty(),
                 parsed.message.tool_calls.len(),
             ) {
@@ -1908,7 +2621,10 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             bytes: Box::pin(bytes),
             buf: Vec::new(),
             pending: VecDeque::new(),
-            acc: OpenAiStreamAcc::new(self.effective_reasoning_tags().cloned()),
+            acc: OpenAiStreamAcc::new(
+                self.effective_reasoning_tags().cloned(),
+                self.cache_accounting,
+            ),
             provider: self.provider.clone(),
             model: self.model.clone(),
             started: false,
@@ -1933,7 +2649,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         if request.tools.is_empty() {
             return Ok(Box::pin(stream));
         }
-        let native = self.profile.tool_calling;
+        let native = self.native_tools_enabled();
         let mut scrubber = crate::harness::tool::ToolCallStreamScrubber::new();
         Ok(Box::pin(stream.flat_map(move |item| {
             futures::stream::iter(clean_stream_item(item, &mut scrubber, native))

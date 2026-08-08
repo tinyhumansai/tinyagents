@@ -601,10 +601,12 @@ fn retry_on_predicate_overrides_the_builtin_classification() {
 
     // LangGraph's curated default shape: connection errors and 5xx, never a
     // programming error (a failing tool is the closest analogue here).
-    let narrowed = RetryPolicy::default()
-        .with_retry_on(Arc::new(|err: &TinyAgentsError| {
-            matches!(err, TinyAgentsError::Model(_) | TinyAgentsError::Provider(_))
-        }));
+    let narrowed = RetryPolicy::default().with_retry_on(Arc::new(|err: &TinyAgentsError| {
+        matches!(
+            err,
+            TinyAgentsError::Model(_) | TinyAgentsError::Provider(_)
+        )
+    }));
     assert!(narrowed.is_retryable_error(&TinyAgentsError::Model("timeout".into())));
     assert!(
         !narrowed.is_retryable_error(&TinyAgentsError::Tool("flaky".into())),
@@ -612,8 +614,7 @@ fn retry_on_predicate_overrides_the_builtin_classification() {
     );
 
     // And it can widen it too.
-    let widened =
-        RetryPolicy::default().with_retry_on(Arc::new(|_: &TinyAgentsError| true));
+    let widened = RetryPolicy::default().with_retry_on(Arc::new(|_: &TinyAgentsError| true));
     assert!(widened.is_retryable_error(&TinyAgentsError::Validation("bad".into())));
 
     // Clearing restores the built-in classification.

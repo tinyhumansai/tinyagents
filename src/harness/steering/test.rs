@@ -459,7 +459,8 @@ fn a_pause_survives_the_batch_and_holds_later_checkpoints() {
     // the next, and could never be deliberately resumed either.
     let handle = SteeringHandle::allow_all();
     handle.send(SteeringCommand::Pause);
-    let mut ctx: RunContext = RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
+    let mut ctx: RunContext =
+        RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
     let mut messages = Vec::new();
 
     assert_eq!(
@@ -479,7 +480,8 @@ fn a_pause_survives_the_batch_and_holds_later_checkpoints() {
 #[test]
 fn a_pause_is_resumable_from_a_later_batch() {
     let handle = SteeringHandle::allow_all();
-    let mut ctx: RunContext = RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
+    let mut ctx: RunContext =
+        RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
     let mut messages = Vec::new();
 
     handle.send(SteeringCommand::Pause);
@@ -508,7 +510,8 @@ fn pause_state_makes_a_paused_run_distinguishable_from_an_empty_answer() {
     handle.send(SteeringCommand::PauseWith {
         reason: "waiting for human approval".into(),
     });
-    let mut ctx: RunContext = RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
+    let mut ctx: RunContext =
+        RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
     let mut messages = Vec::new();
 
     let outcome = apply_pending_steering(&mut ctx, &mut messages).unwrap();
@@ -527,7 +530,8 @@ fn pause_state_makes_a_paused_run_distinguishable_from_an_empty_answer() {
 #[test]
 fn a_repeated_pause_keeps_the_original_reason_and_checkpoint() {
     let handle = SteeringHandle::allow_all();
-    let mut ctx: RunContext = RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
+    let mut ctx: RunContext =
+        RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
     let mut messages = Vec::new();
 
     handle.send(SteeringCommand::PauseWith {
@@ -569,7 +573,8 @@ fn pause_with_is_gated_by_the_same_policy_kind_as_pause() {
 fn handle_resume_clears_a_latch_without_going_through_the_queue() {
     let handle = SteeringHandle::allow_all();
     handle.send(SteeringCommand::Pause);
-    let mut ctx: RunContext = RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
+    let mut ctx: RunContext =
+        RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
     let mut messages = Vec::new();
     apply_pending_steering(&mut ctx, &mut messages).unwrap();
 

@@ -53,7 +53,7 @@ impl OpenAiEmbeddingModel {
     /// (`text-embedding-3-small`), and the default base URL.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: super::http::default_client(),
             api_key: api_key.into(),
             model: DEFAULT_MODEL.to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
@@ -89,15 +89,89 @@ impl OpenAiEmbeddingModel {
     }
 
     /// Controls whether the OpenAI-compatible `dimensions` field is sent.
+    ///
+    /// `dimensions` is an OpenAI-specific **request** parameter for
+    /// Matryoshka-style truncation. llama.cpp-backed servers (LM Studio,
+    /// `llama-server`) reject or ignore it, and the width is whatever the GGUF
+    /// produces regardless.
     pub fn with_send_dimensions(mut self, send: bool) -> Self {
         self.send_dimensions = send;
         self
     }
 
     /// Controls whether an empty API key is rejected before making a request.
+    ///
+    /// Passing `false` also turns [`Self::with_send_dimensions`] off, because
+    /// "no API key required" is how a local server identifies itself and the
+    /// hosted defaults are wrong for one in exactly two ways:
+    ///
+    /// * `send_dimensions: true` puts a field on the wire that llama.cpp-backed
+    ///   servers reject or ignore, and
+    /// * `dimensions: 1536` (`text-embedding-3-small`'s width) is then checked
+    ///   against every returned vector, so a 768-wide local model fails **every
+    ///   call** as a dimension mismatch.
+    ///
+    /// The crate's own live test hand-wrote this workaround and explained why —
+    /// "probing with the default would reject a 768-wide local model as a
+    /// mismatch". Lifting it into the adapter means callers stop rediscovering
+    /// it. Set [`Self::with_send_dimensions`] explicitly *after* this call to
+    /// override.
     pub fn with_required_api_key(mut self, required: bool) -> Self {
         self.requires_api_key = required;
+        if !required {
+            self.send_dimensions = false;
+        }
         self
+    }
+
+    /// Embeds text against a server whose vector width is not known in advance,
+    /// returning the discovered width alongside the vectors.
+    ///
+    /// Mirrors
+    /// [`OllamaEmbeddingModel::embed_discovering_dimensions`][ollama], which has
+    /// existed for a while — the OpenAI-compatible path had no equivalent, so
+    /// every caller pointing at LM Studio or `llama-server` had to hand-roll the
+    /// same probe. The declared width is set to `0` for the probe, which
+    /// disables the width check (the check is what rejects an unknown-width
+    /// model), then read back off the returned vector.
+    ///
+    /// # Errors
+    ///
+    /// [`TinyAgentsError::Validation`] when `texts` holds no non-blank input, or
+    /// when the server answers with an empty vector (a width of zero is not a
+    /// discovery, it is a failure). Transport and decode failures surface from
+    /// [`EmbeddingModel::embed`] unchanged.
+    ///
+    /// [ollama]: super::OllamaEmbeddingModel::embed_discovering_dimensions
+    pub async fn embed_discovering_dimensions(
+        self,
+        texts: &[String],
+    ) -> Result<(usize, Vec<Vec<f32>>)> {
+        if !texts.iter().any(|text| !text.trim().is_empty()) {
+            return Err(TinyAgentsError::Validation(
+                "dynamic embedding dimension discovery requires at least one nonblank input"
+                    .to_string(),
+            ));
+        }
+        let model_id = self.model.clone();
+        // Width 0 disables the per-vector width check; sending `dimensions` is
+        // meaningless when we do not yet know the width.
+        let probe = self.with_dimensions(0).with_send_dimensions(false);
+        let vectors = probe.embed(texts).await?;
+        let width = vectors.first().map(Vec::len).unwrap_or(0);
+        if width == 0 {
+            return Err(TinyAgentsError::Validation(format!(
+                "embedding model `{model_id}` returned an empty vector; \
+                 cannot discover its dimensionality"
+            )));
+        }
+        tracing::debug!(
+            target: "tinyagents::embeddings::openai",
+            model = %model_id,
+            width,
+            "[embeddings] discovered embedding width"
+        );
+        Ok((width, vectors))
     }
 
     pub fn base_url(&self) -> &str {

@@ -59,6 +59,7 @@ const MODEL_CONTEXT_PATTERNS: &[(&str, ContextPatternMatch, u64)] = &[
     ("claude-3-5-sonnet", ContextPatternMatch::Substring, 200_000),
     ("claude-3-5-haiku", ContextPatternMatch::Substring, 200_000),
     ("claude-3-opus", ContextPatternMatch::Substring, 200_000),
+    ("gpt-5", ContextPatternMatch::Substring, 400_000),
     ("gpt-4.1", ContextPatternMatch::Substring, 1_047_576),
     ("gpt-4o", ContextPatternMatch::Substring, 128_000),
     ("gpt-4-turbo", ContextPatternMatch::Substring, 128_000),
@@ -174,6 +175,7 @@ impl ModelProfile {
             && (!set.native_structured_output || self.native_structured_output)
             && (!set.json_schema || self.json_schema)
             && (!set.reasoning || self.reasoning)
+            && (!set.reasoning_effort || self.reasoning_effort)
             && (!set.image_in || self.modalities.image_in)
             && (!set.image_out || self.modalities.image_out)
             && (!set.audio_in || self.modalities.audio_in)
@@ -246,6 +248,11 @@ impl ModelProfile {
             native_structured_output: caps.json_schema,
             json_schema: caps.json_schema,
             reasoning: caps.reasoning,
+            // The offline catalog has no column for a configurable effort knob,
+            // and inferring one from `reasoning` would over-promise (a model can
+            // emit reasoning without accepting an effort level). Stay
+            // conservative: a caller that needs the knob must say so.
+            reasoning_effort: false,
             max_input_tokens: entry.max_input_tokens,
             max_output_tokens: entry.max_output_tokens,
         }
@@ -270,6 +277,7 @@ impl ModelProfile {
             native_structured_output: true,
             json_schema: true,
             reasoning: true,
+            reasoning_effort: true,
             ..Self::default()
         }
     }
@@ -409,6 +417,20 @@ impl ModelRequest {
     pub fn with_continuation_id(mut self, id: impl Into<String>) -> Self {
         self.continuation_id = Some(id.into());
         self
+    }
+
+    /// Sets the provider-neutral reasoning configuration for this call.
+    ///
+    /// Adapters lower it to their provider's spelling; see [`ReasoningConfig`].
+    pub fn with_reasoning(mut self, reasoning: ReasoningConfig) -> Self {
+        self.reasoning = Some(reasoning);
+        self
+    }
+
+    /// Shorthand for [`with_reasoning`](Self::with_reasoning) with only an
+    /// effort level.
+    pub fn with_reasoning_effort(self, effort: ReasoningEffort) -> Self {
+        self.with_reasoning(ReasoningConfig::effort(effort))
     }
 
     /// Returns the ids of cacheable segments in declaration order, describing

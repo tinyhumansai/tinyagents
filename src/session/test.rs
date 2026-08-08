@@ -4,8 +4,8 @@
 //! than per-file inline `mod tests` blocks. Sections mirror the source files.
 
 use super::context::StorageContext;
-use super::ops::*;
 use super::migrations::apply as init_schema;
+use super::ops::*;
 use super::store::with_memory_connection;
 use super::types::*;
 use crate::error::TinyAgentsError;

@@ -277,6 +277,7 @@ impl Retriever {
 
 mod cloud;
 mod cohere;
+mod http;
 mod noop;
 mod ollama;
 mod openai;
@@ -284,6 +285,7 @@ mod rate_limit;
 mod retry_after;
 mod voyage;
 
+pub use http::{DEFAULT_CONNECT_TIMEOUT_SECS, DEFAULT_EMBEDDING_TIMEOUT_SECS, default_client};
 pub use noop::NoopEmbeddingModel;
 pub use ollama::{
     DEFAULT_OLLAMA_DIMENSIONS, DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL, OllamaEmbeddingModel,

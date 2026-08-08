@@ -84,16 +84,20 @@ const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 600;
 
 mod convert;
+mod local;
 mod reasoning_tags;
 pub(crate) mod relaxed_json;
 mod responses;
 mod sse;
 mod transport;
 
+pub use convert::CacheTokenAccounting;
+pub use local::{CONTEXT_OVERFLOW_CODE, LocalProbe, LocalRuntimeKind};
 pub use reasoning_tags::ReasoningTagExtraction;
 pub use transport::{AuthStyle, OpenAiModel};
 
 use convert::*;
+use local::*;
 use reasoning_tags::*;
 use sse::*;
 #[cfg(test)]

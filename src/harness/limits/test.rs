@@ -90,10 +90,7 @@ fn sync_call_limits_remains_the_documented_fail_open_override() {
 fn limit_behavior_defaults_to_error() {
     assert_eq!(RunLimits::default().behavior, LimitBehavior::Error);
     assert_eq!(LimitBehavior::Error.as_str(), "error");
-    assert_eq!(
-        LimitBehavior::StopWithPartial.as_str(),
-        "stop_with_partial"
-    );
+    assert_eq!(LimitBehavior::StopWithPartial.as_str(), "stop_with_partial");
 }
 
 #[test]
@@ -144,9 +141,8 @@ fn rollback_tool_calls_uncounts_calls_that_never_ran() {
     // LangChain's `ToolCallLimitMiddleware` rolls the thread count back for
     // every remaining call it answered with a "stopped before this could run"
     // message rather than executing.
-    let mut tracker = LimitTracker::new(
-        RunLimits::default().with_behavior(LimitBehavior::StopWithPartial),
-    );
+    let mut tracker =
+        LimitTracker::new(RunLimits::default().with_behavior(LimitBehavior::StopWithPartial));
     for _ in 0..5 {
         tracker.try_record_tool_call().unwrap();
     }
