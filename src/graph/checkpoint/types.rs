@@ -257,13 +257,167 @@ impl<State> Checkpoint<State> {
     }
 }
 
+/// The `idx` reserved for a task's **resume** control-plane write.
+///
+/// LangGraph reserves *negative* indices for control-plane channels
+/// (`WRITES_IDX_MAP`), which is what distinguishes an upsert from an append:
+/// see [`PendingWrite::is_control_plane`].
+pub const WRITES_IDX_RESUME: i64 = -1;
+
+/// The `idx` reserved for a task's **error** control-plane write.
+pub const WRITES_IDX_ERROR: i64 = -2;
+
+/// The `idx` reserved for a task's **interrupt** control-plane write.
+pub const WRITES_IDX_INTERRUPT: i64 = -3;
+
 /// A partial write produced by a completed task, preserved across reruns.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+///
+/// # Why writes are recorded separately from the checkpoint
+///
+/// A superstep can fail *after* some of its tasks have already run. The
+/// boundary checkpoint records that those tasks completed, but without a record
+/// of what they wrote, a resume has no way to tell "this task already ran" from
+/// "this task has not run yet" — so it re-runs them, and any side effect they
+/// performed happens twice. Writes are therefore persisted per task through
+/// [`Checkpointer::put_writes`](crate::graph::Checkpointer::put_writes) and read
+/// back into [`CheckpointTuple::pending_writes`], which is what resume consults
+/// to skip already-completed work.
+///
+/// # Identity
+///
+/// A write is addressed by `(thread_id, namespace, checkpoint_id, task_id,
+/// idx)`, mirroring the primary key LangGraph's SQL checkpointers use. Within
+/// one checkpoint the `(task_id, idx)` pair is unique: re-putting the same pair
+/// never produces a second row.
+///
+/// # Control-plane writes upsert; data writes are append-once
+///
+/// `idx >= 0` is an ordinary data write, emitted once per task in emission
+/// order. Re-putting it is **ignored** (insert-or-ignore), so a retried
+/// `put_writes` is idempotent.
+///
+/// `idx < 0` marks a control-plane write — resume values, errors, interrupts —
+/// which by construction there is at most one of per task and whose value
+/// legitimately changes on a retry. Re-putting it **replaces** the stored value
+/// (insert-or-replace). Use the `WRITES_IDX_*` constants rather than raw
+/// negative numbers.
+///
+/// # Back-compatibility
+///
+/// `task_id`, `idx` and `channel` carry `#[serde(default)]`, so checkpoint
+/// records written before the write protocol existed still deserialize (as an
+/// anonymous data write at index `0`).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PendingWrite {
     /// The node that produced the write.
     pub node: NodeId,
+    /// The task that produced the write, unique within a superstep.
+    ///
+    /// A plain node id is not enough on its own: a fan-out step runs the same
+    /// node several times with different [`Send`](crate::graph::Send) args, and
+    /// each of those is a separately resumable task.
+    #[serde(default)]
+    pub task_id: String,
+    /// Position of this write within its task's emission order, or one of the
+    /// `WRITES_IDX_*` constants for a control-plane write.
+    #[serde(default)]
+    pub idx: i64,
+    /// The channel (state field / node output slot) the write targets.
+    ///
+    /// Free-form and backend-opaque; it exists so writes stay distinguishable
+    /// per channel, and because write isolation is asserted per channel *and*
+    /// namespace in the conformance suite.
+    #[serde(default)]
+    pub channel: String,
     /// The serialized write payload.
+    ///
+    /// May be [`serde_json::Value::Null`] when the producing runtime cannot
+    /// serialize its update type. The graph executor is in exactly that
+    /// position — a graph's `Update` carries no `Serialize` bound — so it
+    /// records writes as *completion markers*: the applied value is already
+    /// durable in the checkpoint's `state`, and the write record's job is to
+    /// answer "did this task already run?".
     pub payload: serde_json::Value,
+}
+
+impl PendingWrite {
+    /// Builds an ordinary data write for `task_id` at position `idx`.
+    pub fn data(
+        node: impl Into<NodeId>,
+        task_id: impl Into<String>,
+        idx: i64,
+        channel: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Self {
+        Self {
+            node: node.into(),
+            task_id: task_id.into(),
+            idx,
+            channel: channel.into(),
+            payload,
+        }
+    }
+
+    /// Builds a completion marker: a data write at index `0` whose payload is
+    /// `null`, recording only that `task_id` ran to completion.
+    pub fn completion_marker(node: impl Into<NodeId>, task_id: impl Into<String>) -> Self {
+        let node = node.into();
+        let channel = node.as_str().to_string();
+        Self {
+            node,
+            task_id: task_id.into(),
+            idx: 0,
+            channel,
+            payload: serde_json::Value::Null,
+        }
+    }
+
+    /// Whether this is a control-plane write (`idx < 0`), which upserts rather
+    /// than appends. See the type docs.
+    pub fn is_control_plane(&self) -> bool {
+        self.idx < 0
+    }
+
+    /// The `(task_id, idx)` identity pair this write is deduplicated on within
+    /// a checkpoint.
+    pub fn identity(&self) -> (&str, i64) {
+        (self.task_id.as_str(), self.idx)
+    }
+}
+
+/// Merges `incoming` into `existing`, applying the replace-vs-ignore rule.
+///
+/// Shared by every backend so the three of them cannot drift on the one part of
+/// the write protocol that is easy to get subtly wrong:
+///
+/// - an incoming **control-plane** write (`idx < 0`) replaces any stored write
+///   with the same `(task_id, idx)`;
+/// - an incoming **data** write (`idx >= 0`) is ignored when that pair is
+///   already stored.
+///
+/// Returns the number of entries that were actually inserted or replaced, which
+/// backends use for logging.
+pub fn merge_writes(existing: &mut Vec<PendingWrite>, incoming: &[PendingWrite]) -> usize {
+    let mut changed = 0;
+    for write in incoming {
+        match existing
+            .iter_mut()
+            .find(|w| w.identity() == write.identity())
+        {
+            Some(slot) => {
+                if write.is_control_plane() {
+                    *slot = write.clone();
+                    changed += 1;
+                }
+                // Data writes are append-once: a duplicate is a no-op.
+            }
+            None => {
+                existing.push(write.clone());
+                changed += 1;
+            }
+        }
+    }
+    changed
 }
 
 /// Lightweight checkpoint summary returned by `Checkpointer::list`.

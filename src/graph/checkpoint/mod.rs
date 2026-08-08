@@ -23,7 +23,8 @@ pub use file::FileCheckpointer;
 pub use sqlite::SqliteCheckpointer;
 pub use types::{
     BarrierArrivals, Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource,
-    CheckpointTuple, DurabilityMode, PendingActivation, PendingWrite,
+    CheckpointTuple, DurabilityMode, PendingActivation, PendingWrite, WRITES_IDX_ERROR,
+    WRITES_IDX_INTERRUPT, WRITES_IDX_RESUME, merge_writes,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -90,6 +91,63 @@ where
     /// Lists checkpoint metadata for a thread in insertion order.
     async fn list(&self, thread_id: &str) -> Result<Vec<CheckpointMetadata>>;
 
+    // ---- Pending writes ----------------------------------------------------
+    //
+    // The partial-failure protocol. A superstep can fail after some of its
+    // tasks have already run; without a per-task record of what they wrote, a
+    // resume cannot tell "already ran" from "not yet run" and re-executes their
+    // side effects. `put_writes` records that work against the checkpoint it
+    // belongs to; `get_writes` reads it back, and `get_tuple` surfaces it as
+    // `CheckpointTuple::pending_writes` so resume can skip completed tasks.
+    //
+    // Both carry default no-op bodies so an out-of-tree `Checkpointer` keeps
+    // compiling: such a backend simply never persists writes, which is exactly
+    // the behaviour every backend had before the protocol existed.
+
+    /// Records `writes` against the checkpoint addressed by `config`.
+    ///
+    /// `config.checkpoint_id` must name a specific checkpoint — writes belong
+    /// to the boundary they were produced at, so a `None` id has no meaning and
+    /// backends reject it.
+    ///
+    /// Idempotency follows [`PendingWrite`]'s replace-vs-ignore rule: a data
+    /// write (`idx >= 0`) whose `(task_id, idx)` is already stored is ignored,
+    /// while a control-plane write (`idx < 0`) replaces the stored value. Both
+    /// are implemented through [`merge_writes`], so every backend agrees.
+    ///
+    /// The default body is a no-op returning `Ok(())`.
+    async fn put_writes(&self, _config: &CheckpointConfig, _writes: &[PendingWrite]) -> Result<()> {
+        Ok(())
+    }
+
+    /// Reads back the writes recorded against the checkpoint addressed by
+    /// `config`, in insertion order.
+    ///
+    /// Returns an empty vec for an unknown checkpoint or one that has no
+    /// writes. When `config.checkpoint_id` is `None` the latest checkpoint in
+    /// `config.namespace` is resolved first.
+    ///
+    /// The default body returns an empty vec.
+    async fn get_writes(&self, _config: &CheckpointConfig) -> Result<Vec<PendingWrite>> {
+        Ok(Vec::new())
+    }
+
+    /// Resolves the checkpoint id a **read** of writes addresses.
+    ///
+    /// Unlike [`Checkpointer::put_writes`] (where an unaddressed id is a caller
+    /// bug), a read may legitimately mean "the latest checkpoint in this
+    /// namespace" — the same relaxation [`Checkpointer::get`] makes. Returns
+    /// `None` when the thread/namespace has no checkpoint at all.
+    async fn resolve_write_target(&self, config: &CheckpointConfig) -> Result<Option<String>> {
+        match &config.checkpoint_id {
+            Some(id) => Ok(Some(id.clone())),
+            None => Ok(self
+                .get_scoped(&config.thread_id, None, &config.namespace)
+                .await?
+                .map(|c| c.checkpoint_id)),
+        }
+    }
+
     /// Loads every checkpoint stored under `thread_id`, in listing order.
     ///
     /// This is the bulk-read companion to [`Checkpointer::list`]: it returns
@@ -145,13 +203,33 @@ where
                     checkpoint_id: Some(parent.clone()),
                     namespace: checkpoint.namespace.clone(),
                 });
-        let pending_writes = checkpoint.pending_writes.clone();
+        let pending_writes = self.resolved_writes(&resolved, &checkpoint).await?;
         Ok(Some(CheckpointTuple {
             config: resolved,
             checkpoint,
             parent_config,
             pending_writes,
         }))
+    }
+
+    /// The writes to surface on a tuple for `checkpoint`.
+    ///
+    /// Prefers the separately persisted [`Checkpointer::get_writes`] records —
+    /// the authoritative partial-failure ledger — and falls back to the
+    /// checkpoint record's own inline `pending_writes` for backends that do not
+    /// implement the write protocol (whose `get_writes` default returns empty)
+    /// and for records written before it existed.
+    async fn resolved_writes(
+        &self,
+        config: &CheckpointConfig,
+        checkpoint: &Checkpoint<State>,
+    ) -> Result<Vec<PendingWrite>> {
+        let stored = self.get_writes(config).await?;
+        if stored.is_empty() {
+            Ok(checkpoint.pending_writes.clone())
+        } else {
+            Ok(stored)
+        }
     }
 
     /// Returns a thread's checkpoint lineage newest-first, following each
@@ -164,6 +242,15 @@ where
     /// O(H²) over the lineage. Such backends override this to read the thread
     /// once and walk the lineage in memory (O(H)). The observable result is
     /// identical to iterating `get_tuple` by parent pointer.
+    ///
+    /// The walk carries a **visited set**. `parent_checkpoint_id` is caller-set
+    /// data, not a structurally enforced acyclic pointer: a hand-written
+    /// checkpoint, a bad fork, or a `copy_thread` that reused ids can point a
+    /// record at itself or at one of its descendants. With `limit == None` an
+    /// unguarded walk then never terminates — it does not merely return a wrong
+    /// answer, it hangs the caller. Revisiting an id ends the walk.
+    /// [`FileCheckpointer`] has always had this guard (its in-memory `remove`
+    /// doubles as one); this makes it uniform.
     async fn state_history(
         &self,
         thread_id: &str,
@@ -172,6 +259,7 @@ where
     ) -> Result<Vec<CheckpointTuple<State>>> {
         let mut out = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut visited: HashSet<String> = HashSet::new();
         loop {
             if let Some(limit) = limit
                 && out.len() >= limit
@@ -186,6 +274,14 @@ where
             let Some(tuple) = self.get_tuple(config).await? else {
                 break;
             };
+            if !visited.insert(tuple.checkpoint.checkpoint_id.clone()) {
+                tracing::warn!(
+                    "[checkpoint] state_history: lineage cycle at checkpoint `{}` \
+                     (thread `{thread_id}`); truncating the walk",
+                    tuple.checkpoint.checkpoint_id
+                );
+                break;
+            }
             let parent = tuple.checkpoint.parent_checkpoint_id.clone();
             out.push(tuple);
             match parent {
@@ -252,10 +348,47 @@ where
     /// Composed from [`Checkpointer::get_thread`] + [`Checkpointer::put`], so
     /// the source thread is read once (a bulk read, not one
     /// [`Checkpointer::get`] per checkpoint).
+    ///
+    /// # The target must be empty
+    ///
+    /// Copying preserves each record's `checkpoint_id` — that is what keeps the
+    /// lineage spine intact — so appending a lineage onto a thread that already
+    /// has one produces a file/table containing two disjoint lineages *with
+    /// reused ids*. Every subsequent `get(Some(id))` then resolves to whichever
+    /// copy was written last and the parent walk crosses between lineages: the
+    /// thread is silently corrupt, with no error at the point of damage.
+    ///
+    /// So a non-empty target is **rejected** rather than merged into. Callers
+    /// that genuinely want to overwrite call [`Checkpointer::delete_thread`]
+    /// first, which makes the destructive intent explicit. Copying an empty or
+    /// unknown source thread is a no-op (still `Ok`).
     async fn copy_thread(&self, source_thread: &str, target_thread: &str) -> Result<()> {
+        let existing = self.list(target_thread).await?;
+        if !existing.is_empty() {
+            return Err(TinyAgentsError::Checkpoint(format!(
+                "copy_thread: target thread `{target_thread}` already has {} checkpoint(s); \
+                 copying would interleave two lineages with reused checkpoint ids. \
+                 Delete the target first if replacing it is intended.",
+                existing.len()
+            )));
+        }
         for mut checkpoint in self.get_thread(source_thread).await? {
+            let source_config = CheckpointConfig {
+                thread_id: source_thread.to_string(),
+                checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
+                namespace: checkpoint.namespace.clone(),
+            };
+            let writes = self.get_writes(&source_config).await?;
             checkpoint.thread_id = target_thread.to_string();
+            let target_config = CheckpointConfig {
+                thread_id: target_thread.to_string(),
+                checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
+                namespace: checkpoint.namespace.clone(),
+            };
             self.put(checkpoint).await?;
+            if !writes.is_empty() {
+                self.put_writes(&target_config, &writes).await?;
+            }
         }
         Ok(())
     }
@@ -337,13 +470,20 @@ where
 /// Cheap to clone; clones share the same underlying store.
 pub struct InMemoryCheckpointer<State> {
     inner: Arc<Mutex<HashMap<String, Vec<Checkpoint<State>>>>>,
+    /// Pending writes keyed by `(thread_id, namespace, checkpoint_id)` — the
+    /// same identity the SQL backends use as a primary key prefix.
+    writes: Arc<Mutex<HashMap<WriteKey, Vec<PendingWrite>>>>,
 }
+
+/// The address a batch of pending writes is filed under.
+type WriteKey = (String, Vec<String>, String);
 
 impl<State> InMemoryCheckpointer<State> {
     /// Creates an empty checkpointer.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
+            writes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -366,6 +506,7 @@ impl<State> Clone for InMemoryCheckpointer<State> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            writes: self.writes.clone(),
         }
     }
 }
@@ -439,6 +580,11 @@ where
     async fn delete_thread(&self, thread_id: &str) -> Result<()> {
         let mut map = self.inner.lock().map_err(|_| lock_err())?;
         map.remove(thread_id);
+        // Writes are keyed by thread too, and deleting a thread must not leave
+        // its write ledger behind for a later thread of the same name to
+        // inherit. The conformance suite asserts exactly this.
+        let mut writes = self.writes.lock().map_err(|_| lock_err())?;
+        writes.retain(|(thread, _, _), _| thread != thread_id);
         Ok(())
     }
 
@@ -453,8 +599,74 @@ where
         };
         let before = list.len();
         list.retain(|c| !drop.contains(c.checkpoint_id.as_str()));
-        Ok(before - list.len())
+        let removed = before - list.len();
+        drop_writes_for(&self.writes, thread_id, &drop)?;
+        Ok(removed)
     }
+
+    async fn put_writes(&self, config: &CheckpointConfig, writes: &[PendingWrite]) -> Result<()> {
+        let checkpoint_id = require_checkpoint_id(config)?;
+        if writes.is_empty() {
+            return Ok(());
+        }
+        let key: WriteKey = (
+            config.thread_id.clone(),
+            config.namespace.clone(),
+            checkpoint_id,
+        );
+        let mut map = self.writes.lock().map_err(|_| lock_err())?;
+        let slot = map.entry(key).or_default();
+        let changed = merge_writes(slot, writes);
+        tracing::debug!(
+            "[checkpoint:memory] put_writes thread={} checkpoint={:?} offered={} stored={}",
+            config.thread_id,
+            config.checkpoint_id,
+            writes.len(),
+            changed
+        );
+        Ok(())
+    }
+
+    async fn get_writes(&self, config: &CheckpointConfig) -> Result<Vec<PendingWrite>> {
+        let Some(checkpoint_id) = self.resolve_write_target(config).await? else {
+            return Ok(Vec::new());
+        };
+        let key: WriteKey = (
+            config.thread_id.clone(),
+            config.namespace.clone(),
+            checkpoint_id,
+        );
+        let map = self.writes.lock().map_err(|_| lock_err())?;
+        Ok(map.get(&key).cloned().unwrap_or_default())
+    }
+}
+
+/// Removes the write ledgers of `ids` within `thread_id`.
+fn drop_writes_for(
+    writes: &Mutex<HashMap<WriteKey, Vec<PendingWrite>>>,
+    thread_id: &str,
+    ids: &HashSet<&str>,
+) -> Result<()> {
+    let mut map = writes.lock().map_err(|_| lock_err())?;
+    map.retain(|(thread, _, checkpoint), _| {
+        thread != thread_id || !ids.contains(checkpoint.as_str())
+    });
+    Ok(())
+}
+
+/// Extracts the checkpoint id a `put_writes` call addresses.
+///
+/// A write belongs to the boundary that produced it, so an unaddressed
+/// (`None`) id is a caller bug rather than "the latest": silently filing the
+/// writes against whatever checkpoint happens to be newest is precisely the
+/// corruption the protocol exists to prevent.
+pub(crate) fn require_checkpoint_id(config: &CheckpointConfig) -> Result<String> {
+    config.checkpoint_id.clone().ok_or_else(|| {
+        TinyAgentsError::Checkpoint(format!(
+            "put_writes requires an explicit checkpoint_id (thread `{}`)",
+            config.thread_id
+        ))
+    })
 }
 
 #[cfg(test)]
