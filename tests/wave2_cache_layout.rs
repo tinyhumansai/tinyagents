@@ -238,3 +238,71 @@ fn breakpoints_are_injected_only_under_the_protection_policy() {
         serde_json::json!("mine")
     );
 }
+
+// ── Guard baseline is scoped to one run ───────────────────────────────────────
+
+/// A `PromptCacheGuardMiddleware` must not compare across run boundaries.
+///
+/// A KV-cache prefix is only meaningful *within* one conversation. A single
+/// guard instance is routinely shared across runs — a sub-agent's middleware
+/// stack is built once and its agent invoked many times — so without run
+/// scoping the guard compares the last request of one run against the first
+/// request of the next, two unrelated transcripts, and reports an invalidation
+/// that never happened.
+///
+/// This went unnoticed while stability was compared by segment id alone: any
+/// two requests carrying the same segment ids compared equal regardless of
+/// content, so the cross-run comparison was vacuously stable. Making the
+/// comparison content-aware (CACHE-6) turned that latent bug into a false
+/// positive on every multi-run sub-agent, which is how it surfaced.
+#[tokio::test]
+async fn the_guard_does_not_compare_layouts_across_runs() {
+    use tinyagents::harness::context::{RunConfig, RunContext};
+    use tinyagents::harness::middleware::{Middleware, PromptCacheGuardMiddleware};
+
+    let guard = PromptCacheGuardMiddleware::new();
+    let segments = vec![
+        segment("system", SegmentRole::System, true),
+        segment("turn", SegmentRole::Volatile, false),
+    ];
+
+    // Two independent runs that share a stable prefix but ask different
+    // questions — exactly what two invocations of one sub-agent look like.
+    for (run, question) in [("run-a", "investigate topic"), ("run-b", "ask for more")] {
+        let mut ctx: RunContext<()> = RunContext::new(RunConfig::new(run), ());
+        let mut request =
+            ModelRequest::new(vec![Message::user(question)]).with_cache_segments(segments.clone());
+        Middleware::<(), ()>::before_model(&guard, &mut ctx, &(), &mut request)
+            .await
+            .expect("guard pass succeeds");
+    }
+
+    assert!(
+        guard.layout_events().is_empty(),
+        "a fresh run must not be diffed against the previous run's last request"
+    );
+}
+
+/// The run scoping must not blunt the detection it was added around: within a
+/// single run, rewriting a stable segment's content is still reported.
+#[tokio::test]
+async fn the_guard_still_reports_an_invalidation_inside_one_run() {
+    use tinyagents::harness::context::{RunConfig, RunContext};
+    use tinyagents::harness::middleware::{Middleware, PromptCacheGuardMiddleware};
+
+    let guard = PromptCacheGuardMiddleware::new();
+    let mut ctx: RunContext<()> = RunContext::new(RunConfig::new("one-run"), ());
+
+    for system in ["you are a helpful assistant", "you are a terse assistant"] {
+        let mut request = built_with_system(system, "q");
+        Middleware::<(), ()>::before_model(&guard, &mut ctx, &(), &mut request)
+            .await
+            .expect("guard pass succeeds");
+    }
+
+    assert_eq!(
+        guard.layout_events().len(),
+        1,
+        "rewriting a stable segment's text inside one run is still an invalidation"
+    );
+}
