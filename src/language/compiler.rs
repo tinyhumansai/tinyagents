@@ -55,6 +55,17 @@ use crate::registry::CapabilityRegistry;
 ///
 /// All failures are reported as [`TinyAgentsError::Compile`].
 pub fn compile(program: &Program) -> Result<Vec<Blueprint>> {
+    reject_duplicate_graphs(program)?;
+    program.graphs.iter().map(compile_graph).collect()
+}
+
+/// Rejects a [`Program`] that declares the same graph name more than once.
+///
+/// Shared by [`compile`] and [`compile_with_provenance`] so both entry points
+/// enforce the same semantic guard — two blueprints sharing one `graph_id`
+/// would otherwise collide when registered (`DuplicateComponent` mid-way
+/// through, or a silent overwrite via `replace_graph_blueprint`).
+fn reject_duplicate_graphs(program: &Program) -> Result<()> {
     let mut graph_ids: HashSet<&str> = HashSet::new();
     for graph in &program.graphs {
         if !graph_ids.insert(graph.name.as_str()) {
@@ -64,7 +75,7 @@ pub fn compile(program: &Program) -> Result<Vec<Blueprint>> {
             )));
         }
     }
-    program.graphs.iter().map(compile_graph).collect()
+    Ok(())
 }
 
 fn compile_graph(graph: &crate::language::types::GraphDecl) -> Result<Blueprint> {
@@ -411,6 +422,7 @@ fn compile_graph(graph: &crate::language::types::GraphDecl) -> Result<Blueprint>
 /// Returns [`TinyAgentsError::Compile`] for the same semantic failures as
 /// [`compile`].
 pub fn compile_with_provenance(program: &Program, origin: Origin) -> Result<Vec<Blueprint>> {
+    reject_duplicate_graphs(program)?;
     program
         .graphs
         .iter()

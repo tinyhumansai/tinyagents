@@ -17,7 +17,7 @@ use crate::language::diagnostic::Diagnostic;
 use crate::language::source::SourceFile;
 use crate::language::types::{
     ChannelDecl, CommandDecl, EdgeDecl, GraphDecl, IoFieldDecl, JoinDecl, Literal, NodeDecl,
-    Program, RouteDecl, SendDecl, Span, SpannedToken, Token,
+    Program, RouteDecl, SendDecl, Span, SpannedToken, SteeringDecl, Token,
 };
 
 /// Tokenises and parses `source` in one step.
@@ -58,6 +58,20 @@ pub fn parse(tokens: &[SpannedToken]) -> Result<Program> {
         )
         .with_primary_label("here")
         .into_parse_error(None));
+    }
+    // The cursor helpers (`current`/`advance`) assume the stream ends with an
+    // `Eof` sentinel so that `pos` can pin at the last index once exhausted.
+    // A slice missing that sentinel (e.g. produced by a caller filtering or
+    // truncating a token stream) would otherwise let the pinned cursor make
+    // zero progress forever in productions that can succeed on a no-op
+    // `advance()` — an unkillable hang rather than a parse error.
+    let last = tokens.last().expect("checked non-empty above");
+    if !matches!(last.token, Token::Eof) {
+        return Err(
+            Diagnostic::error("token stream missing end-of-input sentinel", last.span)
+                .with_primary_label("here")
+                .into_parse_error(None),
+        );
     }
     Parser {
         tokens,
@@ -482,6 +496,10 @@ impl Parser<'_> {
                 self.advance();
                 node.metadata = self.parse_defaults_block()?;
             }
+            "steering" => {
+                self.advance();
+                node.steering = Some(self.parse_steering_block()?);
+            }
             other => {
                 return Err(self.error(format!("unknown node item `{other}`"), tok.span));
             }
@@ -531,6 +549,37 @@ impl Parser<'_> {
         }
         self.expect(&Token::RBrace)?;
         Ok(CommandDecl { goto, update, span })
+    }
+
+    /// Parses a `steering { parent allow [...] human allow [...] delivery "…" }`
+    /// block. The `steering` keyword has already been consumed.
+    fn parse_steering_block(&mut self) -> Result<SteeringDecl> {
+        self.expect(&Token::LBrace)?;
+        let mut steering = SteeringDecl::default();
+        while !matches!(self.current().token, Token::RBrace) {
+            if self.at_eof() {
+                return Err(self.error("unexpected end of input inside `steering`", self.span()));
+            }
+            if self.is_keyword("parent") {
+                self.advance();
+                self.expect_keyword("allow")?;
+                steering.parent_allow = self.parse_string_list()?;
+            } else if self.is_keyword("human") {
+                self.advance();
+                self.expect_keyword("allow")?;
+                steering.human_allow = self.parse_string_list()?;
+            } else if self.is_keyword("delivery") {
+                self.advance();
+                steering.delivery = Some(self.expect_string()?);
+            } else {
+                return Err(self.error(
+                    "expected `parent`, `human`, or `delivery` inside `steering`",
+                    self.span(),
+                ));
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(steering)
     }
 
     /// Parses a `sends [ send <node> ["input"] … ]` block. The `sends` keyword

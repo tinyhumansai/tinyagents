@@ -126,6 +126,22 @@ fn duplicate_graph_id_is_a_compile_error() {
 }
 
 #[test]
+fn compile_with_provenance_also_rejects_duplicate_graph_id() {
+    // `compile_with_provenance` documents "the same semantic validation and
+    // lowering as `compile`", so it must reject a duplicate graph name too —
+    // otherwise two distinct blueprints share one `graph_id` and collide when
+    // registered.
+    use crate::language::compiler::compile_with_provenance;
+    use crate::language::types::Origin;
+
+    let src = "graph g { start a node a { } } graph g { start b node b { } }";
+    let program = parse_str(src).unwrap();
+    let err = compile_with_provenance(&program, Origin::generated()).unwrap_err();
+    assert!(matches!(err, crate::error::TinyAgentsError::Compile(_)));
+    assert!(err.to_string().contains("duplicate graph"), "{err}");
+}
+
+#[test]
 fn next_and_command_goto_conflict_is_a_compile_error() {
     let src = "graph g { start a node a { next b command { goto c } } node b { } node c { } }";
     let err = compile(&parse_str(src).unwrap()).unwrap_err();

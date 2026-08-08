@@ -171,7 +171,26 @@ impl Resolver {
             );
         }
 
-        // 3. Every referenced tool must be registered.
+        // 3. `subagent`/`repl_agent` nodes (and `subgraph`/`graph` nodes that
+        //    used a dedicated subgraph field) may also carry a secondary
+        //    `model` reference, checked against the model allowlist.
+        if let Some(model) = CapabilityResolver::secondary_model_reference(
+            kind,
+            node.model.as_deref(),
+            node.graph.is_some(),
+        ) {
+            self.check_ref(
+                self.caps.model_allowed(model),
+                &node.name,
+                "model",
+                model,
+                node.span,
+                CODE_UNKNOWN_MODEL,
+                out,
+            );
+        }
+
+        // 4. Every referenced tool must be registered.
         for tool in &node.tools {
             self.check_ref(
                 self.caps.tool_allowed(tool),
@@ -287,6 +306,14 @@ impl Resolver {
                     &node.name,
                     reference.target,
                 ));
+            }
+            if let Some(model) = CapabilityResolver::secondary_model_reference(
+                &node.kind,
+                node.model.as_deref(),
+                node.subgraph.is_some(),
+            ) && !self.caps.model_allowed(model)
+            {
+                return Err(unregistered("model", &node.name, model));
             }
             for tool in &node.tools {
                 if !self.caps.tool_allowed(tool) {

@@ -78,3 +78,23 @@ fn parse_rejects_unknown_node_item() {
         other => panic!("expected parse error, got {other:?}"),
     }
 }
+
+#[test]
+fn parse_rejects_token_stream_missing_eof_sentinel_instead_of_hanging() {
+    // The lexer always terminates a stream with `Eof`; the cursor helpers in
+    // `Parser` rely on that sentinel to guarantee forward progress. A caller
+    // that slices off the trailing `Eof` (e.g. after filtering/truncating a
+    // token stream) must get a parse error, not an infinite loop.
+    let tokens = tokenize("graph g { start").unwrap();
+    assert!(matches!(tokens.last().unwrap().token, Token::Eof));
+    let truncated = &tokens[..tokens.len() - 1];
+    assert!(!matches!(truncated.last().unwrap().token, Token::Eof));
+
+    let err = parse(truncated).unwrap_err();
+    match err {
+        crate::error::TinyAgentsError::Parse { message, .. } => {
+            assert!(message.contains("end-of-input sentinel"), "{message}");
+        }
+        other => panic!("expected parse error, got {other:?}"),
+    }
+}

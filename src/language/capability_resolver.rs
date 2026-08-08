@@ -295,6 +295,36 @@ impl CapabilityResolver {
         Some(PrimaryReference { class, target })
     }
 
+    /// The secondary `model` reference a node may carry alongside its primary,
+    /// kind-specific reference.
+    ///
+    /// `subagent` and `repl_agent` nodes both accept a documented `model`
+    /// field in addition to their primary `agent`/`script` reference (for
+    /// `repl_agent` it is the model-driven CodeAct form), so that value must
+    /// be validated against the model allowlist too — it is never the
+    /// primary target for those kinds. `subgraph`/`graph` nodes only carry a
+    /// secondary model check when a *dedicated* subgraph/graph field was
+    /// used (`dedicated_subgraph_field`); otherwise `model` is itself the
+    /// fallback primary target already covered by
+    /// [`classify_reference`](Self::classify_reference). Every other kind
+    /// resolves `model` as its *primary* reference, so it has no secondary
+    /// check here.
+    ///
+    /// Shares the same "edit the policy once" shape as `classify_reference`
+    /// so [`bind_blueprint`](Self::bind_blueprint) and both
+    /// [`crate::language::resolver::Resolver`] paths stay in lockstep.
+    pub fn secondary_model_reference<'a>(
+        kind: &str,
+        model: Option<&'a str>,
+        dedicated_subgraph_field: bool,
+    ) -> Option<&'a str> {
+        match kind {
+            "subagent" | "repl_agent" => model,
+            "subgraph" | "graph" if dedicated_subgraph_field => model,
+            _ => None,
+        }
+    }
+
     /// Returns true when `target` is allowed for the given reference `class`.
     pub fn reference_allowed(&self, class: ReferenceClass, target: &str) -> bool {
         match class {
@@ -324,6 +354,10 @@ impl CapabilityResolver {
     ///   references to a registered agent, `repl_agent` node references to a
     ///   registered script, and all other nodes' `model` references to a
     ///   registered model (via the shared [`classify_reference`](Self::classify_reference) policy);
+    /// - a `subagent`/`repl_agent` node's `model` field (and a `subgraph`/`graph`
+    ///   node's `model` field when a dedicated subgraph field was also used)
+    ///   also resolves to a registered model (via
+    ///   [`secondary_model_reference`](Self::secondary_model_reference));
     /// - every `channel` reducer reference is registered.
     ///
     /// # Errors
@@ -356,6 +390,18 @@ impl CapabilityResolver {
                     node.name,
                     reference.class.word(),
                     reference.target
+                )));
+            }
+
+            if let Some(model) = Self::secondary_model_reference(
+                &node.kind,
+                node.model.as_deref(),
+                node.subgraph.is_some(),
+            ) && !self.model_allowed(model)
+            {
+                return Err(TinyAgentsError::Capability(format!(
+                    "node `{}` references unknown model `{}`",
+                    node.name, model
                 )));
             }
 

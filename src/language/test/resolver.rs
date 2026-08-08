@@ -116,6 +116,36 @@ fn resolver_collects_multiple_diagnostics() {
 }
 
 #[test]
+fn resolver_rejects_unregistered_secondary_model_on_subagent() {
+    // `subagent` nodes may carry a `model` field alongside `agent`; the
+    // registry-backed `Resolver` must validate it too, mirroring the strict
+    // `bind_blueprint` gate.
+    let reg = full_registry();
+    let caps = reg.capability_resolver().allow_agent("researcher");
+
+    let src = r#"graph g { start r node r { kind subagent agent "researcher" model "totally-unregistered" next END } }"#;
+    let program = parse_str(src).unwrap();
+    let diagnostics = Resolver::from_capabilities(caps.clone()).resolve_program(&program);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0].code.as_deref(), Some("E-rag-unknown-model"));
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("unknown model `totally-unregistered`"),
+        "{:?}",
+        diagnostics[0]
+    );
+
+    // The span-less blueprint path shares the same gap-closing gate.
+    let bp = compile(&parse_str(src).unwrap()).unwrap().remove(0);
+    let err = Resolver::from_capabilities(caps)
+        .resolve_blueprint(&bp)
+        .unwrap_err();
+    assert!(matches!(err, crate::error::TinyAgentsError::Capability(_)));
+    assert!(err.to_string().contains("unknown model"), "{err}");
+}
+
+#[test]
 fn resolver_blueprint_path_matches_registry_binding() {
     // The span-less blueprint path mirrors the legacy gate's variants/messages.
     let reg = full_registry();
