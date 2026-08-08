@@ -439,40 +439,89 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // Safe checkpoint: honor any control outcome a middleware requested
             // during this turn (for example an early-exit tool or a budget stop
             // hook), before executing further tools.
-            if let Some(control) = ctx.take_control() {
-                let record = ctx.emit(AgentEvent::ControlApplied {
-                    control: control.kind().to_string(),
-                    detail: match &control {
-                        MiddlewareControl::StopWithFinal(text) => text.clone(),
-                        MiddlewareControl::Interrupt { node, message } => {
-                            format!("{node}: {message}")
-                        }
-                    },
-                });
-                status.set_last_event(record.id);
-                match control {
-                    MiddlewareControl::StopWithFinal(text) => {
-                        run.final_response = Some(ModelResponse::assistant(text));
-                        break;
-                    }
-                    MiddlewareControl::Interrupt { node, message } => {
-                        return Err(TinyAgentsError::Interrupted { node, message });
-                    }
-                }
+            if let Some(exit) = self.apply_pending_control(ctx, run, status)? {
+                return Ok(exit);
             }
 
             let tool_calls = response.tool_calls().to_vec();
 
             // A tool-call structured-output strategy produces an artificial tool
-            // call that is not a registered tool; treat it as the final response
-            // rather than attempting to execute it.
-            let structured_tool_hit = matches!(
-                &structured_plan,
-                Some((StructuredStrategy::ToolCall, name, _))
-                    if tool_calls.iter().any(|c| &c.name == name)
-            );
+            // call that is not a registered tool, so split the turn's calls into
+            // the schema call(s) and the genuine ones. Treating "any call
+            // matched the schema name" as terminal silently dropped every
+            // sibling call in the same turn — a turn returning
+            // `[search(...), my_schema(...)]` broke out with `search` never
+            // executed and no event to say so.
+            let structured_call_name = match &structured_plan {
+                Some((StructuredStrategy::ToolCall, name, _)) => Some(name.clone()),
+                _ => None,
+            };
+            let (structured_hits, real_tool_calls): (Vec<ToolCall>, Vec<ToolCall>) =
+                match &structured_call_name {
+                    Some(name) => tool_calls
+                        .iter()
+                        .cloned()
+                        .partition(|call| &call.name == name),
+                    None => (Vec::new(), tool_calls.clone()),
+                };
+            let structured_tool_hit = !structured_hits.is_empty();
 
-            if tool_calls.is_empty() || structured_tool_hit {
+            if structured_tool_hit && !real_tool_calls.is_empty() {
+                // Record the structured payload the model already produced,
+                // then run the real tools it asked for in the same turn and let
+                // the loop continue; the model finishes on a later turn.
+                if let Some((strategy, name, schema)) = &structured_plan {
+                    let extractor =
+                        StructuredExtractor::new(*strategy, name.clone(), schema.clone());
+                    match extractor.extract(&response) {
+                        Ok(output) => run.structured = Some(output.value),
+                        Err(error) => tracing::debug!(
+                            target: "tinyagents::agent_loop",
+                            run_id = %ctx.run_id(),
+                            %error,
+                            "[agent_loop] structured extraction failed on a mixed turn; \
+                             continuing with the real tool calls"
+                        ),
+                    }
+                }
+                let record = ctx.emit(AgentEvent::ControlApplied {
+                    control: "structured_with_tool_calls".to_string(),
+                    detail: format!(
+                        "structured output recorded alongside {} real tool call(s); \
+                         the run continues",
+                        real_tool_calls.len()
+                    ),
+                });
+                status.set_last_event(record.id);
+
+                // Every requested `tool_call_id` must be answered or the
+                // transcript is malformed for the next provider call.
+                for call in &structured_hits {
+                    messages.push(Message::tool(
+                        call.id.clone(),
+                        "Structured output recorded. Continue with the remaining tool calls.",
+                    ));
+                }
+
+                reset_truncated_empty_recovery(
+                    &mut truncated_empty_retries_used,
+                    &mut boosted_max_tokens,
+                    &mut truncation_base,
+                );
+
+                status.mark_running(HarnessPhase::Tools);
+                self.execute_tools(state, ctx, run, status, messages, real_tool_calls)
+                    .await?;
+
+                // Safe checkpoint: a control requested from `after_tool` /
+                // `wrap_tool` is honored here, at the edge it was raised on.
+                if let Some(exit) = self.apply_pending_control(ctx, run, status)? {
+                    return Ok(exit);
+                }
+                continue;
+            }
+
+            if real_tool_calls.is_empty() {
                 // Truncated-empty recovery (runs before structured extraction,
                 // which would otherwise fail on the empty completion). A local
                 // reasoning model can burn the whole token budget on its hidden
