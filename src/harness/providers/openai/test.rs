@@ -355,12 +355,30 @@ fn parses_id_less_tool_call_with_synthesized_fallback_id() {
     let response = parse_response(body).unwrap();
     let calls = response.tool_calls();
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].id, "tool-0");
     assert_eq!(calls[0].name, "ping");
     assert_eq!(calls[0].arguments, json!({}));
-    assert_eq!(calls[1].id, "tool-1");
     assert_eq!(calls[1].name, "pong");
     assert_eq!(calls[1].arguments, json!({ "n": 1 }));
+
+    // The synthesized ids are `tacall-{epoch}-{slot}`: run-unique via a
+    // process-global epoch, and distinct per slot within the response. The old
+    // form was `tool-{slot}`, keyed only to position — so every id-less turn
+    // emitted `tool-0` and one transcript ended up with several different calls
+    // all claiming the same id, which the agent loop cannot pair.
+    assert!(
+        calls[0].id.starts_with("tacall-"),
+        "unexpected synthesized id: {}",
+        calls[0].id
+    );
+    assert!(calls[0].id.ends_with("-0"), "slot must be the id suffix");
+    assert!(calls[1].id.ends_with("-1"), "slot must be the id suffix");
+    assert_ne!(calls[0].id, calls[1].id);
+
+    // The prompt-guided text protocol mints `ptc_{seq}_{slot}`; the two schemes
+    // must be unmistakably disjoint, because a run that degrades from native to
+    // prompt-guided mid-flight mixes both in one transcript.
+    assert!(!calls[0].id.starts_with("ptc_"));
+    assert!(!calls[0].id.starts_with("call_"));
 }
 
 #[test]
@@ -495,9 +513,13 @@ fn explicit_nulls_are_tolerated_wherever_a_default_exists() {
     let calls = response.tool_calls();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].name, "ping");
-    // A nulled id still gets the synthesized positional fallback, so tool
-    // results stay correlatable.
-    assert_eq!(calls[0].id, "tool-0");
+    // A nulled id still gets the synthesized fallback, so tool results stay
+    // correlatable.
+    assert!(
+        calls[0].id.starts_with("tacall-"),
+        "unexpected synthesized id: {}",
+        calls[0].id
+    );
     assert_eq!(calls[0].arguments, json!({}));
     let usage = response.usage.unwrap();
     assert_eq!(usage.input_tokens, 0);
@@ -883,10 +905,35 @@ fn local_runtime_presets_normalize_endpoint_and_model() {
 
     let overridden = OpenAiModel::ollama().with_model("qwen3:8b");
     let profile = <OpenAiModel as ChatModel<()>>::profile(&overridden).unwrap();
-    assert!(!profile.tool_calling);
-    assert!(!profile.parallel_tool_calls);
-    assert!(!profile.streaming_tool_chunks);
+    // Native tool calling is no longer hard-disabled for local runtimes. It used
+    // to be, unconditionally, which forced the prompt-guided branch on every
+    // local call *and* excluded every local model from any
+    // `CapabilitySet { tool_calling: true }` resolution. It is optimistic now,
+    // with a 400-driven latch (`Degrade::native_tools`) to fall back once.
+    assert!(profile.tool_calling);
+    assert!(profile.parallel_tool_calls);
+    assert!(profile.streaming_tool_chunks);
+    // Vision stays off: it is a property of the loaded weights, and a probe is
+    // what turns it on.
     assert!(!profile.modalities.image_in);
+    // LOCAL-1: no invented context window. `qwen3:8b` matches nothing in the
+    // hint table, but `llama3.2` would have matched `("llama3", Substring,
+    // 128_000)` against a server whose default `num_ctx` is 2048.
+    assert_eq!(profile.max_input_tokens, None);
+    assert_eq!(
+        <OpenAiModel as ChatModel<()>>::profile(&OpenAiModel::ollama())
+            .unwrap()
+            .max_input_tokens,
+        None,
+        "the default Ollama model must not inherit a hosted-sized window either"
+    );
+    // The degrade knobs the local presets exist for are pre-set, so the first
+    // call does not pay a guaranteed 400 to rediscover them.
+    let baseline = overridden.baseline_degrade();
+    assert!(baseline.named_tool_choice);
+    assert!(baseline.json_object);
+    assert!(baseline.json_schema_strict);
+    assert!(!baseline.native_tools, "native tools start enabled");
 
     assert!(OpenAiModel::ollama_at("http://[::1", "qwen3").is_err());
     assert!(OpenAiModel::ollama_at("ftp://host", "qwen3").is_err());
@@ -915,10 +962,11 @@ fn provider_spec_builds_compatible_model() {
         Some("ollama")
     );
     let profile = <OpenAiModel as ChatModel<()>>::profile(&model).unwrap();
-    assert!(!profile.tool_calling);
-    assert!(!profile.parallel_tool_calls);
-    assert!(!profile.streaming_tool_chunks);
+    assert!(profile.tool_calling, "see local_runtime_presets_* for why");
+    assert!(profile.parallel_tool_calls);
+    assert!(profile.streaming_tool_chunks);
     assert!(!profile.modalities.image_in);
+    assert_eq!(profile.max_input_tokens, None);
 
     let mut authenticated = ProviderSpec::for_kind(ProviderKind::Ollama);
     authenticated.requires_api_key = true;
