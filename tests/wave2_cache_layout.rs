@@ -113,7 +113,7 @@ fn appending_to_the_tail_keeps_the_prefix_stable() {
         before.is_prefix_stable_against(&after),
         "appending turns must not be reported as a prefix invalidation"
     );
-    assert!(CacheLayoutEvent::new(&before, &after).changed_prefix == false);
+    assert!(!CacheLayoutEvent::new(&before, &after).changed_prefix);
 }
 
 #[test]
