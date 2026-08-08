@@ -521,7 +521,6 @@ impl ChatModel<()> for TimestampingFailingModel {
 /// structured flag rather than retrying every provider failure.
 struct ProviderFailingModel {
     retryable: bool,
-    retry_after_ms: None,
     status: u16,
     attempts: Mutex<usize>,
 }
