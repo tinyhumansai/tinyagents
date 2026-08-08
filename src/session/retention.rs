@@ -137,12 +137,11 @@ pub fn prune_tool_calls_before(workspace_dir: &Path, older_than: DateTime<Utc>) 
     let cutoff = older_than.to_rfc3339();
     tracing::debug!("{LOG_PREFIX} prune_tool_calls_before.entry cutoff={cutoff}");
     let removed = with_transaction(workspace_dir, |conn| {
-        Ok(conn
-            .execute(
-                "DELETE FROM session_tool_calls WHERE created_at < ?1",
-                params![cutoff],
-            )
-            .storage_context("prune tool calls")?)
+        conn.execute(
+            "DELETE FROM session_tool_calls WHERE created_at < ?1",
+            params![cutoff],
+        )
+        .storage_context("prune tool calls")
     })?;
     tracing::debug!("{LOG_PREFIX} prune_tool_calls_before.exit removed={removed}");
     Ok(removed)
@@ -156,12 +155,11 @@ pub fn prune_run_events_before(workspace_dir: &Path, older_than: DateTime<Utc>) 
     let cutoff = older_than.to_rfc3339();
     tracing::debug!("{LOG_PREFIX} prune_run_events_before.entry cutoff={cutoff}");
     let removed = with_transaction(workspace_dir, |conn| {
-        Ok(conn
-            .execute(
-                "DELETE FROM run_events WHERE timestamp < ?1",
-                params![cutoff],
-            )
-            .storage_context("prune run events")?)
+        conn.execute(
+            "DELETE FROM run_events WHERE timestamp < ?1",
+            params![cutoff],
+        )
+        .storage_context("prune run events")
     })?;
     tracing::debug!("{LOG_PREFIX} prune_run_events_before.exit removed={removed}");
     Ok(removed)
@@ -176,12 +174,11 @@ pub fn prune_run_telemetry_before(
     let cutoff = older_than.to_rfc3339();
     tracing::debug!("{LOG_PREFIX} prune_run_telemetry_before.entry cutoff={cutoff}");
     let removed = with_transaction(workspace_dir, |conn| {
-        Ok(conn
-            .execute(
-                "DELETE FROM run_telemetry WHERE updated_at < ?1",
-                params![cutoff],
-            )
-            .storage_context("prune run telemetry")?)
+        conn.execute(
+            "DELETE FROM run_telemetry WHERE updated_at < ?1",
+            params![cutoff],
+        )
+        .storage_context("prune run telemetry")
     })?;
     tracing::debug!("{LOG_PREFIX} prune_run_telemetry_before.exit removed={removed}");
     Ok(removed)
