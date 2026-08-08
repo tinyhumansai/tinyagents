@@ -181,15 +181,11 @@ impl SteeringHandle {
         self.lock_paused().is_some()
     }
 
-    /// Latches a pause with an optional reason. Idempotent: an existing pause
-    /// keeps its original reason and checkpoint, so a repeated `Pause` does not
-    /// rewrite why the run stopped.
-    fn latch_pause(&self, reason: Option<String>) -> PauseState {
-        let checkpoint = *self
-            .inner
-            .checkpoints
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    /// Latches a pause with an optional reason, recorded as having taken effect
+    /// at `checkpoint`. Idempotent: an existing pause keeps its original reason
+    /// and checkpoint, so a repeated `Pause` does not rewrite why the run
+    /// stopped.
+    fn latch_pause(&self, checkpoint: usize, reason: Option<String>) -> PauseState {
         let mut paused = self.lock_paused();
         let state = paused.get_or_insert(PauseState {
             reason,
