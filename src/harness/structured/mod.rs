@@ -291,12 +291,25 @@ impl StructuredExtractor {
             }));
         }
 
-        let value: Value = serde_json::from_str(&raw).map_err(|e| {
-            TinyAgentsError::StructuredOutput(format!(
-                "schema '{}': response text is not valid JSON: {e}",
-                self.schema_name
-            ))
-        })?;
+        // Climb the repair ladder rather than a bare `from_str`. The crate
+        // already repairs the *other* JSON a model emits (tool-call arguments);
+        // there is no reason a fenced, chatty, or truncated structured answer
+        // should end a run when the same repairs recover it.
+        let Some((value, repair)) = repair::parse_lenient(&raw) else {
+            return Err(TinyAgentsError::StructuredOutput(format!(
+                "schema '{}': response text is not valid JSON and no conservative repair \
+                 recovered it (finish_reason = {:?})",
+                self.schema_name,
+                response.finish_reason.as_deref().unwrap_or("unknown")
+            )));
+        };
+        if repair.is_repaired() {
+            tracing::debug!(
+                "[structured] schema '{}': recovered the value with repair `{}`",
+                self.schema_name,
+                repair.as_str()
+            );
+        }
         Ok(StructuredOutput {
             value,
             raw_text: Some(raw),

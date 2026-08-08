@@ -111,7 +111,7 @@ async fn interrupt_from_after_tool_is_honored_before_the_next_model_call() {
 async fn a_steering_pause_is_distinguishable_from_a_clean_finish() {
     let (harness, _model) = spinning_harness();
 
-    let steering = SteeringHandle::new(SteeringPolicy::permissive());
+    let steering = SteeringHandle::new(SteeringPolicy::allow_all());
     steering.send(SteeringCommand::PauseWith {
         reason: "waiting for a human".to_string(),
     });
