@@ -86,22 +86,22 @@ pub enum UnknownToolPolicy {
 /// How the agent loop reacts when the model calls a *registered* tool with
 /// arguments that fail schema validation.
 ///
-/// The default is [`InvalidArgsPolicy::Fail`], preserving the historical
-/// fail-fast behavior where a missing `required` field, wrong type, or bad
-/// `enum` aborts the whole turn. The recoverable variant lets a run keep going
-/// so the model can self-correct — the recovery still consumes a tool-call
-/// budget slot, so [`RunLimits::max_tool_calls`] bounds any invalid-args loop.
-/// Mirrors [`UnknownToolPolicy`] for the schema-validation seam.
+/// The default is [`InvalidArgsPolicy::ReturnToolError`]: a missing `required`
+/// field, wrong type, or bad `enum` is model output the model can fix, so the
+/// validation detail plus the expected schema go back into the transcript
+/// instead of aborting the turn. The recovery consumes a tool-call budget slot,
+/// so [`RunLimits::max_tool_calls`] bounds any invalid-args loop. Mirrors
+/// [`UnknownToolPolicy`] for the schema-validation seam — including why the
+/// default flipped away from `Fail`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum InvalidArgsPolicy {
     /// Abort the run with
-    /// [`TinyAgentsError::Validation`][crate::error::TinyAgentsError::Validation]
-    /// (the default, historical behavior).
-    #[default]
+    /// [`TinyAgentsError::Validation`][crate::error::TinyAgentsError::Validation].
     Fail,
     /// Inject a tool-error result (carrying the validation detail and the
     /// tool's expected parameter schema) back into the transcript and continue
-    /// the loop, letting the model retry with corrected arguments.
+    /// the loop, letting the model retry with corrected arguments. The default.
+    #[default]
     ReturnToolError,
     /// First normalize common provider-shape defects, then apply
     /// [`Self::ReturnToolError`] if the resulting arguments still fail schema
