@@ -7,7 +7,9 @@
 //! any one of them cannot hide behind the other two.
 
 use tinyagents::graph::checkpoint::{FileCheckpointer, InMemoryCheckpointer};
-use tinyagents::graph::testkit::{checkpointer_lineage_contract, checkpointer_writes_contract};
+use tinyagents::graph::testkit::conformance::{
+    checkpointer_lineage_contract, checkpointer_writes_contract,
+};
 
 #[tokio::test]
 async fn in_memory_checkpointer_satisfies_the_writes_contract() {
