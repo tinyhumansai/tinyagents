@@ -6,6 +6,13 @@
 
 use std::sync::Mutex;
 
+/// One recorded tool outcome, as the driver observed it.
+///
+/// Built with [`ToolAttempt::success`] / [`ToolAttempt::failure`] plus the
+/// [`ToolAttempt::hard_reject`] / [`ToolAttempt::recoverable_miss`] modifiers,
+/// so a driver never has to remember the field set. Borrows rather than owns so
+/// an `after_tool` hook can record without allocating anything but the argument
+/// fingerprint.
 pub struct ToolAttempt<'a> {
     /// Tool name.
     pub tool: &'a str,
@@ -25,6 +32,49 @@ pub struct ToolAttempt<'a> {
     pub recoverable_miss: bool,
 }
 
+impl<'a> ToolAttempt<'a> {
+    /// A tool call that succeeded. Clears every ladder counter when recorded.
+    ///
+    /// `arg_fingerprint` should come from
+    /// [`fingerprint_arguments`][crate::harness::no_progress::fingerprint_arguments]
+    /// so every driver computes it the same way.
+    pub fn success(tool: &'a str, arg_fingerprint: &'a str) -> Self {
+        Self {
+            tool,
+            arg_fingerprint,
+            error: None,
+            hard_reject: false,
+            recoverable_miss: false,
+        }
+    }
+
+    /// A tool call that failed, with the error text the model saw.
+    pub fn failure(tool: &'a str, arg_fingerprint: &'a str, error: &'a str) -> Self {
+        Self {
+            tool,
+            arg_fingerprint,
+            error: Some(error),
+            hard_reject: false,
+            recoverable_miss: false,
+        }
+    }
+
+    /// Marks the failure as a hard security/approval rejection, which can never
+    /// succeed re-issued unchanged and so trips the ladder fastest.
+    pub fn hard_reject(mut self) -> Self {
+        self.hard_reject = true;
+        self
+    }
+
+    /// Marks the failure as the unknown-tool recovery sentinel: correctable
+    /// feedback the model already received, which must not feed the generic
+    /// any-failure backstop.
+    pub fn recoverable_miss(mut self) -> Self {
+        self.recoverable_miss = true;
+        self
+    }
+}
+
 /// The ladder's verdict for one recorded attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NoProgress {
@@ -37,6 +87,40 @@ pub enum NoProgress {
     /// Same-strategy retries exhausted (or the any-failure backstop tripped):
     /// halt with this root-cause summary.
     Halt(String),
+}
+
+impl NoProgress {
+    /// The corrective/summary text carried by a [`NoProgress::Nudge`] or
+    /// [`NoProgress::Halt`]; `None` for [`NoProgress::Continue`].
+    ///
+    /// Saves a driver from matching the enum just to reach the string it has to
+    /// forward either way.
+    pub fn message(&self) -> Option<&str> {
+        match self {
+            NoProgress::Continue => None,
+            NoProgress::Nudge(message) | NoProgress::Halt(message) => Some(message),
+        }
+    }
+
+    /// `true` when the loop should keep running but feed the corrective back to
+    /// the model.
+    pub fn is_nudge(&self) -> bool {
+        matches!(self, NoProgress::Nudge(_))
+    }
+
+    /// `true` when the loop must stop.
+    pub fn is_halt(&self) -> bool {
+        matches!(self, NoProgress::Halt(_))
+    }
+
+    /// Stable, snake_case label for logs and telemetry dimensions.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NoProgress::Continue => "continue",
+            NoProgress::Nudge(_) => "nudge",
+            NoProgress::Halt(_) => "halt",
+        }
+    }
 }
 
 #[derive(Default)]

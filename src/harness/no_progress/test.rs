@@ -263,3 +263,141 @@ fn zero_thresholds_are_fail_safe() {
         SuccessfulRepeat::Halt(_)
     ));
 }
+
+// ---------------------------------------------------------------------------
+// C5: the API a wave-2 `after_tool` driver actually needs
+// ---------------------------------------------------------------------------
+
+mod drivable {
+    use serde_json::json;
+
+    use crate::harness::no_progress::{
+        DEFAULT_IDENTICAL_HALT_THRESHOLD, NoProgress, NoProgressTracker, ToolAttempt,
+        fingerprint_arguments,
+    };
+
+    #[test]
+    fn argument_fingerprints_ignore_object_key_order() {
+        // The identical-repeat rung compares fingerprints, so a driver that
+        // rendered arguments with `Value::to_string` would see two logically
+        // identical calls as different (insertion order is preserved) and let
+        // the loop run to the tool-call cap instead of tripping the ladder.
+        let a = fingerprint_arguments(&json!({"path": "/tmp", "depth": 2, "glob": "*.rs"}));
+        let b = fingerprint_arguments(&json!({"glob": "*.rs", "depth": 2, "path": "/tmp"}));
+        assert_eq!(a, b);
+
+        // Nested objects too.
+        let n1 = fingerprint_arguments(&json!({"o": {"x": 1, "y": 2}}));
+        let n2 = fingerprint_arguments(&json!({"o": {"y": 2, "x": 1}}));
+        assert_eq!(n1, n2);
+    }
+
+    #[test]
+    fn argument_fingerprints_distinguish_real_differences() {
+        let base = fingerprint_arguments(&json!({"path": "/tmp"}));
+        assert_ne!(base, fingerprint_arguments(&json!({"path": "/var"})));
+        assert_ne!(base, fingerprint_arguments(&json!({"pathx": "/tmp"})));
+        // Array order is semantic and must NOT be canonicalised away.
+        assert_ne!(
+            fingerprint_arguments(&json!({"a": [1, 2]})),
+            fingerprint_arguments(&json!({"a": [2, 1]}))
+        );
+        // Type differences matter.
+        assert_ne!(
+            fingerprint_arguments(&json!({"a": 1})),
+            fingerprint_arguments(&json!({"a": "1"}))
+        );
+    }
+
+    #[test]
+    fn fingerprints_are_short_and_stable_across_calls() {
+        let value = json!({"path": "/tmp"});
+        let first = fingerprint_arguments(&value);
+        assert_eq!(first.len(), 16);
+        assert_eq!(first, fingerprint_arguments(&value));
+    }
+
+    #[test]
+    fn tool_attempt_constructors_cover_every_driver_case() {
+        let fp = fingerprint_arguments(&json!({"q": "x"}));
+
+        let ok = ToolAttempt::success("search", &fp);
+        assert!(ok.error.is_none() && !ok.hard_reject && !ok.recoverable_miss);
+
+        let bad = ToolAttempt::failure("search", &fp, "boom");
+        assert_eq!(bad.error, Some("boom"));
+
+        let blocked = ToolAttempt::failure("shell", &fp, "denied").hard_reject();
+        assert!(blocked.hard_reject);
+
+        let missing = ToolAttempt::failure("nope", &fp, "unknown tool").recoverable_miss();
+        assert!(missing.recoverable_miss);
+    }
+
+    #[test]
+    fn a_driver_can_run_the_whole_ladder_through_the_public_api_only() {
+        // The end-to-end shape of the middleware wave 2 has to write: a shared
+        // `&self` tracker, a fingerprint, a constructor, and verdict accessors —
+        // no field literals, no hand-rolled hashing, no enum matching.
+        let tracker = NoProgressTracker::new(DEFAULT_IDENTICAL_HALT_THRESHOLD);
+        let args = json!({"path": "/missing"});
+        let fp = fingerprint_arguments(&args);
+
+        let verdicts: Vec<NoProgress> = (1..=3)
+            .map(|step| tracker.record(step, &ToolAttempt::failure("read", &fp, "ENOENT")))
+            .collect();
+
+        assert!(matches!(verdicts[0], NoProgress::Continue));
+        assert!(verdicts[1].is_nudge(), "expected a nudge on the repeat");
+        assert!(
+            verdicts[2].is_halt(),
+            "expected a halt once retries ran out"
+        );
+
+        // The accessors give a driver everything it needs without a match.
+        assert!(verdicts[0].message().is_none());
+        assert!(verdicts[1].message().unwrap().contains("no progress since"));
+        assert!(verdicts[2].message().unwrap().contains("Stopping"));
+        assert_eq!(
+            verdicts.iter().map(NoProgress::as_str).collect::<Vec<_>>(),
+            vec!["continue", "nudge", "halt"]
+        );
+    }
+
+    #[test]
+    fn record_takes_a_shared_reference_so_an_after_tool_hook_needs_no_refcell() {
+        // `after_tool` hooks receive `&self`; the tracker must be usable through
+        // a shared reference or every driver would need interior mutability of
+        // its own.
+        fn drive(tracker: &NoProgressTracker, fp: &str) -> NoProgress {
+            tracker.record(1, &ToolAttempt::failure("t", fp, "boom"))
+        }
+        let tracker = NoProgressTracker::new(DEFAULT_IDENTICAL_HALT_THRESHOLD);
+        let fp = fingerprint_arguments(&json!({}));
+        assert_eq!(drive(&tracker, &fp), NoProgress::Continue);
+        assert!(drive(&tracker, &fp).is_nudge());
+    }
+
+    #[test]
+    fn a_success_between_failures_clears_the_ladder() {
+        // The driver contract says a success resets progress tracking; pinned
+        // here because a wave-2 middleware relies on it to avoid halting a run
+        // that is genuinely making progress with an occasional failure.
+        let tracker = NoProgressTracker::new(DEFAULT_IDENTICAL_HALT_THRESHOLD);
+        let fp = fingerprint_arguments(&json!({"a": 1}));
+
+        assert_eq!(
+            tracker.record(1, &ToolAttempt::failure("t", &fp, "boom")),
+            NoProgress::Continue
+        );
+        assert_eq!(
+            tracker.record(2, &ToolAttempt::success("t", &fp)),
+            NoProgress::Continue
+        );
+        // The repeat counter restarted, so this is a first failure again.
+        assert_eq!(
+            tracker.record(3, &ToolAttempt::failure("t", &fp, "boom")),
+            NoProgress::Continue
+        );
+    }
+}
