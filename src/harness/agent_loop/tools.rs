@@ -317,7 +317,25 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 }
             }
         };
-        let schema = tool.schema();
+        // Step 1 of the injected-argument ordering rule (see
+        // `crate::harness::tool::injected`): strip every host-injected key from
+        // the model-supplied arguments *before* validating them, so a model
+        // that names a hidden key it was never shown cannot forge it. Step 2
+        // then validates against the **model-facing** projection of the schema
+        // — the same one `ToolRegistry::schemas` advertises — because a key the
+        // model never saw must not be `required` of it.
+        let injected = tool.injected_arguments();
+        let forged = strip_injected_arguments(&mut call.arguments, injected);
+        if !forged.is_empty() {
+            tracing::warn!(
+                "[agent_loop::tools] tool `{}` call `{}`: discarded model-supplied value(s) \
+                 for host-injected argument(s): {}",
+                call.name,
+                call.id,
+                forged.join(", ")
+            );
+        }
+        let schema = project_injected_arguments(tool.schema(), injected);
         let raw_arguments = call.arguments.clone();
         if matches!(
             self.policy.invalid_args,
