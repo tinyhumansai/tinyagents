@@ -422,6 +422,7 @@ pub(super) fn parse_chat_response(
         raw: Some(value),
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     })
 }
 

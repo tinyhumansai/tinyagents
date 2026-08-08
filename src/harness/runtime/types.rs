@@ -230,6 +230,7 @@ impl Default for RunPolicy {
             cache: CachePolicy {
                 response_cache_enabled: true,
                 protect_prompt_prefix: false,
+                ..CachePolicy::default()
             },
             // Opt-in: preserve the historical blank-final behavior by default.
             error_on_empty_response: false,

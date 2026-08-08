@@ -2078,6 +2078,7 @@ impl OpenAiModel {
             code,
             message,
             retryable,
+            retry_after_ms: None,
             raw,
         }
     }
