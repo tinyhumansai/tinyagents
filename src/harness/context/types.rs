@@ -43,7 +43,13 @@ use crate::harness::store::StoreRegistry;
 ///     .with_tag("nightly")
 ///     .with_max_model_calls(10);
 /// assert_eq!(config.run_id.as_str(), "run-1");
-/// assert_eq!(config.max_model_calls, 10);
+/// assert_eq!(config.max_model_calls, Some(10));
+/// assert_eq!(config.effective_max_model_calls(), 10);
+///
+/// // An unset cap reads as `None` but still resolves to the crate default.
+/// let defaulted = RunConfig::new("run-2");
+/// assert_eq!(defaulted.max_model_calls, None);
+/// assert_eq!(defaulted.effective_max_model_calls(), 25);
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunConfig {
