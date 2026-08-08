@@ -480,8 +480,22 @@ pub fn should_recover(native: bool, has_tools: bool, structured_calls: usize) ->
 /// using [`with_prompt_tool_instructions`].
 pub fn apply_prompt_tool_calls(mut response: ModelResponse) -> ModelResponse {
     let text = response.text();
-    let (cleaned, calls) = parse_prompt_tool_calls_from_text(&text);
+    let (cleaned, mut calls) = parse_prompt_tool_calls_from_text(&text);
     if calls.is_empty() {
+        // No delimited block. A small local model may still have emitted the
+        // call as a bare object with no markup at all — see
+        // `parse_bare_tool_call`. That path consumes the whole content, so the
+        // cleaned prose is empty by construction.
+        if let Some(call) = parse_bare_tool_call(&text) {
+            calls.push(call);
+            response.message.tool_calls.extend(calls);
+            // The object was the whole visible text, so nothing survives as
+            // prose — but a reasoning model's `Thinking` block must, hence
+            // `replace_text_blocks` with empty text rather than clearing the
+            // content outright.
+            response.message.content = replace_text_blocks(response.message.content, String::new());
+            return response;
+        }
         return response;
     }
     response.message.tool_calls.extend(calls);
@@ -516,13 +530,41 @@ fn replace_text_blocks(content: Vec<ContentBlock>, cleaned: String) -> Vec<Conte
     out
 }
 
+/// Keys a model may put its arguments under inside a tool-call object.
+///
+/// `arguments` is the OpenAI spelling; `parameters` is what a model copying the
+/// *schema* vocabulary reaches for, and is what `llama3.2:3b` emits.
+const CALL_ARGUMENT_KEYS: [&str; 4] = ["arguments", "parameters", "args", "input"];
+
 /// Parse a single tool-call body into a [`ToolCall`] with a synthetic 1-based id.
 fn parse_one(inner: &str, index: usize) -> Option<ToolCall> {
-    let value: Value = serde_json::from_str(inner).ok()?;
-    let name = value.get("name")?.as_str()?.to_string();
-    let arguments = value
-        .get("arguments")
-        .cloned()
+    let value = parse_relaxed_object(inner)?;
+    tool_call_from_object(&value, index)
+}
+
+/// Parses a JSON object, repairing the relaxed spellings small local models
+/// emit (unquoted keys, redundant braces, leaked quote tokens) when strict
+/// parsing fails.
+fn parse_relaxed_object(raw: &str) -> Option<Value> {
+    match serde_json::from_str::<Value>(raw) {
+        Ok(value) if value.is_object() => Some(value),
+        // A non-object parsed strictly is not a tool call; do not try to
+        // "repair" it into one.
+        Ok(_) => None,
+        Err(_) => crate::harness::providers::openai::relaxed_json::recover_relaxed_object(raw),
+    }
+}
+
+/// Builds a [`ToolCall`] from an already-parsed call object, or `None` when the
+/// object does not name a tool.
+fn tool_call_from_object(value: &Value, index: usize) -> Option<ToolCall> {
+    let name = value.get("name")?.as_str()?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let arguments = CALL_ARGUMENT_KEYS
+        .iter()
+        .find_map(|key| value.get(*key).cloned())
         .unwrap_or_else(|| Value::Object(Map::new()));
     Some(ToolCall {
         id: format!("call_{index}"),
@@ -530,4 +572,49 @@ fn parse_one(inner: &str, index: usize) -> Option<ToolCall> {
         arguments,
         invalid: None,
     })
+}
+
+/// Recovers a tool call a model emitted as a **bare object**, with no
+/// `<tool_call>` markup of any kind.
+///
+/// Observed on `llama3.2:3b` via Ollama under `tool_choice: "required"`: rather
+/// than populating the wire's `tool_calls` array, roughly one response in a
+/// dozen puts the call in `content` as
+///
+/// ```text
+/// {"name":"get_weather","parameters':{'city':"Paris"}}
+/// ```
+///
+/// — note the mismatched quotes, which strict JSON also rejects. Without
+/// recovery the agent loop sees an assistant message with no tool calls, treats
+/// it as the final answer, and silently returns JSON-looking prose to the user
+/// instead of running the tool.
+///
+/// # Why this cannot swallow a genuine text answer
+///
+/// The recovery requires the **entire** message content (trimmed, and with a
+/// surrounding markdown fence removed) to parse as a single JSON object
+/// carrying a string `name`. Prose that merely mentions or quotes JSON has text
+/// outside the object and is left untouched, as is any object that does not
+/// name a tool. The caller only reaches this path when the request declared
+/// tools and the response carried no structured tool calls.
+fn parse_bare_tool_call(text: &str) -> Option<ToolCall> {
+    let candidate = strip_code_fence(text.trim());
+    if !(candidate.starts_with('{') && candidate.ends_with('}')) {
+        return None;
+    }
+    let value = parse_relaxed_object(candidate)?;
+    tool_call_from_object(&value, 1)
+}
+
+/// Strips one surrounding markdown code fence, with or without a language tag.
+fn strip_code_fence(raw: &str) -> &str {
+    let Some(after_open) = raw.strip_prefix("```") else {
+        return raw;
+    };
+    let body = match after_open.find('\n') {
+        Some(newline) => &after_open[newline + 1..],
+        None => return raw,
+    };
+    body.trim_end().strip_suffix("```").map_or(raw, str::trim)
 }

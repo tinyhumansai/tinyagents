@@ -510,3 +510,107 @@ fn apply_prompt_tool_calls_preserves_a_leading_thinking_block() {
         ContentBlock::Text("reply".to_string())
     );
 }
+// ---------------------------------------------------------------------------
+// Bare (undelimited) tool calls
+//
+// Captured from `llama3.2:3b` via Ollama with `tool_choice: "required"`: the
+// model puts the call in `content` instead of the wire's `tool_calls` array,
+// with no `<tool_call>` markup and frequently with malformed JSON.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn apply_prompt_tool_calls_recovers_a_bare_object_with_relaxed_json() {
+    // The exact capture: `parameters'` and `{'city'` use mismatched quotes, so
+    // strict JSON rejects it outright.
+    let resp = crate::harness::model::ModelResponse::assistant(
+        r#"{"name":"get_weather","parameters':{'city':"Paris"}}"#,
+    );
+    let out = apply_prompt_tool_calls(resp);
+
+    assert_eq!(out.message.tool_calls.len(), 1);
+    assert_eq!(out.message.tool_calls[0].name, "get_weather");
+    assert_eq!(
+        out.message.tool_calls[0].arguments,
+        serde_json::json!({ "city": "Paris" })
+    );
+    // The raw markup must not also survive as prose, or the user sees the JSON.
+    assert!(
+        out.text().is_empty(),
+        "the consumed object should not remain as text: {}",
+        out.text()
+    );
+}
+
+#[test]
+fn apply_prompt_tool_calls_recovers_a_bare_object_inside_a_code_fence() {
+    let resp = crate::harness::model::ModelResponse::assistant(
+        "```json\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}\n```",
+    );
+    let out = apply_prompt_tool_calls(resp);
+
+    assert_eq!(out.message.tool_calls.len(), 1);
+    assert_eq!(out.message.tool_calls[0].name, "get_weather");
+}
+
+#[test]
+fn a_tool_call_object_may_name_its_arguments_parameters() {
+    let resp = crate::harness::model::ModelResponse::assistant(
+        r#"<tool_call>{"name":"get_weather","parameters":{"city":"Paris"}}</tool_call>"#,
+    );
+    let out = apply_prompt_tool_calls(resp);
+
+    assert_eq!(out.message.tool_calls.len(), 1);
+    assert_eq!(
+        out.message.tool_calls[0].arguments,
+        serde_json::json!({ "city": "Paris" })
+    );
+}
+
+#[test]
+fn bare_object_recovery_never_swallows_a_genuine_text_answer() {
+    // Prose, prose that merely quotes JSON, a JSON object that names no tool,
+    // and a bare JSON scalar must all pass through untouched.
+    for text in [
+        "The weather in Paris is mild today.",
+        r#"You could send {"name":"get_weather"} to that endpoint."#,
+        r#"{"city":"Paris","temperature":17}"#,
+        r#"{"name":42}"#,
+        r#""just a string""#,
+        "[1, 2, 3]",
+    ] {
+        let out = apply_prompt_tool_calls(crate::harness::model::ModelResponse::assistant(text));
+        assert!(
+            out.message.tool_calls.is_empty(),
+            "{text:?} must not be recovered as a tool call"
+        );
+        assert_eq!(out.text(), text, "{text:?} must survive as text");
+    }
+}
+
+#[test]
+fn bare_tool_call_recovery_preserves_a_thinking_block() {
+    // A local *reasoning* model emits its chain of thought and then the bare
+    // call object as the whole visible text. Consuming the object must not take
+    // the reasoning with it.
+    let mut response = ModelResponse::assistant(r#"{"name":"search","arguments":{"q":"x"}}"#);
+    response.message.content.insert(
+        0,
+        ContentBlock::Thinking {
+            text: "chain of thought".to_string(),
+            signature: None,
+        },
+    );
+
+    let out = apply_prompt_tool_calls(response);
+
+    assert_eq!(out.message.tool_calls.len(), 1);
+    assert_eq!(out.message.tool_calls[0].name, "search");
+    assert_eq!(
+        out.message.content,
+        vec![ContentBlock::Thinking {
+            text: "chain of thought".to_string(),
+            signature: None,
+        }],
+        "the reasoning must survive while the consumed object does not"
+    );
+}
