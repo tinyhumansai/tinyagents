@@ -177,6 +177,27 @@ The checkpoint core lives in `src/graph/checkpoint/`:
   `Async` degrades to `Sync`. `Exit` persists only the terminal checkpoint and
   any interrupt boundary (interrupts must persist so the run can resume). Set
   it with `CompiledGraph::with_durability(mode)`.
+
+Two guarantees make `Async` durability safe to reason about. **Background writes
+are ordered**: each spawned write awaits the previously spawned one before its
+own `put`, because every bundled backend defines a thread's "latest" checkpoint
+by insertion order — an unserialized writer could let boundary N land after
+boundary N+1 and make a concurrent reader (or a `retry` racing a straggler
+append) see a stale record as latest. A write whose predecessor failed is
+skipped entirely rather than appending a record whose `parent_checkpoint_id`
+points at something that never persisted; the predecessor's error is what the
+run reports. **Every exit drains**: not only the terminal, interrupt, and
+failure boundaries but also the mid-run aborts — recursion limit, run deadline,
+node-visit limit, reducer and routing errors — settle in-flight writes before
+returning `Err`. Dropping the tracker would detach those tasks, discarding their
+outcome and racing a caller that immediately calls `retry(thread_id)`.
+
+`prune` is namespace-aware: the recency window applies per namespace, so the
+lineages of embedded subgraphs (which share the parent's thread id under their
+own namespace, and are never referenced by a parent record's
+`parent_checkpoint_id`) are retained rather than deleted along with old parent
+records.
+
 - `CheckpointConfig { thread_id, checkpoint_id, namespace }` — checkpoint
   coordinates. `CheckpointConfig::latest(thread_id)` addresses the newest
   checkpoint at the root namespace.

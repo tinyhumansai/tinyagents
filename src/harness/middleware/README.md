@@ -54,6 +54,11 @@ to log/redact/react), then the *original* error is returned to the caller.
 Errors raised from `on_error` itself are ignored — they cannot mask the root
 cause or replace it with a different error.
 
+One failure delivers exactly one `on_error` per middleware. The stack marks the
+`RunContext` when it fans a hook failure out, and a driver that also handles the
+propagated error (the agent loop does, for failures raised by models, tools, or
+the loop itself) skips its own dispatch for that error.
+
 ## Public surface
 
 - `Middleware<State, Ctx = ()>` — the lifecycle trait described above.

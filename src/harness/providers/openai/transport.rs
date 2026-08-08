@@ -66,12 +66,21 @@ pub struct OpenAiModel {
     /// `tool_choice:"required"` with the `tools` array filtered to the named tool
     /// — some local runtimes (LM Studio, llama.cpp server) 400 on the object form.
     /// See [`Self::with_named_tool_choice`].
-    named_tool_choice_supported: bool,
+    ///
+    /// An [`AtomicBool`] (like [`Self::stream_required`]) because a 400 that
+    /// implicates this shape latches it `false` in [`Self::post_chat_with_degrade`]
+    /// so later calls on the same shared `&self` skip the doomed baseline
+    /// request instead of re-discovering the rejection every time.
+    named_tool_choice_supported: AtomicBool,
     /// Whether the endpoint accepts `response_format:{"type":"json_object"}`.
     /// `true` by default. When `false`, a [`ResponseFormat::JsonObject`] request is
     /// degraded to a permissive `json_schema` wire form — some local runtimes 400
     /// on `json_object`. See [`Self::with_json_object_format`].
-    json_object_format_supported: bool,
+    ///
+    /// An [`AtomicBool`] for the same reason as
+    /// [`Self::named_tool_choice_supported`]: the 400-driven discovery is latched
+    /// on the instance instead of thrown away after the retry.
+    json_object_format_supported: AtomicBool,
     /// Default model id used when a request does not override it.
     model: String,
     /// Provider family identifier used in profiles and normalized errors.
@@ -339,8 +348,8 @@ impl OpenAiModel {
             temperature_unsupported: Vec::new(),
             temperature_override: None,
             merge_system_into_user: false,
-            named_tool_choice_supported: true,
-            json_object_format_supported: true,
+            named_tool_choice_supported: AtomicBool::new(true),
+            json_object_format_supported: AtomicBool::new(true),
             model: DEFAULT_MODEL.to_string(),
             provider: "openai".to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
@@ -395,6 +404,37 @@ impl OpenAiModel {
                 provider = %self.provider,
                 model = %self.model,
                 "[openai] provider requires stream:true; latching for subsequent calls"
+            );
+        }
+    }
+
+    /// Remembers a newly-discovered request-shape rejection so later calls skip
+    /// straight to the degraded body instead of re-paying a guaranteed 400.
+    ///
+    /// Mirrors [`Self::latch_stream_required`]: `degrade` is the union
+    /// [`degrade_for_400`] just computed, so this stores `false` into exactly
+    /// the knob(s) that flipped on this call. Logs on each transition only.
+    pub(super) fn latch_degrade(&self, degrade: Degrade) {
+        if degrade.named_tool_choice
+            && self
+                .named_tool_choice_supported
+                .swap(false, Ordering::Relaxed)
+        {
+            tracing::info!(
+                provider = %self.provider,
+                model = %self.model,
+                "[openai] provider rejects named tool_choice; latching degraded shape for subsequent calls"
+            );
+        }
+        if degrade.json_object
+            && self
+                .json_object_format_supported
+                .swap(false, Ordering::Relaxed)
+        {
+            tracing::info!(
+                provider = %self.provider,
+                model = %self.model,
+                "[openai] provider rejects response_format:json_object; latching degraded shape for subsequent calls"
             );
         }
     }
@@ -494,9 +534,12 @@ impl OpenAiModel {
     /// then degraded to `tool_choice:"required"` with the wire `tools` array
     /// filtered down to just the named tool, preserving the "must call *this*
     /// tool" semantics. Independent of this flag, a 400 whose body implicates
-    /// `tool_choice` triggers the same degraded retry automatically (once).
-    pub fn with_named_tool_choice(mut self, supported: bool) -> Self {
-        self.named_tool_choice_supported = supported;
+    /// `tool_choice` triggers the same degraded retry automatically — and, once
+    /// discovered, is latched on the instance so later calls skip the doomed
+    /// baseline request instead of re-paying the 400 every time.
+    pub fn with_named_tool_choice(self, supported: bool) -> Self {
+        self.named_tool_choice_supported
+            .store(supported, Ordering::Relaxed);
         self
     }
 
@@ -508,9 +551,12 @@ impl OpenAiModel {
     /// [`ResponseFormat::JsonObject`] request is then degraded to a permissive
     /// `json_schema` wire form (an empty object schema with `strict:false`).
     /// Independent of this flag, a 400 whose body implicates `response_format`
-    /// triggers the same degraded retry automatically (once).
-    pub fn with_json_object_format(mut self, supported: bool) -> Self {
-        self.json_object_format_supported = supported;
+    /// triggers the same degraded retry automatically — and, once discovered,
+    /// is latched on the instance so later calls skip the doomed baseline
+    /// request instead of re-paying the 400 every time.
+    pub fn with_json_object_format(self, supported: bool) -> Self {
+        self.json_object_format_supported
+            .store(supported, Ordering::Relaxed);
         self
     }
 
@@ -749,9 +795,8 @@ impl OpenAiModel {
     /// decoded.
     pub async fn list_models(&self) -> Result<Vec<ModelListing>> {
         let url = format!("{}/models", self.base_url);
-
         let response = self
-            .send_checked(self.authorized(self.client.get(&url)), "request", &url)
+            .send_checked(self.list_models_request(&url), "request", &url)
             .await?;
 
         let text = response.text().await.map_err(|e| {
@@ -954,8 +999,8 @@ impl OpenAiModel {
     /// shape on the wire".
     pub(super) fn baseline_degrade(&self) -> Degrade {
         Degrade {
-            named_tool_choice: !self.named_tool_choice_supported,
-            json_object: !self.json_object_format_supported,
+            named_tool_choice: !self.named_tool_choice_supported.load(Ordering::Relaxed),
+            json_object: !self.json_object_format_supported.load(Ordering::Relaxed),
         }
     }
 
@@ -1133,6 +1178,25 @@ impl OpenAiModel {
         }
         if !self.extra_query_params.is_empty() {
             builder = builder.query(&self.extra_query_params);
+        }
+        builder
+    }
+
+    /// Builds the authorized GET request for [`Self::list_models`], applying
+    /// the same deadline policy as every other outbound call.
+    ///
+    /// Every other outbound path (`post_json`, `send_responses`) resolves a
+    /// deadline through [`Self::effective_request_timeout`]; `list_models` used
+    /// not to, so a reachable-but-wedged endpoint (an Ollama/LM Studio server
+    /// that accepts the TCP connect and then never responds — exactly the
+    /// runtime model discovery this method exists for) hung the call forever.
+    /// Factored out (rather than inlined in `list_models`) so the timeout
+    /// policy is unit-testable via [`reqwest::RequestBuilder::build`] without a
+    /// network round trip.
+    pub(super) fn list_models_request(&self, url: &str) -> reqwest::RequestBuilder {
+        let mut builder = self.authorized(self.client.get(url));
+        if let Some(timeout) = self.effective_request_timeout(None, false) {
+            builder = builder.timeout(timeout);
         }
         builder
     }
@@ -1320,6 +1384,7 @@ impl OpenAiModel {
                 if err.status == Some(400)
                     && let Some(degrade) = degrade_for_400(&err.message, request, baseline) =>
             {
+                self.latch_degrade(degrade);
                 let retry = self.build_chat_body(request, degrade, streaming)?;
                 self.post_json(&retry, request.timeout_ms, streaming, what)
                     .await
@@ -1555,6 +1620,28 @@ pub(super) fn request_timeout(timeout_ms: Option<u64>, streaming: bool) -> Optio
         Some(ms) => Some(Duration::from_millis(ms)),
         None if streaming => None,
         None => Some(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)),
+    }
+}
+
+/// Resolves the `timeout_ms` [`invoke_with_streaming`] should carry when a
+/// unary [`ChatModel::invoke`] call degrades onto the streaming wire path.
+///
+/// An explicit `timeout_ms` always wins (unchanged). Otherwise the caller's
+/// mode is unary, not the wire mode — so unlike [`request_timeout`] with
+/// `streaming: true`, an unset `timeout_ms` here must **not** resolve to `None`:
+/// `stream()` folds `None` into no overall deadline, which would let a provider
+/// that returns `200 text/event-stream` and then stops sending bytes hang the
+/// unary caller forever. Skipped for caller-owned clients (`with_client`),
+/// which manage their own client-level timeout policy and opt out of
+/// [`OpenAiModel::effective_request_timeout`] the same way.
+pub(super) fn unary_fold_timeout_ms(
+    timeout_ms: Option<u64>,
+    caller_owned_client: bool,
+) -> Option<u64> {
+    match timeout_ms {
+        Some(ms) => Some(ms),
+        None if caller_owned_client => None,
+        None => Some(DEFAULT_REQUEST_TIMEOUT_SECS * 1_000),
     }
 }
 
@@ -1898,8 +1985,14 @@ pub(super) fn clean_stream_item(
 /// `ChatModel` impl (the stream method never reads it).
 async fn invoke_with_streaming(
     model: &OpenAiModel,
-    request: ModelRequest,
+    mut request: ModelRequest,
 ) -> Result<ModelResponse> {
+    // `invoke` is a unary call to its caller and is documented (and, below,
+    // tested) to be capped at `DEFAULT_REQUEST_TIMEOUT_SECS` when the caller did
+    // not set an explicit `timeout_ms`. Folding onto the streaming wire path
+    // must not silently drop that cap — see `unary_fold_timeout_ms`.
+    request.timeout_ms = unary_fold_timeout_ms(request.timeout_ms, model.caller_owned_client);
+
     let mut stream = model.stream(&(), request).await?;
     let mut acc = StreamAccumulator::new();
 

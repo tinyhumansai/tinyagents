@@ -485,12 +485,35 @@ pub fn apply_prompt_tool_calls(mut response: ModelResponse) -> ModelResponse {
         return response;
     }
     response.message.tool_calls.extend(calls);
-    response.message.content = if cleaned.is_empty() {
-        Vec::new()
-    } else {
-        vec![ContentBlock::Text(cleaned)]
-    };
+    response.message.content = replace_text_blocks(response.message.content, cleaned);
     response
+}
+
+/// Rebuild a content vector, keeping every non-[`ContentBlock::Text`] block (e.g.
+/// `Thinking`) in place and substituting the single cleaned text at the position
+/// of the first original `Text` block. If the original content had no `Text`
+/// block, the cleaned text (when non-empty) is appended; if `cleaned` is empty,
+/// no text block is emitted at all.
+fn replace_text_blocks(content: Vec<ContentBlock>, cleaned: String) -> Vec<ContentBlock> {
+    let mut out = Vec::with_capacity(content.len());
+    let mut inserted = false;
+    for block in content {
+        match block {
+            ContentBlock::Text(_) => {
+                if !inserted {
+                    if !cleaned.is_empty() {
+                        out.push(ContentBlock::Text(cleaned.clone()));
+                    }
+                    inserted = true;
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    if !inserted && !cleaned.is_empty() {
+        out.push(ContentBlock::Text(cleaned));
+    }
+    out
 }
 
 /// Parse a single tool-call body into a [`ToolCall`] with a synthetic 1-based id.

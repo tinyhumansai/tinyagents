@@ -34,7 +34,23 @@ const CANCELLED_TOKEN: &str = "rlm cell cancelled by host";
 /// The embedded Rhai backend. See the [module docs](self).
 pub struct RhaiInterpreter {
     max_operations: u64,
-    scope: Scope<'static>,
+    /// The persistent notebook scope, behind a shared handle rather than
+    /// owned outright by `Self`.
+    ///
+    /// `eval_cell` hands the scope to a `spawn_blocking` task. If that were a
+    /// bare `Scope` moved in and out via `mem::take`, dropping the
+    /// `eval_cell` future (a caller-side `timeout`/`select!`/abort — the
+    /// documented cancellation shape) would detach the blocking task and
+    /// silently discard the scope it was about to write back, leaving `self`
+    /// with the empty scope `mem::take` left behind and no indication
+    /// anything was lost. Keeping the scope behind `Arc<Mutex<_>>` instead
+    /// means a dropped future no longer owns the only copy: the orphaned
+    /// task still writes into the shared scope, and the mutex serializes any
+    /// next cell behind it rather than starting from empty. A poisoned lock
+    /// (the blocking closure panicked mid-eval) is treated as an
+    /// unrecoverable session error instead of silently falling back to an
+    /// empty namespace.
+    scope: Arc<Mutex<Scope<'static>>>,
 }
 
 impl RhaiInterpreter {
@@ -43,7 +59,7 @@ impl RhaiInterpreter {
     pub fn new(max_operations: u64) -> Self {
         Self {
             max_operations,
-            scope: Scope::new(),
+            scope: Arc::new(Mutex::new(Scope::new())),
         }
     }
 }
@@ -331,6 +347,12 @@ Rhai syntax notes (Rhai is NOT JavaScript or Rust):
 
     async fn set_variable(&mut self, name: &str, value: Value) -> Result<()> {
         self.scope
+            .lock()
+            .map_err(|_| {
+                TinyAgentsError::Model(
+                    "rlm rhai interpreter scope poisoned by a previous panic".to_string(),
+                )
+            })?
             .set_value(name.to_string(), json_to_dynamic(&value));
         Ok(())
     }
@@ -338,19 +360,38 @@ Rhai syntax notes (Rhai is NOT JavaScript or Rust):
     async fn eval_cell(&mut self, code: &str, host: Arc<dyn RlmHostApi>) -> Result<CellEval> {
         let cell: SharedCellState = Arc::new(Mutex::new(CellState::default()));
         let engine = build_engine(host, cell.clone(), self.max_operations);
-        let mut scope = std::mem::take(&mut self.scope);
+        let scope = self.scope.clone();
         let code = code.to_string();
 
         // Rhai is synchronous and the capability closures block through the
         // bridge, so evaluate on the blocking pool to keep the async runtime
         // (which drives the actual provider I/O) responsive.
-        let (scope_back, eval) = tokio::task::spawn_blocking(move || {
-            let result = engine.eval_with_scope::<Dynamic>(&mut scope, &code);
-            (scope, result)
+        //
+        // The scope is locked *inside* the blocking closure (not moved out of
+        // `self` via `mem::take`) so a caller that drops this `eval_cell`
+        // future — a `timeout`/`select!`/abort around `RlmSession::eval` or
+        // `RlmRunner::run` — never leaves `self.scope` empty: the orphaned
+        // blocking task still holds the only route back to the scope and
+        // still writes its updates into it before the lock releases.
+        let eval = tokio::task::spawn_blocking(move || {
+            // A poisoned lock means an earlier cell's blocking task panicked
+            // while holding the scope: surface that as a distinct outcome
+            // rather than silently continuing on a scope whose consistency
+            // is no longer guaranteed.
+            match scope.lock() {
+                Ok(mut guard) => Ok(engine.eval_with_scope::<Dynamic>(&mut guard, &code)),
+                Err(_poisoned) => Err(()),
+            }
         })
         .await
-        .map_err(|err| TinyAgentsError::Model(format!("rlm rhai eval task failed: {err}")))?;
-        self.scope = scope_back;
+        .map_err(|err| TinyAgentsError::Model(format!("rlm rhai eval task failed: {err}")))?
+        .map_err(|()| {
+            TinyAgentsError::Model(
+                "rlm rhai interpreter state lost: a previous cell panicked while holding the \
+                 notebook scope"
+                    .to_string(),
+            )
+        })?;
 
         let mut state = cell.lock().expect("cell state poisoned");
         if let Some(fatal) = state.fatal.take() {

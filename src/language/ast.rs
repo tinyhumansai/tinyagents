@@ -156,8 +156,29 @@ pub struct NodeDecl {
     pub retry: Vec<(String, Literal)>,
     /// Node-level `metadata { key value … }` entries.
     pub metadata: Vec<(String, Literal)>,
+    /// A `steering { … }` policy declaration for a `subagent` node.
+    pub steering: Option<SteeringDecl>,
     /// Source position of the `node` keyword.
     pub span: Span,
+}
+
+/// A `steering { parent allow [...] human allow [...] delivery "…" }`
+/// declaration: the narrowed set of steering commands a parent orchestrator
+/// or a human may send to this `subagent` node, plus a delivery policy.
+///
+/// Parsing accepts the shape documented in
+/// `docs/modules/expressive-language/reference.md`; lowering it into a
+/// runtime `harness::steering` policy is not yet implemented (tracked
+/// separately), so [`crate::language::compiler::compile`] currently parses
+/// and retains this declaration without acting on it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SteeringDecl {
+    /// Steering commands a parent orchestrator run may send (`parent allow [...]`).
+    pub parent_allow: Vec<String>,
+    /// Steering commands a human may send (`human allow [...]`).
+    pub human_allow: Vec<String>,
+    /// The delivery policy name (`delivery "safe_boundary"`), if declared.
+    pub delivery: Option<String>,
 }
 
 impl NodeDecl {
@@ -185,6 +206,7 @@ impl NodeDecl {
             timeout: None,
             retry: Vec::new(),
             metadata: Vec::new(),
+            steering: None,
             span,
         }
     }

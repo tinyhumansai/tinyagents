@@ -59,6 +59,34 @@ fn model_query_calls_a_registered_model_and_records_the_call() {
 }
 
 #[test]
+fn model_query_does_not_leak_the_registry_alias_as_the_provider_model_id() {
+    // Regression test: `build_model_request` used to set `ModelRequest.model`
+    // to the *registry* name the script passed, not a provider model id.
+    // `CapabilityRegistry::register_model` allows those to differ (a host
+    // may register a `"fast"` alias for `gpt-4o-mini`), and a real provider
+    // transport sends `request.model` verbatim on the wire when set — so the
+    // request must leave `model` unset and let the resolved model supply its
+    // own provider id, exactly like `RlmHost::handle_llm` / `RlmRunner::run`.
+    let scripted = Arc::new(ScriptedModel::replies(vec!["hi"]));
+    let mut registry = CapabilityRegistry::<()>::new();
+    registry
+        .register_model("fast", scripted.clone())
+        .expect("register model");
+    let mut s =
+        ReplSession::<()>::new().with_capabilities(ReplCapabilities::new(Arc::new(registry)));
+
+    s.eval_cell(r#"model_query(#{ model: "fast", prompt: "hi" })"#)
+        .expect("model_query");
+
+    let requests = scripted.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].model, None,
+        "the registry alias `fast` must not be sent as the provider model id"
+    );
+}
+
+#[test]
 fn model_query_structured_returns_content_and_finish_reason() {
     let mut s = session_with_model(vec!["structured-reply"]);
 

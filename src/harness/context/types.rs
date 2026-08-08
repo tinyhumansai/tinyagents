@@ -152,6 +152,12 @@ impl MiddlewareControl {
 /// Unlike [`RunConfig`], `RunContext` is **not** serializable: it owns live
 /// counters, listener lists, and user handles.
 pub struct RunContext<Ctx = ()> {
+    /// Process-unique identity of *this context instance*, minted on
+    /// construction. Unlike [`RunConfig::run_id`] — a caller-supplied label two
+    /// concurrent runs may well share — it distinguishes concurrent runs, so
+    /// shared per-run bookkeeping (a middleware's in-flight reservation, say)
+    /// can be keyed on it. Read it with [`RunContext::instance_id`].
+    pub(crate) instance_id: u64,
     /// The declarative configuration this context was built from.
     pub config: RunConfig,
     /// Arbitrary user-supplied run data.
@@ -193,6 +199,12 @@ pub struct RunContext<Ctx = ()> {
     /// [`WorkspaceIsolation`][crate::harness::workspace::WorkspaceIsolation]
     /// provider; `None` means no workspace policy is in effect.
     pub workspace: Option<crate::harness::workspace::WorkspaceDescriptor>,
+    /// Whether the middleware stack already fanned `on_error` out to every
+    /// middleware for the error currently unwinding this run. The stack sets it
+    /// when a lifecycle hook fails (it dispatches `on_error` itself before
+    /// propagating), and the agent-loop driver reads it so the same failure is
+    /// not delivered to every middleware a second time.
+    pub(crate) on_error_dispatched: bool,
     /// Whether this run is being driven through the streaming loop path
     /// (`ChatModel::stream`), set by the agent-loop driver. Threaded into each
     /// [`ToolExecutionContext`][crate::harness::tool::ToolExecutionContext] so a

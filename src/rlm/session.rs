@@ -19,6 +19,19 @@ use crate::error::{Result, TinyAgentsError};
 /// [`RlmPolicy::max_output_bytes`] and is truncated.
 const TRUNCATION_MARKER: &str = "\n… [output truncated by rlm policy]";
 
+/// Truncates `s` to at most `max` bytes, walking back to the nearest UTF-8
+/// char boundary at or below `max` first. `String::truncate` panics on a
+/// non-boundary byte index, and captured cell output is arbitrary text (a
+/// multi-byte character can straddle the raw budget), so the cut point must
+/// be found before truncating.
+fn truncate_at_char_boundary(s: &mut String, max: usize) {
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
 /// One sandboxed script workspace: a persistent interpreter plus the
 /// capability host its cells call back into.
 pub struct RlmSession<State: Send + Sync + 'static> {
@@ -108,16 +121,21 @@ impl<State: Send + Sync + 'static> RlmSession<State> {
         let mut eval = eval?;
 
         // Bound what flows back into the driver conversation. Truncation is
-        // explicit (marked) so the model knows it saw a prefix.
+        // explicit (marked) so the model knows it saw a prefix. `truncate`
+        // cuts at a raw byte offset, so the budget is first walked back to
+        // the nearest UTF-8 char boundary — output is arbitrary
+        // model/script-authored text (CJK, emoji, accents included), and a
+        // multi-byte character straddling `max_output_bytes` would otherwise
+        // panic `String::truncate`.
         if eval.stdout.len() > policy.max_output_bytes {
-            eval.stdout.truncate(policy.max_output_bytes);
+            truncate_at_char_boundary(&mut eval.stdout, policy.max_output_bytes);
             eval.stdout.push_str(TRUNCATION_MARKER);
         }
         if let Some(value) = &eval.value {
             let rendered = value.to_string();
             if rendered.len() > policy.max_output_bytes {
                 let mut clipped = rendered;
-                clipped.truncate(policy.max_output_bytes);
+                truncate_at_char_boundary(&mut clipped, policy.max_output_bytes);
                 clipped.push_str(TRUNCATION_MARKER);
                 eval.value = Some(Value::String(clipped));
             }

@@ -100,6 +100,7 @@ use sse::*;
 use transport::{
     Degrade, auth_headers, degrade_for_400, effective_temperature, glob_match,
     is_stream_required_error, merge_provider_options, merge_system_into_user, request_timeout,
+    unary_fold_timeout_ms,
 };
 
 #[cfg(test)]

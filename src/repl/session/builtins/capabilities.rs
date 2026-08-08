@@ -19,7 +19,7 @@ pub(super) fn model_query_impl<State: Send + Sync + 'static>(
         .registry
         .model(&model_name)
         .ok_or_else(|| raise(ctx, TinyAgentsError::ModelNotFound(model_name.clone())))?;
-    let request = build_model_request(&model_name, params);
+    let request = build_model_request(params);
     let call_id = new_call_id();
     emit_call_started(ctx, &call_id, ReplCallKind::Model, &model_name);
     let start = Instant::now();

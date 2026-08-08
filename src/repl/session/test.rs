@@ -415,6 +415,41 @@ fn tool_call_batched_keeps_successes_when_one_item_tool_errors() {
     assert_eq!(items[2]["content"], serde_json::json!("ok:3"));
 }
 
+#[test]
+fn a_recoverable_capability_error_is_catchable_by_try_catch() {
+    // Regression test: `raise()` used to stash *every* capability error
+    // (recoverable or not) into `host_error`, which `eval_cell`'s success
+    // path and `on_progress` both treat as fatal — so a script that caught
+    // the error and recovered still failed the whole cell. An unknown tool
+    // name is a recoverable failure (`TinyAgentsError::ToolNotFound`), not a
+    // policy bound, so `try`/`catch` around it must actually work.
+    let mut s = session();
+
+    let result = s
+        .eval_cell(r#"let ok = 0; try { tool_call(#{ tool: "nope" }); } catch(e) { ok = 1; } ok"#)
+        .expect("a caught recoverable capability error must not fail the cell");
+
+    assert_eq!(result.value, Some(ReplValue::Int(1)));
+}
+
+#[test]
+fn an_uncaught_recoverable_capability_error_still_reports_its_typed_form() {
+    // The typed-error contract for an *uncaught* recoverable failure must
+    // survive the fix above: `eval_cell` should still report
+    // `TinyAgentsError::ToolNotFound`, not a generic stringly-wrapped
+    // `Validation` error.
+    let mut s = session();
+
+    let err = s
+        .eval_cell(r#"tool_call(#{ tool: "nope" })"#)
+        .expect_err("an unregistered tool must fail the cell when uncaught");
+
+    assert!(
+        matches!(err, TinyAgentsError::ToolNotFound(ref t) if t == "nope"),
+        "expected ToolNotFound(nope), got {err:?}"
+    );
+}
+
 /// A trivial [`HarnessAgent`] that returns a fixed response, for exercising
 /// `agent_query` without a real model/harness run.
 struct StubAgent;

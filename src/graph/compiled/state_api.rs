@@ -71,7 +71,11 @@ where
     /// attributed node). A command node cannot be used as `as_node` (it routes
     /// dynamically and has no static successors); doing so returns
     /// [`TinyAgentsError::Graph`] rather than silently producing a non-resumable
-    /// checkpoint. With `as_node == None` the latest pending node set is
+    /// checkpoint. A successor reached by a waiting edge is barrier-gated
+    /// exactly as it would be during a run: it is scheduled only once every
+    /// required predecessor has arrived (the write records the attributed
+    /// node's arrival), so a manual write can never fire a join ahead of a
+    /// still-pending branch. With `as_node == None` the latest pending node set is
     /// preserved. Requires a configured checkpointer and an existing checkpoint
     /// for the thread.
     pub async fn update_state(
@@ -111,26 +115,73 @@ where
         let parent_id = base.checkpoint_id.clone();
         let new_state = self.reducer.apply(base.state, update)?;
 
+        // Manual writes preserve any accumulated barrier arrivals, and an
+        // attributed write records its own arrival into them.
+        let mut arrivals = barriers_from_persisted(&base.barrier_arrivals);
         // Pending nodes: the attributed node's successors, or the inherited set.
+        let mut withheld_by_barrier = false;
+        // Set only when the base checkpoint's pending set was reinstated below,
+        // which is the one case where the pending *activations* must be
+        // reinstated with it. Keying that off `withheld_by_barrier` would let a
+        // routing that withholds one target while scheduling another persist
+        // `next_nodes` and `pending_activations` that disagree — and resume
+        // prefers the activations, silently dropping the scheduled successor.
+        let mut used_base_fallback = false;
         let next_nodes: Vec<NodeId> = match &as_node {
-            Some(node) => self
-                .route(node, None, &new_state)?
-                .into_iter()
-                .map(|t| t.node().clone())
-                .filter(|n| n.as_str() != END)
-                .collect(),
+            Some(node) => {
+                let mut next = Vec::new();
+                for target in self.route(node, None, &new_state)? {
+                    let tnode = target.node().clone();
+                    if tnode.as_str() == END {
+                        continue;
+                    }
+                    // Apply the same barrier gate the executor applies in
+                    // `route_completed`: a waiting node stays unscheduled until
+                    // every required predecessor has arrived. Without this an
+                    // attributed write would fire a join ahead of a predecessor
+                    // that is still pending — the data loss the waiting edge
+                    // exists to prevent.
+                    if let Some(required) = self.waiting.get(&tnode) {
+                        let arrived = arrivals.entry(tnode.clone()).or_default();
+                        arrived.insert(node.clone());
+                        if !required.is_subset(arrived) {
+                            withheld_by_barrier = true;
+                            continue;
+                        }
+                        arrivals.remove(&tnode);
+                    }
+                    next.push(tnode);
+                }
+                // An unsatisfied barrier leaves nothing to schedule, which would
+                // make the checkpoint non-resumable. Keep the base checkpoint's
+                // still-pending nodes (minus the attributed one) so the barrier's
+                // remaining predecessors still run and clear the join.
+                if next.is_empty() && withheld_by_barrier {
+                    used_base_fallback = true;
+                    next.extend(base.next_nodes.iter().filter(|n| *n != node).cloned());
+                }
+                next
+            }
             None => base.next_nodes.clone(),
         };
         let completed_tasks: Vec<NodeId> = as_node.iter().cloned().collect();
         // With `as_node`, pending becomes that node's (plain) successors, so no
         // send args carry over; without it, inherit the base checkpoint's
-        // pending activations verbatim so any pending `Send` args survive.
-        let pending_activations = match &as_node {
-            Some(_) => None,
-            None => base.pending_activations.clone(),
+        // pending activations verbatim so any pending `Send` args survive. The
+        // barrier-withheld fallback above re-schedules base pending nodes, so it
+        // keeps their activations (and `Send` args) too.
+        let pending_activations = match (&as_node, used_base_fallback) {
+            (Some(node), true) => base.pending_activations.as_ref().map(|pending| {
+                pending
+                    .iter()
+                    .filter(|activation| activation.node != *node)
+                    .cloned()
+                    .collect()
+            }),
+            (Some(_), false) => None,
+            (None, _) => base.pending_activations.clone(),
         };
-        // Manual writes preserve any accumulated barrier arrivals.
-        let barrier_arrivals = base.barrier_arrivals.clone();
+        let barrier_arrivals = barriers_to_persisted(&arrivals);
 
         let checkpoint_id = next_checkpoint_id();
         let config = self.config_for(thread_id, Some(&checkpoint_id));

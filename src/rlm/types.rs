@@ -95,7 +95,9 @@ impl InterpreterSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RlmPolicy {
-    /// Maximum code cells one [`super::RlmRunner::run`] loop may execute.
+    /// Maximum code cells a session may execute, cumulative across every
+    /// [`super::RlmRunner::run`] call on the same runner/session (matching
+    /// [`super::RlmSession::eval`]'s own enforcement) — not reset per call.
     pub max_cells: usize,
     /// Maximum source size, in bytes, of a single cell.
     pub max_script_bytes: usize,

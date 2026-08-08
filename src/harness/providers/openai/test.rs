@@ -1745,6 +1745,66 @@ fn request_timeout_defaults_by_call_kind() {
 }
 
 #[test]
+fn unary_fold_timeout_ms_caps_a_degraded_unary_call_at_the_default() {
+    // Before the fix, `invoke_with_streaming` passed the request's `timeout_ms`
+    // through unchanged, and `stream()` resolves an unset one to `None` overall
+    // deadline. A unary `invoke` call degraded onto the streaming path must
+    // still be capped, so a provider that returns `200 text/event-stream` and
+    // then stops sending bytes cannot hang the caller forever.
+    assert_eq!(
+        unary_fold_timeout_ms(None, false),
+        Some(DEFAULT_REQUEST_TIMEOUT_SECS * 1_000)
+    );
+    // A genuine `stream()` caller is unaffected: this function is only
+    // consulted on the degraded-unary path.
+}
+
+#[test]
+fn unary_fold_timeout_ms_prefers_an_explicit_override() {
+    assert_eq!(unary_fold_timeout_ms(Some(1_500), false), Some(1_500));
+    assert_eq!(unary_fold_timeout_ms(Some(1_500), true), Some(1_500));
+}
+
+#[test]
+fn unary_fold_timeout_ms_leaves_caller_owned_clients_uncapped() {
+    // `with_client` callers manage their own client-level timeout policy
+    // (see `effective_request_timeout`'s caller-owned-client opt-out); the
+    // degraded-unary injection must not override that.
+    assert_eq!(unary_fold_timeout_ms(None, true), None);
+}
+
+#[test]
+fn list_models_request_carries_the_default_timeout() {
+    // Regression: `list_models` used to build its GET request with no
+    // `.timeout(...)` at all, so a reachable-but-wedged endpoint (TCP connect
+    // succeeds, then the server never responds) hung the call forever. Every
+    // other outbound path resolves a deadline via `effective_request_timeout`;
+    // this inspects the actual `reqwest::Request` `list_models` now builds.
+    let m = model();
+    let built = m
+        .list_models_request(&format!("{}/models", m.base_url()))
+        .build()
+        .expect("request builds");
+    assert_eq!(
+        built.timeout(),
+        Some(&Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)),
+        "list_models must apply the default unary request timeout"
+    );
+}
+
+#[test]
+fn list_models_request_respects_caller_owned_client_opt_out() {
+    // A caller-owned client (`with_client`) manages its own timeout policy;
+    // `list_models` must not override it with a timeout of its own.
+    let m = model().with_client(reqwest::Client::new());
+    let built = m
+        .list_models_request(&format!("{}/models", m.base_url()))
+        .build()
+        .expect("request builds");
+    assert_eq!(built.timeout(), None);
+}
+
+#[test]
 fn from_env_errors_when_api_key_missing() {
     // Snapshot and clear the key so the missing-key path is exercised
     // deterministically, then restore the prior value.
@@ -2536,6 +2596,74 @@ fn degrade_for_400_unions_with_existing_baseline_degrade() {
             named_tool_choice: true,
             json_object: true,
         })
+    );
+}
+
+// The named-tool-choice / json_object 400-driven degradation used to be
+// discovered by `degrade_for_400` and applied only to the one retry, then
+// thrown away — `named_tool_choice_supported`/`json_object_format_supported`
+// were plain `bool`s only the builder ever wrote. `post_chat_with_degrade`
+// takes `&self`, so every later call to the same rejecting endpoint replayed
+// the un-degraded baseline body and paid a guaranteed second 400. This mirrors
+// `stream_required_constraint_latches_after_discovery` for the two request-shape
+// knobs.
+#[test]
+fn shape_degrade_latches_after_discovery_so_baseline_is_already_degraded() {
+    let m = model();
+    assert_eq!(
+        m.baseline_degrade(),
+        Degrade::default(),
+        "must start un-latched"
+    );
+
+    m.latch_degrade(Degrade {
+        named_tool_choice: true,
+        json_object: false,
+    });
+    assert_eq!(
+        m.baseline_degrade(),
+        Degrade {
+            named_tool_choice: true,
+            json_object: false,
+        },
+        "a discovered named_tool_choice rejection must be remembered so the next \
+         call's baseline body is already degraded, instead of re-paying the 400"
+    );
+
+    // Idempotent, and unions rather than clobbers: a later json_object discovery
+    // keeps the earlier named_tool_choice latch.
+    m.latch_degrade(Degrade {
+        named_tool_choice: true,
+        json_object: true,
+    });
+    assert_eq!(
+        m.baseline_degrade(),
+        Degrade {
+            named_tool_choice: true,
+            json_object: true,
+        }
+    );
+}
+
+#[test]
+fn shape_degrade_latch_survives_through_a_shared_handle() {
+    // Same reasoning as `stream_required_latch_survives_through_a_shared_handle`:
+    // production holds models as `Arc<dyn ChatModel>`.
+    let shared: std::sync::Arc<OpenAiModel> = std::sync::Arc::new(model());
+    let clone = std::sync::Arc::clone(&shared);
+    assert_eq!(clone.baseline_degrade(), Degrade::default());
+
+    shared.latch_degrade(Degrade {
+        named_tool_choice: false,
+        json_object: true,
+    });
+    assert_eq!(
+        clone.baseline_degrade(),
+        Degrade {
+            named_tool_choice: false,
+            json_object: true,
+        },
+        "the latch must be visible to every holder of the shared model"
     );
 }
 

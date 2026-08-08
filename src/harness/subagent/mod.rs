@@ -226,7 +226,11 @@ impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
             parent.thread_id(),
             parent.config.max_turn_output_tokens,
         )?;
-        let ctx = RunContext::new(config, ctx_data).with_events(parent.events.clone());
+        // Share the parent's cancellation token so one `cancel()` unwinds the
+        // whole nested-run tree instead of stopping at this boundary.
+        let ctx = RunContext::new(config, ctx_data)
+            .with_events(parent.events.clone())
+            .with_cancellation(parent.cancellation.clone());
         self.run_child(state, ctx, input.into(), parent.streaming)
             .await
     }
@@ -593,7 +597,12 @@ where
                 return Err(error);
             }
         };
-        let ctx = RunContext::new(config, Ctx::default()).with_events(context.events);
+        // Inherit the caller's cancellation token: a cancel requested on the
+        // parent run must also stop the child loop this tool drives, otherwise
+        // it runs to completion while the parent waits on this `await`.
+        let ctx = RunContext::new(config, Ctx::default())
+            .with_events(context.events)
+            .with_cancellation(context.cancellation);
         // Match the parent's drive mode: when the parent run streams, the child
         // streams too, so its deltas flow onto the shared sink and reach the
         // parent's `invoke_stream` consumer with the child's own lineage.

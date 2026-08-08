@@ -44,6 +44,12 @@ use crate::harness::ids::{RunId, ThreadId};
 use crate::harness::limits::{LimitTracker, RunLimits};
 use crate::harness::store::StoreRegistry;
 
+/// Mints the next process-unique [`RunContext::instance_id`].
+fn next_context_instance_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 // ── RunConfig ─────────────────────────────────────────────────────────────────
 
 impl RunConfig {
@@ -184,6 +190,7 @@ impl<Ctx> RunContext<Ctx> {
         // (a durable journal replayed after a restart re-mints the same ids).
         let events = EventSink::with_stream_id(config.run_id.as_str());
         Self {
+            instance_id: next_context_instance_id(),
             config,
             data,
             stores: StoreRegistry::new(),
@@ -193,8 +200,32 @@ impl<Ctx> RunContext<Ctx> {
             cancellation: CancellationToken::new(),
             control: std::sync::Arc::new(std::sync::Mutex::new(None)),
             workspace: None,
+            on_error_dispatched: false,
             streaming: false,
         }
+    }
+
+    /// Returns this context's process-unique instance id.
+    ///
+    /// Two concurrent runs can carry the same [`RunConfig::run_id`] (it is a
+    /// caller-supplied label), so keep per-run bookkeeping keyed on this
+    /// instead when it is shared across runs.
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
+    /// Records that the middleware stack already dispatched `on_error` for the
+    /// error currently unwinding this run.
+    pub(crate) fn mark_on_error_dispatched(&mut self) {
+        self.on_error_dispatched = true;
+    }
+
+    /// Takes (and clears) the flag set by [`Self::mark_on_error_dispatched`].
+    ///
+    /// `true` means the stack already delivered `on_error` for this failure, so
+    /// the driver must not dispatch it again.
+    pub(crate) fn take_on_error_dispatched(&mut self) -> bool {
+        std::mem::take(&mut self.on_error_dispatched)
     }
 
     /// Attaches an isolated workspace descriptor that is threaded into every

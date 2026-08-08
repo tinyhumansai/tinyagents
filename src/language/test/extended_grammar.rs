@@ -275,3 +275,130 @@ fn bind_blueprint_rejects_unregistered_subagent_and_script() {
     assert!(err.to_string().contains("unknown script"), "{err}");
     assert!(err.to_string().contains("triage_script"), "{err}");
 }
+
+#[test]
+fn bind_blueprint_rejects_unregistered_secondary_model_on_subagent_and_repl_agent() {
+    // `subagent` and `repl_agent` nodes may carry a documented `model` field
+    // alongside their primary `agent`/`script` reference. The strict gate
+    // must validate it too, not silently let it through because only the
+    // primary reference was classified.
+    let node_kinds = || {
+        crate::language::capability_resolver::DEFAULT_NODE_KINDS
+            .iter()
+            .map(|k| k.to_string())
+    };
+
+    let subagent_src = r#"
+        graph g {
+          start r
+          node r {
+            kind subagent
+            agent "researcher"
+            model "totally-unregistered"
+            next END
+          }
+        }
+    "#;
+    let bp = compile(&parse_str(subagent_src).unwrap())
+        .unwrap()
+        .remove(0);
+    let resolver = CapabilityResolver::new()
+        .allow_agent("researcher")
+        .with_node_kinds(node_kinds());
+    let err = resolver.bind_blueprint(&bp).unwrap_err();
+    assert!(matches!(err, crate::error::TinyAgentsError::Capability(_)));
+    assert!(err.to_string().contains("unknown model"), "{err}");
+    assert!(err.to_string().contains("totally-unregistered"), "{err}");
+
+    let repl_agent_src = r#"
+        graph g {
+          start r
+          node r {
+            kind repl_agent
+            script "triage"
+            model "totally-unregistered"
+            next END
+          }
+        }
+    "#;
+    let bp = compile(&parse_str(repl_agent_src).unwrap())
+        .unwrap()
+        .remove(0);
+    let resolver = CapabilityResolver::new()
+        .allow_script("triage")
+        .with_node_kinds(node_kinds());
+    let err = resolver.bind_blueprint(&bp).unwrap_err();
+    assert!(err.to_string().contains("unknown model"), "{err}");
+    assert!(err.to_string().contains("totally-unregistered"), "{err}");
+
+    // A registered model passes, alongside the registered primary reference.
+    let ok_resolver = CapabilityResolver::new()
+        .allow_agent("researcher")
+        .allow_model("totally-unregistered")
+        .with_node_kinds(node_kinds());
+    let bp = compile(&parse_str(subagent_src).unwrap())
+        .unwrap()
+        .remove(0);
+    ok_resolver.bind_blueprint(&bp).unwrap();
+}
+
+#[test]
+fn steering_block_on_subagent_node_parses() {
+    // The reference doc's own worked example
+    // (docs/modules/expressive-language/reference.md, `subagent` section) must
+    // parse: it previously failed with "unknown node item `steering`" even
+    // though `steering` is documented as a supported `subagent` field and
+    // README.md's grammar declares `steering_decl = "steering" object`.
+    let src = r#"
+        graph g {
+          start research
+          node research {
+            kind subagent
+            agent "researcher"
+            steering {
+              parent allow ["add_instruction", "request_status", "cancel"]
+              human allow ["add_instruction", "pause", "resume", "cancel"]
+              delivery "safe_boundary"
+            }
+            next synthesize
+          }
+          node synthesize {
+            kind model
+            next END
+          }
+        }
+    "#;
+    let program = parse_str(src).unwrap();
+    let node = &program.graphs[0].nodes[0];
+    assert_eq!(node.name, "research");
+    let steering = node.steering.as_ref().expect("steering block parsed");
+    assert_eq!(
+        steering.parent_allow,
+        vec!["add_instruction", "request_status", "cancel"]
+    );
+    assert_eq!(
+        steering.human_allow,
+        vec!["add_instruction", "pause", "resume", "cancel"]
+    );
+    assert_eq!(steering.delivery.as_deref(), Some("safe_boundary"));
+
+    // The declaration survives compilation (lowering into the blueprint stays
+    // a no-op; the point is that documented source is no longer rejected).
+    compile(&program).unwrap();
+}
+
+#[test]
+fn steering_block_rejects_unknown_item() {
+    let src =
+        "graph g { start a node a { kind subagent agent \"x\" steering { bogus 1 } next END } }";
+    let err = parse_str(src).unwrap_err();
+    match err {
+        crate::error::TinyAgentsError::Parse { message, .. } => {
+            assert!(
+                message.contains("`parent`, `human`, or `delivery`"),
+                "{message}"
+            );
+        }
+        other => panic!("expected parse error, got {other:?}"),
+    }
+}

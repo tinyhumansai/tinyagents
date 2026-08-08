@@ -13,6 +13,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::error::TinyAgentsError;
+use crate::harness::cancel::CancellationToken;
 use crate::harness::context::{RunConfig, RunContext};
 use crate::harness::events::{AgentEvent, EventSink, RecordingListener};
 use crate::harness::limits::RunLimits;
@@ -95,6 +96,35 @@ impl Tool<()> for SpinTool {
     }
 
     async fn call(&self, _state: &(), call: ToolCall) -> crate::Result<ToolResult> {
+        Ok(ToolResult::text(call.id, "spin", "again"))
+    }
+}
+
+/// A child-side tool that counts its invocations and cancels the shared token
+/// on the first one, so the child's next loop checkpoint must observe it.
+struct CancelOnFirstCallTool {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    token: CancellationToken,
+}
+
+#[async_trait::async_trait]
+impl Tool<()> for CancelOnFirstCallTool {
+    fn name(&self) -> &str {
+        "spin"
+    }
+
+    fn description(&self) -> &str {
+        "cancels the run on its first call"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new("spin", "cancels the run on its first call", json!({}))
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> crate::Result<ToolResult> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            self.token.cancel();
+        }
         Ok(ToolResult::text(call.id, "spin", "again"))
     }
 }
@@ -325,6 +355,82 @@ async fn parent_can_continue_after_subagent_tool_hits_child_limit() {
             .any(|message| matches!(message, Message::Tool(_))
                 && message.text().contains("delegated-agent limit signal")),
         "parent transcript should include the child limit tool result"
+    );
+}
+
+#[tokio::test]
+async fn call_with_context_propagates_parent_cancellation_into_the_child() {
+    // Regression test: the child run used to be built with a fresh, never
+    // cancelled `CancellationToken`, so cancelling the parent's token was a
+    // no-op for the whole sub-agent delegation — the child ran until it hit a
+    // limit while the parent was blocked awaiting this tool.
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let token = CancellationToken::new();
+
+    let mut child: AgentHarness<()> = AgentHarness::new();
+    child
+        .register_model(
+            "child-model",
+            Arc::new(MockModel::with_tool_call("spin", json!({}))),
+        )
+        .register_tool(Arc::new(CancelOnFirstCallTool {
+            calls: calls.clone(),
+            token: token.clone(),
+        }))
+        // Bound the child so a non-propagating token fails the assertion
+        // instead of looping forever.
+        .with_policy(RunPolicy {
+            limits: RunLimits::default().with_max_model_calls(5),
+            ..RunPolicy::default()
+        });
+
+    let tool = SubAgentTool::new(Arc::new(SubAgent::new(
+        "worker",
+        "spins until cancelled",
+        Arc::new(child),
+    )));
+
+    let parent_ctx: RunContext<()> =
+        RunContext::new(RunConfig::new("parent"), ()).with_cancellation(token);
+    let context = ToolExecutionContext::from_run_context(&parent_ctx);
+
+    let error = tool
+        .call_with_context(
+            &(),
+            ToolCall::new("c1", "worker", json!({ "input": "spin" })),
+            context,
+        )
+        .await
+        .expect_err("the cancelled child unwinds instead of running to its limit");
+
+    assert!(
+        matches!(error, TinyAgentsError::Cancelled),
+        "unexpected child error: {error}"
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the child should stop at its next checkpoint after the cancel"
+    );
+}
+
+#[tokio::test]
+async fn invoke_in_parent_propagates_parent_cancellation_into_the_child() {
+    let subagent = SubAgent::new("worker", "does work", Arc::new(child_harness("done")));
+
+    let token = CancellationToken::new();
+    token.cancel();
+    let parent_ctx: RunContext<()> =
+        RunContext::new(RunConfig::new("parent"), ()).with_cancellation(token);
+
+    let error = subagent
+        .invoke_in_parent(&(), (), &parent_ctx, "go")
+        .await
+        .expect_err("a child started under a cancelled parent token stops immediately");
+
+    assert!(
+        matches!(error, TinyAgentsError::Cancelled),
+        "unexpected child error: {error}"
     );
 }
 

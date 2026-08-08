@@ -182,10 +182,24 @@ where
             ));
         }
 
+        // The resume value belongs to the node(s) that actually interrupted. The
+        // pending set is deliberately wider than that at an interrupt boundary
+        // (it also carries the successors of branches that completed before the
+        // interrupt), so fanning the value across it would hand `ctx.resume` to
+        // nodes that have never run. A boundary that recorded no interrupt (a
+        // failure boundary, resumed via `retry` with no value) keeps the old
+        // fan-across-pending behaviour.
         let mut resume_map = HashMap::new();
         if let Some(value) = command.resume {
-            for activation in &active {
-                resume_map.insert(activation.node.clone(), value.clone());
+            let interrupted = interrupted_nodes(&checkpoint, &active);
+            if interrupted.is_empty() {
+                for activation in &active {
+                    resume_map.insert(activation.node.clone(), value.clone());
+                }
+            } else {
+                for node in interrupted {
+                    resume_map.insert(node, value.clone());
+                }
             }
         }
 
@@ -414,9 +428,16 @@ where
                 .min(self.recursion_policy.max_total_steps);
             if steps >= step_limit {
                 let err = TinyAgentsError::RecursionLimit(step_limit);
-                self.fail_run(&run_id, &thread_id, started_at, steps, &err, None)
+                return self
+                    .fail_and_return(
+                        &run_id,
+                        &thread_id,
+                        started_at,
+                        steps,
+                        &mut async_writes,
+                        err,
+                    )
                     .await;
-                return Err(err);
             }
             // Whole-run wall-clock deadline: stop *between* super-steps once the
             // elapsed run time reaches it, leaving the last committed boundary
@@ -430,17 +451,31 @@ where
                         "graph run exceeded its {deadline:?} deadline after {steps} super-step(s) \
                          ({elapsed:?} elapsed)"
                     ));
-                    self.fail_run(&run_id, &thread_id, started_at, steps, &err, None)
+                    return self
+                        .fail_and_return(
+                            &run_id,
+                            &thread_id,
+                            started_at,
+                            steps,
+                            &mut async_writes,
+                            err,
+                        )
                         .await;
-                    return Err(err);
                 }
             }
             // Node-loop recursion: enforce `max_visits_per_node` per activation.
             for activation in &active {
                 if let Err(err) = recursion.record_node_visit(&mut node_visits, &activation.node) {
-                    self.fail_run(&run_id, &thread_id, started_at, steps, &err, None)
+                    return self
+                        .fail_and_return(
+                            &run_id,
+                            &thread_id,
+                            started_at,
+                            steps,
+                            &mut async_writes,
+                            err,
+                        )
                         .await;
-                    return Err(err);
                 }
             }
             steps += 1;
@@ -486,9 +521,16 @@ where
             } = match run_result {
                 Ok(step_run) => step_run,
                 Err(err) => {
-                    self.fail_run(&run_id, &thread_id, started_at, steps, &err, None)
+                    return self
+                        .fail_and_return(
+                            &run_id,
+                            &thread_id,
+                            started_at,
+                            steps,
+                            &mut async_writes,
+                            err,
+                        )
                         .await;
-                    return Err(err);
                 }
             };
 
@@ -500,7 +542,14 @@ where
                     Ok(state) => state,
                     Err(err) => {
                         return self
-                            .fail_and_return(&run_id, &thread_id, started_at, steps, err)
+                            .fail_and_return(
+                                &run_id,
+                                &thread_id,
+                                started_at,
+                                steps,
+                                &mut async_writes,
+                                err,
+                            )
                             .await;
                     }
                 };
@@ -540,7 +589,14 @@ where
                     Ok(successors) => successors,
                     Err(route_err) => {
                         return self
-                            .fail_and_return(&run_id, &thread_id, started_at, steps, route_err)
+                            .fail_and_return(
+                                &run_id,
+                                &thread_id,
+                                started_at,
+                                steps,
+                                &mut async_writes,
+                                route_err,
+                            )
                             .await;
                     }
                 };
@@ -593,9 +649,16 @@ where
             // too. Then return control to the caller.
             if let Some((index, emitted)) = interrupt {
                 if let Err(err) = self.require_interrupt_durability(&thread_id) {
-                    self.fail_run(&run_id, &thread_id, started_at, steps, &err, None)
+                    return self
+                        .fail_and_return(
+                            &run_id,
+                            &thread_id,
+                            started_at,
+                            steps,
+                            &mut async_writes,
+                            err,
+                        )
                         .await;
-                    return Err(err);
                 }
                 let successors = match self.route_completed(
                     &active[..index],
@@ -606,7 +669,14 @@ where
                     Ok(successors) => successors,
                     Err(route_err) => {
                         return self
-                            .fail_and_return(&run_id, &thread_id, started_at, steps, route_err)
+                            .fail_and_return(
+                                &run_id,
+                                &thread_id,
+                                started_at,
+                                steps,
+                                &mut async_writes,
+                                route_err,
+                            )
                             .await;
                     }
                 };
@@ -620,7 +690,14 @@ where
                 // (a broken lineage cannot be safely resumed from).
                 if let Err(err) = async_writes.drain().await {
                     return self
-                        .fail_and_return(&run_id, &thread_id, started_at, steps, err)
+                        .fail_and_return(
+                            &run_id,
+                            &thread_id,
+                            started_at,
+                            steps,
+                            &mut async_writes,
+                            err,
+                        )
                         .await;
                 }
                 let checkpoint_id = match self
@@ -631,6 +708,7 @@ where
                         &pending,
                         &activation_nodes(&active[..index]),
                         vec![emitted.clone()],
+                        std::slice::from_ref(&active[index].node),
                         &barrier_arrivals,
                         parent_checkpoint.clone(),
                         steps,
@@ -643,7 +721,14 @@ where
                     Ok(id) => id,
                     Err(persist_err) => {
                         return self
-                            .fail_and_return(&run_id, &thread_id, started_at, steps, persist_err)
+                            .fail_and_return(
+                                &run_id,
+                                &thread_id,
+                                started_at,
+                                steps,
+                                &mut async_writes,
+                                persist_err,
+                            )
                             .await;
                     }
                 };
@@ -680,7 +765,14 @@ where
                 Ok(next) => next,
                 Err(route_err) => {
                     return self
-                        .fail_and_return(&run_id, &thread_id, started_at, steps, route_err)
+                        .fail_and_return(
+                            &run_id,
+                            &thread_id,
+                            started_at,
+                            steps,
+                            &mut async_writes,
+                            route_err,
+                        )
                         .await;
                 }
             };
@@ -700,7 +792,14 @@ where
             // continuing with a hole in its lineage.
             if let Some(err) = async_writes.take_failure().await {
                 return self
-                    .fail_and_return(&run_id, &thread_id, started_at, steps, err)
+                    .fail_and_return(
+                        &run_id,
+                        &thread_id,
+                        started_at,
+                        steps,
+                        &mut async_writes,
+                        err,
+                    )
                     .await;
             }
             let terminal = next.is_empty();
@@ -728,7 +827,14 @@ where
                     // synchronously in every mode.
                     if terminal && let Err(err) = async_writes.drain().await {
                         return self
-                            .fail_and_return(&run_id, &thread_id, started_at, steps, err)
+                            .fail_and_return(
+                                &run_id,
+                                &thread_id,
+                                started_at,
+                                steps,
+                                &mut async_writes,
+                                err,
+                            )
                             .await;
                     }
                     self.persist_checkpoint(
@@ -738,6 +844,7 @@ where
                         &next,
                         &completed_nodes,
                         Vec::new(),
+                        &[],
                         &barrier_arrivals,
                         parent_checkpoint.clone(),
                         steps,
@@ -751,7 +858,14 @@ where
                     Ok(id) => id,
                     Err(persist_err) => {
                         return self
-                            .fail_and_return(&run_id, &thread_id, started_at, steps, persist_err)
+                            .fail_and_return(
+                                &run_id,
+                                &thread_id,
+                                started_at,
+                                steps,
+                                &mut async_writes,
+                                persist_err,
+                            )
                             .await;
                     }
                 }
@@ -829,14 +943,23 @@ where
     /// a reducer merge, a routing resolution, or a checkpoint persist — still
     /// transitions the run to `Failed` (rather than leaving observers to see it
     /// stuck in `Running` forever) before the error unwinds out of the run.
+    ///
+    /// Any in-flight `Async` background write is drained first: dropping the
+    /// tracker would detach those tasks, discarding their outcome (contrary to
+    /// [`AsyncCheckpointWrites`]' contract) and racing a caller that
+    /// immediately `retry`s the thread. A background write error must not
+    /// replace the error that aborted the run, so it is dropped here — exactly
+    /// as at the failure boundary.
     async fn fail_and_return<T>(
         &self,
         run_id: &RunId,
         thread_id: &Option<ThreadId>,
         started_at: SystemTime,
         steps: usize,
+        writes: &mut AsyncCheckpointWrites,
         err: TinyAgentsError,
     ) -> Result<T> {
+        let _ = writes.drain().await;
         self.fail_run(run_id, thread_id, started_at, steps, &err, None)
             .await;
         Err(err)
@@ -1337,6 +1460,7 @@ where
         pending: &[Activation],
         completed_tasks: &[NodeId],
         interrupts: Vec<Interrupt>,
+        interrupted: &[NodeId],
         barrier_arrivals: &HashMap<NodeId, HashSet<NodeId>>,
         parent: Option<String>,
         step: usize,
@@ -1354,6 +1478,7 @@ where
             pending,
             completed_tasks,
             interrupts,
+            interrupted,
             barrier_arrivals,
             parent,
             step,
@@ -1413,6 +1538,7 @@ where
             pending,
             completed_tasks,
             Vec::new(),
+            &[],
             barrier_arrivals,
             parent,
             step,
@@ -1426,7 +1552,7 @@ where
             Ok(handle) => {
                 let checkpointer = Arc::clone(checkpointer);
                 let sink = self.event_sink.clone();
-                writes.push(handle.spawn(async move {
+                writes.spawn_ordered(&handle, async move {
                     let id = checkpointer.put(checkpoint).await?;
                     if let Some(sink) = sink {
                         sink.emit(GraphEvent::CheckpointSaved {
@@ -1434,7 +1560,7 @@ where
                         });
                     }
                     Ok(id)
-                }));
+                });
                 Ok(Some(id))
             }
             Err(_) => {
@@ -1458,6 +1584,7 @@ where
         pending: &[Activation],
         completed_tasks: &[NodeId],
         interrupts: Vec<Interrupt>,
+        interrupted: &[NodeId],
         barrier_arrivals: &HashMap<NodeId, HashSet<NodeId>>,
         parent: Option<String>,
         step: usize,
@@ -1465,6 +1592,23 @@ where
         recursion: &serde_json::Value,
         child_runs: &serde_json::Value,
     ) -> Checkpoint<State> {
+        let mut metadata = serde_json::json!({
+            "source": source,
+            "step": step,
+            "recursion": recursion,
+            "child_runs": child_runs,
+        });
+        // Which node of *this* graph paused, as opposed to the (possibly
+        // re-emitted, child-owned) `Interrupt::node`. Resume keys the resume
+        // value on it; omitted entirely when nothing interrupted.
+        if !interrupted.is_empty() {
+            metadata["interrupted_nodes"] = serde_json::json!(
+                interrupted
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+            );
+        }
         Checkpoint {
             thread_id: thread.to_string(),
             checkpoint_id: next_checkpoint_id(),
@@ -1478,12 +1622,7 @@ where
             pending_activations: Some(pending.iter().map(PendingActivation::from).collect()),
             barrier_arrivals: barriers_to_persisted(barrier_arrivals),
             interrupts,
-            metadata: serde_json::json!({
-                "source": source,
-                "step": step,
-                "recursion": recursion,
-                "child_runs": child_runs,
-            }),
+            metadata,
         }
     }
 
