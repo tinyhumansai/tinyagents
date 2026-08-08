@@ -224,7 +224,7 @@ pub enum TinyAgentsError {
 
     /// A durable-storage operation failed — opening, migrating, reading, or
     /// writing a backing database for the session store and run ledger
-    /// ([`crate::harness::session_store`]).
+    /// ([`crate::session`]).
     ///
     /// Distinct from [`TinyAgentsError::Checkpoint`], which covers graph
     /// checkpoint durability: a session-store failure means run *history* could

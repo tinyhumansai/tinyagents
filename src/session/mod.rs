@@ -2,8 +2,17 @@
 //!
 //! SQLite-backed store (WAL + FTS5) for sessions, messages, tool calls, cost
 //! metadata, and parent/child lineage, plus a [`run_ledger`] for background
-//! agent/workflow execution state. This is the harness's *history* layer: what
+//! agent/workflow execution state. This is the runtime's *history* layer: what
 //! ran, what it cost, what it called, and how runs nest.
+//!
+//! # Why this is a top-level module
+//!
+//! Session history is a persistence domain in its own right, not a part of the
+//! agent loop. Nothing in [`crate::harness`] reads from it, and a host can use
+//! it without running a harness at all — indexing sessions produced elsewhere,
+//! or recovering orchestration state at boot before any agent exists. Filing it
+//! under `harness::` would imply a dependency that does not exist in either
+//! direction.
 //!
 //! # Relationship to the other persistence layers
 //!
@@ -31,19 +40,19 @@
 //!
 //! ```no_run
 //! use std::path::Path;
-//! use tinyagents::harness::session_store::{self, SessionStatus};
+//! use tinyagents::session::{self, SessionStatus};
 //!
 //! # fn main() -> tinyagents::Result<()> {
 //! let workspace = Path::new("/tmp/workspace");
 //!
-//! session_store::record_session_start(
+//! session::record_session_start(
 //!     workspace, "sess-1", "researcher", "Researcher", "sess-1",
 //!     None, None, None, Some("gpt-5"), None,
 //! )?;
-//! session_store::record_message(
+//! session::record_message(
 //!     workspace, "sess-1", "user", "summarize the repo", None, None, None, None,
 //! )?;
-//! session_store::record_session_end(
+//! session::record_session_end(
 //!     workspace, "sess-1", SessionStatus::Completed, 1, 120, 340, 0, 0.004,
 //! )?;
 //! # Ok(())

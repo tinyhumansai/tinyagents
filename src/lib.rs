@@ -79,6 +79,10 @@ pub mod registry;
 pub mod repl;
 #[cfg(feature = "rlm")]
 pub mod rlm;
+/// Durable session history and run ledger — a persistence domain in its own
+/// right, not part of the agent-loop harness. Requires the `sqlite` feature.
+#[cfg(feature = "sqlite")]
+pub mod session;
 
 // --- Error: the crate-wide error type and `Result` alias ---
 pub use error::{Result, TinyAgentsError};

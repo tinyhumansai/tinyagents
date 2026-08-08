@@ -41,7 +41,7 @@ pub fn upsert_agent_run(workspace_dir: &Path, upsert: AgentRunUpsert) -> Result<
         upsert.parent_thread_id.as_deref().unwrap_or("-")
     );
 
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         conn.execute(
             "INSERT INTO agent_runs (
@@ -111,7 +111,7 @@ pub fn upsert_workflow_run(workspace_dir: &Path, upsert: WorkflowRunUpsert) -> R
     let child_run_ids_json =
         serde_json::to_string(&upsert.child_run_ids).storage_context("serialize child run ids")?;
 
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         conn.execute(
             "INSERT INTO workflow_runs (
@@ -154,7 +154,7 @@ pub fn append_run_event(workspace_dir: &Path, event: RunEventAppend) -> Result<R
     let now = Utc::now();
     let payload_json =
         serde_json::to_string(&event.payload).storage_context("serialize run event")?;
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let next_sequence: i64 = conn.query_row(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_events WHERE run_id = ?1",
@@ -188,7 +188,7 @@ pub fn upsert_run_telemetry(
     upsert: RunTelemetryUpsert,
 ) -> Result<RunTelemetry> {
     let now = Utc::now();
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         conn.execute(
             "INSERT INTO run_telemetry (
@@ -226,7 +226,7 @@ pub fn upsert_run_telemetry(
 }
 
 pub fn get_agent_run(workspace_dir: &Path, id: &str) -> Result<Option<AgentRun>> {
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         get_agent_run_inner(conn, id)
     })
@@ -258,7 +258,7 @@ pub fn transition_agent_run_status(
         error.is_some(),
         completed_at.is_some()
     );
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let rows_affected = conn
             .execute(
@@ -300,7 +300,7 @@ pub fn transition_agent_run_status(
 /// [`register_run_ledger_finalize_subscriber`]: crate::openhuman::agent::orchestration::run_ledger_finalize::register_run_ledger_finalize_subscriber
 pub fn interrupt_orphaned_agent_runs(workspace_dir: &Path) -> Result<usize> {
     let now = Utc::now();
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let rows_affected = conn
             .execute(
@@ -323,7 +323,7 @@ pub fn list_agent_runs(
     workspace_dir: &Path,
     request: &AgentRunListRequest,
 ) -> Result<AgentRunListResponse> {
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let mut where_clauses = Vec::new();
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -397,7 +397,7 @@ pub fn list_recent_run_events(
     workspace_dir: &Path,
     request: &RunEventListRequest,
 ) -> Result<RunEventListResponse> {
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let limit = request.limit.unwrap_or(100).min(1000) as i64;
         let after = request.after_sequence.unwrap_or(0) as i64;
@@ -422,7 +422,7 @@ pub fn list_recent_run_events(
 
 pub fn get_workflow_run(workspace_dir: &Path, id: &str) -> Result<Option<WorkflowRun>> {
     tracing::debug!("{LOG_PREFIX} get_workflow_run.entry id={id}");
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let mut stmt = conn.prepare(
             "SELECT id, definition_id, parent_thread_id, input_json, phase_states_json,
@@ -455,7 +455,7 @@ pub fn list_workflow_runs(
         request.limit,
         request.offset
     );
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let mut where_clauses = Vec::new();
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -540,7 +540,7 @@ pub fn upsert_agent_team(workspace_dir: &Path, upsert: AgentTeamUpsert) -> Resul
         upsert.lead_agent_id,
         upsert.status.as_str()
     );
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         conn.execute(
             "INSERT INTO agent_teams (
@@ -577,7 +577,7 @@ pub fn upsert_agent_team(workspace_dir: &Path, upsert: AgentTeamUpsert) -> Resul
 /// Fetch a single team by id.
 pub fn get_agent_team(workspace_dir: &Path, id: &str) -> Result<Option<AgentTeam>> {
     tracing::debug!("{LOG_PREFIX} get_agent_team.entry id={id}");
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let team = get_agent_team_inner(conn, id)?;
         tracing::debug!(
@@ -600,7 +600,7 @@ pub fn list_agent_teams(
         request.limit,
         request.offset
     );
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let mut where_clauses = Vec::new();
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -677,7 +677,7 @@ pub fn upsert_agent_team_member(
         upsert.name,
         upsert.member_status.as_str()
     );
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         conn.execute(
             "INSERT INTO agent_team_members (
@@ -720,7 +720,7 @@ pub fn upsert_agent_team_member(
 /// Fetch a single member by id.
 pub fn get_agent_team_member(workspace_dir: &Path, id: &str) -> Result<Option<AgentTeamMember>> {
     tracing::debug!("{LOG_PREFIX} get_agent_team_member.entry id={id}");
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let member = get_agent_team_member_inner(conn, id)?;
         tracing::debug!(
@@ -737,7 +737,7 @@ pub fn list_agent_team_members(
     team_id: &str,
 ) -> Result<Vec<AgentTeamMember>> {
     tracing::debug!("{LOG_PREFIX} list_agent_team_members.entry team={team_id}");
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let mut stmt = conn.prepare(
             "SELECT id, team_id, name, agent_id, member_status,
@@ -777,7 +777,7 @@ pub fn upsert_agent_team_task(
         upsert.status.as_str(),
         upsert.depends_on.len()
     );
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         conn.execute(
             "INSERT INTO agent_team_tasks (
@@ -827,7 +827,7 @@ pub fn upsert_agent_team_task(
 /// Fetch a single task by id.
 pub fn get_agent_team_task(workspace_dir: &Path, id: &str) -> Result<Option<AgentTeamTask>> {
     tracing::debug!("{LOG_PREFIX} get_agent_team_task.entry id={id}");
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let task = get_agent_team_task_inner(conn, id)?;
         tracing::debug!(
@@ -841,7 +841,7 @@ pub fn get_agent_team_task(workspace_dir: &Path, id: &str) -> Result<Option<Agen
 /// List all tasks of a team, by `order_index` then creation order.
 pub fn list_agent_team_tasks(workspace_dir: &Path, team_id: &str) -> Result<Vec<AgentTeamTask>> {
     tracing::debug!("{LOG_PREFIX} list_agent_team_tasks.entry team={team_id}");
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let mut stmt = conn.prepare(
             "SELECT id, team_id, title, objective, status, owner_member_id,
@@ -886,7 +886,7 @@ pub fn claim_agent_team_task(
     tracing::debug!(
         "{LOG_PREFIX} claim_agent_team_task.entry team={team_id} task={task_id} member={member_id}"
     );
-    let outcome = crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    let outcome = crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
 
         // 1. Resolve the task within this team.
@@ -980,7 +980,7 @@ pub fn complete_agent_team_task(
     tracing::debug!(
         "{LOG_PREFIX} complete_agent_team_task.entry team={team_id} task={task_id} member={member_id}"
     );
-    let outcome = crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    let outcome = crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
 
         // 1. Resolve the task within this team.
@@ -1135,7 +1135,7 @@ pub fn shutdown_agent_team_member(
     tracing::debug!(
         "{LOG_PREFIX} shutdown_agent_team_member.entry team={team_id} member={member_id}"
     );
-    let result = crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    let result = crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
 
         // Existence + team-membership check only; the row is intentionally not
@@ -1207,7 +1207,7 @@ pub fn mark_agent_team_member_running(
     tracing::debug!(
         "{LOG_PREFIX} mark_agent_team_member_running.entry team={team_id} member={member_id} task={task_id} run={run_id}"
     );
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let now = Utc::now();
         let changed = conn
@@ -1246,7 +1246,7 @@ pub fn mark_agent_team_member_idle(
     tracing::debug!(
         "{LOG_PREFIX} mark_agent_team_member_idle.entry team={team_id} member={member_id}"
     );
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let now = Utc::now();
         let changed = conn
@@ -1272,7 +1272,7 @@ pub fn mark_agent_team_member_idle(
 /// `shutdown_agent_team_member`.
 pub fn release_agent_team_task(workspace_dir: &Path, team_id: &str, task_id: &str) -> Result<bool> {
     tracing::debug!("{LOG_PREFIX} release_agent_team_task.entry team={team_id} task={task_id}");
-    crate::harness::session_store::store::with_connection(workspace_dir, |conn| {
+    crate::session::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let now = Utc::now();
         let changed = conn

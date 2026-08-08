@@ -32,9 +32,6 @@ pub mod prompt;
 pub mod providers;
 pub mod retry;
 pub mod runtime;
-/// Durable session history and run ledger. Requires the `sqlite` feature.
-#[cfg(feature = "sqlite")]
-pub mod session_store;
 pub mod steering;
 pub mod store;
 pub mod stream;

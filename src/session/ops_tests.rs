@@ -1,6 +1,6 @@
 use super::*;
-use crate::harness::session_store::store::with_memory_connection;
-use crate::harness::session_store::types::SessionSearchParams;
+use crate::session::store::with_memory_connection;
+use crate::session::types::SessionSearchParams;
 
 fn insert_test_session(conn: &Connection, id: &str, agent_id: &str, key: &str) {
     let now = Utc::now();
