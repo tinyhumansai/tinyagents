@@ -569,6 +569,25 @@ pub struct ModelResponse {
     /// this needs no cap of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continue_turn: Option<String>,
+    /// `true` when this response was served from a local
+    /// [`ResponseCache`][crate::harness::cache::ResponseCache] rather than
+    /// produced by a provider call.
+    ///
+    /// # Why accounting needs this
+    ///
+    /// A cached response retains the `usage` the provider originally reported.
+    /// Replaying it verbatim re-bills those tokens on every hit: the run's
+    /// usage totals inflate and a cost-budget middleware prices spend that
+    /// never happened, which can abort a run over money nobody paid. LangChain
+    /// zeroes usage on the cache-hit path for exactly this reason. This flag
+    /// lets the accounting sites tell a replay from a real call without
+    /// destroying the `usage` a caller may legitimately want to inspect.
+    ///
+    /// `#[serde(default)]` plus a skip-when-false so entries written before the
+    /// flag existed still deserialize, and so a serialized response is
+    /// byte-identical to the historical shape when it is a real call.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub served_from_cache: bool,
 }
 
 /// An incremental streamed chunk of a model response.

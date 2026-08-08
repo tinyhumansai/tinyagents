@@ -191,8 +191,29 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 crate::harness::steering::SteeringOutcome::Cancel => {
                     return Err(TinyAgentsError::Cancelled);
                 }
-                crate::harness::steering::SteeringOutcome::Pause => break,
+                crate::harness::steering::SteeringOutcome::Pause => {
+                    let pause = ctx
+                        .steering
+                        .as_ref()
+                        .and_then(|handle| handle.pause_state())
+                        .unwrap_or(crate::harness::steering::PauseState {
+                            reason: None,
+                            paused_at_checkpoint: 0,
+                        });
+                    return Ok(LoopExit::Paused(pause));
+                }
                 crate::harness::steering::SteeringOutcome::Continue => {}
+            }
+
+            // Safe checkpoint: honor a control outcome requested during the
+            // *previous* turn's tool execution (or by `before_agent`) before
+            // spending another model call on it. Draining only after the model
+            // call meant a `StopWithFinal`/`Interrupt` raised from
+            // `after_tool`/`wrap_tool` was honored one full model call late —
+            // an extra billable provider round trip after a guardrail, or a
+            // human gate, had already said stop.
+            if let Some(exit) = self.apply_pending_control(ctx, run, status)? {
+                return Ok(exit);
             }
 
             // Fail-closed limit and deadline checks before each model call.
