@@ -1950,8 +1950,25 @@ impl OpenAiModel {
 
         let status = response.status();
         if !status.is_success() {
+            // Read `Retry-After` *before* the body is consumed: a 429/503 that
+            // names how long to wait is authoritative, and retrying sooner
+            // burns an attempt for certain.
+            let retry_after_ms = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_retry_after_header_ms);
             let text = response.text().await.unwrap_or_default();
-            let error = self.parse_error_body(status.as_u16(), &text);
+            let mut error = self.parse_error_body(status.as_u16(), &text);
+            if let Some(ms) = retry_after_ms {
+                tracing::debug!(
+                    provider = %self.provider,
+                    status = status.as_u16(),
+                    retry_after_ms = ms,
+                    "[openai] honoring a server-supplied Retry-After header"
+                );
+                error.retry_after_ms = Some(ms);
+            }
             return Err(TinyAgentsError::Provider(Box::new(error)));
         }
         Ok(response)
