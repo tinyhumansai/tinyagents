@@ -309,6 +309,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         loop {
             // Retry loop for the current model.
             let mut attempt = 0usize;
+            // Counts the deltas the *current* streaming attempt has already
+            // handed to consumers. A stream that dies after 200 tokens has
+            // already delivered them; the retry replays from scratch, so a UI
+            // concatenating `ModelDelta.text` renders partial garbage followed
+            // by the full answer. `StreamAccumulator` is discarded internally,
+            // but consumers are never told to discard too — see the warning
+            // below and the `AgentEvent` handoff noted in the module docs.
+            let mut deltas_emitted = 0usize;
             let outcome = loop {
                 // Observe cancellation before (re)issuing a model attempt so a
                 // cancel requested during a retry/rate-limit wait stops the run
