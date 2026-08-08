@@ -249,6 +249,23 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     ctx.emit(AgentEvent::LimitReached {
                         kind: LimitKind::ModelCalls,
                     });
+                    // `RunConfig` cannot express a `LimitBehavior`, so the
+                    // tracker built from it always carries the default
+                    // (`Error`) even when the harness policy asks for
+                    // `StopWithPartial`. Honor the policy here rather than
+                    // discarding a run the operator asked to keep.
+                    if matches!(
+                        self.policy.limits.behavior,
+                        crate::harness::limits::LimitBehavior::StopWithPartial
+                    ) {
+                        tracing::debug!(
+                            target: "tinyagents::agent_loop",
+                            run_id = %ctx.run_id(),
+                            "[agent_loop] model-call cap reached; policy asks to stop with the \
+                             partial run"
+                        );
+                        return Ok(LoopExit::LimitStop(LimitKind::ModelCalls));
+                    }
                     return Err(TinyAgentsError::LimitExceeded(err.to_string()));
                 }
             }
