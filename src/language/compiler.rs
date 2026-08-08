@@ -267,6 +267,28 @@ fn compile_graph(graph: &crate::language::types::GraphDecl) -> Result<Blueprint>
             }
         }
 
+        // Reject a `steering { … }` declaration rather than dropping it on the
+        // floor. The grammar accepts the documented shape (parser.rs), but
+        // there is no faithful lowering onto the runtime today:
+        // `harness::steering::SteeringPolicy` is a single flat allowlist of
+        // `SteeringCommandKind`s with no `parent`/`human` actor separation, no
+        // delivery policy, and no `add_instruction` / `request_status` kinds.
+        // Any partial lowering would have to widen or invent semantics, and a
+        // silent no-op is worse still: an operator would deploy a blueprint
+        // believing the declared restrictions are enforced while the runtime
+        // receives none. Fail loudly until declarative steering is implemented
+        // end to end.
+        if node.steering.is_some() {
+            return Err(compile_err(format!(
+                "node `{}` declares a `steering {{ … }}` block, but declarative steering is parsed and not yet enforced: \
+the runtime policy (`harness::steering::SteeringPolicy`) is one flat command allowlist with no `parent`/`human` actor \
+separation, no delivery policy, and no `add_instruction`/`request_status` commands, so the declaration cannot be lowered \
+faithfully. Remove the block and apply a `SteeringPolicy` from the Rust `NodeFactory` that builds this node until \
+declarative steering lowering lands.",
+                node.name
+            )));
+        }
+
         // Determine routing. Precedence: explicit `routes` > `next` > command
         // `goto` > top-level edge > terminal.
         let routing = if has_routes {

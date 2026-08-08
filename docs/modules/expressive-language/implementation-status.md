@@ -84,7 +84,14 @@ against the registered scripts.
 ## Not yet implemented
 
 - State-schema declarations (`state Name { … }`).
-- Steering policy lowering for `subagent` nodes (parsed shape only is partial).
+- Steering policy lowering for `subagent` nodes. The `steering { … }` block
+  parses (the grammar reserves the shape), but the compiler **rejects** any node
+  that declares one rather than discarding it silently: the runtime
+  `harness::steering::SteeringPolicy` is a single flat command allowlist with no
+  `parent`/`human` actor separation, no delivery policy, and no
+  `add_instruction`/`request_status` commands, so no faithful lowering exists.
+  Build the `SteeringPolicy` in the Rust `NodeFactory` instead. See
+  `reference.md`, `subagent` section.
 - Duration literals like `60s` (write timeouts as a number or quoted string).
 - Formatter and round-trip golden tests (milestone L8).
 - Agent-authored review gates and blueprint provenance (milestone L7).

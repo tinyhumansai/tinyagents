@@ -77,7 +77,6 @@ Supported fields:
 - `routes`
 - `retry`
 - `timeout`
-- `steering`
 
 Example:
 
@@ -85,18 +84,37 @@ Example:
 node research {
   kind subagent
   agent "researcher"
-  steering {
-    parent allow ["add_instruction", "request_status", "cancel"]
-    human allow ["add_instruction", "pause", "resume", "cancel"]
-    delivery "safe_boundary"
-  }
   next synthesize
 }
 ```
 
-Steering policies lower into harness steering policy and graph task policy. They
-can narrow a child agent's model/tool/runtime limits but cannot grant
-capabilities absent from the registry or parent run policy.
+#### `steering` — reserved, rejected by the compiler
+
+```tinyagents
+steering {
+  parent allow ["add_instruction", "request_status", "cancel"]
+  human allow ["add_instruction", "pause", "resume", "cancel"]
+  delivery "safe_boundary"
+}
+```
+
+This block **parses** — the grammar reserves the shape above — but `compile`
+**rejects** any node that carries it, with a `TinyAgentsError::Compile`
+diagnostic. It is not enforced, and it is deliberately not accepted-and-ignored:
+a silently discarded policy would let an operator deploy a blueprint believing a
+child agent's steering is restricted when the runtime receives no restriction at
+all.
+
+There is no faithful lowering yet. `harness::steering::SteeringPolicy` is a
+single flat allowlist of `SteeringCommandKind`s (`pause`, `resume`, `cancel`,
+`inject_message`, `redirect`, `set_metadata`); it has no `parent`/`human` actor
+separation, no delivery policy, and no `add_instruction` or `request_status`
+command — so three of the four elements in the block above have no runtime
+counterpart.
+
+Until declarative steering is implemented end to end, restrict a child agent by
+building the `SteeringPolicy` in the Rust `NodeFactory` that materialises the
+node, where the policy is actually attached to the run's `SteeringHandle`.
 
 ### `repl_agent`
 

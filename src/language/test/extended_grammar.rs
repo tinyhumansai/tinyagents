@@ -381,10 +381,61 @@ fn steering_block_on_subagent_node_parses() {
         vec!["add_instruction", "pause", "resume", "cancel"]
     );
     assert_eq!(steering.delivery.as_deref(), Some("safe_boundary"));
+}
 
-    // The declaration survives compilation (lowering into the blueprint stays
-    // a no-op; the point is that documented source is no longer rejected).
-    compile(&program).unwrap();
+#[test]
+fn steering_block_is_rejected_at_compile_time_until_it_is_enforced() {
+    // Parsing the documented shape must not imply enforcement. Nothing lowers
+    // `SteeringDecl` into `harness::steering::SteeringPolicy` (which has no
+    // parent/human actor split, no delivery policy, and no
+    // `add_instruction`/`request_status` kinds), so compilation fails loudly
+    // rather than deploying a blueprint whose steering restrictions exist only
+    // in the source text.
+    let src = r#"
+        graph g {
+          start research
+          node research {
+            kind subagent
+            agent "researcher"
+            steering {
+              parent allow ["cancel"]
+              human allow ["pause", "resume", "cancel"]
+              delivery "safe_boundary"
+            }
+            next END
+          }
+        }
+    "#;
+    let program = parse_str(src).unwrap();
+    let err = compile(&program).unwrap_err();
+    match err {
+        crate::error::TinyAgentsError::Compile(message) => {
+            assert!(message.contains("node `research`"), "{message}");
+            assert!(message.contains("steering"), "{message}");
+            assert!(message.contains("not yet enforced"), "{message}");
+            assert!(message.contains("NodeFactory"), "{message}");
+        }
+        other => panic!("expected a compile error, got {other:?}"),
+    }
+}
+
+#[test]
+fn subagent_node_without_steering_still_compiles() {
+    // The rejection above is scoped to the `steering` block itself: an
+    // otherwise identical `subagent` node must keep compiling, and the
+    // compiled spec carries no steering field to mistake for a policy.
+    let src = r#"
+        graph g {
+          start research
+          node research {
+            kind subagent
+            agent "researcher"
+            next END
+          }
+        }
+    "#;
+    let blueprint = compile(&parse_str(src).unwrap()).unwrap().remove(0);
+    assert_eq!(blueprint.nodes[0].agent.as_deref(), Some("researcher"));
 }
 
 #[test]
