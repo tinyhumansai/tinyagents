@@ -221,7 +221,23 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             return Err(TinyAgentsError::LimitExceeded(err.to_string()));
         }
 
-        self.middleware.run_before_tool(ctx, state, call).await?;
+        // The slot is *reserved* above (cap-first, so a middleware hook never
+        // runs for a call the budget has already refused) and *released* here
+        // when `before_tool` refuses the call — an approval denial or an
+        // allowlist rejection must not spend budget on a call that never ran
+        // (TOOL-12). The recovery paths below deliberately keep their slot:
+        // they answer the model and let it try again, so counting them is what
+        // bounds the correction loop.
+        if let Err(err) = self.middleware.run_before_tool(ctx, state, call).await {
+            tracing::debug!(
+                "[agent_loop::tools] `before_tool` refused `{}` (call `{}`); \
+                 releasing its tool-call slot: {err}",
+                call.name,
+                call.id
+            );
+            ctx.limits.rollback_tool_calls(1);
+            return Err(err);
+        }
 
         // The provider marked this call's arguments unparseable (a small local
         // model emitted malformed JSON). Rather than fail the run, inject a
