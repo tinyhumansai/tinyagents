@@ -7,13 +7,31 @@
 //! OpenAI Codex OAuth path requires (paired with `with_extra_query_param` +
 //! `with_user_agent`).
 //!
-//! This first port is **text-in / text-out**: system messages fold into
-//! `instructions`, user/assistant/tool turns become `input` items, and the
-//! terminal `output_text` (or the first `output_text` content part) becomes the
-//! assistant reply. Native tool calls over `/responses` and true SSE streaming
-//! are follow-ups; the harness embeds tool specs in the prompt for this path
-//! (its [`profile`](super::OpenAiModel) advertises the caller's chosen
-//! `tool_calling`).
+//! System messages fold into `instructions`, user/assistant/tool turns become
+//! `input` items, and the terminal `output_text` (or the first `output_text`
+//! content part) becomes the assistant reply.
+//!
+//! # What this path now carries
+//!
+//! The request used to be `{model, input, instructions, stream, store,
+//! max_output_tokens}` and **silently dropped everything else** a caller set —
+//! `tools`, `tool_choice`, `response_format`, `temperature`, `top_p`, `seed`,
+//! `stop_sequences`, `continuation_id`, and `provider_options`. That last one
+//! made `reasoning: {effort, summary}` unreachable on the only wire format in
+//! this crate that supports it. All of them are on the wire now, and the
+//! response side reads reasoning items, their `encrypted_content`, and the
+//! cache/reasoning usage breakdowns that were previously ignored (so every
+//! cached token on this path was billed at the full input rate).
+//!
+//! # Remaining gaps
+//!
+//! Tool *declarations* are sent, but a model that calls one comes back as a
+//! `function_call` output item this port does not yet decode into
+//! [`ToolCall`](crate::harness::tool::ToolCall)s — and tool *results* are
+//! rendered as `user` turns carrying an explicit `[tool_result id=…]` prefix
+//! rather than native `function_call_output` items. That preserves the causal
+//! link the previous fold-into-assistant behaviour erased, but structural
+//! tool support and true SSE streaming remain follow-ups.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
