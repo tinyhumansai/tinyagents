@@ -30,7 +30,10 @@ fn namespaces_know_their_own_prefixes_and_suffixes() {
 async fn put_get_delete_roundtrip() {
     let store = InMemoryNamespacedStore::new();
     let n = ns(&["users", "alice"]);
-    store.put(&n, "k", serde_json::json!({"v": 1})).await.unwrap();
+    store
+        .put(&n, "k", serde_json::json!({"v": 1}))
+        .await
+        .unwrap();
     let item = store.get(&n, "k").await.unwrap().expect("stored");
     assert_eq!(item.value, serde_json::json!({"v": 1}));
     assert_eq!(item.namespace, n);
@@ -71,7 +74,11 @@ async fn search_applies_comparison_filters() {
     let n = ns(&["items"]);
     for (key, score) in [("low", 1), ("mid", 5), ("high", 9)] {
         store
-            .put(&n, key, serde_json::json!({"score": score, "meta": {"kind": "x"}}))
+            .put(
+                &n,
+                key,
+                serde_json::json!({"score": score, "meta": {"kind": "x"}}),
+            )
             .await
             .unwrap();
     }
@@ -90,7 +97,10 @@ async fn search_applies_comparison_filters() {
 
     // Nested dotted paths resolve.
     let mut filter = std::collections::HashMap::new();
-    filter.insert("meta.kind".to_string(), FilterOp::Eq(serde_json::json!("x")));
+    filter.insert(
+        "meta.kind".to_string(),
+        FilterOp::Eq(serde_json::json!("x")),
+    );
     assert_eq!(
         store
             .search(SearchQuery {
@@ -291,6 +301,11 @@ async fn the_flat_store_surface_still_works() {
     );
     assert_eq!(store.list("events").await.unwrap(), vec!["e1".to_string()]);
     FlatStore::delete(&store, "events", "e1").await.unwrap();
-    assert!(FlatStore::get(&store, "events", "e1").await.unwrap().is_none());
+    assert!(
+        FlatStore::get(&store, "events", "e1")
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(store.list("events").await.unwrap().is_empty());
 }

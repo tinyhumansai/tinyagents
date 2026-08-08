@@ -275,10 +275,19 @@ async fn probing_replaces_the_model_id_guess_with_the_servers_own_window() {
     let model = model.probed().await.expect("probe succeeds");
     let profile = <OpenAiModel as ChatModel<()>>::profile(&model).expect("profile");
     assert_eq!(profile.max_input_tokens, Some(8192));
-    assert!(profile.tool_calling, "the server reported the `tools` capability");
-    assert!(!profile.modalities.image_in, "no `vision` capability reported");
+    assert!(
+        profile.tool_calling,
+        "the server reported the `tools` capability"
+    );
+    assert!(
+        !profile.modalities.image_in,
+        "no `vision` capability reported"
+    );
 
-    assert_eq!(server.request_to("/api/show").body["model"], json!("llama3.2"));
+    assert_eq!(
+        server.request_to("/api/show").body["model"],
+        json!("llama3.2")
+    );
 }
 
 /// A server without the probe endpoint must degrade to "learned nothing", not
@@ -287,7 +296,10 @@ async fn probing_replaces_the_model_id_guess_with_the_servers_own_window() {
 async fn a_probe_against_an_older_server_is_not_an_error() {
     let server = MockServer::start(vec![Canned::error(404, json!({ "error": "not found" }))]);
     let model = OpenAiModel::ollama_at(&server.base_url, "llama3.2").expect("valid local URL");
-    let probe = model.probe_local_profile().await.expect("a 404 is not fatal");
+    let probe = model
+        .probe_local_profile()
+        .await
+        .expect("a 404 is not fatal");
     assert!(probe.is_empty());
 }
 
@@ -321,7 +333,9 @@ async fn a_local_runtime_sends_native_tools() {
     let _ = ChatModel::<()>::invoke(&model, &(), request).await;
 
     let sent = server.request_to("/v1/chat/completions");
-    let tools = sent.body["tools"].as_array().expect("native tools on the wire");
+    let tools = sent.body["tools"]
+        .as_array()
+        .expect("native tools on the wire");
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0]["function"]["name"], json!("get_weather"));
 
@@ -356,13 +370,22 @@ async fn a_tools_rejection_degrades_once_and_then_latches() {
         .expect("the degraded retry succeeds");
 
     let seen = server.requests();
-    assert_eq!(seen.len(), 2, "one rejected attempt, then one degraded retry");
+    assert_eq!(
+        seen.len(),
+        2,
+        "one rejected attempt, then one degraded retry"
+    );
     assert!(
-        seen[0].body["tools"].as_array().is_some_and(|t| !t.is_empty()),
+        seen[0].body["tools"]
+            .as_array()
+            .is_some_and(|t| !t.is_empty()),
         "the first attempt must try native tools"
     );
     assert!(
-        seen[1].body.get("tools").is_none_or(|t| t.as_array().is_none_or(Vec::is_empty)),
+        seen[1]
+            .body
+            .get("tools")
+            .is_none_or(|t| t.as_array().is_none_or(Vec::is_empty)),
         "the retry must drop native tools"
     );
 
@@ -372,9 +395,16 @@ async fn a_tools_rejection_degrades_once_and_then_latches() {
         .await
         .expect("second call succeeds");
     let seen = server.requests();
-    assert_eq!(seen.len(), 3, "the latch must skip the doomed baseline attempt");
+    assert_eq!(
+        seen.len(),
+        3,
+        "the latch must skip the doomed baseline attempt"
+    );
     assert!(
-        seen[2].body.get("tools").is_none_or(|t| t.as_array().is_none_or(Vec::is_empty)),
+        seen[2]
+            .body
+            .get("tools")
+            .is_none_or(|t| t.as_array().is_none_or(Vec::is_empty)),
         "the latch was not applied to the following call"
     );
 }
@@ -487,7 +517,10 @@ async fn a_local_runtime_does_not_send_strict_structured_output() {
     let _ = ChatModel::<()>::invoke(&model, &(), request).await;
 
     let sent = server.request_to("/v1/chat/completions");
-    assert_eq!(sent.body["response_format"]["json_schema"]["strict"], json!(false));
+    assert_eq!(
+        sent.body["response_format"]["json_schema"]["strict"],
+        json!(false)
+    );
 }
 
 /// On hosted OpenAI strict stays on, but the schema is now sanitized to satisfy
@@ -519,7 +552,10 @@ async fn hosted_strict_mode_sanitizes_the_schema_it_sends() {
         .iter()
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
-    assert!(required.contains(&"a") && required.contains(&"b"), "{required:?}");
+    assert!(
+        required.contains(&"a") && required.contains(&"b"),
+        "{required:?}"
+    );
 }
 
 /// A `JsonSchema` request had no degradation path at all — only `JsonObject` was
@@ -545,8 +581,14 @@ async fn a_strict_schema_rejection_retries_without_strict() {
 
     let seen = server.requests();
     assert_eq!(seen.len(), 2, "a JsonSchema 400 must have a retry path");
-    assert_eq!(seen[0].body["response_format"]["json_schema"]["strict"], json!(true));
-    assert_eq!(seen[1].body["response_format"]["json_schema"]["strict"], json!(false));
+    assert_eq!(
+        seen[0].body["response_format"]["json_schema"]["strict"],
+        json!(true)
+    );
+    assert_eq!(
+        seen[1].body["response_format"]["json_schema"]["strict"],
+        json!(false)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -576,7 +618,10 @@ async fn gpt5_sends_max_completion_tokens_not_max_tokens() {
 fn gpt5_profiles_as_a_reasoning_model_with_native_structured_output() {
     let model = OpenAiModel::new("k").with_model("gpt-5");
     let profile = <OpenAiModel as ChatModel<()>>::profile(&model).expect("profile");
-    assert!(profile.reasoning, "CapabilitySet{{reasoning:true}} used to reject gpt-5");
+    assert!(
+        profile.reasoning,
+        "CapabilitySet{{reasoning:true}} used to reject gpt-5"
+    );
     assert!(profile.native_structured_output);
     assert!(profile.reasoning_effort);
     assert_eq!(profile.max_input_tokens, Some(400_000));
@@ -652,7 +697,10 @@ async fn cache_write_tokens_are_recorded() {
     let usage = response.usage.expect("usage reported");
     assert_eq!(usage.cache_read_tokens, 40);
     assert_eq!(usage.cache_creation_tokens, 25);
-    assert_eq!(usage.input_tokens, 100, "OpenAI includes cache tokens in the input total");
+    assert_eq!(
+        usage.input_tokens, 100,
+        "OpenAI includes cache tokens in the input total"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -727,7 +775,9 @@ async fn non_conforming_provider_ids_are_normalized_deterministically() {
 
     assert_eq!(ids[0], ids[1], "normalization must be deterministic");
     assert!(
-        ids[0].bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+        ids[0]
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
         "unexpected id: {}",
         ids[0]
     );
@@ -774,7 +824,10 @@ async fn the_responses_path_no_longer_drops_the_request() {
 
     let request = user("hi")
         .with_tools(vec![ToolSchema::new("t", "d", json!({"type": "object"}))])
-        .with_response_format(ResponseFormat::json_schema("answer", json!({"type": "object"})))
+        .with_response_format(ResponseFormat::json_schema(
+            "answer",
+            json!({"type": "object"}),
+        ))
         .with_temperature(0.3)
         .with_top_p(0.9)
         .with_seed(7)
@@ -831,10 +884,17 @@ async fn the_responses_path_reads_reasoning_and_cache_usage() {
         .await
         .expect("call succeeds");
 
-    assert_eq!(response.text(), "the answer", "reasoning must not leak into the answer");
+    assert_eq!(
+        response.text(),
+        "the answer",
+        "reasoning must not leak into the answer"
+    );
 
     let usage = response.usage.expect("usage reported");
-    assert_eq!(usage.cache_read_tokens, 30, "every cached token was billed at full rate");
+    assert_eq!(
+        usage.cache_read_tokens, 30,
+        "every cached token was billed at full rate"
+    );
     assert_eq!(usage.cache_creation_tokens, 10);
     assert_eq!(usage.reasoning_tokens, 12);
 
@@ -878,7 +938,11 @@ async fn tool_results_keep_their_call_identity_on_the_responses_path() {
         rendered.contains("call_abc"),
         "the tool call id must survive into the input: {rendered}"
     );
-    let tool_item = input.as_array().expect("input items").last().expect("last item");
+    let tool_item = input
+        .as_array()
+        .expect("input items")
+        .last()
+        .expect("last item");
     assert_eq!(
         tool_item["role"],
         json!("user"),
