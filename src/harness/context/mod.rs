@@ -55,9 +55,11 @@ fn next_context_instance_id() -> u64 {
 impl RunConfig {
     /// Creates a run configuration with sensible defaults.
     ///
-    /// Defaults: no thread, no tags, `null` metadata, no timeout,
-    /// `max_model_calls = 25`, and `max_tool_calls = 50`. These mirror the
-    /// crate-wide [`RunLimits`] defaults.
+    /// Defaults: no thread, no tags, `null` metadata, no timeout, and **unset**
+    /// call caps (`max_model_calls`/`max_tool_calls` are `None`), which resolve
+    /// to the crate-wide [`RunLimits`] defaults of 25 and 50. Leaving them unset
+    /// is what lets a harness-wide `RunPolicy` raise them; see
+    /// [`RunConfig::max_model_calls`].
     pub fn new(run_id: impl Into<String>) -> Self {
         Self {
             run_id: RunId::new(run_id),
