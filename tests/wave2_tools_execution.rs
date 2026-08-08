@@ -25,14 +25,13 @@ use tinyagents::TinyAgentsError;
 use tinyagents::harness::context::{RunConfig, RunContext};
 use tinyagents::harness::events::AgentEvent;
 use tinyagents::harness::limits::RunLimits;
-use tinyagents::harness::message::{AssistantMessage, ContentBlock, Message};
+use tinyagents::harness::message::Message;
 use tinyagents::harness::middleware::Middleware;
 use tinyagents::harness::model::ModelResponse;
 use tinyagents::harness::providers::MockModel;
 use tinyagents::harness::runtime::{AgentHarness, RunPolicy, UnknownToolPolicy};
 use tinyagents::harness::testkit::EventRecorder;
 use tinyagents::harness::tool::{Tool, ToolCall, ToolErrorPolicy, ToolResult, ToolSchema};
-use tinyagents::harness::usage::Usage;
 
 // ── Scripted model helpers ────────────────────────────────────────────────────
 
@@ -524,7 +523,7 @@ async fn before_tool_rejection_does_not_consume_a_tool_call_slot() {
         name: "echo_a".into(),
         calls: calls.clone(),
     }));
-    harness.register_middleware(Arc::new(RejectingMiddleware));
+    harness.push_middleware(Arc::new(RejectingMiddleware));
 
     let config = RunConfig::new().with_limits(RunLimits::new().with_max_tool_calls(4));
     let mut ctx = RunContext::new(config);
