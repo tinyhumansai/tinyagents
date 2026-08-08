@@ -388,6 +388,23 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                             // whole exponential schedule one step too high.
                             let backoff_attempt = attempt;
                             attempt += 1;
+                            if streaming && deltas_emitted > 0 {
+                                // The retry re-emits the whole response from
+                                // the beginning. Until `AgentEvent` grows a
+                                // dedicated discard marker, `RetryScheduled`
+                                // for a streaming call *is* the signal that
+                                // every delta seen so far for this `call_id`
+                                // must be dropped.
+                                tracing::warn!(
+                                    call_id = %call_id.as_str(),
+                                    discarded_deltas = deltas_emitted,
+                                    attempt,
+                                    "[stream] retrying a streaming call that already emitted \
+                                     deltas; consumers must discard everything received so far \
+                                     for this call_id"
+                                );
+                            }
+                            deltas_emitted = 0;
                             ctx.emit(AgentEvent::RetryScheduled {
                                 call_id: call_id.clone(),
                                 attempt,
