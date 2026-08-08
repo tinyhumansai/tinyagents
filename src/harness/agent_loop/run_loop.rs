@@ -611,7 +611,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     return Err(TinyAgentsError::EmptyResponse);
                 }
                 run.final_response = Some(response);
-                break;
+                return Ok(LoopExit::Finished);
             }
 
             // A tool-calling response is a resolved turn too: clear the
