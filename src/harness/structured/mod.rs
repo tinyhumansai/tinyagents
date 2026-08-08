@@ -24,6 +24,22 @@
 //! [`ResponseFormat`] to include in a [`ModelRequest`], then call
 //! [`StructuredExtractor::extract`] on the completed [`ModelResponse`].
 //!
+//! # Repair, validation, and non-fatal extraction
+//!
+//! Extraction is not a bare `serde_json::from_str` any more. Three things
+//! happen around it, each in its own submodule:
+//!
+//! * [`repair`] climbs a conservative ladder — code fence, prose slice,
+//!   relaxed JSON, truncation close — so a fenced, chatty, or cut-off answer is
+//!   recovered instead of ending a run. It never invents structure: a rung is
+//!   accepted only when the repaired text parses strictly.
+//! * [`validate`] checks the parsed value against the declared schema, so
+//!   `{"wrong_key": 1}` against a `score` schema is a reported error naming the
+//!   failing instance path — not a silent success.
+//! * [`StructuredExtractor::extract_outcome`] returns a [`StructuredOutcome`]
+//!   instead of `Result`, recording a failure as data so a caller can repair,
+//!   re-ask, or return the raw response rather than losing the run.
+//!
 //! # Example
 //!
 //! ```rust
@@ -164,8 +180,8 @@ impl StructuredExtractor {
     /// * `strategy` – whether to use provider-schema or tool-call extraction.
     /// * `schema_name` – the schema's logical name; used as the tool name when
     ///   matching tool calls in [`StructuredStrategy::ToolCall`] mode.
-    /// * `schema` – the JSON Schema document (retained for future local
-    ///   validation, not yet applied).
+    /// * `schema` – the JSON Schema document. Enforced: every extracted value
+    ///   is validated against it (see [`validate`]).
     pub fn new(
         strategy: StructuredStrategy,
         schema_name: impl Into<String>,
@@ -180,7 +196,7 @@ impl StructuredExtractor {
 
     /// Returns the JSON Schema document this extractor was configured with.
     ///
-    /// Retained for local validation and for echoing the schema back into a
+    /// Used for local validation and for echoing the schema back into a
     /// [`ResponseFormat`] when re-requesting structured output.
     pub fn schema(&self) -> &Value {
         &self.schema
@@ -327,6 +343,27 @@ impl StructuredExtractor {
                     self.schema_name
                 ))
             })?;
+
+        // A provider that could not parse the call's arguments preserves them
+        // as a raw string (`ToolCall::invalid`). Running the same repair ladder
+        // here means a small local model's malformed arguments are recovered
+        // rather than handed on as a JSON string masquerading as the value.
+        if let Some(raw) = call.arguments.as_str()
+            && let Some((value, repair)) = repair::parse_lenient(raw)
+        {
+            if repair.is_repaired() {
+                tracing::debug!(
+                    "[structured] schema '{}': recovered tool-call arguments with repair `{}`",
+                    self.schema_name,
+                    repair.as_str()
+                );
+            }
+            return Ok(StructuredOutput {
+                value,
+                raw_text: Some(raw.to_string()),
+            });
+        }
+
         Ok(StructuredOutput {
             value: call.arguments.clone(),
             raw_text: None,
