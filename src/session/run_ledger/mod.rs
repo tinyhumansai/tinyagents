@@ -31,3 +31,6 @@ pub use types::{
     RunTelemetryUpsert, WorkflowRun, WorkflowRunListRequest, WorkflowRunListResponse,
     WorkflowRunStatus, WorkflowRunUpsert,
 };
+
+#[cfg(test)]
+mod test;

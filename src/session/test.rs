@@ -1,7 +1,17 @@
-use super::*;
-use crate::session::store::with_memory_connection;
-use crate::session::types::SessionSearchParams;
+//! Module-local unit tests for [`crate::session`].
+//!
+//! Consolidated here per AGENTS.md: one `test.rs` per module directory rather
+//! than per-file inline `mod tests` blocks. Sections mirror the source files.
 
+use super::context::StorageContext;
+use super::ops::*;
+use super::store::{init_schema, with_memory_connection};
+use super::types::*;
+use crate::error::TinyAgentsError;
+use chrono::Utc;
+use rusqlite::{Connection, params};
+
+// ── ops.rs ──────────────────────────────────────────────────────────────
 fn insert_test_session(conn: &Connection, id: &str, agent_id: &str, key: &str) {
     let now = Utc::now();
     conn.execute(
@@ -395,4 +405,165 @@ fn long_ascii_message_truncates_at_the_byte_cap() {
         Ok(())
     })
     .unwrap();
+}
+
+/// Punctuation that is meaningful to FTS5 must be searched as literal text.
+///
+/// `SessionSearchParams::query` is plain text, not an FTS5 expression. Binding
+/// it raw made ordinary input (`C++`, `foo-bar`, `file.rs`, a stray quote)
+/// return a syntax or `no such column` error instead of results.
+#[test]
+fn fts_query_treats_punctuation_as_literal_text() {
+    for raw in ["C++", "foo-bar", "file.rs", "a\"b", "NOT", "*"] {
+        with_memory_connection(|conn| {
+            conn.execute(
+                "INSERT INTO sessions_fts (session_id, agent_definition_name, content, tool_name)
+                 VALUES ('s1', '', ?1, '')",
+                params![raw],
+            )?;
+            let params = SessionSearchParams {
+                query: Some(raw.to_string()),
+                ..Default::default()
+            };
+            // The assertion is that this does not error; FTS tokenization
+            // decides whether a given punctuation string is recallable.
+            search_sessions_inner(conn, &params)
+                .unwrap_or_else(|e| panic!("query {raw:?} must not error: {e}"));
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+/// Multi-term queries stay conjunctive, as a search box implies.
+#[test]
+fn fts_query_joins_terms_with_and() {
+    assert_eq!(fts_match_query("alpha beta"), "\"alpha\" AND \"beta\"");
+    assert_eq!(fts_match_query("C++"), "\"C++\"");
+    // Embedded quotes are escaped by doubling, per the FTS5 string grammar.
+    assert_eq!(fts_match_query("a\"b"), "\"a\"\"b\"");
+}
+
+// ── types.rs ───────────────────────────────────────────────────────────
+
+#[test]
+fn session_status_roundtrip() {
+    for status in [
+        SessionStatus::Running,
+        SessionStatus::Completed,
+        SessionStatus::Failed,
+        SessionStatus::Interrupted,
+    ] {
+        assert_eq!(SessionStatus::parse(status.as_str()), status);
+    }
+}
+
+#[test]
+fn session_status_parse_unknown_defaults_to_running() {
+    assert_eq!(SessionStatus::parse("bogus"), SessionStatus::Running);
+    assert_eq!(SessionStatus::parse(""), SessionStatus::Running);
+}
+
+#[test]
+fn session_status_serde_roundtrip() {
+    let status = SessionStatus::Completed;
+    let json = serde_json::to_string(&status).unwrap();
+    assert_eq!(json, "\"completed\"");
+    let parsed: SessionStatus = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, status);
+}
+
+#[test]
+fn session_search_params_defaults() {
+    let params = SessionSearchParams::default();
+    assert!(params.query.is_none());
+    assert!(params.agent_id.is_none());
+    assert!(params.limit.is_none());
+    assert!(params.offset.is_none());
+}
+
+// ── store.rs ───────────────────────────────────────────────────────────
+
+#[test]
+fn schema_initializes_without_error() {
+    with_memory_connection(|conn| {
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
+        assert_eq!(count, 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn schema_is_idempotent() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+    init_schema(&conn).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn wal_mode_is_set() {
+    with_memory_connection(|conn| {
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+        // In-memory DBs may report "memory" instead of "wal"
+        assert!(mode == "wal" || mode == "memory");
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn fts_table_exists_after_init() {
+    with_memory_connection(|conn| {
+        let exists: bool = conn
+            .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions_fts'")?
+            .exists([])?;
+        assert!(exists);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn foreign_keys_are_enabled() {
+    with_memory_connection(|conn| {
+        let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+        assert_eq!(fk, 1);
+        Ok(())
+    })
+    .unwrap();
+}
+
+// ── context.rs ───────────────────────────────────────────────────────────
+
+#[test]
+fn result_error_is_prefixed_with_context() {
+    let failed: std::result::Result<(), _> = Err("disk full");
+    let err = failed.storage_context("write session").unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Storage(_)));
+    assert_eq!(err.to_string(), "storage error: write session: disk full");
+}
+
+#[test]
+fn result_ok_passes_through() {
+    let ok: std::result::Result<u8, &str> = Ok(7);
+    assert_eq!(ok.storage_context("read").unwrap(), 7);
+}
+
+#[test]
+fn none_becomes_storage_error_without_a_source_suffix() {
+    let absent: Option<u8> = None;
+    let err = absent
+        .storage_context("run missing after upsert")
+        .unwrap_err();
+    assert_eq!(err.to_string(), "storage error: run missing after upsert");
+}
+
+#[test]
+fn some_passes_through() {
+    assert_eq!(Some(3).storage_context("read").unwrap(), 3);
 }

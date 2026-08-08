@@ -92,7 +92,7 @@ pub fn with_memory_connection<T>(f: impl FnOnce(&Connection) -> Result<T>) -> Re
     f(&conn)
 }
 
-fn init_schema(conn: &Connection) -> Result<()> {
+pub(super) fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA foreign_keys = ON;
@@ -178,63 +178,4 @@ fn init_fts(conn: &Connection) -> Result<()> {
         .storage_context("failed to create sessions_fts virtual table")?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn schema_initializes_without_error() {
-        with_memory_connection(|conn| {
-            let count: i64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
-            assert_eq!(count, 0);
-            Ok(())
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn schema_is_idempotent() {
-        let conn = Connection::open_in_memory().unwrap();
-        init_schema(&conn).unwrap();
-        init_schema(&conn).unwrap();
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn wal_mode_is_set() {
-        with_memory_connection(|conn| {
-            let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
-            // In-memory DBs may report "memory" instead of "wal"
-            assert!(mode == "wal" || mode == "memory");
-            Ok(())
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn fts_table_exists_after_init() {
-        with_memory_connection(|conn| {
-            let exists: bool = conn
-                .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions_fts'")?
-                .exists([])?;
-            assert!(exists);
-            Ok(())
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn foreign_keys_are_enabled() {
-        with_memory_connection(|conn| {
-            let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
-            assert_eq!(fk, 1);
-            Ok(())
-        })
-        .unwrap();
-    }
 }

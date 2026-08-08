@@ -12,7 +12,7 @@ use super::types::{
     SessionToolCall,
 };
 
-const MAX_TOOL_OUTPUT_BYTES: usize = 32 * 1024;
+pub(super) const MAX_TOOL_OUTPUT_BYTES: usize = 32 * 1024;
 
 // A record-shaped signature: each argument is one persisted column. Grouping
 // them into a struct is worth doing, but is an API change rather than part of
@@ -330,7 +330,7 @@ pub fn search_sessions(
     with_connection(workspace_dir, |conn| search_sessions_inner(conn, params))
 }
 
-fn search_sessions_inner(
+pub(super) fn search_sessions_inner(
     conn: &Connection,
     params: &SessionSearchParams,
 ) -> Result<SessionSearchResult> {
@@ -341,7 +341,7 @@ fn search_sessions_inner(
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
     if let Some(q) = params.query.as_ref().filter(|q| !q.trim().is_empty()) {
-        param_values.push(Box::new(q.clone()));
+        param_values.push(Box::new(fts_match_query(q)));
         where_clauses.push(format!(
             "s.id IN (SELECT session_id FROM sessions_fts WHERE sessions_fts MATCH ?{})",
             param_values.len()
@@ -538,7 +538,11 @@ pub fn mark_interrupted(workspace_dir: &Path) -> Result<usize> {
     })
 }
 
-fn index_fts_session(conn: &Connection, session_id: &str, agent_name: &str) -> Result<()> {
+pub(super) fn index_fts_session(
+    conn: &Connection,
+    session_id: &str,
+    agent_name: &str,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO sessions_fts (session_id, agent_definition_name, content, tool_name)
          VALUES (?1, ?2, '', '')",
@@ -548,10 +552,29 @@ fn index_fts_session(conn: &Connection, session_id: &str, agent_name: &str) -> R
     Ok(())
 }
 
-/// Longest FTS snippet indexed per message, in bytes.
-const MAX_FTS_SNIPPET_BYTES: usize = 2000;
+/// Renders a user's plain-text search string as an FTS5 MATCH expression.
+///
+/// [`SessionSearchParams::query`] is documented as plain text, not as raw FTS5
+/// syntax, but binding it straight to `MATCH` hands it to the FTS5 parser.
+/// Ordinary input then fails rather than searching: `C++`, `foo-bar`,
+/// `file.rs`, or a stray `"` each produce a syntax or `no such column` error
+/// instead of results.
+///
+/// Each whitespace-separated term is emitted as a double-quoted FTS5 string
+/// literal (with `"` escaped by doubling, per the FTS5 grammar), so every
+/// character inside it is treated as data. Terms are joined by `AND`, matching
+/// the implicit conjunction a user expects from a search box.
+pub(super) fn fts_match_query(raw: &str) -> String {
+    raw.split_whitespace()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
 
-fn index_fts_content(conn: &Connection, session_id: &str, content: &str) -> Result<()> {
+/// Longest FTS snippet indexed per message, in bytes.
+pub(super) const MAX_FTS_SNIPPET_BYTES: usize = 2000;
+
+pub(super) fn index_fts_content(conn: &Connection, session_id: &str, content: &str) -> Result<()> {
     // Slice on a character boundary, not a byte offset. `&content[..2000]`
     // panics whenever byte 2000 lands inside a multi-byte character, which any
     // ordinary long non-ASCII message can do. The panic is worse than it looks:
@@ -576,7 +599,7 @@ fn index_fts_content(conn: &Connection, session_id: &str, content: &str) -> Resu
     Ok(())
 }
 
-fn index_fts_tool(conn: &Connection, session_id: &str, tool_name: &str) -> Result<()> {
+pub(super) fn index_fts_tool(conn: &Connection, session_id: &str, tool_name: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO sessions_fts (session_id, agent_definition_name, content, tool_name)
          VALUES (?1, '', '', ?2)",
@@ -586,7 +609,7 @@ fn index_fts_tool(conn: &Connection, session_id: &str, tool_name: &str) -> Resul
     Ok(())
 }
 
-fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
+pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
     let started_at_raw: String = row.get(15)?;
     let ended_at_raw: Option<String> = row.get(16)?;
 
@@ -614,7 +637,7 @@ fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
     })
 }
 
-fn parse_rfc3339(raw: &str) -> Result<DateTime<Utc>> {
+pub(super) fn parse_rfc3339(raw: &str) -> Result<DateTime<Utc>> {
     let parsed = DateTime::parse_from_rfc3339(raw)
         .storage_context(&format!("invalid RFC3339 timestamp in session DB: {raw}"))?;
     Ok(parsed.with_timezone(&Utc))
@@ -626,10 +649,6 @@ fn parse_rfc3339(raw: &str) -> Result<DateTime<Utc>> {
 /// cannot surface as [`TinyAgentsError`] directly from inside `query_map`; it
 /// is boxed here and unwrapped by the caller's `?` into
 /// [`TinyAgentsError::Storage`] via the crate's `From<rusqlite::Error>`.
-fn sql_conversion_error(err: TinyAgentsError) -> rusqlite::Error {
+pub(super) fn sql_conversion_error(err: TinyAgentsError) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(err))
 }
-
-#[cfg(test)]
-#[path = "ops_tests.rs"]
-mod tests;

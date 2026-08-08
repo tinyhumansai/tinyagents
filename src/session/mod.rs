@@ -60,6 +60,9 @@
 //! ```
 //!
 //! Requires the `sqlite` feature.
+//!
+//! See [`README.md`](./README.md) for the schema, the FTS behaviour, and the
+//! coordination guarantees.
 
 mod context;
 mod ops;
@@ -76,3 +79,6 @@ pub use types::{
     SessionMessage, SessionRecord, SessionSearchParams, SessionSearchResult, SessionStatus,
     SessionToolCall,
 };
+
+#[cfg(test)]
+mod test;

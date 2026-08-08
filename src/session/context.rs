@@ -36,36 +36,3 @@ impl<T> StorageContext<T> for Option<T> {
         self.ok_or_else(|| TinyAgentsError::Storage(context.to_string()))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn result_error_is_prefixed_with_context() {
-        let failed: std::result::Result<(), _> = Err("disk full");
-        let err = failed.storage_context("write session").unwrap_err();
-        assert!(matches!(err, TinyAgentsError::Storage(_)));
-        assert_eq!(err.to_string(), "storage error: write session: disk full");
-    }
-
-    #[test]
-    fn result_ok_passes_through() {
-        let ok: std::result::Result<u8, &str> = Ok(7);
-        assert_eq!(ok.storage_context("read").unwrap(), 7);
-    }
-
-    #[test]
-    fn none_becomes_storage_error_without_a_source_suffix() {
-        let absent: Option<u8> = None;
-        let err = absent
-            .storage_context("run missing after upsert")
-            .unwrap_err();
-        assert_eq!(err.to_string(), "storage error: run missing after upsert");
-    }
-
-    #[test]
-    fn some_passes_through() {
-        assert_eq!(Some(3).storage_context("read").unwrap(), 3);
-    }
-}
