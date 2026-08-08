@@ -12,8 +12,13 @@ fn run_config_defaults_are_sensible() {
     assert!(config.tags.is_empty());
     assert_eq!(config.metadata, serde_json::Value::Null);
     assert!(config.timeout_ms.is_none());
-    assert_eq!(config.max_model_calls, 25);
-    assert_eq!(config.max_tool_calls, 50);
+    // Unset by default, so a harness `RunPolicy` remains free to raise the cap
+    // (see `RunConfig::max_model_calls`); the effective value is the crate
+    // default.
+    assert_eq!(config.max_model_calls, None);
+    assert_eq!(config.max_tool_calls, None);
+    assert_eq!(config.effective_max_model_calls(), 25);
+    assert_eq!(config.effective_max_tool_calls(), 50);
 }
 
 #[test]
@@ -31,8 +36,8 @@ fn run_config_builders_compose() {
     assert_eq!(config.tags, vec!["a".to_string(), "b".to_string()]);
     assert_eq!(config.metadata["k"], serde_json::json!("v"));
     assert_eq!(config.timeout_ms, Some(1234));
-    assert_eq!(config.max_model_calls, 3);
-    assert_eq!(config.max_tool_calls, 4);
+    assert_eq!(config.max_model_calls, Some(3));
+    assert_eq!(config.max_tool_calls, Some(4));
 }
 
 #[test]
