@@ -266,6 +266,7 @@ async fn distinct_keys_do_not_block_each_other() {
 #[cfg(feature = "sqlite")]
 mod sqlite_backend {
     use super::*;
+    use tinyagents::Result;
     use tinyagents::harness::cache::SqliteResponseCache;
 
     #[tokio::test]
