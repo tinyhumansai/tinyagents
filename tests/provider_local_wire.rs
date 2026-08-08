@@ -89,9 +89,7 @@ impl MockServer {
                     .or_else(|| script.last())
                     .cloned()
                     .unwrap_or_else(|| Canned::ok(json!({})));
-                if let Some(record) = serve_one(stream, &reply) {
-                    recorder.lock().expect("recorder lock").push(record);
-                }
+                serve_one(stream, &reply, &recorder);
             }
         });
 
@@ -127,9 +125,33 @@ impl MockServer {
     }
 }
 
-/// Reads one HTTP/1.1 request off `stream`, writes `reply`, returns what was
-/// read. Returns `None` for a malformed request line.
-fn serve_one(mut stream: TcpStream, reply: &Canned) -> Option<Recorded> {
+/// Reads one HTTP/1.1 request off `stream`, records it, then writes `reply`.
+///
+/// **Recording happens before the reply is written**, and that ordering is
+/// load-bearing rather than incidental. Recording afterwards is a race the
+/// client always wins: `invoke` can receive the full response body and return to
+/// the test while the server thread has not yet reached its `push`, so an
+/// assertion made immediately after the call sees an empty log. That is exactly
+/// how two of these tests came out flaky under a loaded parallel test run and
+/// green when the file ran alone.
+fn serve_one(mut stream: TcpStream, reply: &Canned, recorder: &Arc<Mutex<Vec<Recorded>>>) {
+    let Some(record) = read_request(&mut stream) else {
+        return;
+    };
+    recorder.lock().expect("recorder lock").push(record);
+
+    let response = format!(
+        "HTTP/1.1 {} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        reply.status,
+        reply.body.len(),
+        reply.body
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+}
+
+/// Reads one HTTP/1.1 request off `stream`. Returns `None` for a malformed one.
+fn read_request(stream: &mut TcpStream) -> Option<Recorded> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
 
     let mut request_line = String::new();
@@ -162,15 +184,6 @@ fn serve_one(mut stream: TcpStream, reply: &Canned) -> Option<Recorded> {
         reader.read_exact(&mut raw).ok()?;
     }
     let body = serde_json::from_slice::<Value>(&raw).unwrap_or(Value::Null);
-
-    let response = format!(
-        "HTTP/1.1 {} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        reply.status,
-        reply.body.len(),
-        reply.body
-    );
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.flush();
 
     Some(Recorded { method, path, body })
 }
