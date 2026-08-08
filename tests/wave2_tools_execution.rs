@@ -267,7 +267,7 @@ async fn concurrent_admission_failure_emits_no_tool_started() {
     // The harness policy is the enforced source of truth for the cap (the run
     // config's value is overwritten by `sync_call_limits` at run start).
     harness.with_policy(RunPolicy {
-        limits: RunLimits::new().with_max_tool_calls(2),
+        limits: RunLimits::default().with_max_tool_calls(2),
         ..RunPolicy::default()
     });
 
