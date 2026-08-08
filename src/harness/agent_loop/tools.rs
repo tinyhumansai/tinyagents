@@ -78,16 +78,21 @@
 //!   budget, exactly as in serial mode.
 //! - **Cancellation**: observed between admissions (before each call starts),
 //!   matching the serial path, which also never interrupts a mid-flight tool.
-//! - **Errors**: the first failing call *in original call order* fails the
-//!   turn. Difference: in serial mode later calls never start after a
-//!   failure; in concurrent mode they were already in flight and run to
-//!   completion (their results are discarded). Tools that must not observe a
-//!   sibling's failure should be run under a tool-wrap middleware (serial) or
-//!   a harness without parallel-capable turns.
+//! - **Errors**: a tool error that its [`ToolErrorPolicy`] keeps fatal fails
+//!   the turn at the first such call *in original call order*. Difference: in
+//!   serial mode later calls never start after a failure; in concurrent mode
+//!   they were already in flight and run to completion (their results are
+//!   discarded). Tools that must not observe a sibling's failure should be run
+//!   under a tool-wrap middleware (serial) or a harness without
+//!   parallel-capable turns.
+//!
+//! [`ToolErrorPolicy`]: crate::harness::tool::ToolErrorPolicy
 
 use super::model_call::ToolCallBase;
 use super::*;
-use crate::harness::tool::ToolExecutionContext;
+use crate::harness::tool::{
+    ToolErrorPolicy, ToolExecutionContext, project_injected_arguments, strip_injected_arguments,
+};
 
 /// How a single requested tool call was resolved during admission.
 enum ResolvedToolCall<State: Send + Sync> {
