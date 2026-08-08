@@ -53,7 +53,11 @@ async fn thread_ids_differing_only_by_case_do_not_share_a_file() {
         .collect();
     names.sort();
     names.dedup();
-    assert_eq!(names.len(), 2, "two distinct case-folded filenames: {names:?}");
+    assert_eq!(
+        names.len(),
+        2,
+        "two distinct case-folded filenames: {names:?}"
+    );
 }
 
 /// The empty thread id escapes to `""`, so its file is the dotfile `.jsonl`,
@@ -103,7 +107,10 @@ async fn one_unreadable_thread_file_does_not_break_list_threads() {
     cp.put(checkpoint("good", "c1")).await.unwrap();
     std::fs::write(dir.path().join("poison.jsonl"), "not json at all\n").unwrap();
 
-    let threads = cp.list_threads().await.expect("listing survives one bad file");
+    let threads = cp
+        .list_threads()
+        .await
+        .expect("listing survives one bad file");
     assert!(threads.iter().any(|t| t == "good"));
 }
 
@@ -204,5 +211,11 @@ async fn read_from_handles_a_sparse_offset_sequence() {
         "offset 11 selects the entry labelled 11, not the entry at index 11"
     );
     // A new append continues from the file's own numbering.
-    assert_eq!(store.append("sparse", serde_json::json!("c")).await.unwrap(), 12);
+    assert_eq!(
+        store
+            .append("sparse", serde_json::json!("c"))
+            .await
+            .unwrap(),
+        12
+    );
 }

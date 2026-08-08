@@ -135,7 +135,8 @@ fn listing_sort_columns_are_indexed() {
 fn a_done_task_cannot_be_reclaimed() {
     let dir = workspace();
     run_ledger::upsert_agent_team(dir.path(), team("team")).unwrap();
-    run_ledger::upsert_agent_team_task(dir.path(), task("task", AgentTeamTaskStatus::Done)).unwrap();
+    run_ledger::upsert_agent_team_task(dir.path(), task("task", AgentTeamTaskStatus::Done))
+        .unwrap();
 
     let outcome =
         run_ledger::claim_agent_team_task(dir.path(), "team", "task", "stale-worker", "tok")
@@ -161,7 +162,8 @@ fn a_done_task_cannot_be_reclaimed() {
 fn a_todo_task_is_still_claimable() {
     let dir = workspace();
     run_ledger::upsert_agent_team(dir.path(), team("team")).unwrap();
-    run_ledger::upsert_agent_team_task(dir.path(), task("task", AgentTeamTaskStatus::Todo)).unwrap();
+    run_ledger::upsert_agent_team_task(dir.path(), task("task", AgentTeamTaskStatus::Todo))
+        .unwrap();
     let outcome =
         run_ledger::claim_agent_team_task(dir.path(), "team", "task", "worker", "tok").unwrap();
     assert!(matches!(outcome, ClaimOutcome::Claimed(_)), "{outcome:?}");
@@ -184,8 +186,17 @@ fn retention_prunes_finished_sessions_and_reindex_restores_search() {
         None,
     )
     .unwrap();
-    session::record_message(dir.path(), "old", "user", "findable haystack", None, None, None, None)
-        .unwrap();
+    session::record_message(
+        dir.path(),
+        "old",
+        "user",
+        "findable haystack",
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     session::record_session_end(
         dir.path(),
         "old",
@@ -236,7 +247,10 @@ fn retention_prunes_finished_sessions_and_reindex_restores_search() {
         },
     )
     .unwrap();
-    assert_eq!(recovered.total, 1, "reindexing makes the row findable again");
+    assert_eq!(
+        recovered.total, 1,
+        "reindexing makes the row findable again"
+    );
 
     // Retention removes the finished session and everything hanging off it.
     let report = session::apply_retention(dir.path(), Utc::now() + Duration::seconds(1)).unwrap();
