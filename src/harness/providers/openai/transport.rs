@@ -1629,20 +1629,19 @@ impl OpenAiModel {
             .collect::<Result<Vec<_>>>()?;
 
         // Project the declarations through the shared preparation seam rather
-        // than shipping `schema.parameters` verbatim. Two things this buys:
-        // a tool whose `parameters` is `Value::Null` (the type permits it) no
-        // longer serialises as `"parameters": null`, which every provider 400s
-        // on; and when strict mode is in force the same sanitizer that fixes the
-        // `response_format` schema fixes the tool schemas too, instead of two
-        // half-implementations disagreeing.
-        let preparation = {
-            let base = crate::harness::tool::SchemaPreparation::openai();
-            if degrade.json_schema_strict {
-                base
-            } else {
-                base.with_strict()
-            }
-        };
+        // than shipping `schema.parameters` verbatim: a tool whose `parameters`
+        // is `Value::Null` (the type permits it) otherwise serialises as
+        // `"parameters": null`, which every provider 400s on, and local `$ref`s
+        // are resolved for routes that cannot follow them.
+        //
+        // Deliberately **not** `.with_strict()`. The strict sanitizer forces
+        // every declared property into `required`, which changes the contract
+        // the model is given — an optional argument becomes mandatory. That is
+        // only correct when the wire actually carries `strict: true`, and this
+        // adapter does not set it on the tool object (it is a `response_format`
+        // concern here). Applying it anyway would silently make every optional
+        // tool argument required.
+        let preparation = crate::harness::tool::SchemaPreparation::openai();
         let mut tools: Vec<ToolWire> = if prompt_guided_tools {
             Vec::new()
         } else {
