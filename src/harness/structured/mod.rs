@@ -201,17 +201,65 @@ impl StructuredExtractor {
     ///   the structured value.  Returns [`TinyAgentsError::Validation`] when no
     ///   matching call is found.
     ///
+    /// # Validation
+    ///
+    /// Both strategies validate the extracted value against this extractor's
+    /// schema before returning it (see [`validate`]). A value that parses but
+    /// does not conform is an error naming the failing instance path — not a
+    /// success carrying the wrong shape.
+    ///
     /// # Errors
     ///
     /// See strategy descriptions above.
     pub fn extract(&self, response: &ModelResponse) -> Result<StructuredOutput> {
-        match self.strategy {
-            StructuredStrategy::ProviderSchema => self.extract_provider_schema(response),
-            StructuredStrategy::ToolCall => self.extract_tool_call(response),
+        let output = match self.strategy {
+            StructuredStrategy::ProviderSchema => self.extract_provider_schema(response)?,
+            StructuredStrategy::ToolCall => self.extract_tool_call(response)?,
+        };
+        validate::validate_value(&self.schema, &output.value, &self.instance_root())?;
+        Ok(output)
+    }
+
+    /// Extracts without failing: records the error instead of raising it.
+    ///
+    /// The difference is who decides what a failed extraction costs. `extract`
+    /// decides for the caller — it returns `Err`, and on the agent loop's final
+    /// turn that discards the entire run. This returns a
+    /// [`StructuredOutcome`] instead, so a caller can log the failure and
+    /// return the raw response, hand [`StructuredOutcome::error`] back to the
+    /// model as a repair prompt (LangChain's `OutputFixingParser`), or re-ask
+    /// with the original prompt (`RetryOutputParser`) — none of which are
+    /// possible once the run has already been thrown away.
+    ///
+    /// Mirrors LangChain's `include_raw=True`.
+    pub fn extract_outcome(&self, response: &ModelResponse) -> StructuredOutcome {
+        match self.extract(response) {
+            Ok(output) => StructuredOutcome {
+                value: Some(output.value),
+                raw: response.clone(),
+                error: None,
+            },
+            Err(error) => {
+                let error = error.to_string();
+                tracing::debug!(
+                    "[structured] extraction failed for schema '{}': {error}",
+                    self.schema_name
+                );
+                StructuredOutcome {
+                    value: None,
+                    raw: response.clone(),
+                    error: Some(error),
+                }
+            }
         }
     }
 
     // -- private helpers --
+
+    /// The label validation errors are rooted at, for example `schema 'review'`.
+    fn instance_root(&self) -> String {
+        format!("schema '{}'", self.schema_name)
+    }
 
     fn extract_provider_schema(&self, response: &ModelResponse) -> Result<StructuredOutput> {
         let raw = response.text();
