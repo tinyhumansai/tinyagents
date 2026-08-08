@@ -109,12 +109,24 @@ impl StructuredStrategy {
     ///     StructuredStrategy::for_profile(Some(&profile)),
     ///     StructuredStrategy::ProviderSchema
     /// );
+    ///
+    /// // A model that can do neither -> JSON in the text, not a tool call.
+    /// let plain = ModelProfile::default();
+    /// assert_eq!(
+    ///     StructuredStrategy::for_profile(Some(&plain)),
+    ///     StructuredStrategy::ProviderSchema
+    /// );
     /// ```
     pub fn for_profile(profile: Option<&ModelProfile>) -> StructuredStrategy {
         match profile {
-            Some(p) if !(p.native_structured_output && p.json_schema) => {
-                StructuredStrategy::ToolCall
+            Some(p) if p.native_structured_output && p.json_schema => {
+                StructuredStrategy::ProviderSchema
             }
+            Some(p) if p.tool_calling => StructuredStrategy::ToolCall,
+            // No native schema support and no tool calling: ask for JSON in the
+            // text and lean on the repair ladder. A dedicated `JsonMode` arm
+            // (plain JSON object + schema in the prompt, LangChain's third
+            // `method`) is the refinement — see the module docs.
             _ => StructuredStrategy::ProviderSchema,
         }
     }

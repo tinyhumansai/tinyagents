@@ -15,14 +15,14 @@ use serde_json::json;
 
 use tinyagents::TinyAgentsError;
 use tinyagents::harness::context::{MiddlewareControl, RunConfig, RunContext};
-use tinyagents::harness::events::ExecutionStatus;
+use tinyagents::harness::ids::ExecutionStatus;
 use tinyagents::harness::message::Message;
 use tinyagents::harness::middleware::Middleware;
 use tinyagents::harness::providers::MockModel;
 use tinyagents::harness::runtime::AgentHarness;
-use tinyagents::harness::steering::{SteeringCommand, SteeringHandle};
+use tinyagents::harness::steering::{SteeringCommand, SteeringHandle, SteeringPolicy};
 use tinyagents::harness::testkit::FakeTool;
-use tinyagents::harness::tool::{ToolCall, ToolResult};
+use tinyagents::harness::tool::ToolResult;
 
 /// Requests a control outcome from `after_tool` — the natural place for a
 /// post-hoc guardrail or a budget stop that only knows once the result is in.
@@ -40,7 +40,6 @@ impl Middleware<(), ()> for StopAfterToolMiddleware {
         &self,
         ctx: &mut RunContext<()>,
         _state: &(),
-        _call: &ToolCall,
         _result: &mut ToolResult,
     ) -> tinyagents::Result<()> {
         ctx.request_control(self.control.clone());
@@ -52,7 +51,7 @@ fn spinning_harness() -> (AgentHarness<()>, Arc<MockModel>) {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     let model = Arc::new(MockModel::with_tool_call("spin", json!({})));
     harness.register_model("mock", model.clone());
-    harness.register_tool(Arc::new(FakeTool::new("spin", "again")));
+    harness.register_tool(Arc::new(FakeTool::returning("spin", "again")));
     (harness, model)
 }
 
@@ -112,7 +111,7 @@ async fn interrupt_from_after_tool_is_honored_before_the_next_model_call() {
 async fn a_steering_pause_is_distinguishable_from_a_clean_finish() {
     let (harness, _model) = spinning_harness();
 
-    let steering = SteeringHandle::new();
+    let steering = SteeringHandle::new(SteeringPolicy::permissive());
     steering.send(SteeringCommand::PauseWith {
         reason: "waiting for a human".to_string(),
     });
