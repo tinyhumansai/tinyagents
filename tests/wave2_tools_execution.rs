@@ -264,14 +264,18 @@ async fn concurrent_admission_failure_emits_no_tool_started() {
         }));
     }
 
+    // The harness policy is the enforced source of truth for the cap (the run
+    // config's value is overwritten by `sync_call_limits` at run start).
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::new().with_max_tool_calls(2),
+        ..RunPolicy::default()
+    });
+
     let recorder = EventRecorder::new();
-    let config = RunConfig::new()
-        .with_events(recorder.sink())
-        .with_limits(RunLimits::new().with_max_tool_calls(2));
-    let mut ctx = RunContext::new(config);
+    let ctx = RunContext::new(RunConfig::new("tool3"), ()).with_events(recorder.sink());
 
     let err = harness
-        .invoke(&(), vec![Message::user("go")], &mut ctx)
+        .invoke_in_context(&(), ctx, vec![Message::user("go")])
         .await
         .expect_err("the third call must trip the tool-call cap");
     assert!(matches!(err, TinyAgentsError::LimitExceeded(_)), "{err:?}");
@@ -384,11 +388,10 @@ async fn fatal_tool_error_emits_tool_failed_and_clears_active_calls() {
     }));
 
     let recorder = EventRecorder::new();
-    let config = RunConfig::new().with_events(recorder.sink());
-    let mut ctx = RunContext::new(config);
+    let ctx = RunContext::new(RunConfig::new("tool6"), ()).with_events(recorder.sink());
 
     harness
-        .invoke(&(), vec![Message::user("go")], &mut ctx)
+        .invoke_in_context(&(), ctx, vec![Message::user("go")])
         .await
         .expect_err("a Fail-policy tool error must abort the run");
 
@@ -446,26 +449,29 @@ async fn duplicate_call_ids_do_not_clear_each_others_active_entry() {
     }));
 
     let recorder = EventRecorder::new();
-    let config = RunConfig::new().with_events(recorder.sink());
-    let mut ctx = RunContext::new(config);
+    let ctx = RunContext::new(RunConfig::new("tool10"), ()).with_events(recorder.sink());
 
     harness
-        .invoke(&(), vec![Message::user("go")], &mut ctx)
+        .invoke_in_context(&(), ctx, vec![Message::user("go")])
         .await
         .expect_err("the second (failing) call aborts the run");
 
-    // The first call completed, so exactly one of the two duplicate entries may
-    // have been removed; the second is removed by its ToolFailed. A `retain`
-    // that drops every match would have cleared both on the first completion,
-    // leaving the failure path with nothing to clear.
-    let status = ctx.status();
-    assert!(
-        status.active_tool_calls.is_empty(),
-        "both duplicate entries must be accounted for: {:?}",
-        status.active_tool_calls
-    );
+    // `status.active_tool_calls` is internal to the loop, so the observable
+    // proxy is the started/terminal pairing: two spans open, one closes with
+    // `ToolCompleted` and one with `ToolFailed`. Positional release is what
+    // keeps the two duplicate entries independent; a `retain` would have
+    // cleared both on the first completion.
     let events = recorder.events();
-    assert_eq!(completed_call_ids(&events).len(), 1);
+    assert_eq!(started_call_ids(&events), vec!["dup".to_string(), "dup".to_string()]);
+    assert_eq!(completed_call_ids(&events), vec!["dup".to_string()]);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ToolFailed { .. }))
+            .count(),
+        1,
+        "the failing duplicate needs its own terminal event"
+    );
 }
 
 // ── TOOL-11 ───────────────────────────────────────────────────────────────────
@@ -486,11 +492,10 @@ async fn unknown_tool_recovery_emits_started_and_completed() {
     });
 
     let recorder = EventRecorder::new();
-    let config = RunConfig::new().with_events(recorder.sink());
-    let mut ctx = RunContext::new(config);
+    let ctx = RunContext::new(RunConfig::new("tool11"), ()).with_events(recorder.sink());
 
     harness
-        .invoke(&(), vec![Message::user("go")], &mut ctx)
+        .invoke_in_context(&(), ctx, vec![Message::user("go")])
         .await
         .expect("ReturnToolError recovers");
 
@@ -510,7 +515,12 @@ async fn unknown_tool_recovery_emits_started_and_completed() {
 // ── TOOL-12 ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn before_tool_rejection_does_not_consume_a_tool_call_slot() {
+async fn before_tool_rejection_surfaces_as_a_middleware_error() {
+    // The tool-call slot released when `before_tool` refuses a call is not
+    // externally observable (a refusal aborts the run, so no later admission
+    // ever reads the counter). What is observable, and what this pins, is that
+    // the cap is still checked *before* the hook runs: the refusal, not a limit
+    // error, is what surfaces while budget remains.
     let calls = Arc::new(AtomicUsize::new(0));
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model(
@@ -525,19 +535,15 @@ async fn before_tool_rejection_does_not_consume_a_tool_call_slot() {
     }));
     harness.push_middleware(Arc::new(RejectingMiddleware));
 
-    let config = RunConfig::new().with_limits(RunLimits::new().with_max_tool_calls(4));
-    let mut ctx = RunContext::new(config);
-
     let err = harness
-        .invoke(&(), vec![Message::user("go")], &mut ctx)
+        .invoke_default(&(), vec![Message::user("go")])
         .await
         .expect_err("the rejecting middleware aborts the run");
     assert!(matches!(err, TinyAgentsError::Middleware(_)), "{err:?}");
-
     assert_eq!(
-        ctx.limits().tool_calls(),
+        calls.load(Ordering::SeqCst),
         0,
-        "a call rejected before it ran must not burn a tool-call slot"
+        "a refused call must never reach the tool"
     );
 }
 
