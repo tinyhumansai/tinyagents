@@ -338,6 +338,21 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for Microcompa
                 continue;
             }
             if let Message::Tool(t) = &request.messages[i] {
+                // `ToolMessage::trusted_verbatim` means the producing tool
+                // asked for its content to reach the model byte-for-byte, and
+                // its doc names blanking as exactly the rewrite a host must not
+                // perform. Blanking one produced content that reads fine and is
+                // wrong — an input schema the model copies argument names out
+                // of, a signature, a diff — so leave it intact and reclaim
+                // tokens elsewhere.
+                if t.trusted_verbatim {
+                    tracing::debug!(
+                        target: "tinyagents::middleware",
+                        tool_call_id = %t.tool_call_id,
+                        "[microcompact] skipping a trusted_verbatim tool result"
+                    );
+                    continue;
+                }
                 let id = t.tool_call_id.clone();
                 request.messages[i] = Message::tool(id, self.placeholder.clone());
                 cleared += 1;
