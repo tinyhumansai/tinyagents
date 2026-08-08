@@ -602,13 +602,6 @@ fn strip_tool_call_markers(raw: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// Converts an OpenAI [`UsageWire`] into the harness-neutral [`Usage`], under
-/// OpenAI's own accounting convention (cache reads are *included* in
-/// `prompt_tokens`).
-pub(super) fn convert_usage(wire: UsageWire) -> Usage {
-    convert_usage_with(wire, CacheTokenAccounting::IncludedInInput)
-}
-
 /// Whether a provider's reported input-token count already contains the tokens
 /// it served from (or wrote into) its prompt cache.
 ///

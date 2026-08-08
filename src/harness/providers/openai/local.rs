@@ -36,7 +36,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::error::{Result, TinyAgentsError};
+use crate::error::TinyAgentsError;
 
 /// A local OpenAI-compatible model server.
 ///
@@ -448,9 +448,6 @@ pub(super) fn probe_error(endpoint: &str, detail: impl std::fmt::Display) -> Tin
         "[openai] local probe of {endpoint} failed: {detail}"
     ))
 }
-
-/// Convenience alias so callers of the probe read naturally.
-pub type ProbeResult = Result<LocalProbe>;
 
 #[cfg(test)]
 #[path = "local_test.rs"]
