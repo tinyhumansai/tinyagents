@@ -37,20 +37,33 @@ fn backoff_grows_exponentially_then_caps() {
 }
 
 #[test]
-fn jitter_scales_backoff_by_supplied_random_value() {
+fn jitter_spreads_backoff_additively_around_the_base() {
+    // Updated for LOOP-2. This test used to assert the *multiplicative* form
+    // (`base * rand01`), which is the defect: `rand01 = 0.0` collapsed the
+    // window to `Duration::ZERO`, and the production path passed a hardcoded
+    // `0.0`, so turning jitter on disabled backoff entirely. Jitter is now
+    // additive (`base * (1 ± JITTER_FRACTION)`), matching both LangGraph
+    // (`interval + uniform(0, 1)`) and LangChain (`delay ± 25%`), and can only
+    // ever widen the delay band.
     let policy = RetryPolicy::default()
         .with_initial_backoff_ms(1000)
         .with_multiplier(1.0)
+        .with_max_backoff_ms(u64::MAX)
         .with_jitter(true);
-    // rand01 = 0.0 collapses the window to zero; 1.0 keeps the full base.
-    assert_eq!(policy.backoff_for_attempt_with(0, 0.0), Duration::ZERO);
+
+    // The band is [750, 1250] at the default ±25%.
     assert_eq!(
-        policy.backoff_for_attempt_with(0, 0.25),
-        Duration::from_millis(250)
+        policy.backoff_for_attempt_with(0, 0.0),
+        Duration::from_millis(750)
+    );
+    assert_eq!(
+        policy.backoff_for_attempt_with(0, 0.5),
+        Duration::from_millis(1000),
+        "the midpoint must reproduce the un-jittered value"
     );
     assert_eq!(
         policy.backoff_for_attempt_with(0, 1.0),
-        Duration::from_millis(1000)
+        Duration::from_millis(1250)
     );
 }
 
