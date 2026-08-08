@@ -292,8 +292,12 @@ snapshot, its `parent_config`, the listing `metadata`, and any
   `update` is folded through the same `StateReducer` the executor uses, on top
   of the thread's latest committed state, and persisted as a new checkpoint with
   source `update`. `as_node` must name a real node (`MissingNode` otherwise); the
-  write is attributed to it and the new checkpoint's pending nodes become that
-  node's routing successors. With `as_node == None` the latest pending set is
+  write is attributed to it: the node is treated as just-completed (it leaves
+  the pending set) and its routing successors are merged into the base
+  checkpoint's remaining pending work, so branches the write never touched keep
+  running — with their `Send` args intact. A successor behind a waiting edge is
+  barrier-gated exactly as during a run, and the retained predecessors are what
+  later clear the join. With `as_node == None` the latest pending set is
   preserved.
 - `bulk_update_state(thread_id, updates)` — applies a sequence of
   `(update, as_node)` pairs as successive `update` checkpoints, each layered on

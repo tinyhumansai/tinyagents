@@ -167,10 +167,18 @@ pub struct NodeDecl {
 /// or a human may send to this `subagent` node, plus a delivery policy.
 ///
 /// Parsing accepts the shape documented in
-/// `docs/modules/expressive-language/reference.md`; lowering it into a
-/// runtime `harness::steering` policy is not yet implemented (tracked
-/// separately), so [`crate::language::compiler::compile`] currently parses
-/// and retains this declaration without acting on it.
+/// `docs/modules/expressive-language/reference.md`, but lowering it into a
+/// runtime `harness::steering` policy is not yet implemented: that policy is a
+/// single flat allowlist of
+/// [`SteeringCommandKind`](crate::harness::steering::SteeringCommandKind)s with
+/// no `parent`/`human` actor separation, no delivery policy, and no
+/// `add_instruction` / `request_status` commands.
+///
+/// Because a partial lowering would silently weaken the declared restrictions,
+/// [`crate::language::compiler::compile`] **rejects** any node carrying this
+/// declaration with a [`TinyAgentsError::Compile`](crate::error::TinyAgentsError::Compile)
+/// diagnostic. The AST node exists so the documented grammar still parses (and
+/// so tooling can read the declaration), not because compilation accepts it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SteeringDecl {
     /// Steering commands a parent orchestrator run may send (`parent allow [...]`).

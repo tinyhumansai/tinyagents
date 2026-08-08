@@ -251,6 +251,10 @@ checkpoint_decl = "checkpoint" ident
 node_ref       = ident | "END"
 ```
 
+`steering_decl` is reserved grammar only: it parses, and the compiler then
+rejects it, because no faithful lowering onto the runtime steering policy exists
+yet. See the `subagent` section of [`reference.md`](reference.md).
+
 ## AST
 
 ```rust
@@ -371,8 +375,8 @@ Required errors:
 - checkpoint policy incompatible with interrupts
 - state channel missing reducer
 - send target missing input mapping
-- steering target not allowed
-- steering policy references unknown actor or capability
+- steering target not allowed (future — today the compiler rejects `steering` blocks wholesale)
+- steering policy references unknown actor or capability (future — same)
 
 Example diagnostic:
 

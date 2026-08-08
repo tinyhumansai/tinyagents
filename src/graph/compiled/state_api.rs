@@ -66,18 +66,25 @@ where
     /// [`StateReducer`](crate::graph::StateReducer) the executor uses, on top of
     /// the thread's latest committed state. When `as_node` is supplied it must
     /// name a real node (else [`TinyAgentsError::MissingNode`]); the write is
-    /// attributed to that node and the new checkpoint's pending nodes become that
-    /// node's routing successors (so a subsequent resume continues from after the
-    /// attributed node). A command node cannot be used as `as_node` (it routes
-    /// dynamically and has no static successors); doing so returns
-    /// [`TinyAgentsError::Graph`] rather than silently producing a non-resumable
-    /// checkpoint. A successor reached by a waiting edge is barrier-gated
-    /// exactly as it would be during a run: it is scheduled only once every
-    /// required predecessor has arrived (the write records the attributed
-    /// node's arrival), so a manual write can never fire a join ahead of a
-    /// still-pending branch. With `as_node == None` the latest pending node set is
-    /// preserved. Requires a configured checkpointer and an existing checkpoint
-    /// for the thread.
+    /// attributed to that node, which is treated as having just completed: it
+    /// leaves the pending set and its routing successors are *merged into* the
+    /// base checkpoint's remaining pending work (so a subsequent resume
+    /// continues from after the attributed node without dropping the branches
+    /// it never touched). Sibling branches keep their `Send` args, and a
+    /// successor that is already pending is not scheduled twice. When the
+    /// attributed node has several pending `Send` activations, the write
+    /// completes all of them at once — a manual write cannot name which packet
+    /// it stands for — and the successor is scheduled once. A command node
+    /// cannot be used as `as_node` (it routes dynamically and has no static
+    /// successors); doing so returns [`TinyAgentsError::Graph`] rather than
+    /// silently producing a non-resumable checkpoint. A successor reached by a
+    /// waiting edge is barrier-gated exactly as it would be during a run: it is
+    /// scheduled only once every required predecessor has arrived (the write
+    /// records the attributed node's arrival), so a manual write can never fire
+    /// a join ahead of a still-pending branch — and because the other pending
+    /// predecessors are retained, they still run and clear the join. With
+    /// `as_node == None` the latest pending node set is preserved. Requires a
+    /// configured checkpointer and an existing checkpoint for the thread.
     pub async fn update_state(
         &self,
         thread_id: &str,
@@ -118,69 +125,91 @@ where
         // Manual writes preserve any accumulated barrier arrivals, and an
         // attributed write records its own arrival into them.
         let mut arrivals = barriers_from_persisted(&base.barrier_arrivals);
-        // Pending nodes: the attributed node's successors, or the inherited set.
-        let mut withheld_by_barrier = false;
-        // Set only when the base checkpoint's pending set was reinstated below,
-        // which is the one case where the pending *activations* must be
-        // reinstated with it. Keying that off `withheld_by_barrier` would let a
-        // routing that withholds one target while scheduling another persist
-        // `next_nodes` and `pending_activations` that disagree — and resume
-        // prefers the activations, silently dropping the scheduled successor.
-        let mut used_base_fallback = false;
-        let next_nodes: Vec<NodeId> = match &as_node {
-            Some(node) => {
-                let mut next = Vec::new();
-                for target in self.route(node, None, &new_state)? {
-                    let tnode = target.node().clone();
-                    if tnode.as_str() == END {
-                        continue;
-                    }
-                    // Apply the same barrier gate the executor applies in
-                    // `route_completed`: a waiting node stays unscheduled until
-                    // every required predecessor has arrived. Without this an
-                    // attributed write would fire a join ahead of a predecessor
-                    // that is still pending — the data loss the waiting edge
-                    // exists to prevent.
-                    if let Some(required) = self.waiting.get(&tnode) {
-                        let arrived = arrivals.entry(tnode.clone()).or_default();
-                        arrived.insert(node.clone());
-                        if !required.is_subset(arrived) {
-                            withheld_by_barrier = true;
+        // Pending schedule: the attributed node's successors *merged into* the
+        // base checkpoint's still-pending work, or the inherited set verbatim.
+        //
+        // `next_nodes` and `pending_activations` are derived from one merged
+        // activation list so they can never disagree — resume prefers the
+        // activations, so a node named by only one of them would be silently
+        // dropped (or re-scheduled without its `Send` arg).
+        //
+        // The merge is unconditional rather than a fallback for the
+        // nothing-was-scheduled case. `route(node, None, ..)` resolves a static
+        // or conditional edge, so today it yields at most one target and a
+        // withheld barrier is the only way to end up with none — but keying the
+        // merge on that would silently drop the untouched branches the moment a
+        // single call ever resolves a withheld target *and* a schedulable one.
+        let (next_nodes, pending_activations): (Vec<NodeId>, Option<Vec<PendingActivation>>) =
+            match &as_node {
+                Some(node) => {
+                    // The attributed node counts as completed, so it leaves the
+                    // schedule; every other branch the base checkpoint had in
+                    // flight (with its `Send` arg, when it carried one) stays.
+                    let mut merged: Vec<Activation> = match &base.pending_activations {
+                        Some(pending) if !pending.is_empty() => pending
+                            .iter()
+                            .map(Activation::from)
+                            .filter(|activation| activation.node != *node)
+                            .collect(),
+                        // Checkpoints written before `pending_activations`
+                        // existed only carry the node-id projection.
+                        _ => base
+                            .next_nodes
+                            .iter()
+                            .filter(|pending| *pending != node)
+                            .cloned()
+                            .map(Activation::node)
+                            .collect(),
+                    };
+                    let mut seen: HashSet<NodeId> = merged
+                        .iter()
+                        .filter(|activation| activation.send_arg.is_none())
+                        .map(|activation| activation.node.clone())
+                        .collect();
+                    for target in self.route(node, None, &new_state)? {
+                        let tnode = target.node().clone();
+                        if tnode.as_str() == END {
                             continue;
                         }
-                        arrivals.remove(&tnode);
+                        // Apply the same barrier gate the executor applies in
+                        // `route_completed`: a waiting node stays unscheduled
+                        // until every required predecessor has arrived. Without
+                        // this an attributed write would fire a join ahead of a
+                        // predecessor that is still pending — the data loss the
+                        // waiting edge exists to prevent. The barrier's other
+                        // predecessors are still scheduled (they are part of
+                        // `merged` above), so they run and clear the join.
+                        if let Some(required) = self.waiting.get(&tnode) {
+                            let arrived = arrivals.entry(tnode.clone()).or_default();
+                            arrived.insert(node.clone());
+                            if !required.is_subset(arrived) {
+                                continue;
+                            }
+                            arrivals.remove(&tnode);
+                        }
+                        // `Send` activations may legitimately repeat a node
+                        // (each carries its own arg); plain ones are
+                        // deduplicated so a successor already pending is not
+                        // scheduled twice.
+                        let send_arg = target.send_arg().cloned();
+                        if send_arg.is_some() || seen.insert(tnode.clone()) {
+                            merged.push(Activation {
+                                node: tnode,
+                                send_arg,
+                            });
+                        }
                     }
-                    next.push(tnode);
+                    let nodes = activation_nodes(&merged);
+                    let activations = if merged.is_empty() {
+                        None
+                    } else {
+                        Some(merged.iter().map(PendingActivation::from).collect())
+                    };
+                    (nodes, activations)
                 }
-                // An unsatisfied barrier leaves nothing to schedule, which would
-                // make the checkpoint non-resumable. Keep the base checkpoint's
-                // still-pending nodes (minus the attributed one) so the barrier's
-                // remaining predecessors still run and clear the join.
-                if next.is_empty() && withheld_by_barrier {
-                    used_base_fallback = true;
-                    next.extend(base.next_nodes.iter().filter(|n| *n != node).cloned());
-                }
-                next
-            }
-            None => base.next_nodes.clone(),
-        };
+                None => (base.next_nodes.clone(), base.pending_activations.clone()),
+            };
         let completed_tasks: Vec<NodeId> = as_node.iter().cloned().collect();
-        // With `as_node`, pending becomes that node's (plain) successors, so no
-        // send args carry over; without it, inherit the base checkpoint's
-        // pending activations verbatim so any pending `Send` args survive. The
-        // barrier-withheld fallback above re-schedules base pending nodes, so it
-        // keeps their activations (and `Send` args) too.
-        let pending_activations = match (&as_node, used_base_fallback) {
-            (Some(node), true) => base.pending_activations.as_ref().map(|pending| {
-                pending
-                    .iter()
-                    .filter(|activation| activation.node != *node)
-                    .cloned()
-                    .collect()
-            }),
-            (Some(_), false) => None,
-            (None, _) => base.pending_activations.clone(),
-        };
         let barrier_arrivals = barriers_to_persisted(&arrivals);
 
         let checkpoint_id = next_checkpoint_id();
