@@ -45,6 +45,10 @@ reqwest = { version = "0.12", default-features = false, features = [
 # Optional embedded SQLite checkpointer backend (`graph::checkpoint::sqlite`).
 # `bundled` compiles SQLite from vendored C source so no system library is
 # required; the dependency is pulled in only by the `sqlite` feature.
+# `bundled` compiles SQLite with FTS5 already enabled, which
+# `harness::session_store` relies on for its `sessions_fts` cross-session
+# search table. There is no separate `fts5` cargo feature at this version — do
+# not add one, it does not resolve.
 rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 
 # Optional embedded Rhai scripting engine powering the `.ragsh` REPL session
@@ -54,7 +58,9 @@ rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 rhai = { version = "1", features = ["sync"], optional = true }
 
 # Optional builtin tool family for deterministic time/date helpers.
-chrono = "0.4"
+# `serde` is required by `harness::session_store`, whose records carry
+# `DateTime<Utc>` timestamps across the serde boundary.
+chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = { version = "0.10", optional = true }
 
 [features]
@@ -75,6 +81,9 @@ tools = ["dep:chrono-tz"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
+# Throwaway workspace roots for `harness::session_store` tests, which exercise
+# the real on-disk SQLite path rather than an in-memory database.
+tempfile = "3"
 # `.env` loading for the runnable examples.
 dotenvy = "0.15"
 # Stream combinators (`StreamExt::next`) for integration tests that drive a

@@ -1,0 +1,181 @@
+use std::path::{Path, PathBuf};
+
+use rusqlite::Connection;
+
+use super::context::StorageContext;
+use crate::error::Result;
+
+/// Subdirectory of the workspace holding the session database.
+const DB_SUBDIR: &str = "session_db";
+/// Database filename inside [`DB_SUBDIR`].
+const DB_FILE: &str = "sessions.db";
+
+/// Resolves the session database path for a workspace root.
+///
+/// Kept public so hosts can locate the file for backup, inspection, or
+/// migration without reproducing the layout.
+pub fn db_path(workspace_dir: &Path) -> PathBuf {
+    workspace_dir.join(DB_SUBDIR).join(DB_FILE)
+}
+
+/// Opens the workspace's session database, applying schema migrations, and
+/// runs `f` against the connection.
+///
+/// A connection is opened per call rather than pooled: these operations are
+/// short, infrequent relative to a run's model calls, and SQLite in WAL mode
+/// handles concurrent readers without a shared handle to synchronize.
+pub fn with_connection<T>(
+    workspace_dir: &Path,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    let db_path = db_path(workspace_dir);
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent).storage_context(&format!(
+            "failed to create session_db directory: {}",
+            parent.display()
+        ))?;
+    }
+
+    let conn = Connection::open(&db_path)
+        .storage_context(&format!("failed to open session DB: {}", db_path.display()))?;
+
+    init_schema(&conn)?;
+    f(&conn)
+}
+
+/// Opens the session database and runs `f` inside a single **immediate**
+/// write transaction, committing on `Ok` and rolling back on `Err`.
+///
+/// [`with_connection`] hands out an autocommit connection: each statement
+/// commits on its own, so a multi-statement read-then-write sequence has no
+/// isolation at all. Any operation whose correctness depends on the state it
+/// read still holding when it writes — a compare-and-swap claim, a gate that
+/// checks dependencies before acting — must use this instead.
+///
+/// `BEGIN IMMEDIATE` rather than the default deferred begin: it takes the
+/// write lock up front, so two racing claims serialize at `BEGIN` instead of
+/// discovering the conflict at COMMIT time and failing with `SQLITE_BUSY`
+/// after one of them has already decided it won.
+pub fn with_transaction<T>(
+    workspace_dir: &Path,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    with_connection(workspace_dir, |conn| {
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .storage_context("begin session DB transaction")?;
+        match f(conn) {
+            Ok(value) => {
+                conn.execute_batch("COMMIT")
+                    .storage_context("commit session DB transaction")?;
+                Ok(value)
+            }
+            Err(err) => {
+                // Roll back best-effort: the caller's error is the one worth
+                // reporting, and a failed rollback (connection already gone)
+                // must not mask it.
+                if let Err(rollback_err) = conn.execute_batch("ROLLBACK") {
+                    tracing::warn!(
+                        "[session] rollback after error failed: {rollback_err} (original: {err})"
+                    );
+                }
+                Err(err)
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+pub fn with_memory_connection<T>(f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    let conn =
+        Connection::open_in_memory().storage_context("failed to open in-memory session DB")?;
+    init_schema(&conn)?;
+    f(&conn)
+}
+
+pub(super) fn init_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA foreign_keys = ON;
+
+         CREATE TABLE IF NOT EXISTS sessions (
+            id                    TEXT PRIMARY KEY,
+            agent_definition_id   TEXT NOT NULL,
+            agent_definition_name TEXT NOT NULL,
+            session_key           TEXT NOT NULL,
+            parent_session_id     TEXT,
+            thread_id             TEXT,
+            source_channel        TEXT,
+            status                TEXT NOT NULL DEFAULT 'running',
+            model                 TEXT,
+            turn_count            INTEGER NOT NULL DEFAULT 0,
+            input_tokens          INTEGER NOT NULL DEFAULT 0,
+            output_tokens         INTEGER NOT NULL DEFAULT 0,
+            cached_input_tokens   INTEGER NOT NULL DEFAULT 0,
+            cost_usd              REAL NOT NULL DEFAULT 0.0,
+            transcript_path       TEXT,
+            started_at            TEXT NOT NULL,
+            ended_at              TEXT,
+            FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE SET NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_definition_id);
+         CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+         CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
+         CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
+         CREATE INDEX IF NOT EXISTS idx_sessions_thread ON sessions(thread_id);
+         CREATE INDEX IF NOT EXISTS idx_sessions_channel ON sessions(source_channel);
+         CREATE INDEX IF NOT EXISTS idx_sessions_key ON sessions(session_key);
+
+         CREATE TABLE IF NOT EXISTS session_messages (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id  TEXT NOT NULL,
+            role        TEXT NOT NULL,
+            content     TEXT NOT NULL,
+            model       TEXT,
+            input_tokens  INTEGER,
+            output_tokens INTEGER,
+            cost_usd    REAL,
+            created_at  TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+         );
+         CREATE INDEX IF NOT EXISTS idx_messages_session ON session_messages(session_id);
+
+         CREATE TABLE IF NOT EXISTS session_tool_calls (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id  TEXT NOT NULL,
+            message_id  INTEGER,
+            tool_name   TEXT NOT NULL,
+            tool_input  TEXT,
+            tool_output TEXT,
+            status      TEXT NOT NULL DEFAULT 'pending',
+            duration_ms INTEGER,
+            created_at  TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (message_id) REFERENCES session_messages(id) ON DELETE SET NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON session_tool_calls(session_id);
+         CREATE INDEX IF NOT EXISTS idx_tool_calls_name ON session_tool_calls(tool_name);",
+    )
+    .storage_context("failed to initialize session_db schema")?;
+
+    init_fts(conn)?;
+    Ok(())
+}
+
+fn init_fts(conn: &Connection) -> Result<()> {
+    let has_fts: bool = conn
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions_fts'")?
+        .exists([])?;
+
+    if !has_fts {
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE sessions_fts USING fts5(
+                session_id,
+                agent_definition_name,
+                content,
+                tool_name
+             );",
+        )
+        .storage_context("failed to create sessions_fts virtual table")?;
+    }
+    Ok(())
+}

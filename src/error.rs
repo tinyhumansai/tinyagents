@@ -221,4 +221,27 @@ pub enum TinyAgentsError {
     /// (checkpoints, model wire formats, structured output, blueprints).
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+
+    /// A durable-storage operation failed — opening, migrating, reading, or
+    /// writing a backing database for the session store and run ledger
+    /// ([`crate::session`]).
+    ///
+    /// Distinct from [`TinyAgentsError::Checkpoint`], which covers graph
+    /// checkpoint durability: a session-store failure means run *history* could
+    /// not be recorded or queried, while a checkpoint failure means a run
+    /// cannot be resumed. The payload carries the operation context and the
+    /// underlying driver message.
+    #[error("storage error: {0}")]
+    Storage(String),
+}
+
+/// Converts a raw `rusqlite` failure into [`TinyAgentsError::Storage`] so the
+/// session store and run ledger can use `?` on driver calls directly. Call
+/// sites that have useful context to add should still map explicitly rather
+/// than relying on this bare conversion.
+#[cfg(feature = "sqlite")]
+impl From<rusqlite::Error> for TinyAgentsError {
+    fn from(err: rusqlite::Error) -> Self {
+        Self::Storage(err.to_string())
+    }
 }
