@@ -167,6 +167,7 @@ fn preset_kind(name: &str) -> Option<ProviderKind> {
         "openai" => Some(ProviderKind::OpenAi),
         "anthropic" => Some(ProviderKind::Anthropic),
         "ollama" => Some(ProviderKind::Ollama),
+        "lmstudio" | "lm_studio" | "lm-studio" => Some(ProviderKind::LmStudio),
         "deepseek" => Some(ProviderKind::DeepSeek),
         "groq" => Some(ProviderKind::Groq),
         "xai" => Some(ProviderKind::Xai),
@@ -267,6 +268,13 @@ fn resolve(entry: &ProviderEntry, env_lookup: &dyn Fn(&str) -> Option<String>) -
                 .and_then(env_lookup)
                 .filter(|k| !k.trim().is_empty())
         });
+
+    // A local runtime (`requires_api_key: false`) has no credential to find and
+    // never sends an Authorization header, so a missing key must not skip it.
+    // Requiring a placeholder — which is what the Ollama row used to document —
+    // meant a correctly-configured local server was silently excluded from the
+    // matrix by an empty variable that could never be filled in meaningfully.
+    let api_key = api_key.or_else(|| (!spec.requires_api_key).then(|| "local".to_string()));
 
     match api_key {
         Some(api_key) => Resolution::Ready(Box::new(ResolvedProvider {
@@ -872,13 +880,29 @@ fn every_built_in_preset_name_resolves() {
         "openrouter",
         "together",
         "mistral",
+        "lmstudio",
         "ollama",
     ] {
         let kind = preset_kind(name).unwrap_or_else(|| panic!("preset {name} should resolve"));
-        let spec = ProviderSpec::for_kind(kind);
+        let spec = ProviderSpec::for_kind(kind.clone());
         assert!(
-            !spec.base_url.is_empty() && !spec.model.is_empty(),
-            "preset {name} must carry a default base_url and model"
+            !spec.base_url.is_empty(),
+            "preset {name} must carry a default base_url"
+        );
+        // LM Studio is the one preset with no default model, and deliberately
+        // so: the served id is whatever GGUF the operator loaded, so any guess
+        // would 404 on most installs. It is the only exemption — a new preset
+        // that cannot name a model belongs behind a base URL instead.
+        if kind == ProviderKind::LmStudio {
+            assert!(
+                spec.model.is_empty(),
+                "the LM Studio preset must not guess a model id"
+            );
+            continue;
+        }
+        assert!(
+            !spec.model.is_empty(),
+            "preset {name} must carry a default model"
         );
     }
     assert_eq!(preset_kind("nope"), None);
@@ -993,6 +1017,7 @@ fn the_example_file_documents_every_built_in_preset() {
         "openrouter",
         "together",
         "mistral",
+        "lmstudio",
     ] {
         assert!(
             entries.iter().any(|e| e.preset.as_deref() == Some(preset)),
@@ -1009,10 +1034,65 @@ fn the_example_file_documents_every_built_in_preset() {
             "{} must ship with a blank API key",
             entry.slug
         );
-        assert!(
-            matches!(resolve(entry, &|_| None), Resolution::Skipped(_)),
-            "{} should resolve cleanly and skip on a blank key",
-            entry.slug
-        );
+
+        let resolution = resolve(entry, &|_| None);
+        let local = entry
+            .preset
+            .as_deref()
+            .and_then(preset_kind)
+            .is_some_and(|kind| !ProviderSpec::for_kind(kind).requires_api_key);
+
+        if local {
+            // A local runtime has no credential to supply, so a blank key must
+            // still leave it dialable rather than skipping it forever.
+            assert!(
+                matches!(resolution, Resolution::Ready(_)),
+                "{} is a local runtime and should resolve as ready without a key",
+                entry.slug
+            );
+        } else {
+            assert!(
+                matches!(resolution, Resolution::Skipped(_)),
+                "{} should resolve cleanly and skip on a blank key",
+                entry.slug
+            );
+        }
     }
+}
+
+/// LM Studio must be reachable through the matrix as a **preset**, not just as
+/// a bare base URL.
+///
+/// The distinction is behavioural, not cosmetic: the preset routes through the
+/// transport's local-runtime path (no `Authorization` header, `/v1` base-URL
+/// normalisation, and the request-shape degradations llama.cpp-backed servers
+/// need), while `PROVIDER_LMSTUDIO_BASE_URL` alone resolves to
+/// [`ProviderKind::Compatible`] and gets none of it.
+#[test]
+fn the_lmstudio_preset_resolves_as_a_keyless_local_runtime() {
+    let entry = ProviderEntry {
+        slug: "LMSTUDIO".to_string(),
+        preset: Some("lmstudio".to_string()),
+        model: Some("qwen/qwen3-4b".to_string()),
+        api_key: Some(String::new()),
+        ..ProviderEntry::default()
+    };
+
+    let Resolution::Ready(resolved) = resolve(&entry, &|_| None) else {
+        panic!("a local runtime should resolve without any credential");
+    };
+    assert_eq!(resolved.spec.kind, ProviderKind::LmStudio);
+    assert_eq!(resolved.spec.base_url, "http://localhost:1234/v1");
+    assert!(!resolved.spec.requires_api_key);
+
+    // Without a model the preset is incomplete, because LM Studio has no
+    // default id to fall back on.
+    let no_model = ProviderEntry {
+        model: None,
+        ..entry
+    };
+    assert!(matches!(
+        resolve(&no_model, &|_| None),
+        Resolution::Invalid(_)
+    ));
 }
