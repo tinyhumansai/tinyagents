@@ -28,6 +28,14 @@ pub enum ProviderKind {
     Anthropic,
     /// Local Ollama server exposing `/v1/chat/completions`.
     Ollama,
+    /// Local LM Studio server exposing `/v1/chat/completions`.
+    ///
+    /// Unlike every other preset this one carries **no default model**: the id
+    /// LM Studio serves is whatever GGUF the user loaded, so there is no
+    /// stable name to guess. Set one explicitly with
+    /// [`ProviderSpec::with_model`], or discover it at runtime with
+    /// [`OpenAiModel::list_models`](crate::harness::providers::openai::OpenAiModel::list_models).
+    LmStudio,
     /// DeepSeek OpenAI-compatible endpoint.
     DeepSeek,
     /// Groq OpenAI-compatible endpoint.
@@ -51,6 +59,7 @@ impl ProviderKind {
             ProviderKind::OpenAi => "openai",
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Ollama => "ollama",
+            ProviderKind::LmStudio => "lmstudio",
             ProviderKind::DeepSeek => "deepseek",
             ProviderKind::Groq => "groq",
             ProviderKind::Xai => "xai",
@@ -73,6 +82,7 @@ impl ProviderKind {
                 "openai" => Some(ProviderKind::OpenAi),
                 "anthropic" => Some(ProviderKind::Anthropic),
                 "ollama" => Some(ProviderKind::Ollama),
+                "lmstudio" | "lm_studio" | "lm-studio" => Some(ProviderKind::LmStudio),
                 "deepseek" => Some(ProviderKind::DeepSeek),
                 "groq" => Some(ProviderKind::Groq),
                 "xai" => Some(ProviderKind::Xai),
@@ -142,6 +152,12 @@ impl ProviderSpec {
             ProviderKind::Ollama => {
                 Self::new(kind, "llama3.2", "http://localhost:11434/v1", None, false)
             }
+            // No default model on purpose: LM Studio serves whichever GGUF is
+            // loaded, so any id guessed here would 404 on most installs. An
+            // empty model forces callers to set one (or discover it through
+            // `list_models`), which fails loudly at construction instead of
+            // silently on the first request.
+            ProviderKind::LmStudio => Self::new(kind, "", "http://localhost:1234/v1", None, false),
             ProviderKind::DeepSeek => Self::new(
                 kind,
                 "deepseek-chat",

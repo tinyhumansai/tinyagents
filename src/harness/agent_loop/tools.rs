@@ -549,6 +549,7 @@ fn normalize_tool_arguments(call: &mut ToolCall, schema: &ToolSchema) {
     // recover. If its contents violate the schema, preserve them so the model
     // sees the real validation error instead of executing with an empty object.
     if call.arguments.is_object() {
+        unwrap_wrapped_arguments(call, schema);
         return;
     }
 
@@ -558,6 +559,76 @@ fn normalize_tool_arguments(call: &mut ToolCall, schema: &ToolSchema) {
         .is_some_and(|required| required.iter().any(Value::is_string));
     if !has_required_fields {
         call.arguments = serde_json::json!({});
+    }
+}
+
+/// Keys under which a model commonly buries the real arguments object.
+///
+/// `properties` is the JSON-Schema echo; the rest are the wrapper names small
+/// models invent when they confuse the *call* envelope with its payload. All of
+/// them were observed on local runtimes — see [`unwrap_wrapped_arguments`].
+const ARGUMENT_WRAPPER_KEYS: [&str; 7] = [
+    "properties",
+    "arguments",
+    "args",
+    "parameters",
+    "params",
+    "param",
+    "input",
+];
+
+/// Recovers arguments a model buried one level deep inside an envelope.
+///
+/// Small local models (observed on `llama3.2:3b` via Ollama) routinely send
+/// something other than a bare arguments object. All three of these are real
+/// captures for a tool declaring one required `city` string:
+///
+/// ```text
+/// {"type":"object","required":["city"],"properties":{"city":"Paris"}}
+/// {"properties":{...},"required":[...],"arguments":{"city":"Paris"}}
+/// {"param":{"city":"Paris"}}
+/// ```
+///
+/// In each case the intended `{"city":"Paris"}` is present, one level down.
+/// Without this the call fails validation, costs a repair round trip, and on
+/// the default [`InvalidArgsPolicy::Fail`] aborts the run outright.
+///
+/// The rewrite is deliberately conservative and cannot corrupt a legitimate
+/// call. For each candidate key it applies only when the outer object is
+/// already schema-invalid, when the tool does not itself declare an argument of
+/// that name (so the key is not meaningfully the model's own data), and when
+/// the unwrapped value *does* validate. If no candidate satisfies all three the
+/// original arguments are left untouched, so the model still sees a precise
+/// validation error rather than a rewritten one.
+///
+/// [`InvalidArgsPolicy::Fail`]: crate::harness::runtime::InvalidArgsPolicy::Fail
+fn unwrap_wrapped_arguments(call: &mut ToolCall, schema: &ToolSchema) {
+    let declared = schema
+        .parameters
+        .get("properties")
+        .and_then(Value::as_object);
+
+    for key in ARGUMENT_WRAPPER_KEYS {
+        // A tool that genuinely takes an argument of this name must never have
+        // it unwrapped — for such a tool the key is data, not an envelope.
+        if declared.is_some_and(|declared| declared.contains_key(key)) {
+            continue;
+        }
+        let Some(inner) = call
+            .arguments
+            .get(key)
+            .filter(|inner| inner.is_object())
+            .cloned()
+        else {
+            continue;
+        };
+
+        let mut candidate = call.clone();
+        candidate.arguments = inner;
+        if schema.validate_call(&candidate).is_ok() {
+            call.arguments = candidate.arguments;
+            return;
+        }
     }
 }
 

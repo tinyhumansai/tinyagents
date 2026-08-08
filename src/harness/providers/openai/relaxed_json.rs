@@ -64,7 +64,7 @@ const LEAKED_QUOTE_TOKENS: &[&str] = &["<|\"|>", "<|\">"];
 ///
 /// See the module docs for the repair strategy and the safety invariant (only
 /// invoked after strict parsing has already failed).
-pub(super) fn recover_relaxed_object(raw: &str) -> Option<Value> {
+pub(crate) fn recover_relaxed_object(raw: &str) -> Option<Value> {
     let normalized = normalize_leaked_quote_tokens(raw);
     let mut layer = normalized.trim().to_string();
     for _ in 0..=MAX_BRACE_PEEL {
@@ -184,6 +184,51 @@ enum Container {
 /// identifiers in array or value position are left alone (so `["discord"]`,
 /// `true`, numbers, and already-quoted keys pass through unchanged). Returns the
 /// input verbatim when there is nothing to quote.
+/// Reads a quote-delimited object key whose delimiters may be single quotes or
+/// mismatched, returning the key text and the bytes consumed (including both
+/// delimiters).
+///
+/// `rest` begins at the opening quote. Models that lose track of their own
+/// string delimiters produce `'city'`, `"city'`, and `'city"` interchangeably —
+/// all three mean the same key, and strict JSON accepts none of them.
+///
+/// Returns `None` for a well-formed `"key"` so the caller keeps using the
+/// normal in-string path, and `None` for anything that does not look like a
+/// key: the token must be terminated by `'` or `"` followed (after optional
+/// whitespace) by a `:`, and must not span a line break or contain structural
+/// JSON characters. That keeps a legitimate double-quoted key containing an
+/// apostrophe (`{"it's fine": 1}`) from being truncated at the apostrophe,
+/// because there the next character after `'` is not a colon.
+fn take_quoted_key(rest: &str) -> Option<(String, usize)> {
+    let mut chars = rest.char_indices();
+    let (_, open) = chars.next()?;
+    debug_assert!(open == '"' || open == '\'');
+
+    let mut key = String::new();
+    for (idx, ch) in chars {
+        match ch {
+            '"' | '\'' => {
+                let after = &rest[idx + ch.len_utf8()..];
+                if after.trim_start().starts_with(':') {
+                    // A perfectly well-formed key needs no rewriting; let the
+                    // ordinary scanner handle it so behaviour is unchanged.
+                    if open == '"' && ch == '"' {
+                        return None;
+                    }
+                    return Some((key, idx + ch.len_utf8()));
+                }
+                // Not the end of a key — record it and keep looking.
+                key.push(ch);
+            }
+            // A key never spans a newline or contains structure; bail out and
+            // let the ordinary scanner deal with whatever this really is.
+            '\n' | '\r' | '{' | '}' | '[' | ']' | ':' => return None,
+            _ => key.push(ch),
+        }
+    }
+    None
+}
+
 fn quote_bare_keys(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     let mut stack: Vec<Container> = Vec::new();
@@ -206,6 +251,29 @@ fn quote_bare_keys(s: &str) -> String {
         }
 
         match ch {
+            // A quote in key position may open a *mismatched* key delimiter
+            // (`"city'`) or a single-quoted one (`'city'`), neither of which the
+            // in-string scanner below can terminate correctly. Try that first;
+            // a well-formed `"key"` falls through to the normal path.
+            '"' | '\'' if expect_key && matches!(stack.last(), Some(Container::Object)) => {
+                match take_quoted_key(&s[idx..]) {
+                    Some((key, consumed)) => {
+                        out.push('"');
+                        out.push_str(&key.replace('\\', r"\\").replace('"', "\\\""));
+                        out.push('"');
+                        // Advance the iterator past the bytes just consumed.
+                        while chars.peek().is_some_and(|&(next, _)| next < idx + consumed) {
+                            chars.next();
+                        }
+                        expect_key = false;
+                    }
+                    None => {
+                        in_string = true;
+                        expect_key = false;
+                        out.push(ch);
+                    }
+                }
+            }
             '"' => {
                 in_string = true;
                 expect_key = false;
@@ -278,6 +346,45 @@ fn quote_bare_keys(s: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn repairs_single_quoted_and_mismatched_keys() {
+        // Captured from `llama3.2:3b` via Ollama: the model loses track of its
+        // own string delimiters mid-object.
+        assert_eq!(
+            recover_relaxed_object(r#"{"name":"get_weather","parameters':{'city':"Paris"}}"#),
+            Some(json!({ "name": "get_weather", "parameters": { "city": "Paris" } }))
+        );
+        // Single-quoted keys are repaired the same way, as long as the values
+        // themselves are well-formed.
+        assert_eq!(
+            recover_relaxed_object(r#"{'city':"Paris"}"#),
+            Some(json!({ "city": "Paris" }))
+        );
+    }
+
+    /// Single-quoted *values* are deliberately **not** repaired.
+    ///
+    /// A key is a short identifier, so reading `'` as a delimiter there is
+    /// safe. A value is free text where an apostrophe is ordinary English
+    /// (`"it's sunny"`), and treating those as delimiters would corrupt real
+    /// arguments. Such a blob stays unrecovered, the call is marked invalid,
+    /// and the agent loop hands the model a precise error to retry against —
+    /// the same path every other unrepairable blob takes.
+    #[test]
+    fn single_quoted_values_are_left_unrepaired() {
+        assert_eq!(recover_relaxed_object(r#"{'city':'Paris'}"#), None);
+    }
+
+    #[test]
+    fn an_apostrophe_inside_a_well_formed_key_is_not_a_delimiter() {
+        // `'` here is followed by ` fine"`, not a colon, so the key survives
+        // whole rather than being truncated at the apostrophe.
+        assert_eq!(
+            recover_relaxed_object(r#"{"it's fine":1,bare:2}"#),
+            Some(json!({ "it's fine": 1, "bare": 2 }))
+        );
+    }
 
     #[test]
     fn quotes_unquoted_keys() {

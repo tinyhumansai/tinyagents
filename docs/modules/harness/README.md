@@ -235,6 +235,7 @@ Feature details:
 
 - [Context feature](context.md)
 - [Model and provider feature](model.md)
+- [Local models and embeddings (Ollama, LM Studio)](local-models.md)
 - [Embeddings and retrieval feature](embeddings.md)
 - [State graph runtime feature](state-graph.md)
 - [Prompt feature](prompt.md)

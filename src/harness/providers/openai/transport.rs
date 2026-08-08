@@ -733,7 +733,11 @@ impl OpenAiModel {
                 "provider spec base_url must not be empty".to_string(),
             ));
         }
-        if spec.kind == crate::harness::providers::ProviderKind::Ollama {
+        // Local runtimes need the same treatment whichever one it is: no
+        // Authorization header, a base URL normalised to the `/v1` root, and
+        // the request-shape degradations these servers require. Ollama and LM
+        // Studio differ only in their default port.
+        if let Some(default_root) = local_runtime_default_root(&spec.kind) {
             let auth = if spec.requires_api_key {
                 AuthStyle::Bearer
             } else {
@@ -741,7 +745,7 @@ impl OpenAiModel {
             };
             return Ok(Self::local_runtime(
                 &spec.provider,
-                normalize_local_v1_base_url(spec.base_url, "http://localhost:11434")?,
+                normalize_local_v1_base_url(spec.base_url, default_root)?,
                 api_key,
                 spec.model,
             )
@@ -1451,6 +1455,23 @@ impl OpenAiModel {
             .and_then(Value::as_str)
             .map(str::to_string);
         self.provider_error(message, Some(status), code, raw)
+    }
+}
+
+/// The server root a local-runtime provider falls back to when its spec carries
+/// a blank `base_url`, or `None` for providers that are not local runtimes.
+///
+/// This is the single place that decides "is this kind a local runtime?", so a
+/// new local provider is one arm here rather than a condition to keep in sync
+/// across the transport.
+fn local_runtime_default_root(
+    kind: &crate::harness::providers::ProviderKind,
+) -> Option<&'static str> {
+    use crate::harness::providers::ProviderKind;
+    match kind {
+        ProviderKind::Ollama => Some("http://localhost:11434"),
+        ProviderKind::LmStudio => Some("http://localhost:1234"),
+        _ => None,
     }
 }
 

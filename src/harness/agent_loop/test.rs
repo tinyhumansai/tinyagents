@@ -3683,3 +3683,237 @@ async fn an_endless_continue_is_bounded_by_max_model_calls() {
         "expected the model-call cap to stop it, got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Schema-echo argument recovery
+//
+// Small local models sometimes fill the tool's own JSON Schema in place and
+// send the whole envelope as the arguments. These pin the conservative
+// unwrap in `normalize_tool_arguments`, in both directions.
+// ---------------------------------------------------------------------------
+
+/// A tool whose arguments genuinely include a field named `properties`, so the
+/// echo-unwrap must leave its calls alone.
+struct SchemaShapedTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl Tool<()> for SchemaShapedTool {
+    fn name(&self) -> &str {
+        "schema_shaped"
+    }
+    fn description(&self) -> &str {
+        "takes a literal `properties` argument"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "schema_shaped",
+            "takes a literal `properties` argument",
+            json!({
+                "type": "object",
+                "required": ["properties"],
+                "properties": {
+                    "properties": { "type": "object" }
+                }
+            }),
+        )
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(
+            call.id,
+            self.name(),
+            serde_json::to_string(&call.arguments).unwrap_or_default(),
+        ))
+    }
+}
+
+/// A tool that records the arguments it was actually invoked with, so a test
+/// can assert what normalization produced rather than only that it ran.
+struct ArgumentRecordingTool {
+    seen: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+#[async_trait]
+impl Tool<()> for ArgumentRecordingTool {
+    fn name(&self) -> &str {
+        "strict_lookup"
+    }
+    fn description(&self) -> &str {
+        "strict lookup"
+    }
+    fn schema(&self) -> ToolSchema {
+        StrictLookupTool {
+            calls: Arc::new(Mutex::new(0)),
+        }
+        .schema()
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        self.seen.lock().unwrap().push(call.arguments.clone());
+        Ok(ToolResult::text(call.id, self.name(), "strict-output"))
+    }
+}
+
+#[tokio::test]
+async fn echoed_schema_arguments_are_unwrapped_before_validation() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response(
+                "call-1",
+                "strict_lookup",
+                // The exact shape `llama3.2:3b` emits: the declaration filled
+                // in place, rather than the arguments object.
+                json!({
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": { "query": "rust" }
+                }),
+            ),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    harness.register_tool(Arc::new(ArgumentRecordingTool {
+        seen: Arc::clone(&seen),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("an echoed schema should be unwrapped, not rejected");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    // The tool ran once, with the unwrapped arguments — not the envelope.
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![json!({ "query": "rust" })],
+        "the envelope should have been unwrapped to the inner arguments"
+    );
+}
+
+/// The other envelope shapes captured from `llama3.2:3b`: the arguments nested
+/// under `arguments` alongside a schema echo, and under a bare `param` key.
+#[tokio::test]
+async fn wrapped_arguments_are_unwrapped_from_every_known_envelope_key() {
+    for envelope in [
+        json!({
+            "properties": { "query": { "type": "string" } },
+            "required": ["query"],
+            "arguments": { "query": "rust" }
+        }),
+        json!({ "param": { "query": "rust" } }),
+        json!({ "params": { "query": "rust" } }),
+        json!({ "args": { "query": "rust" } }),
+        json!({ "parameters": { "query": "rust" } }),
+        json!({ "input": { "query": "rust" } }),
+    ] {
+        let mut harness: AgentHarness<()> = AgentHarness::new();
+        harness.register_model(
+            "mock",
+            Arc::new(MockModel::with_responses(vec![
+                tool_call_response("call-1", "strict_lookup", envelope.clone()),
+                text_response("done", 1, 1),
+            ])),
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        harness.register_tool(Arc::new(ArgumentRecordingTool {
+            seen: Arc::clone(&seen),
+        }));
+        harness.with_policy(RunPolicy {
+            invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+            ..RunPolicy::default()
+        });
+
+        harness
+            .invoke_default(&(), vec![Message::user("lookup")])
+            .await
+            .unwrap_or_else(|e| panic!("{envelope} should be unwrapped: {e}"));
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![json!({ "query": "rust" })],
+            "{envelope} should have been unwrapped to the inner arguments"
+        );
+    }
+}
+
+#[tokio::test]
+async fn echo_unwrap_leaves_a_tool_that_really_takes_properties_alone() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response(
+                "call-1",
+                "schema_shaped",
+                json!({ "properties": { "query": "rust" } }),
+            ),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(SchemaShapedTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("run")])
+        .await
+        .expect("a valid call must not be rewritten");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn echo_unwrap_is_skipped_when_the_inner_value_is_still_invalid() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response(
+                "call-1",
+                "strict_lookup",
+                // `query` is an integer, so unwrapping would not rescue it.
+                // The original envelope must survive so the model sees a
+                // precise validation error rather than a rewritten one.
+                json!({
+                    "type": "object",
+                    "properties": { "query": 7 }
+                }),
+            ),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StrictLookupTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("the loop recovers by handing the validation error back");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "the tool must not run with arguments that never validated"
+    );
+}
