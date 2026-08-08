@@ -49,20 +49,30 @@ use crate::harness::tool::{ToolRegistry, ToolTimeoutSettings};
 /// How the agent loop reacts when the model calls a tool that is not
 /// registered.
 ///
-/// The default is [`UnknownToolPolicy::Fail`], preserving the historical
-/// fail-fast behavior. The recoverable variants let a run keep going so the
-/// model can correct itself — each recovery still consumes a tool-call budget
-/// slot, so [`RunLimits::max_tool_calls`] bounds any unknown-tool loop.
+/// The default is [`UnknownToolPolicy::ReturnToolError`]: a hallucinated tool
+/// name is a routine model mistake, not a harness fault, so the run keeps going
+/// and the model gets told which tools actually exist. Each recovery still
+/// consumes a tool-call budget slot, so [`RunLimits::max_tool_calls`] bounds any
+/// unknown-tool loop.
+///
+/// # Why the default flipped
+///
+/// `Fail` used to be the default, which made the crate inconsistent with
+/// itself: an **unparseable** arguments blob has always recovered
+/// unconditionally (see `agent_loop/tools.rs`), so `{city:` survived while a
+/// merely unknown tool name killed the whole run. It also diverged from
+/// LangGraph, whose `ToolNode` answers an unknown name with a synthetic
+/// `status="error"` message listing the valid tools. `Fail` remains available
+/// for callers that genuinely want a hard stop.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum UnknownToolPolicy {
     /// Abort the run with
-    /// [`TinyAgentsError::ToolNotFound`][crate::error::TinyAgentsError::ToolNotFound]
-    /// (the default, historical behavior).
-    #[default]
+    /// [`TinyAgentsError::ToolNotFound`][crate::error::TinyAgentsError::ToolNotFound].
     Fail,
     /// Inject a tool-error result (naming the originally requested tool and
     /// listing the registered tools) back into the transcript and continue the
-    /// loop, letting the model retry with a valid tool.
+    /// loop, letting the model retry with a valid tool. The default.
+    #[default]
     ReturnToolError,
     /// Rewrite an unknown call to a fixed compatibility tool name and retry the
     /// lookup once. If the rewrite target is also unregistered, fall back to
