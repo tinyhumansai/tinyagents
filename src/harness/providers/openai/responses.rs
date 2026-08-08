@@ -517,6 +517,7 @@ mod tests {
                         text: Some("answer".into()),
                     },
                 ],
+                ..ResponsesOutput::default()
             }],
             output_text: None,
             usage: None,
