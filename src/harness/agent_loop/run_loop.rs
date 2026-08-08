@@ -330,7 +330,28 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                                     parameters: schema.clone(),
                                     format: crate::harness::tool::ToolFormat::Json,
                                 });
-                                request.tool_choice = ToolChoice::Tool(name.clone());
+                                // Force the schema tool **only** when it is the
+                                // sole tool available. Forcing it inside a
+                                // tool-using loop makes the model emit the
+                                // structured call on turn 1, which terminates
+                                // the loop before any registered tool can ever
+                                // run — the agent silently loses its tools, and
+                                // the symptom points nowhere near this code.
+                                // LangChain likewise binds a schema tool with a
+                                // forced `tool_choice` only in its terminal
+                                // wrapper, never in the tool-calling loop.
+                                if tool_schemas.is_empty() {
+                                    request.tool_choice = ToolChoice::Tool(name.clone());
+                                } else {
+                                    tracing::debug!(
+                                        target: "tinyagents::agent_loop",
+                                        run_id = %ctx.run_id(),
+                                        schema_name = %name,
+                                        registered_tools = tool_schemas.len(),
+                                        "[agent_loop] structured tool offered but not forced; \
+                                         registered tools stay callable"
+                                    );
+                                }
                             }
                         }
                         Some((strategy, name, schema))
