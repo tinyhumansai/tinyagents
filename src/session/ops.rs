@@ -213,9 +213,16 @@ pub fn record_tool_call(
         )
         .storage_context("failed to insert tool call")?;
 
+        // Capture the row id BEFORE indexing. `index_fts_tool` inserts into the
+        // `sessions_fts` virtual table, which moves `last_insert_rowid()` to
+        // that row — so reading it afterwards handed callers an FTS rowid for a
+        // tool call that does not exist. `record_message` already ordered these
+        // correctly; this path did not.
+        let tool_call_id = conn.last_insert_rowid();
+
         index_fts_tool(conn, session_id, tool_name)?;
 
-        Ok(conn.last_insert_rowid())
+        Ok(tool_call_id)
     })
 }
 

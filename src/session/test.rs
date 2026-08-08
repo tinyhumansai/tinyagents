@@ -567,3 +567,52 @@ fn none_becomes_storage_error_without_a_source_suffix() {
 fn some_passes_through() {
     assert_eq!(Some(3).storage_context("read").unwrap(), 3);
 }
+
+/// `record_tool_call` must return the `session_tool_calls` row id, not the
+/// rowid of the FTS row written immediately afterwards.
+///
+/// The FTS insert moves `last_insert_rowid()`, so reading it after indexing
+/// handed callers an id for a tool call that does not exist. The session row is
+/// already in `sessions_fts` in any real session, which is what makes the two
+/// counters diverge.
+#[test]
+fn record_tool_call_returns_the_tool_call_row_id() {
+    with_memory_connection(|conn| {
+        // Seed an FTS row first, as a real session always would, so the FTS
+        // rowid counter is ahead of the tool-call one.
+        index_fts_session(conn, "s1", "agent")?;
+
+        conn.execute(
+            "INSERT INTO sessions (
+                id, agent_definition_id, agent_definition_name, session_key, started_at
+             ) VALUES ('s1', 'a', 'agent', 's1', ?1)",
+            params![Utc::now().to_rfc3339()],
+        )?;
+        conn.execute(
+            "INSERT INTO session_tool_calls (session_id, tool_name, status, created_at)
+             VALUES ('s1', 'echo', 'ok', ?1)",
+            params![Utc::now().to_rfc3339()],
+        )?;
+        let expected = conn.last_insert_rowid();
+        index_fts_tool(conn, "s1", "echo")?;
+
+        // The FTS insert must have moved the connection's rowid...
+        assert_ne!(
+            conn.last_insert_rowid(),
+            expected,
+            "test is vacuous unless the FTS insert moves last_insert_rowid()"
+        );
+        // ...and the id we hand back must still address a real tool call.
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM session_tool_calls WHERE id = ?1",
+            params![expected],
+            |r| r.get(0),
+        )?;
+        assert_eq!(
+            exists, 1,
+            "returned id must address a session_tool_calls row"
+        );
+        Ok(())
+    })
+    .unwrap();
+}

@@ -1183,7 +1183,7 @@ pub fn shutdown_agent_team_member(
     tracing::debug!(
         "{LOG_PREFIX} shutdown_agent_team_member.entry team={team_id} member={member_id}"
     );
-    let result = crate::session::store::with_connection(workspace_dir, |conn| {
+    let result = crate::session::store::with_transaction(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
 
         // Existence + team-membership check only; the row is intentionally not
