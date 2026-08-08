@@ -630,7 +630,6 @@ pub struct ProviderError {
     /// Whether retrying the same request may succeed.
     #[serde(default)]
     pub retryable: bool,
- retry_after_ms: None,
     /// Server-supplied wait before retrying, in milliseconds, parsed from the
     /// HTTP `Retry-After` response header.
     ///
