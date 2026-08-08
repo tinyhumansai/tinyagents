@@ -828,8 +828,16 @@ async fn concurrent_runs_on_one_middleware_release_their_own_reservations() {
     mw.before_model(&mut large, &(), &mut large_req)
         .await
         .unwrap();
+    // Expected from the crate's shared estimator (which charges every content
+    // block, tool call, and the role label) rather than a hand-copied number.
+    let expected = crate::harness::message::count_tokens_approximately(&[Message::user(
+        "x".repeat(40),
+    )]) + crate::harness::message::count_tokens_approximately(&[Message::user("y".repeat(400))]);
     let reserved = tracker.snapshot().reserved_input_total;
-    assert_eq!(reserved, 110, "both reservations are on the shared tracker");
+    assert_eq!(
+        reserved, expected,
+        "both reservations are on the shared tracker"
+    );
 
     let mut response = ModelResponse::assistant("ok");
     mw.after_model(&mut small, &(), &mut response)
@@ -892,7 +900,10 @@ async fn shared_tracker_reservation_is_atomic_under_concurrency() {
     use crate::harness::middleware::Middleware;
 
     let tracker = BudgetTracker::new();
-    let per_call_tokens = 10u64; // "x" * 40 chars / 4 == 10 estimated tokens.
+    // Derived from the shared estimator so the test tracks it instead of
+    // pinning a stale hand-computed constant.
+    let per_call_tokens =
+        crate::harness::message::count_tokens_approximately(&[Message::user("x".repeat(40))]);
     let concurrent_capacity = 4u64;
     let attempts = 10usize;
     let limits = BudgetLimits {

@@ -21,6 +21,14 @@ fn segment(id: &str, role: SegmentRole, cacheable: bool) -> PromptSegment {
     }
 }
 
+/// Builds a request through [`PromptBuilder`] so `prompt_fingerprint` — the
+/// content digest the layout now consults — is actually populated.
+fn built_with_system(system: &str, question: &str) -> ModelRequest {
+    let mut builder = PromptBuilder::new();
+    builder.push_system("sys", vec![Message::system(system)]);
+    builder.build(vec![Message::user(question)])
+}
+
 fn tool(name: &str, description: &str) -> ToolSchema {
     ToolSchema {
         name: name.to_string(),
@@ -39,16 +47,8 @@ fn editing_a_stable_segments_text_is_reported_as_a_prefix_change() {
     // the provider's KV prefix was already destroyed. The content digest comes
     // from `PromptBuilder::fingerprint`, which hashes the segments' messages
     // and was previously ignored by the layout entirely.
-    let before_request = PromptBuilder::new()
-        .segment("sys", SegmentRole::System, true, vec![Message::system(
-            "You are a careful assistant.",
-        )])
-        .build(vec![Message::user("q")]);
-    let after_request = PromptBuilder::new()
-        .segment("sys", SegmentRole::System, true, vec![Message::system(
-            "You are a RECKLESS assistant.",
-        )])
-        .build(vec![Message::user("q")]);
+    let before_request = built_with_system("You are a careful assistant.", "q");
+    let after_request = built_with_system("You are a RECKLESS assistant.", "q");
 
     let before = PromptCacheLayout::from_request(&before_request);
     let after = PromptCacheLayout::from_request(&after_request);
@@ -174,13 +174,8 @@ fn protect_prompt_prefix_is_load_bearing_for_the_layout_event() {
 
 #[test]
 fn a_prompt_cache_key_is_derived_from_the_stable_prefix() {
-    let request = |question: &str| {
-        PromptBuilder::new()
-            .segment("sys", SegmentRole::System, true, vec![Message::system(
-                "You are a careful assistant.",
-            )])
-            .build(vec![Message::user(question)])
-    };
+    let request =
+        |question: &str| built_with_system("You are a careful assistant.", question);
 
     let first = prompt_cache_key(&request("q1")).expect("a stable prefix exists");
     let second = prompt_cache_key(&request("q2")).expect("a stable prefix exists");
@@ -189,11 +184,7 @@ fn a_prompt_cache_key_is_derived_from_the_stable_prefix() {
         "every turn of one logical thread must route to the same provider cache shard"
     );
 
-    let other = PromptBuilder::new()
-        .segment("sys", SegmentRole::System, true, vec![Message::system(
-            "You are a different assistant.",
-        )])
-        .build(vec![Message::user("q1")]);
+    let other = built_with_system("You are a different assistant.", "q1");
     assert_ne!(
         prompt_cache_key(&other).expect("a stable prefix exists"),
         first,
