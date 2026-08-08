@@ -17,7 +17,7 @@ use tinyagents::harness::message::Message;
 use tinyagents::harness::middleware::ModelFallbackMiddleware;
 use tinyagents::harness::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyagents::harness::retry::{FallbackPolicy, RetryPolicy};
-use tinyagents::harness::runtime::AgentHarness;
+use tinyagents::harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents::harness::testkit::EventRecorder;
 use tinyagents::harness::usage::Usage;
 use tinyagents::{Result, TinyAgentsError};
@@ -131,9 +131,12 @@ async fn a_fallback_answer_is_never_cached_under_the_primary_key() {
     );
     harness.set_default_model("primary");
     harness.with_response_cache(cache.clone());
-    harness.policy_mut().retry = RetryPolicy::new(1);
-    harness.policy_mut().fallback = Some(FallbackPolicy {
-        models: vec!["primary".to_string(), "backup".to_string()],
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(1),
+        fallback: Some(FallbackPolicy {
+            models: vec!["primary".to_string(), "backup".to_string()],
+        }),
+        ..RunPolicy::default()
     });
 
     let run = harness
@@ -350,10 +353,15 @@ async fn model_fallback_middleware_actually_switches_models() {
         )),
     );
     harness.set_default_model("primary");
-    harness.policy_mut().retry = RetryPolicy::new(1);
     // No harness-level `FallbackPolicy` — the switch must come from the wrap
     // middleware alone, which steers by mutating `request.model`.
-    harness.with_model_middleware(Arc::new(ModelFallbackMiddleware::new(["backup"])));
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default()
+            .with_max_attempts(1)
+            .with_backoff_sleep(false),
+        ..RunPolicy::default()
+    });
+    harness.push_model_middleware(Arc::new(ModelFallbackMiddleware::new(["backup"])));
 
     let events = EventRecorder::new();
     let ctx = RunContext::new(RunConfig::new("fallback"), ()).with_events(events.sink());
@@ -390,8 +398,13 @@ async fn an_unresolvable_wrap_override_keeps_the_resolved_binding() {
         }),
     );
     harness.set_default_model("primary");
-    harness.policy_mut().retry = RetryPolicy::new(1);
-    harness.with_model_middleware(Arc::new(ModelFallbackMiddleware::new(["nonexistent"])));
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default()
+            .with_max_attempts(1)
+            .with_backoff_sleep(false),
+        ..RunPolicy::default()
+    });
+    harness.push_model_middleware(Arc::new(ModelFallbackMiddleware::new(["nonexistent"])));
 
     let events = EventRecorder::new();
     let ctx = RunContext::new(RunConfig::new("bad-override"), ()).with_events(events.sink());
