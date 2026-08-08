@@ -15,6 +15,9 @@
 //!
 //! # Primary types
 //! - [`Store`] — the core async trait every backend implements.
+//! - [`namespaced::NamespacedStore`] — the hierarchical, TTL-aware,
+//!   batch-oriented long-term store. Additive: `Store` is unchanged, and
+//!   [`namespaced::FlatNamespacedStore`] adapts the new trait back to it.
 //! - [`InMemoryStore`] — ephemeral in-process store for tests and examples.
 //! - [`FileStore`] — file-system-backed store for local development.
 //! - [`StoreRegistry`] — named bag of stores injected into `RunContext`.
@@ -24,6 +27,7 @@
 //! `"artifacts"`. The registry does not enforce a naming scheme, but
 //! consistent names make multi-store applications easier to audit.
 
+pub mod namespaced;
 mod types;
 
 use std::collections::HashMap;
