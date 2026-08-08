@@ -250,31 +250,26 @@ pub(super) fn degraded_json_object_format() -> Value {
     })
 }
 
-/// Prepares a caller-supplied JSON Schema for OpenAI **strict** structured
-/// output.
+/// The schema projection applied to a `response_format` JSON Schema.
 ///
 /// OpenAI's strict mode is not "the same schema, validated harder": it rejects
 /// any object that does not carry `additionalProperties: false` and list *every*
-/// declared property in `required`. Sending a caller's raw schema with
-/// `strict: true` therefore 400s on schemas that are perfectly valid JSON
-/// Schema — including this crate's own documented example.
+/// declared property in `required`. `strict: true` used to be hardcoded here and
+/// paired with the caller's **raw** schema, so a perfectly valid JSON Schema
+/// 400d — including this crate's own documented example. The sibling
+/// `degraded_json_object_format` had it right with `strict: false`; the
+/// constraint was understood in one place and not the other.
 ///
-/// # Wave-2 dependency
-///
-/// The recursive sanitizer (force-populate `required`, set
-/// `additionalProperties: false` at every object level) is being built as a
-/// callable function in `crate::harness::tool::schema`. **This is its call
-/// site**: when that function lands, replace the body below with a call to it.
-/// Until then this is the identity transform, and correctness rests on the
-/// `strict` default — [`OpenAiModel::with_strict_json_schema`][swj] — which is
-/// `false` for local runtimes and can be turned off anywhere, plus the
-/// automatic 400-driven degrade to `strict: false`.
-///
-/// [swj]: super::OpenAiModel::with_strict_json_schema
-fn prepare_strict_schema(schema: &Value) -> Value {
-    // TODO(wave-2): call `crate::harness::tool::schema::harden_for_strict` here
-    // once that agent's function lands; see the doc comment above.
-    schema.clone()
+/// Delegates to [`prepare_parameters`], the shared sanitizer, so the
+/// response-format schema and the tool-parameter schemas are projected by
+/// exactly one implementation.
+fn prepare_response_schema(schema: &Value, strict: bool) -> Value {
+    let preparation = if strict {
+        crate::harness::tool::SchemaPreparation::openai().with_strict()
+    } else {
+        crate::harness::tool::SchemaPreparation::openai()
+    };
+    crate::harness::tool::prepare_parameters(schema, &preparation)
 }
 
 /// Translates a [`ResponseFormat`] into the OpenAI `response_format` JSON value.
@@ -294,11 +289,7 @@ pub(super) fn translate_response_format(format: &ResponseFormat, strict: bool) -
         // schema request directly. (The agent loop normally resolves `Auto`
         // before reaching the provider; this keeps direct calls correct too.)
         ResponseFormat::JsonSchema { name, schema } | ResponseFormat::Auto { name, schema } => {
-            let schema = if strict {
-                prepare_strict_schema(schema)
-            } else {
-                schema.clone()
-            };
+            let schema = prepare_response_schema(schema, strict);
             Some(json!({
                 "type": "json_schema",
                 "json_schema": {

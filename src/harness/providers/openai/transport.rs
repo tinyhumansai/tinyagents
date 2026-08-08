@@ -1628,18 +1628,32 @@ impl OpenAiModel {
             .map(translate_message)
             .collect::<Result<Vec<_>>>()?;
 
+        // Project the declarations through the shared preparation seam rather
+        // than shipping `schema.parameters` verbatim. Two things this buys:
+        // a tool whose `parameters` is `Value::Null` (the type permits it) no
+        // longer serialises as `"parameters": null`, which every provider 400s
+        // on; and when strict mode is in force the same sanitizer that fixes the
+        // `response_format` schema fixes the tool schemas too, instead of two
+        // half-implementations disagreeing.
+        let preparation = {
+            let base = crate::harness::tool::SchemaPreparation::openai();
+            if degrade.json_schema_strict {
+                base
+            } else {
+                base.with_strict()
+            }
+        };
         let mut tools: Vec<ToolWire> = if prompt_guided_tools {
             Vec::new()
         } else {
-            request
-                .tools
-                .iter()
+            crate::harness::tool::prepare_tool_schemas(&request.tools, &preparation)
+                .into_iter()
                 .map(|schema| ToolWire {
                     kind: "function".to_string(),
                     function: FunctionSchemaWire {
-                        name: schema.name.clone(),
-                        description: schema.description.clone(),
-                        parameters: schema.parameters.clone(),
+                        name: schema.name,
+                        description: schema.description,
+                        parameters: schema.parameters,
                     },
                 })
                 .collect()
