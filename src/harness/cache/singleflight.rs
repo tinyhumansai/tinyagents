@@ -80,27 +80,17 @@ impl SingleFlight {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<ModelResponse>>,
     {
-        let mut receiver = {
-            let mut inflight = match self.inflight.lock() {
-                Ok(guard) => guard,
-                // A poisoned map must never take the run down: fall back to
-                // simply making the call, which is the un-collapsed behaviour.
-                Err(_) => {
-                    tracing::warn!(
-                        "[cache] single-flight map poisoned; issuing the model call directly"
-                    );
-                    return call().await.map(|response| (response, false));
-                }
-            };
-            match inflight.get(key) {
-                Some(sender) => Some(sender.subscribe()),
-                None => {
-                    let (sender, _) = broadcast::channel(1);
-                    inflight.insert(key.to_string(), sender);
-                    None
-                }
-            }
+        // The lock is acquired and released inside this helper so no
+        // `MutexGuard` is ever alive across an `await` — which would make the
+        // whole future `!Send` and unusable from `tokio::spawn`.
+        let claim = self.claim(key);
+        let Some(claim) = claim else {
+            // A poisoned map must never take the run down: fall back to simply
+            // making the call, which is the un-collapsed behaviour.
+            tracing::warn!("[cache] single-flight map poisoned; issuing the model call directly");
+            return call().await.map(|response| (response, false));
         };
+        let mut receiver = claim;
 
         // Follower: wait for the leader rather than duplicating the call.
         if let Some(receiver) = receiver.as_mut() {
