@@ -207,5 +207,25 @@ Every lookup should produce a decision:
 - write skipped
 - write completed
 
+Implemented today: `AgentEvent::CacheHit` / `AgentEvent::CacheMiss` are emitted
+as events, and the "no lookup happened at all" half is reported as a
+`CacheSkipReason` (`no_cache_attached`, `policy_disabled`,
+`multi_turn_transcript`) on a `[cache]`-prefixed debug log. A cache also exposes
+`ResponseCache::stats() -> CacheStats` (hits, misses, writes, evictions,
+expirations, entries, bytes). The remaining decisions are not yet distinct
+events.
+
 The usage feature should record provider prompt-cache hits separately from local
 response-cache hits.
+
+## Backends
+
+- `InMemoryResponseCache` — bounded on **both** an entry count and an
+  approximate byte budget (an entry count alone does not bound memory when
+  responses are long-context). Recency is an ordered map, not a linear scan.
+- `SqliteResponseCache` (feature `sqlite`) — durable, WAL, `(ns, key)` primary
+  key with an `expiry` column and a lazy purge on read. Namespaces do not
+  cross-serve and clear independently.
+- `SingleFlight` — collapses concurrent identical misses into one provider call
+  so N simultaneous callers do not all pay for the same answer. Errors are not
+  shared: a follower whose leader failed runs its own call.
