@@ -96,6 +96,35 @@ pub enum TinyAgentsError {
     #[error("model error: {0}")]
     Provider(Box<crate::harness::model::ProviderError>),
 
+    /// The request did not fit in the model's context window.
+    ///
+    /// Distinguished from the generic [`TinyAgentsError::Provider`] because the
+    /// remedy is specific and mechanical — compact or drop transcript history
+    /// and retry — where a generic provider failure has none. A caller that can
+    /// summarise its own transcript (see
+    /// [`crate::harness::summarization`]) can match on this variant instead of
+    /// string-matching a provider message that differs per vendor and changes
+    /// without notice. Port of LangChain's `ContextOverflowError`.
+    ///
+    /// # Detection is best-effort, and asymmetric
+    ///
+    /// Hosted providers raise an explicit 400 for this, which
+    /// [`crate::harness::providers::openai::CONTEXT_OVERFLOW_CODE`] classifies.
+    /// **Local servers usually truncate the front of the prompt silently
+    /// instead**, so the absence of this error is not evidence that the prompt
+    /// fitted — pair it with a probed real context window
+    /// ([`crate::harness::providers::openai::LocalProbe`]) rather than relying
+    /// on it alone.
+    #[error("context overflow: {message}")]
+    ContextOverflow {
+        /// Provider family identifier, for example `openai` or `ollama`.
+        provider: String,
+        /// Provider model id, when known.
+        model: Option<String>,
+        /// The provider's own message, preserved verbatim.
+        message: String,
+    },
+
     /// A tool invocation returned an error. The payload describes the failure.
     #[error("tool error: {0}")]
     Tool(String),
