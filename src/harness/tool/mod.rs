@@ -10,8 +10,11 @@
 //! See [`types`] for definitions. This module provides constructors and the
 //! [`ToolRegistry`] logic for registering and looking up tools by name.
 
+mod error_policy;
+pub mod injected;
 mod prompt;
 mod schema;
+mod schema_prepare;
 mod timeout;
 mod types;
 
@@ -21,8 +24,11 @@ use serde_json::Value;
 
 use crate::error::{Result, TinyAgentsError};
 
+pub use error_policy::{ToolErrorPolicy, is_control_flow_error};
+pub use injected::{project_injected_arguments, strip_injected_arguments};
 pub use prompt::*;
 pub use schema::*;
+pub use schema_prepare::*;
 pub use timeout::*;
 pub use types::*;
 
@@ -397,11 +403,59 @@ impl<State: Send + Sync> ToolRegistry<State> {
         names
     }
 
-    /// Returns the schemas of all registered tools, sorted by name.
+    /// Returns the **model-facing** schemas of all registered tools, sorted by
+    /// name.
+    ///
+    /// Each schema has its tool's
+    /// [`injected_arguments`][Tool::injected_arguments] projected out — removed
+    /// from `properties` and from `required` alike — so a host-supplied
+    /// argument is never advertised to the model and never demanded of it. See
+    /// [`crate::harness::tool::injected`] for the matching execution-time rule.
     pub fn schemas(&self) -> Vec<ToolSchema> {
+        let mut schemas: Vec<ToolSchema> = self
+            .tools
+            .values()
+            .map(|t| project_injected_arguments(t.schema(), t.injected_arguments()))
+            .collect();
+        schemas.sort_by(|a, b| a.name.cmp(&b.name));
+        schemas
+    }
+
+    /// Returns the **declared** schemas, including any injected arguments.
+    ///
+    /// This is the introspection view — registry listings, audit logs, docs —
+    /// not the model-facing one. Never put this on the wire; use
+    /// [`Self::schemas`].
+    pub fn declared_schemas(&self) -> Vec<ToolSchema> {
         let mut schemas: Vec<ToolSchema> = self.tools.values().map(|t| t.schema()).collect();
         schemas.sort_by(|a, b| a.name.cmp(&b.name));
         schemas
+    }
+
+    /// Returns each registered tool's injected-argument names, keyed by tool
+    /// name. Tools declaring none are omitted.
+    pub fn injected_arguments(&self) -> std::collections::HashMap<String, Vec<String>> {
+        self.tools
+            .iter()
+            .filter_map(|(name, tool)| {
+                let injected = tool.injected_arguments();
+                if injected.is_empty() {
+                    return None;
+                }
+                Some((
+                    name.clone(),
+                    injected.iter().map(|key| (*key).to_string()).collect(),
+                ))
+            })
+            .collect()
+    }
+
+    /// Returns each registered tool's [`ToolErrorPolicy`], keyed by tool name.
+    pub fn error_policies(&self) -> std::collections::HashMap<String, ToolErrorPolicy> {
+        self.tools
+            .iter()
+            .map(|(name, tool)| (name.clone(), tool.error_policy()))
+            .collect()
     }
 
     /// Returns a snapshot of every registered tool's [`ToolPolicy`], keyed by
@@ -552,7 +606,13 @@ fn json_value_kind(value: &Value) -> &'static str {
 }
 
 #[cfg(test)]
+mod error_policy_test;
+#[cfg(test)]
+mod injected_test;
+#[cfg(test)]
 mod prompt_test;
+#[cfg(test)]
+mod schema_prepare_test;
 #[cfg(test)]
 mod schema_test;
 #[cfg(test)]

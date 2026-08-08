@@ -223,7 +223,20 @@ fn prompt_parser_extracts_single_tool_call() {
     assert_eq!(cleaned, "Let me read it.");
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].name, "read_file");
-    assert_eq!(calls[0].id, "call_1");
+    // Ids are process-unique, not a per-response index: only the shape and the
+    // slot suffix are stable. See `next_synthetic_call_id`.
+    assert!(
+        calls[0]
+            .id
+            .starts_with(&format!("{SYNTHETIC_CALL_ID_PREFIX}_")),
+        "unexpected synthetic id {}",
+        calls[0].id
+    );
+    assert!(
+        calls[0].id.ends_with("_1"),
+        "slot suffix lost: {}",
+        calls[0].id
+    );
     assert_eq!(calls[0].arguments, serde_json::json!({"path": "a.txt"}));
 }
 
@@ -235,7 +248,12 @@ fn prompt_parser_extracts_multiple_calls_and_keeps_prose() {
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].name, "one");
     assert_eq!(calls[1].name, "two");
-    assert_eq!(calls[1].id, "call_2");
+    assert!(
+        calls[1].id.ends_with("_2"),
+        "slot suffix lost: {}",
+        calls[1].id
+    );
+    assert_ne!(calls[0].id, calls[1].id);
 }
 
 #[test]
@@ -613,4 +631,48 @@ fn bare_tool_call_recovery_preserves_a_thinking_block() {
         }],
         "the reasoning must survive while the consumed object does not"
     );
+}
+
+/// TOOL-2: two turns of the same run must not both mint `call_1`.
+///
+/// The recovered id used to be the call's index *within one response*, which
+/// resets every turn. A two-turn run therefore produced a transcript with two
+/// assistant messages declaring the same tool-call id and two tool messages
+/// answering it — a pairing no provider (and no pairing repair) can resolve.
+#[test]
+fn synthetic_call_ids_are_unique_across_responses() {
+    let text = r#"<tool_call>{"name":"one","arguments":{}}</tool_call>"#;
+    let (_, first) = parse_prompt_tool_calls_from_text(text);
+    let (_, second) = parse_prompt_tool_calls_from_text(text);
+
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 1);
+    assert_ne!(
+        first[0].id, second[0].id,
+        "a second turn reused the first turn's synthetic tool-call id"
+    );
+}
+
+/// The synthetic scheme must be visibly distinct from real provider ids and
+/// from the OpenAI adapter's own positional fallback (`tool-{slot}`), so the
+/// two can never collide.
+#[test]
+fn synthetic_call_ids_do_not_look_like_provider_ids() {
+    let id = next_synthetic_call_id(1);
+    assert!(id.starts_with("ptc_"), "{id}");
+    assert!(!id.starts_with("call_"), "{id}");
+    assert!(!id.starts_with("tool-"), "{id}");
+}
+
+/// The bare-object recovery path mints ids from the same counter, so a model
+/// that alternates between markup and bare objects still cannot collide.
+#[test]
+fn bare_object_recovery_also_mints_unique_ids() {
+    let body = r#"{"name":"one","arguments":{}}"#;
+    let first = apply_prompt_tool_calls(ModelResponse::assistant(body));
+    let second = apply_prompt_tool_calls(ModelResponse::assistant(body));
+
+    let first_id = &first.message.tool_calls[0].id;
+    let second_id = &second.message.tool_calls[0].id;
+    assert_ne!(first_id, second_id);
 }
