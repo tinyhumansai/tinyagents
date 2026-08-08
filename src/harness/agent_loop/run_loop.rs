@@ -447,11 +447,26 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             run.steps += 1;
             status.model_calls = run.model_calls;
             status.active_model_call = None;
+            // A cache replay consumed no provider tokens, so folding its usage
+            // into the run's totals reports spend that never happened. The
+            // saving is surfaced through the cache-hit event instead of being
+            // buried in the spend total.
             if let Some(usage) = response.usage {
-                run.usage.record(usage);
-                status.usage = run.usage;
-                let record = ctx.emit(AgentEvent::UsageRecorded { usage });
-                status.set_last_event(record.id);
+                if response.served_from_cache {
+                    tracing::debug!(
+                        target: "tinyagents::agent_loop",
+                        run_id = %ctx.run_id(),
+                        call_id = %call_id,
+                        saved_input_tokens = usage.input_tokens,
+                        saved_output_tokens = usage.output_tokens,
+                        "[agent_loop] cache-served response; usage not billed to the run"
+                    );
+                } else {
+                    run.usage.record(usage);
+                    status.usage = run.usage;
+                    let record = ctx.emit(AgentEvent::UsageRecorded { usage });
+                    status.set_last_event(record.id);
+                }
             }
             let captured_output = self
                 .policy
