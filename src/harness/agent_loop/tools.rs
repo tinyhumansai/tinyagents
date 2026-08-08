@@ -534,9 +534,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             let tool = match self.admit_tool_call(state, ctx, status, &mut call).await? {
                 ResolvedToolCall::Tool(tool) => tool,
                 ResolvedToolCall::ErrorMessage(message) => {
-                    run.tool_calls += 1;
-                    status.tool_calls = run.tool_calls;
-                    messages.push(Message::tool(call.id.clone(), message));
+                    self.recover_tool_call(state, ctx, run, status, messages, &call, message)
+                        .await?;
                     continue;
                 }
             };
@@ -550,20 +549,76 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // crate-owned tool policy returns a recoverable tool error; the
             // outer run budget still aborts when the whole run is exhausted.
             let run_budget = self.call_budget(ctx);
+            let error_policy = tool.error_policy();
+            let policy_call = call.clone();
             let base = ToolCallBase {
                 tool,
                 timeout_settings: self.tool_timeouts.clone(),
             };
             let run_id = ctx.run_id().as_str().to_string();
             let fut = self.middleware.run_wrapped_tool(ctx, state, call, &base);
-            let result = Self::with_call_budget(run_budget, &run_id, "tool call", fut)
-                .await?
-                .into_result();
+            // The policy is applied *inside* the run-budget wrapper so that
+            // exhausting the run's wall clock stays fatal (it is the run
+            // ending, not the tool failing) while a tool error is routed.
+            let guarded = async move {
+                let outcome = fut.await.map(|wrapped| wrapped.into_result());
+                apply_tool_error_policy(&error_policy, &policy_call, outcome)
+            };
+            let outcome = Self::with_call_budget(run_budget, &run_id, "tool call", guarded).await;
+            let result = match outcome {
+                Ok(result) => result,
+                Err(err) => {
+                    self.fail_tool_call(
+                        ctx,
+                        status,
+                        &prepared.call_id,
+                        &prepared.tool_name,
+                        prepared.started_at_ms,
+                        &err,
+                    );
+                    return Err(err);
+                }
+            };
 
             self.finish_tool_call(state, ctx, run, status, messages, prepared, result)
                 .await?;
         }
         Ok(())
+    }
+
+    /// Answers a call that no tool ran — unknown tool, schema-invalid
+    /// arguments, or arguments the provider could not parse — through the same
+    /// pipeline a real result takes.
+    ///
+    /// Before this existed the recovery arms pushed a bare
+    /// [`Message::tool`] and hand-incremented the counters, so no
+    /// `ToolStarted`/`ToolCompleted` pair was emitted, `after_tool` middleware
+    /// never saw the result, and accounting lived in three places (TOOL-11). The
+    /// transcript content is unchanged: [`ToolResult::error`][err] puts the
+    /// message verbatim in `content`.
+    ///
+    /// [err]: crate::harness::tool::ToolResult::error
+    #[allow(clippy::too_many_arguments)]
+    async fn recover_tool_call(
+        &self,
+        state: &State,
+        ctx: &mut RunContext<Ctx>,
+        run: &mut AgentRun,
+        status: &mut HarnessRunStatus,
+        messages: &mut Vec<Message>,
+        call: &ToolCall,
+        message: String,
+    ) -> Result<()> {
+        tracing::debug!(
+            "[agent_loop::tools] recovering call `{}` for `{}` without executing a tool",
+            call.id,
+            call.name
+        );
+        let prepared = self.start_tool_call(ctx, status, call);
+        let result =
+            crate::harness::tool::ToolResult::error(call.id.clone(), call.name.clone(), message);
+        self.finish_tool_call(state, ctx, run, status, messages, prepared, result)
+            .await
     }
 
     /// Executes a multi-call turn concurrently (`join_all`), so turn latency

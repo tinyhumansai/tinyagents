@@ -248,9 +248,9 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 text: String::new(),
                 reasoning: String::new(),
                 tool_call: Some(crate::harness::tool::ToolDelta {
-                    id: call.id.clone(),
-                    name: Some(call.name.clone()),
-                    arguments: serde_json::to_string(&call.arguments).unwrap_or_default(),
+                    call_id: call.id.clone(),
+                    content: serde_json::to_string(&call.arguments).unwrap_or_default(),
+                    tool_name: Some(call.name.clone()),
                 }),
             });
         }

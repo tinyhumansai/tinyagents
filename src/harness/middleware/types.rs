@@ -66,6 +66,20 @@ pub struct AgentRun {
     pub tool_calls: usize,
     /// Number of loop iterations (model/tool super-steps) executed.
     pub steps: usize,
+    /// Set when the run stopped because steering latched a **pause** rather
+    /// than because the model finished.
+    ///
+    /// A paused run has no `final_response`, exactly like a run whose model
+    /// returned an empty answer — which is why the two were previously
+    /// indistinguishable. Check this field (or
+    /// [`HarnessRunStatus`][crate::harness::events::HarnessRunStatus], which
+    /// reports `Interrupted` for a paused run) before treating a missing final
+    /// response as a completed-but-empty answer. The pause stays latched on the
+    /// [`SteeringHandle`][crate::harness::steering::SteeringHandle], so
+    /// [`SteeringHandle::resume`][crate::harness::steering::SteeringHandle::resume]
+    /// lifts it and a fresh invocation continues from
+    /// [`AgentRun::messages`].
+    pub paused: Option<crate::harness::steering::PauseState>,
 }
 
 // ── Middleware trait ──────────────────────────────────────────────────────────
