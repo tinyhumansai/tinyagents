@@ -44,15 +44,40 @@
 //! # Limits
 //!
 //! Model and tool caps are enforced by the run context's own
-//! [`crate::harness::limits::LimitTracker`], which is synced with
-//! [`RunPolicy::limits`][crate::harness::runtime::RunPolicy] once at the start
-//! of each run (see [`crate::harness::limits::LimitTracker::sync_call_limits`])
-//! so the harness policy and the per-run [`RunConfig`] agree on a single
-//! enforced cap instead of silently disagreeing. Each call is checked
-//! *before* it is made, returning [`TinyAgentsError::LimitExceeded`] whose
-//! message always names the limit that actually tripped. The wall-clock
-//! deadline (from the run config) is checked each iteration and surfaces as
-//! [`TinyAgentsError::Timeout`].
+//! [`crate::harness::limits::LimitTracker`], reconciled once at the start of
+//! each run with [`RunPolicy::limits`][crate::harness::runtime::RunPolicy] so
+//! the harness policy and the per-run [`RunConfig`] agree on a single enforced
+//! cap instead of silently disagreeing.
+//!
+//! The reconciliation is **asymmetric**, which is why [`RunConfig`]'s caps are
+//! `Option<usize>`: an explicitly-set config cap is the caller's ceiling and
+//! the stricter of the two wins (fail-closed), while an unset cap merely
+//! defaulted and the policy wins outright — including when it raises the cap
+//! above the crate default. Both cases are legitimate and they are
+//! indistinguishable while the config cap is a bare `usize`, which is how
+//! `RunConfig::new("r").with_max_model_calls(2)` came to run 25 model calls.
+//!
+//! Each call is checked *before* it is made. Under the default
+//! [`LimitBehavior::Error`][crate::harness::limits::LimitBehavior] exhaustion
+//! returns [`TinyAgentsError::LimitExceeded`] whose message always names the
+//! limit that actually tripped; under
+//! [`LimitBehavior::StopWithPartial`][crate::harness::limits::LimitBehavior] the
+//! loop instead emits [`AgentEvent::LimitReached`], stops, and finalizes with
+//! everything the run produced. The wall-clock deadline (from the run config) is
+//! checked each iteration and surfaces as [`TinyAgentsError::Timeout`].
+//!
+//! # Exits
+//!
+//! The loop distinguishes three deliberate stops (see the private `LoopExit`):
+//! a normal finish, a `StopWithPartial` limit stop, and a **steering pause**.
+//! A pause is not a completion: it sets
+//! [`AgentRun::paused`][crate::harness::middleware::AgentRun::paused], reports
+//! the run interrupted, and leaves the pause latched on the
+//! [`SteeringHandle`][crate::harness::steering::SteeringHandle] so a later
+//! `Resume` lifts it. The working transcript is written onto the
+//! [`AgentRun`] on **every** exit path, including errors, so a failed run's
+//! partial conversation can still be inspected or repaired (see
+//! [`AgentHarness::invoke_collecting_partial`]).
 //!
 //! # Backoff
 //!
