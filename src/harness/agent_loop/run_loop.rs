@@ -229,11 +229,28 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // The context's `LimitTracker` (synced with `RunPolicy::limits`
             // above) is the single enforced source of truth for the model-call
             // cap, so the reported limit always matches the one that trips.
-            if let Err(err) = ctx.record_model_call() {
-                ctx.emit(AgentEvent::LimitReached {
-                    kind: LimitKind::ModelCalls,
-                });
-                return Err(TinyAgentsError::LimitExceeded(err.to_string()));
+            // `LimitBehavior::StopWithPartial` turns cap exhaustion into a
+            // clean stop rather than an error that discards every message,
+            // usage figure, and tool result the run produced up to that point.
+            match ctx.limits.try_record_model_call() {
+                Ok(crate::harness::limits::LimitOutcome::Proceed) => {}
+                Ok(crate::harness::limits::LimitOutcome::Stop(_)) => {
+                    ctx.emit(AgentEvent::LimitReached {
+                        kind: LimitKind::ModelCalls,
+                    });
+                    tracing::debug!(
+                        target: "tinyagents::agent_loop",
+                        run_id = %ctx.run_id(),
+                        "[agent_loop] model-call cap reached; stopping with the partial run"
+                    );
+                    return Ok(LoopExit::LimitStop(LimitKind::ModelCalls));
+                }
+                Err(err) => {
+                    ctx.emit(AgentEvent::LimitReached {
+                        kind: LimitKind::ModelCalls,
+                    });
+                    return Err(TinyAgentsError::LimitExceeded(err.to_string()));
+                }
             }
 
             // Build the request from the working transcript, tool schemas, and
