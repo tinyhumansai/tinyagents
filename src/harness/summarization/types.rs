@@ -58,6 +58,121 @@ pub enum TrimStrategy {
     MaxTokens(u64),
 }
 
+/// The role of a [`Message`], as a standalone value for role-boundary
+/// predicates.
+///
+/// Used by [`TrimOptions::start_on`] / [`TrimOptions::end_on`], the crate's
+/// port of LangChain core's `trim_messages(start_on=…, end_on=…)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageRole {
+    /// [`Message::System`].
+    System,
+    /// [`Message::User`].
+    User,
+    /// [`Message::Assistant`].
+    Assistant,
+    /// [`Message::Tool`].
+    Tool,
+}
+
+impl MessageRole {
+    /// Returns the role of `message`.
+    pub fn of(message: &Message) -> Self {
+        match message {
+            Message::System(_) => MessageRole::System,
+            Message::User(_) => MessageRole::User,
+            Message::Assistant(_) => MessageRole::Assistant,
+            Message::Tool(_) => MessageRole::Tool,
+        }
+    }
+}
+
+/// Knobs for [`trim_messages_with`][crate::harness::summarization::trim_messages_with].
+///
+/// [`Default`] is the safe configuration: tool-call pairing is repaired and no
+/// role boundary is imposed. [`trim_messages`][crate::harness::summarization::trim_messages]
+/// is exactly `trim_messages_with(.., &TrimOptions::default())`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrimOptions {
+    /// Repair the strategy's cut point so it never splits an assistant
+    /// tool-call turn from the tool results answering it, and never leaves an
+    /// assistant tool call unanswered.
+    ///
+    /// **Defaults to on, and should stay on.** Turning it off restores the
+    /// pre-repair behaviour, which produces transcripts that providers reject
+    /// outright: OpenAI `400`s on a `role:"tool"` with no preceding
+    /// `tool_calls`, and Anthropic rejects a `tool_result` with no matching
+    /// `tool_use`. It exists for callers that reconstruct pairing themselves
+    /// afterwards (and for tests that need to observe the unrepaired cut).
+    ///
+    /// `#[serde(default = …)]` so a persisted `TrimOptions` written before this
+    /// field existed — or one that simply omits it — still deserialises to the
+    /// safe value rather than to `false`.
+    #[serde(default = "default_repair_tool_pairs")]
+    pub repair_tool_pairs: bool,
+
+    /// Drop messages from the **front** of the retained slice until it begins
+    /// on one of these roles. `None` (the default) imposes no boundary.
+    ///
+    /// This is the mechanism LangChain core's `trim_messages` documents as the
+    /// caller's responsibility for provider compatibility — e.g.
+    /// `start_on: [User]` for providers that require the first non-system turn
+    /// to be a user turn. It composes with, and does not replace,
+    /// [`repair_tool_pairs`][Self::repair_tool_pairs].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_on: Option<Vec<MessageRole>>,
+
+    /// Drop messages from the **back** of the retained slice until it ends on
+    /// one of these roles. `None` (the default) imposes no boundary.
+    ///
+    /// `end_on: [Tool, Assistant]` is the usual setting for "do not end the
+    /// prompt mid-tool-call".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_on: Option<Vec<MessageRole>>,
+}
+
+/// The default for [`TrimOptions::repair_tool_pairs`] (`true`).
+pub(crate) fn default_repair_tool_pairs() -> bool {
+    true
+}
+
+impl Default for TrimOptions {
+    /// The safe configuration: pairing repaired, no role boundary.
+    ///
+    /// Hand-written rather than derived precisely because a derived `Default`
+    /// would set `repair_tool_pairs` to `false` — silently restoring the
+    /// provider-`400` behaviour this type exists to prevent.
+    fn default() -> Self {
+        Self {
+            repair_tool_pairs: default_repair_tool_pairs(),
+            start_on: None,
+            end_on: None,
+        }
+    }
+}
+
+impl TrimOptions {
+    /// Requires the retained slice to begin on one of `roles`.
+    pub fn starting_on(mut self, roles: impl IntoIterator<Item = MessageRole>) -> Self {
+        self.start_on = Some(roles.into_iter().collect());
+        self
+    }
+
+    /// Requires the retained slice to end on one of `roles`.
+    pub fn ending_on(mut self, roles: impl IntoIterator<Item = MessageRole>) -> Self {
+        self.end_on = Some(roles.into_iter().collect());
+        self
+    }
+
+    /// Disables tool-call pairing repair. See
+    /// [`repair_tool_pairs`][Self::repair_tool_pairs] before reaching for this.
+    pub fn without_pair_repair(mut self) -> Self {
+        self.repair_tool_pairs = false;
+        self
+    }
+}
+
 /// Options for order-preserving token-budget trimming with a caller-supplied
 /// message estimator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

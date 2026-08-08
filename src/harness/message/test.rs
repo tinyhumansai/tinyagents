@@ -277,3 +277,160 @@ fn an_unset_flag_is_omitted_from_the_wire() {
     let wire = serde_json::to_value(Message::Tool(msg)).unwrap();
     assert_eq!(wire["tool"]["trusted_verbatim"], json!(true));
 }
+
+// ---------------------------------------------------------------------------
+// content_and_artifact (C7)
+// ---------------------------------------------------------------------------
+
+/// A tool may return a small model-facing summary while leaving the full
+/// structured payload reachable from the transcript.
+#[test]
+fn tool_from_result_carries_the_structured_artifact() {
+    let mut result = crate::harness::tool::ToolResult::text("c1", "query", "3 rows");
+    result.raw = Some(json!({"rows": [1, 2, 3]}));
+
+    let message = Message::tool_from_result(&result);
+
+    // The model sees only the summary…
+    assert_eq!(message.text(), "3 rows");
+    // …while application code can recover the payload.
+    assert_eq!(message.artifact(), Some(&json!({"rows": [1, 2, 3]})));
+}
+
+/// The artifact is host-side state and must never be part of the text the wire
+/// conversion serialises.
+#[test]
+fn artifact_does_not_leak_into_message_text() {
+    let mut result = crate::harness::tool::ToolResult::text("c1", "query", "ok");
+    result.raw = Some(json!({"secret_looking_blob": "x".repeat(500)}));
+    let message = Message::tool_from_result(&result);
+
+    assert_eq!(message.text(), "ok");
+    assert!(!message.text().contains("secret_looking_blob"));
+    // It is also not charged to the context window, because it never reaches
+    // the provider.
+    assert_eq!(message.estimated_char_weight(), "ok".len() + "c1".len());
+}
+
+/// Non-tool messages have no artifact, and a plain `Message::tool` never
+/// invents one.
+#[test]
+fn artifact_is_absent_without_a_tool_result() {
+    assert!(Message::assistant("hi").artifact().is_none());
+    assert!(Message::tool("c1", "r").artifact().is_none());
+}
+
+/// Transcripts persisted before the field existed still deserialise, and a
+/// message with no artifact stays byte-identical on the wire.
+#[test]
+fn artifact_serde_defaults_and_skips() {
+    let legacy: Message =
+        serde_json::from_value(json!({"tool": {"tool_call_id": "c1", "content": []}})).unwrap();
+    assert!(legacy.artifact().is_none());
+
+    let rendered = serde_json::to_value(&legacy).unwrap();
+    assert!(rendered["tool"].get("artifact").is_none());
+
+    let mut result = crate::harness::tool::ToolResult::text("c1", "t", "ok");
+    result.raw = Some(json!({"a": 1}));
+    let round_tripped: Message =
+        serde_json::from_value(serde_json::to_value(Message::tool_from_result(&result)).unwrap())
+            .unwrap();
+    assert_eq!(round_tripped.artifact(), Some(&json!({"a": 1})));
+}
+
+// ---------------------------------------------------------------------------
+// Token estimation (REASON-3)
+// ---------------------------------------------------------------------------
+
+/// An assistant turn that only calls tools carries no text. Counting content
+/// alone estimated it at zero tokens, so a tool-driven run never tripped a
+/// compaction gate no matter how large its argument blobs grew.
+#[test]
+fn tool_only_assistant_turn_is_not_estimated_at_zero() {
+    let message = Message::Assistant(AssistantMessage {
+        id: None,
+        content: Vec::new(),
+        tool_calls: vec![ToolCall::new(
+            "call_1",
+            "search",
+            json!({"query": "q".repeat(1_000)}),
+        )],
+        usage: None,
+    });
+
+    assert_eq!(message.text(), "");
+    assert!(message.estimated_char_weight() > 1_000);
+    assert!(estimate_message_tokens(&message) > 200);
+    assert!(count_tokens_approximately(&[message]) > 200);
+}
+
+/// The parity counter charges role labels and per-message framing, so many
+/// short messages are not free.
+#[test]
+fn count_tokens_approximately_charges_role_and_framing() {
+    let one = count_tokens_approximately(&[Message::user("")]);
+    // "user" (4 chars => 1 token) + 3 framing tokens.
+    assert_eq!(one, 4);
+
+    let four = count_tokens_approximately(&vec![Message::user(""); 4]);
+    assert_eq!(four, 16, "per-message rounding must sum to the whole");
+}
+
+/// Tool declarations occupy the prompt too; a run with verbose schemas starts
+/// well into its window before the first user message.
+#[test]
+fn tool_schemas_are_counted() {
+    let schema = crate::harness::tool::ToolSchema::new(
+        "search",
+        "Search the corpus",
+        json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+    );
+    let options = TokenCountOptions::default();
+    assert!(count_tool_schema_tokens(&[schema], &options) > 5);
+    assert_eq!(count_tool_schema_tokens(&[], &options), 0);
+}
+
+/// Usage calibration may only nudge the heuristic, never replace it: the factor
+/// is clamped so one anomalous provider report cannot blow the estimate up or
+/// collapse it below the heuristic.
+#[test]
+fn usage_metadata_scaling_is_clamped_both_ways() {
+    let options = TokenCountOptions::default().with_usage_metadata_scaling();
+
+    let inflated = vec![
+        Message::user("hello there"),
+        Message::Assistant(AssistantMessage {
+            id: None,
+            content: vec![ContentBlock::Text("hi".into())],
+            tool_calls: Vec::new(),
+            usage: Some(Usage {
+                total_tokens: 1_000_000,
+                ..Usage::default()
+            }),
+        }),
+    ];
+    let baseline = count_tokens_approximately(&inflated);
+    let scaled = count_tokens_approximately_with(&inflated, &options);
+    assert!(scaled <= (baseline as f64 * USAGE_SCALE_MAX).ceil() as u64);
+    assert!(scaled >= baseline);
+
+    let deflated = vec![
+        Message::user("hello there"),
+        Message::Assistant(AssistantMessage {
+            id: None,
+            content: vec![ContentBlock::Text("hi".into())],
+            tool_calls: Vec::new(),
+            usage: Some(Usage {
+                total_tokens: 1,
+                ..Usage::default()
+            }),
+        }),
+    ];
+    // A provider reporting fewer tokens than the heuristic guessed is not a
+    // licence to under-count.
+    assert_eq!(
+        count_tokens_approximately_with(&deflated, &options),
+        count_tokens_approximately(&deflated)
+    );
+}
