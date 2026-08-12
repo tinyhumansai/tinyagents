@@ -119,6 +119,8 @@ tests for every adapter.
 - Support parent-orchestrator and human steering of sub-agents, orchestrator
   agents, graph tasks, and harness loops through typed commands delivered at
   safe boundaries.
+- Queue host-owned payloads in steer, follow-up, and collected-context lanes
+  without importing host transport or UI metadata into the harness.
 - Support durable graph runs with pause/resume, checkpoint listing, and
   inspectable node transitions.
 - Support per-agent execution blueprints that describe how an agent runs
@@ -164,6 +166,10 @@ src/harness/
   prompt.rs
   providers.rs
   retry.rs
+  run_queue/
+    mod.rs
+    test.rs
+    types.rs
   runtime.rs
   steering.rs
   stream.rs
@@ -201,6 +207,8 @@ Feature ownership:
 - `prompt`: prompt templates, rendering, and dynamic prompt context.
 - `providers`: feature-gated provider adapters.
 - `retry`: retry classification, backoff, attempt accounting.
+- `run_queue`: generic FIFO mechanics for steer, follow-up, and
+  collected-context payloads; hosts retain ownership of payload metadata.
 - `runtime`: high-level `AgentHarness` builder/facade.
 - `steering`: policy-checked parent/human steering of orchestrators,
   sub-agents, graph tasks, and harness loops.

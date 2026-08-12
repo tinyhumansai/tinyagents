@@ -326,6 +326,26 @@ pub(super) fn local_options_object(provider_options: &Value) -> Option<&Value> {
 // Error classification
 // ---------------------------------------------------------------------------
 
+/// Returns `true` when a provider failure says the model's Jinja chat template
+/// rejected the message list.
+///
+/// This is distinct from a rejected model id, sampling parameter, or
+/// credential. The markers are emitted by local OpenAI-compatible runtimes
+/// such as LM Studio, llama.cpp, and Ollama while rendering model-owned chat
+/// templates. Matching is deliberately narrow and case-insensitive so hosts
+/// can present accurate remediation without misclassifying ordinary 400s.
+pub fn is_chat_template_rejection_message(body: &str) -> bool {
+    const PHRASES: &[&str] = &[
+        "no user query found in messages",
+        "unable to generate parser for this template",
+        "automatic parser generation failed",
+        "jinja exception",
+    ];
+
+    let lower = body.to_ascii_lowercase();
+    PHRASES.iter().any(|phrase| lower.contains(phrase))
+}
+
 /// Rewrites a local runtime's opaque 404 into a message naming the fix.
 ///
 /// The embeddings adapter has done this for a while — "Run `ollama pull

@@ -3,6 +3,39 @@
 use super::*;
 use serde_json::json;
 
+const LMSTUDIO_CHAT_TEMPLATE_REJECTION: &str = "lmstudio returned: Engine protocol predict \
+    request returned 400: {\"error\":{\"code\":400,\"message\":\"Unable to generate parser \
+    for this template. Automatic parser generation failed: While executing CallExpression at \
+    line 79, column 24 in source: {{- raise_exception('No user query found in messages.') }}. \
+    Error: Jinja Exception: No user query found in messages.\"}}";
+
+#[test]
+fn chat_template_rejections_are_classified_inside_runtime_wrappers() {
+    let aggregate =
+        format!("The model may not be available. Attempts: {LMSTUDIO_CHAT_TEMPLATE_REJECTION}");
+    assert!(is_chat_template_rejection_message(&aggregate));
+}
+
+#[test]
+fn chat_template_rejection_detection_is_case_insensitive() {
+    assert!(is_chat_template_rejection_message(
+        "Error: JINJA EXCEPTION: No User Query Found In Messages."
+    ));
+}
+
+#[test]
+fn unrelated_provider_rejections_are_not_chat_template_failures() {
+    for body in [
+        "openai API error (400): invalid temperature: only 1 is allowed for this model",
+        "The model `gpt-5.5` does not exist or you do not have access to it.",
+        "lmstudio returned: model 'qwen3.5-9b' does not support tools",
+        "openrouter API error (429): rate limited",
+        "Failed to render the prompt template file on disk",
+    ] {
+        assert!(!is_chat_template_rejection_message(body), "{body:?}");
+    }
+}
+
 #[test]
 fn native_root_strips_the_openai_compat_suffix() {
     let kind = LocalRuntimeKind::Ollama;
