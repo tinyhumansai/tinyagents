@@ -708,7 +708,9 @@ fn requires_streaming_flag_skips_non_streaming_attempt() {
 // agent turn forever (511 events / 2 users on the linked Sentry issue).
 #[test]
 fn stream_required_constraint_latches_after_discovery() {
-    let m = model();
+    // A unique base_url keeps this test's runtime discovery out of the
+    // process-global endpoint registry shared with the DEFAULT_BASE_URL tests.
+    let m = model().with_base_url("https://stream-latch-discovery.invalid/v1");
     assert!(!m.requires_streaming(), "must start un-latched");
 
     m.latch_stream_required();
@@ -728,7 +730,8 @@ fn stream_required_latch_survives_through_a_shared_handle() {
     // Production holds models as `Arc<dyn ChatModel>`, so the latch must be
     // observable through a shared reference — that is the whole reason it is an
     // `AtomicBool` and not a `bool`.
-    let shared: std::sync::Arc<OpenAiModel> = std::sync::Arc::new(model());
+    let shared: std::sync::Arc<OpenAiModel> =
+        std::sync::Arc::new(model().with_base_url("https://stream-latch-shared-handle.invalid/v1"));
     let clone = std::sync::Arc::clone(&shared);
     assert!(!clone.requires_streaming());
 
@@ -736,6 +739,38 @@ fn stream_required_latch_survives_through_a_shared_handle() {
     assert!(
         clone.requires_streaming(),
         "the latch must be visible to every holder of the shared model"
+    );
+}
+
+// openhuman#5497: the per-instance latch is not enough on its own. Hosts build a
+// fresh `OpenAiModel` per workload (chat, summariser, titler, …) all aimed at
+// the same streaming-only endpoint, so a purely per-instance latch lets the
+// guaranteed-400 probe reappear for every workload on every turn. The discovery
+// is therefore shared process-wide, keyed by endpoint.
+#[test]
+fn stream_required_discovery_is_shared_across_instances_by_endpoint() {
+    let base = "https://shared-stream-discovery.invalid/v1";
+
+    let discoverer = OpenAiModel::new("k").with_base_url(base);
+    assert!(!discoverer.requires_streaming(), "must start un-latched");
+    discoverer.latch_stream_required();
+    assert!(discoverer.requires_streaming());
+
+    // A brand-new instance (different key + model, same endpoint) inherits the
+    // constraint without ever issuing its own doomed non-streaming probe.
+    let sibling = OpenAiModel::new("other-key")
+        .with_model("some-other-model")
+        .with_base_url(base);
+    assert!(
+        sibling.requires_streaming(),
+        "a fresh instance for the same endpoint must adopt the shared discovery"
+    );
+
+    // Scoped per endpoint — an unrelated base_url is unaffected.
+    let elsewhere = OpenAiModel::new("k").with_base_url("https://unrelated-endpoint.invalid/v1");
+    assert!(
+        !elsewhere.requires_streaming(),
+        "the shared record must be scoped per endpoint, not global-for-all"
     );
 }
 
