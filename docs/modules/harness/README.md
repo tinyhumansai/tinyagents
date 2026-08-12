@@ -166,7 +166,10 @@ src/harness/
   prompt.rs
   providers.rs
   retry.rs
-  run_queue.rs
+  run_queue/
+    mod.rs
+    test.rs
+    types.rs
   runtime.rs
   steering.rs
   stream.rs
