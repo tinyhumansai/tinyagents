@@ -92,7 +92,9 @@ mod sse;
 mod transport;
 
 pub use convert::CacheTokenAccounting;
-pub use local::{CONTEXT_OVERFLOW_CODE, LocalProbe, LocalRuntimeKind};
+pub use local::{
+    CONTEXT_OVERFLOW_CODE, LocalProbe, LocalRuntimeKind, is_chat_template_rejection_message,
+};
 pub use reasoning_tags::ReasoningTagExtraction;
 pub use transport::{AuthStyle, OpenAiModel};
 

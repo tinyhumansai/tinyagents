@@ -159,6 +159,9 @@ pub use harness::steering::{
     SteeringCommand, SteeringCommandKind, SteeringHandle, SteeringOutcome, SteeringPolicy,
 };
 
+// --- Harness: active-run message queues ---
+pub use harness::run_queue::{QueueLane, QueueStatus, RunQueue};
+
 // --- Cooperative run cancellation ---
 pub use harness::cancel::CancellationToken;
 
