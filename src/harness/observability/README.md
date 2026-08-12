@@ -71,8 +71,10 @@ per-observation: the first failure of a run logs at `ERROR` on the
 first success afterwards logs one `WARN` recovery summary carrying how many
 observations were lost. The worker keeps attempting every item while degraded —
 the attempt is what detects recovery. Because reporting goes through `tracing`,
-an embedder with no subscriber installed sees nothing; read `append_failures`
-for a subscriber-independent signal.
+an embedder with no subscriber installed sees nothing — install a subscriber to
+observe durable-log loss. `AppendWorker::append_failures` counts it, but like
+the queue-full `dropped` count it is crate-internal, so it is not a signal a
+host application can read today.
 
 ## Latency metrics semantics
 

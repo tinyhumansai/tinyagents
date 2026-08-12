@@ -44,8 +44,12 @@
 //!
 //! Persistence remains best-effort — an error never propagates back into the run
 //! — but it is observable. Note that reporting goes through `tracing`, so an
-//! embedder with no subscriber installed sees nothing; inspect
-//! [`AppendWorker::append_failures`] for a subscriber-independent signal.
+//! embedder with no subscriber installed sees nothing at all: installing one is
+//! how a host observes durable-log loss. [`AppendWorker::append_failures`]
+//! counts it, but — like the queue-full [`AppendWorker::dropped`] count it
+//! mirrors — it is crate-internal and is not reachable from a host application
+//! through [`JournalSink`](super::JournalSink) or
+//! [`JsonlSink`](super::JsonlSink).
 //!
 //! # Ordering & durability boundary
 //! A single drain thread preserves submit order. [`AppendWorker::flush`] blocks
