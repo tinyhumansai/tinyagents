@@ -754,21 +754,11 @@ fn redact_base_url_for_log_strips_credentials_and_query() {
     let redacted = super::transport::redact_base_url_for_log(
         "https://user:sup3rsecret@proxy.example.com:8443/v1?api_key=abc123#frag",
     );
-    assert!(
-        !redacted.contains("sup3rsecret"),
-        "password must be stripped: {redacted}"
-    );
-    assert!(
-        !redacted.contains("api_key") && !redacted.contains("abc123"),
-        "query must be stripped: {redacted}"
-    );
-    assert!(
-        !redacted.contains("user@") && !redacted.contains("user:"),
-        "username must be stripped: {redacted}"
-    );
-    assert!(
-        redacted.starts_with("https://proxy.example.com:8443/v1"),
-        "scheme, host, port and path are preserved: {redacted}"
+    // Exact match proves userinfo, query AND fragment are all gone (not just
+    // the specific secret tokens) while scheme, host, port and path survive.
+    assert_eq!(
+        redacted, "https://proxy.example.com:8443/v1",
+        "credentials, query and fragment must be stripped; host/port/path kept: {redacted}"
     );
 
     // A credential-free URL is unchanged.
