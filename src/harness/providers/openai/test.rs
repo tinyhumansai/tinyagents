@@ -748,6 +748,43 @@ fn stream_required_latch_survives_through_a_shared_handle() {
 // guaranteed-400 probe reappear for every workload on every turn. The discovery
 // is therefore shared process-wide, keyed by endpoint.
 #[test]
+fn redact_base_url_for_log_strips_credentials_and_query() {
+    // A proxy endpoint that carries a secret in userinfo or a query param must
+    // never reach a log line (the latch discovery logs base_url).
+    let redacted = super::transport::redact_base_url_for_log(
+        "https://user:sup3rsecret@proxy.example.com:8443/v1?api_key=abc123#frag",
+    );
+    assert!(
+        !redacted.contains("sup3rsecret"),
+        "password must be stripped: {redacted}"
+    );
+    assert!(
+        !redacted.contains("api_key") && !redacted.contains("abc123"),
+        "query must be stripped: {redacted}"
+    );
+    assert!(
+        !redacted.contains("user@") && !redacted.contains("user:"),
+        "username must be stripped: {redacted}"
+    );
+    assert!(
+        redacted.starts_with("https://proxy.example.com:8443/v1"),
+        "scheme, host, port and path are preserved: {redacted}"
+    );
+
+    // A credential-free URL is unchanged.
+    assert_eq!(
+        super::transport::redact_base_url_for_log("https://api.openai.com/v1"),
+        "https://api.openai.com/v1"
+    );
+
+    // A value that does not parse as a URL is replaced wholesale, never logged.
+    assert_eq!(
+        super::transport::redact_base_url_for_log("::not a url::"),
+        "<unparseable base_url redacted>"
+    );
+}
+
+#[test]
 fn stream_required_discovery_is_shared_across_instances_by_endpoint() {
     let base = "https://shared-stream-discovery.invalid/v1";
 

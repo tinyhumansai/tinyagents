@@ -507,7 +507,7 @@ impl OpenAiModel {
             tracing::info!(
                 provider = %self.provider,
                 model = %self.model,
-                base_url = %self.base_url,
+                base_url = %redact_base_url_for_log(&self.base_url),
                 "[openai] provider requires stream:true; latching endpoint-wide for subsequent calls"
             );
         }
@@ -2344,6 +2344,25 @@ const STREAM_REQUIRED_STATUSES: [u16; 2] = [400, 422];
 /// removed — a streaming-only endpoint does not stop being one within a process.
 static STREAM_REQUIRED_ENDPOINTS: LazyLock<RwLock<HashSet<String>>> =
     LazyLock::new(|| RwLock::new(HashSet::new()));
+
+/// Redacts a base URL for logging: drops any embedded credentials (userinfo)
+/// and query/fragment, keeping only `scheme://host[:port]/path`. Some
+/// OpenAI-compatible proxies carry an API key in the URL (userinfo or a query
+/// param), so the raw `base_url` must never reach a log line. A value that does
+/// not parse as a URL is replaced wholesale rather than logged, so a malformed
+/// endpoint cannot leak either.
+pub(super) fn redact_base_url_for_log(base_url: &str) -> String {
+    match reqwest::Url::parse(base_url) {
+        Ok(mut url) => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        }
+        Err(_) => "<unparseable base_url redacted>".to_string(),
+    }
+}
 
 /// Whether `base_url` has already been discovered to require streaming.
 fn endpoint_requires_streaming(base_url: &str) -> bool {
