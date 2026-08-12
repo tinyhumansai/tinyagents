@@ -142,6 +142,18 @@ pub struct OpenAiModel {
     /// guaranteed-400 round trip before falling back. See
     /// [`Self::latch_stream_required`].
     stream_required: AtomicBool,
+    /// Whether [`stream_required`](Self::stream_required) was set explicitly by a
+    /// caller via [`with_requires_streaming`](Self::with_requires_streaming), as
+    /// opposed to left at its default or discovered at run time.
+    ///
+    /// When `true`, [`requires_streaming`](Self::requires_streaming) returns the
+    /// instance's own value and does **not** consult the process-wide
+    /// endpoint registry — an explicit opt-out (`with_requires_streaming(false)`)
+    /// therefore wins over a sibling's endpoint-wide discovery. Without this, an
+    /// aggregating proxy that fronts mixed upstreams on one `base_url` would
+    /// force a model the host deliberately opted out (e.g. a titler routed to a
+    /// non-streaming upstream) onto the streaming path with no way back.
+    stream_required_explicit: AtomicBool,
     /// Whether a JSON-Schema `response_format` is sent with OpenAI **strict**
     /// structured output (`"strict": true`).
     ///
@@ -451,6 +463,7 @@ impl OpenAiModel {
             reasoning_tags: Some(ReasoningTagExtraction::default()),
             reasoning_tags_overridden: false,
             stream_required: AtomicBool::new(false),
+            stream_required_explicit: AtomicBool::new(false),
             json_schema_strict: AtomicBool::new(true),
             native_tools_on_wire: AtomicBool::new(true),
             cache_accounting: CacheTokenAccounting::default(),
@@ -459,29 +472,47 @@ impl OpenAiModel {
         }
     }
 
-    /// When the provider requires `stream: true` for every request, routes
-    /// unary [`invoke`](ChatModel::invoke) through the streaming path internally.
+    /// Declares up front whether the provider requires `stream: true` for every
+    /// request. When enabled, unary [`invoke`](ChatModel::invoke) is routed
+    /// through the streaming path internally, skipping the one exploratory
+    /// request that run-time discovery costs.
     ///
-    /// Optional: the transport also discovers this on its own (see
-    /// [`Self::latch_stream_required`]). Set it explicitly to skip the one
-    /// exploratory request that discovery costs.
+    /// This is an **explicit, per-instance override**: it is authoritative for
+    /// this instance and is never overridden by a sibling's endpoint-wide
+    /// discovery (see [`Self::requires_streaming`]). So `with_requires_streaming(false)`
+    /// is a genuine opt-out — a model the host knows does not need streaming
+    /// (e.g. a titler routed to a non-streaming upstream behind an aggregating
+    /// proxy) stays on the unary path even if another model sharing the same
+    /// `base_url` has latched the streaming constraint.
     pub fn with_requires_streaming(self, enabled: bool) -> Self {
         self.stream_required.store(enabled, Ordering::Relaxed);
+        self.stream_required_explicit.store(true, Ordering::Relaxed);
         self
     }
 
-    /// Returns whether this instance currently requires streaming for all
-    /// unary calls — either declared up front via
-    /// [`with_requires_streaming`](Self::with_requires_streaming) or learned
-    /// from a provider rejection.
+    /// Returns whether this instance requires streaming for all unary calls.
+    ///
+    /// Precedence:
+    /// 1. An **explicit** [`with_requires_streaming`](Self::with_requires_streaming)
+    ///    is authoritative and short-circuits the shared registry, so an opt-out
+    ///    is never clobbered by another model on the same endpoint.
+    /// 2. Otherwise a value **learned at run time** on this instance (see
+    ///    [`Self::latch_stream_required`]) wins.
+    /// 3. Otherwise a **sibling's** endpoint-wide discovery is adopted (and
+    ///    cached locally to keep the shared read off the hot path).
     pub fn requires_streaming(&self) -> bool {
+        // (1) An explicit setting wins outright — including an explicit `false`,
+        // which must remain a working opt-out.
+        if self.stream_required_explicit.load(Ordering::Relaxed) {
+            return self.stream_required.load(Ordering::Relaxed);
+        }
+        // (2) This instance's own value (default or run-time-latched).
         if self.stream_required.load(Ordering::Relaxed) {
             return true;
         }
-        // A sibling instance pointed at the same endpoint may have already
-        // discovered the constraint. Adopt that so this fresh instance skips the
-        // doomed non-streaming probe too, then cache it locally to avoid the
-        // shared-lock read on subsequent calls.
+        // (3) A sibling pointed at the same endpoint may have already discovered
+        // the constraint. Adopt it so this fresh instance skips the doomed
+        // non-streaming probe, and cache it locally.
         if endpoint_requires_streaming(&self.base_url) {
             self.stream_required.store(true, Ordering::Relaxed);
             return true;
