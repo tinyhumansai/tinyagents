@@ -221,11 +221,19 @@ pub trait ExperienceStore: Send + Sync {
 }
 ```
 
-`ProgressEvent` is deliberately coarse (`Started`, `ToolCall`, `Token`,
-`Finished`, `Error`). OpenHuman's `AgentProgress` is a **UI contract** consumed
-by its frontend timeline, cost footer, and citation chips; it stays host-side
-and is produced *from* `ProgressEvent`. If it drifts into this crate the
-frontend breaks in ways unit tests will not catch.
+`ProgressEvent` is deliberately coarse (`Started`, `ToolCall`,
+`ToolCallFinished`, `Token`, `Finished`, `Error`). OpenHuman's `AgentProgress`
+is a **UI contract** consumed by its frontend timeline, cost footer, and
+citation chips; it stays host-side and is produced *from* `ProgressEvent`. If it
+drifts into this crate the frontend breaks in ways unit tests will not catch.
+
+The test for admitting a variant is **whether only the runtime can know it**,
+not a variant count. `ToolCallFinished` was added under that test (issue #88):
+`ToolCall` opened a tool row and nothing closed it, so a host could not report a
+tool's outcome truthfully — it would have had to leave every row running
+forever or fabricate `success: true`, which puts wrong data in both the timeline
+and the trace exporter. Whether a tool returned or failed is a runtime fact, in
+the same category as `Started` and `Finished`. A chip or a footer is not.
 
 ### 3.10 `ModelResolver`
 
@@ -239,6 +247,20 @@ pub trait ModelResolver<State: Send + Sync>: Send + Sync {
     async fn resolve(&self, req: &ModelResolveRequest) -> Result<Arc<dyn ChatModel<State>>>;
 }
 ```
+
+`ModelResolveRequest` carries `agent_id`, `role`, `is_team_lead` and
+`model_pin`. The last was added by issue #89: `AgentDefinition.model` is
+documented as the model an agent pins, and there was previously no field for it
+on the request, leaving `role` as the only string a wiring author could reach
+for. A host resolver reasonably reads `role` as a role vocabulary, so a model id
+placed there becomes an unrecognised role and falls back to a default — the pin
+dropped silently. `role` is a **host taxonomy**; `model_pin` is a **concrete
+model id**; they must stay separate channels.
+
+The pin is **advisory**. The host decides whether it can honour it — the model
+may be unconfigured, its credentials absent, or its provider down — because the
+runtime has no view of any of that. A runtime that honoured pins itself would
+route to models the host cannot call.
 
 ---
 

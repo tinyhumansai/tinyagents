@@ -38,9 +38,9 @@
 //!
 //! # Why [`ProgressEvent`] stays coarse
 //!
-//! Five variants, and it should stay at five. A host's user-facing progress
-//! model — timeline entries, cost footers, citation chips, avatars, retry
-//! badges — is a **host contract** owned by that host's UI, and it is
+//! Six variants, and the bar for a seventh is high. A host's user-facing
+//! progress model — timeline entries, cost footers, citation chips, avatars,
+//! retry badges — is a **host contract** owned by that host's UI, and it is
 //! *produced from* these events by host-side adapter code. It must not migrate
 //! into this enum.
 //!
@@ -51,6 +51,25 @@
 //! chip, missing footer, stale timeline row — which unit tests in *either*
 //! repository will not catch, because both sides still compile and both sides
 //! still pass. Keep presentation on the host side of the seam.
+//!
+//! # The admission test: runtime facts, not presentation
+//!
+//! "Coarse" is not a variant budget, it is a category rule, and the rule is
+//! whether **only the runtime can know it**. `Started`, `ToolCall`,
+//! `ToolCallFinished`, `Token`, `Finished` and `Error` are all facts about what
+//! the engine did; no host can derive any of them from the outside. A chip, a
+//! footer or a badge is computed *from* those facts by host code, and belongs
+//! there. Ask that question of a proposed variant before counting variants.
+//!
+//! [`ProgressEvent::ToolCallFinished`] was admitted under exactly that test.
+//! This module previously declared that there was intentionally no completion
+//! variant, on the reasoning that tool results are large and can carry
+//! untrusted text — true of the *payload*, but it left `ToolCall` opening a
+//! timeline row that nothing could ever close. `Started`/`Finished` bracket a
+//! run; tool calls now bracket the same way. The asymmetry was an oversight
+//! rather than a boundary, and the payload concern is answered by policy on the
+//! field (see [`ToolCallFinished::output`](Self::ToolCallFinished)) instead of
+//! by withholding the outcome.
 
 use std::sync::{Arc, Mutex};
 
@@ -80,7 +99,7 @@ use crate::harness::usage::Usage;
 /// # Relationship to `AgentEvent`
 ///
 /// [`AgentEvent`](crate::harness::events::AgentEvent) is the authoritative,
-/// fine-grained event stream, and these five variants are a deliberately coarse
+/// fine-grained event stream, and these six variants are a deliberately coarse
 /// projection of it (`Started` ← `RunStarted`, `Token` ← `ModelDelta`, and so
 /// on). `AgentEvent` is the source of truth; `ProgressEvent` is derived.
 ///
@@ -111,11 +130,16 @@ pub enum ProgressEvent {
 
     /// A tool invocation started.
     ///
-    /// There is intentionally **no** completion variant and no arguments or
-    /// result payload. Tool results can be large and can carry untrusted or
-    /// sensitive text; a progress side channel is the wrong place to fan them
-    /// out. A host that wants to render outcomes classifies them itself from
-    /// the turn result.
+    /// Closed by at most one [`ToolCallFinished`](Self::ToolCallFinished)
+    /// carrying the same `call`. **At most**, not exactly one: a run that fails
+    /// or is cancelled mid-tool emits `Error` and no closing event, and events
+    /// may be dropped under backpressure. A host must therefore tear down open
+    /// tool rows when [`is_terminal`](Self::is_terminal) fires, rather than
+    /// waiting for a close that may never arrive.
+    ///
+    /// Call arguments are deliberately absent. They can be large and can carry
+    /// untrusted or sensitive text, and a host does not need them here — it
+    /// owns the tool being invoked and already has them.
     ToolCall {
         /// The run this event belongs to.
         run: RunId,
@@ -123,6 +147,40 @@ pub enum ProgressEvent {
         call: CallId,
         /// Tool name as registered with the runtime.
         tool: String,
+    },
+
+    /// A tool invocation finished, successfully or not.
+    ///
+    /// Correlates with the opening [`ToolCall`](Self::ToolCall) by `call`. This
+    /// is a runtime fact, not a presentation concern: only the engine knows
+    /// whether the tool returned or failed, so no host can derive it. Without
+    /// it a row opened by `ToolCall` could never be closed truthfully — see the
+    /// admission test in the module docs.
+    ///
+    /// **Never synthesise this event.** The tempting shortcut is to infer
+    /// completion from the arrival of the next event and assume success. That
+    /// establishes *that* a tool finished but not *how*, and a fabricated
+    /// `success: true` writes wrong data into both the host's timeline and its
+    /// trace exporter. A row visibly stuck in a running state is a better
+    /// outcome than a confidently incorrect one: the first gets noticed, the
+    /// second does not.
+    ToolCallFinished {
+        /// The run this event belongs to.
+        run: RunId,
+        /// The individual call, matching the opening [`ToolCall`](Self::ToolCall).
+        call: CallId,
+        /// Whether the tool returned successfully.
+        success: bool,
+        /// Raw tool output, or empty when the runtime ran with payload capture
+        /// off.
+        ///
+        /// Deliberately carries **no** truncation or redaction policy: both are
+        /// host decisions, and a host must apply its own before rendering or
+        /// exporting this. Empty is ambiguous by construction — it means "not
+        /// captured" or "genuinely empty", and a host needing to tell those
+        /// apart must consult its own capture configuration rather than
+        /// inferring from this field.
+        output: String,
     },
 
     /// A chunk of assistant output became available.
@@ -174,6 +232,7 @@ impl ProgressEvent {
         match self {
             Self::Started { run, .. }
             | Self::ToolCall { run, .. }
+            | Self::ToolCallFinished { run, .. }
             | Self::Token { run, .. }
             | Self::Finished { run, .. }
             | Self::Error { run, .. } => run,
@@ -186,6 +245,11 @@ impl ProgressEvent {
     /// Lets a host tear down per-run UI state without matching on every
     /// variant, so adding a mid-turn variant later cannot silently turn into a
     /// leaked progress row.
+    ///
+    /// [`ToolCallFinished`](Self::ToolCallFinished) is **not** terminal despite
+    /// the name — it ends a tool call, not the run, and a turn typically emits
+    /// several before `Finished`. Treating it as terminal would tear the run's
+    /// UI down at the first tool result.
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Finished { .. } | Self::Error { .. })
     }
@@ -341,6 +405,15 @@ mod tests {
         }
     }
 
+    fn tool_call_finished(success: bool, output: &str) -> ProgressEvent {
+        ProgressEvent::ToolCallFinished {
+            run: run(),
+            call: CallId::new("call-1"),
+            success,
+            output: output.to_string(),
+        }
+    }
+
     fn token(text: &str) -> ProgressEvent {
         ProgressEvent::Token {
             run: run(),
@@ -368,7 +441,14 @@ mod tests {
     }
 
     fn all_variants() -> Vec<ProgressEvent> {
-        vec![started(), tool_call(), token("hi"), finished(), error()]
+        vec![
+            started(),
+            tool_call(),
+            tool_call_finished(true, "result"),
+            token("hi"),
+            finished(),
+            error(),
+        ]
     }
 
     // ── Value-type invariants ────────────────────────────────────────────────
@@ -390,6 +470,52 @@ mod tests {
     }
 
     #[test]
+    fn tool_completion_is_not_terminal() {
+        // A turn emits one of these per tool call, several before `Finished`.
+        // If this ever reads as terminal a host tears its run UI down at the
+        // first tool result, which looks like a truncated turn rather than a
+        // bug in this predicate.
+        assert!(!tool_call_finished(true, "ok").is_terminal());
+        assert!(!tool_call_finished(false, "boom").is_terminal());
+    }
+
+    #[test]
+    fn tool_completion_correlates_with_its_opening_call() {
+        // The `call` id is the only thing joining the two events. If they ever
+        // stop matching, a host closes the wrong timeline row and the bug
+        // surfaces as a mis-rendered tool, not as a failure here.
+        let (
+            ProgressEvent::ToolCall { call: opened, .. },
+            ProgressEvent::ToolCallFinished { call: closed, .. },
+        ) = (tool_call(), tool_call_finished(true, "ok"))
+        else {
+            panic!("constructors changed shape");
+        };
+        assert_eq!(opened, closed);
+    }
+
+    #[test]
+    fn failure_is_representable_and_distinct_from_success() {
+        // The whole point of #88: a host must be able to report that a tool
+        // failed. If these ever compare equal, `success` has stopped carrying
+        // information and every failed tool renders as a successful one.
+        assert_ne!(
+            tool_call_finished(true, "same"),
+            tool_call_finished(false, "same")
+        );
+    }
+
+    #[test]
+    fn uncaptured_output_is_representable() {
+        // Empty output is a legitimate state (payload capture off), not a
+        // reason to withhold the outcome — success must still round-trip.
+        let ev = tool_call_finished(false, "");
+        let json = serde_json::to_string(&ev).expect("serialize");
+        let back: ProgressEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, ev);
+    }
+
+    #[test]
     fn events_round_trip_through_serde() {
         for ev in all_variants() {
             let json = serde_json::to_string(&ev).expect("serialize");
@@ -403,6 +529,13 @@ mod tests {
         let json = serde_json::to_value(tool_call()).expect("serialize");
         assert_eq!(json["kind"], "tool_call");
         assert_eq!(json["tool"], "search");
+
+        // Distinct tag from `tool_call` — these cross a serde boundary into
+        // host code, so a collision would silently merge open and close.
+        let json = serde_json::to_value(tool_call_finished(false, "boom")).expect("serialize");
+        assert_eq!(json["kind"], "tool_call_finished");
+        assert_eq!(json["success"], false);
+        assert_eq!(json["output"], "boom");
     }
 
     #[test]
@@ -448,7 +581,7 @@ mod tests {
             sink.emit(ev).await;
         }
         assert_eq!(sink.events(), all_variants());
-        assert_eq!(sink.len(), 5);
+        assert_eq!(sink.len(), all_variants().len());
         assert!(!sink.is_empty());
     }
 
