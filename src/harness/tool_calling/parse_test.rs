@@ -370,3 +370,21 @@ fn quote_bare_json_object_keys_leaves_array_literals_unquoted() {
     assert_eq!(v["flags"], serde_json::json!([true, false]));
     assert_eq!(v["n"], serde_json::Value::Null);
 }
+
+#[test]
+fn parse_tool_calls_with_pformat_preserves_multi_call_tag_bodies() {
+    // A single <tool_call> tag body can hold multiple JSON calls (e.g., two
+    // adjacent objects or a {"tool_calls":[...]} envelope). The ordinal pairing
+    // must not drop them when re-parsing the tag body.
+    use crate::harness::pformat::PFormatRegistry;
+
+    let registry = PFormatRegistry::new();
+    let response = r#"<tool_call>{"name":"get_weather","arguments":{"city":"London"}}{"name":"get_time","arguments":{"tz":"UTC"}}</tool_call>"#;
+    let (_, calls) = parse_tool_calls_with_pformat(response, &registry);
+
+    assert_eq!(calls.len(), 2, "both JSON calls in the tag body must be recovered");
+    assert_eq!(calls[0].name, "get_weather");
+    assert_eq!(calls[0].arguments["city"], "London");
+    assert_eq!(calls[1].name, "get_time");
+    assert_eq!(calls[1].arguments["tz"], "UTC");
+}
