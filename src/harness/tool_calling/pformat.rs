@@ -150,14 +150,19 @@ pub type PFormatRegistry = HashMap<String, PFormatToolParams>;
 /// type is its own vocabulary, and requiring it here would make this module
 /// depend on the very thing it exists to stay independent of. Hosts keep a
 /// one-line adapter over their own tool slice.
-pub fn build_registry<'a, I, N>(tools: I) -> PFormatRegistry
+///
+/// The schema is `Borrow<Value>` rather than `&Value` so a host whose tool
+/// trait *returns* a schema by value — the common shape — can map straight
+/// into this without collecting into a temporary first.
+pub fn build_registry<I, N, S>(tools: I) -> PFormatRegistry
 where
-    I: IntoIterator<Item = (N, &'a Value)>,
+    I: IntoIterator<Item = (N, S)>,
     N: Into<String>,
+    S: std::borrow::Borrow<Value>,
 {
     tools
         .into_iter()
-        .map(|(name, schema)| (name.into(), PFormatToolParams::from_schema(schema)))
+        .map(|(name, schema)| (name.into(), PFormatToolParams::from_schema(schema.borrow())))
         .collect()
 }
 
