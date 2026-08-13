@@ -9,16 +9,17 @@ hand-written Rust. The graph runtime should not know whether a graph came from
 Rust builders or a source file.
 
 The language is also the safe serialization boundary for agent-authored graph
-plans. If a REPL agent proposes a new workflow, that proposal should become
+plans. If an orchestrating agent proposes a new workflow, that proposal should
+become
 `.rag` source or an equivalent AST, then pass through the same parser, resolver,
 registry binding, policy checks, and graph compiler as a human-authored file.
 Generated topology must never be installed directly into the runtime.
 
 This module is intentionally declarative. Interactive scripting and
-CodeAct-style recursive execution belong to the
-[REPL language module](../repl-language/README.md). A `.rag` file defines graph topology
-and bindings; a `.ragsh` session inspects, scripts, and orchestrates harness or
-graph calls through capability-bound functions.
+CodeAct-style recursive execution are host concerns and are not implemented in
+this crate. A `.rag` file defines graph topology and bindings; a host session
+inspects, scripts, and orchestrates harness or graph calls through
+capability-bound functions of its own.
 
 For what the parser/compiler implement today versus what is still aspirational,
 see [Implementation status](implementation-status.md).
@@ -33,8 +34,8 @@ see [Implementation status](implementation-status.md).
   node templates through registries.
 - Declare graph input/output shape, state channels, reducer policies, and
   checkpoint/interrupt policy when the compiled graph supports them.
-- Declare commands, fanout sends, joins, subgraphs, sub-agents, and REPL-backed
-  nodes without embedding arbitrary executable code.
+- Declare commands, fanout sends, joins, subgraphs, sub-agents, and
+  host-script-backed nodes without embedding arbitrary executable code.
 - Produce inspectable blueprints for registries, UIs, documentation, tests, and
   generated workflow review.
 - Preserve source spans for clear errors.
@@ -110,13 +111,13 @@ The docs can still describe the language as TinyAgents source.
 ## Expressiveness Targets
 
 The long-term language should cover the graph concepts proven useful in
-LangGraph, LangChain agent graphs, OpenHuman's state-machine harness, and RLM
+LangGraph, LangChain agent graphs, OpenHuman's state-machine harness, and CodeAct
 style orchestration:
 
 - graph defaults: recursion limits, timeouts, checkpointing, durability,
   streaming modes, cache policy, steering policy, and concurrency
 - capabilities: allowed models, tools, agents, graphs, stores, middleware,
-  retrievers, route functions, node templates, and REPL scripts
+  retrievers, route functions, node templates, and host scripts
 - state channels: messages, scratch state, tool calls, artifacts, candidates,
   usage/cost deltas, interrupt payloads, and custom app fields
 - reducers: last value, append, aggregate, topic, messages-by-id, barrier,
@@ -124,7 +125,7 @@ style orchestration:
 - routing: direct edges, conditional routes, typed route labels, command goto,
   `Send` fanout, joins/barriers, parent graph handoff, and terminal output
 - execution nodes: model, agent loop, tool executor, subgraph, sub-agent,
-  interrupt, router, map/fanout, join, and REPL agent
+  interrupt, router, map/fanout, join, and host-script agent
 - observability: source name, graph id, node ids, tags, metadata, event stream
   projections, generated-by provenance, and blueprint version
 - safety: source size limits, policy allowlists, review gates for generated

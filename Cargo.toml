@@ -3,7 +3,7 @@ name = "tinyagents"
 version = "2.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
-description = "A recursive language-model (RLM) harness for Rust."
+description = "A durable agent + graph harness for Rust."
 repository = "https://github.com/tinyhumansai/tinyagents"
 readme = "README.md"
 keywords = ["llm", "agents", "graph", "langchain", "langgraph"]
@@ -59,12 +59,6 @@ reqwest = { version = "0.12", default-features = false, features = [
 # not add one, it does not resolve.
 rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 
-# Optional embedded Rhai scripting engine powering the `.ragsh` REPL session
-# runtime (`repl::session`). The `sync` feature makes the engine and its values
-# `Send + Sync` so a session can live inside an async graph node. Pulled in only
-# by the `repl` feature to keep the default build light.
-rhai = { version = "1", features = ["sync"], optional = true }
-
 # Optional builtin tool family for deterministic time/date helpers.
 # `serde` is required by `harness::session_store`, whose records carry
 # `DateTime<Utc>` timestamps across the serde boundary.
@@ -75,14 +69,6 @@ chrono-tz = { version = "0.10", optional = true }
 default = []
 # Embedded SQLite-backed checkpointer (`graph::checkpoint::SqliteCheckpointer`).
 sqlite = ["dep:rusqlite"]
-# Embedded Rhai-backed `.ragsh` REPL session runtime (`repl::session`).
-repl = ["dep:rhai"]
-# Recursive-language-model runtime (`rlm`): a driver model writes code cells
-# executed in a sandboxed interpreter (embedded Rhai, or an external Python /
-# JavaScript process) whose only host surface is capability calls back into
-# the registry (`llm`, `tool`, `agent`). `tokio/process` + `tokio/io-util`
-# drive the external interpreter subprocesses.
-rlm = ["dep:rhai", "tokio/process", "tokio/io-util"]
 # Builtin generic tools (`harness::tools`) kept out of the default dependency
 # graph so host applications can choose whether they want these implementations.
 tools = ["dep:chrono-tz"]
@@ -102,12 +88,3 @@ futures = "0.3"
 # The OpenAI provider is always compiled, so these build with a plain
 # `cargo build --examples`; they only need a network call + `OPENAI_API_KEY`
 # at run time.
-
-# --- RLM examples (need the `rlm` feature) ---
-[[example]]
-name = "rlm_rhai"
-required-features = ["rlm"]
-
-[[example]]
-name = "rlm_python"
-required-features = ["rlm"]

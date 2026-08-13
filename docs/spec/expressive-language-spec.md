@@ -8,7 +8,8 @@ This language is not meant to replace Rust. It is a workflow definition layer fo
 fast iteration, examples, documentation, and eventually user-authored agent
 plans.
 
-It is also the safe boundary for agent-authored graph plans. A REPL or model may
+It is also the safe boundary for agent-authored graph plans. A host session or
+model may
 propose `.rag` source, but that source must pass through the same parser,
 diagnostics, registry binding, allowlist checks, review gates, and graph
 compiler as human-authored source before it can run.
@@ -130,7 +131,7 @@ expressive language.
 For generated source, the runtime relationship is:
 
 ```text
-REPL/model proposal -> .rag source or AST -> parser -> diagnostics -> resolver
+host/model proposal -> .rag source or AST -> parser -> diagnostics -> resolver
   -> policy/review gate -> compiler -> GraphBuilder + Harness bindings
   -> CompiledGraph -> optional registry registration
 ```

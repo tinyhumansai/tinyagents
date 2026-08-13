@@ -28,7 +28,7 @@ fn name_only_descriptor_kinds_register_alias_and_resolve() {
     // Every name-only kind that routes through `register_descriptor`.
     for (kind, name) in [
         (ComponentKind::Store, "kv"),
-        (ComponentKind::Script, "triage.ragsh"),
+        (ComponentKind::Script, "triage.script"),
         (ComponentKind::Middleware, "redact"),
         (ComponentKind::Checkpointer, "sqlite"),
         (ComponentKind::TaskStore, "jobs"),

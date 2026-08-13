@@ -1,7 +1,7 @@
 //! Crate-wide error type and `Result` alias.
 //!
 //! Every fallible surface of the recursive runtime — graph execution, the
-//! harness agent loop, sub-agent recursion, `.rag`/`.ragsh` compilation, and
+//! harness agent loop, sub-agent recursion, `.rag` compilation, and
 //! registry binding — funnels through [`TinyAgentsError`] so failures from a
 //! deeply nested child run roll up to the caller through one uniform type.
 //! Downstream code should prefer the [`Result`] alias exported here.
@@ -16,7 +16,7 @@ pub type Result<T> = std::result::Result<T, TinyAgentsError>;
 ///
 /// Variants are grouped by the surface that raises them: graph construction and
 /// execution, model/tool invocation, run limits and policy, graph durability,
-/// and `.rag`/`.ragsh` language processing.
+/// and `.rag` language processing.
 #[derive(Debug, Error)]
 pub enum TinyAgentsError {
     /// A graph was compiled or run without a configured `START` edge, so there
@@ -220,7 +220,7 @@ pub enum TinyAgentsError {
     Resume(String),
 
     // --- language / blueprint errors ---
-    /// A `.rag`/`.ragsh` source could not be tokenised or parsed.
+    /// A `.rag` source could not be tokenised or parsed.
     #[error("parse error at line {line}, column {column}: {message}")]
     Parse {
         message: String,

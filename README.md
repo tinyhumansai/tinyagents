@@ -11,33 +11,18 @@
  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3" /></a>
 </p>
 
-**TinyAgents is a recursive language-model (RLM) harness for Rust.** It is a
-typed, durable runtime where language models call models, agents call agents,
+**TinyAgents is a durable agent and graph harness for Rust.** It is a typed,
+checkpointed runtime where language models call models, agents call agents,
 graphs run graphs, and a model can author, compile, and run the very workflow it
 is standing inside — all as inspectable, checkpointed, policy-checked Rust.
 
-## What is an RLM, and why recursive?
+## Recursion, without an embedded interpreter
 
 Most agent frameworks stuff everything into one ever-growing context window and
-hope the model copes. **Recursive Language Models (RLMs)** take a different
-stance: a long prompt is treated as an external *environment* that the model
-explores through a REPL — examining it, decomposing it, and **recursively calling
-itself (or sub-models) over snippets** instead of swallowing the whole thing at
-once. This mitigates "context rot" and lets effective context exceed the raw
-window.
-
-The idea comes from recent research:
-
-- **Paper:** "Recursive Language Models," Alex L. Zhang, Tim Kraska, Omar Khattab
-  (MIT CSAIL), 2025 — [arXiv:2512.24601](https://arxiv.org/abs/2512.24601)
-- **Blog:** Alex L. Zhang, "Recursive Language Models" —
-  <https://alexzhang13.github.io/blog/2025/rlm/>
-- **Reference implementation:** <https://github.com/alexzhang13/rlm>
-
-TinyAgents is **inspired by and architected around** the RLM execution model — a
-production-shaped Rust harness for building RLM-style systems. It does not claim
-to reproduce the paper's benchmark numbers; instead it brings the *execution
-model* to Rust as concrete, implemented surfaces:
+hope the model copes. TinyAgents takes the other stance: a long task is an
+external *environment* that gets decomposed, and the runtime is re-entrant, so a
+model can recurse over pieces of it instead of swallowing the whole thing at
+once. The concrete surfaces:
 
 - **Sub-agents (agents calling agents).** A harness agent is exposed *as a tool*
   to another agent, so orchestration is literally a model calling a model
@@ -45,22 +30,24 @@ model* to Rust as concrete, implemented surfaces:
 - **Recursion policy + depth tracking.** The runtime tracks `root_run_id` /
   `parent_run_id`, enforces a recursion limit, and rolls child runs' events,
   usage, and cost up to the parent as first-class observable runs.
-- **Graphs that run graphs.** A node can embed another compiled graph, and the
-  `.ragsh` REPL can drive a graph from inside a graph node (graph → REPL →
-  graph).
-- **The REPL as the RLM core.** In `.ragsh`, context and prompts are runtime
-  *values*, not just prompt text. The model writes small programs, inspects their
-  output, calls sub-models / sub-agents / sub-graphs as functions, and iterates —
-  the RLM/CodeAct loop.
+- **Graphs that run graphs.** A node can embed another compiled graph, so a
+  whole compiled workflow can appear as a single step inside another one.
 - **Self-authoring (the deepest recursion).** A model can emit a `.rag`
   blueprint that compiles through the *same* registry-bound compiler path as a
   human-authored file, then runs on the *same* runtime the model is already
   executing in. The harness can describe and re-enter itself.
 
-Two languages, one runtime: `.rag` (declarative blueprint) and `.ragsh`
-(imperative REPL) both lower into the exact same `graph` + `harness` types as
-hand-written Rust — a language whose programs *are* the runtime that interprets
-them.
+One language, one runtime: `.rag` blueprints lower into the exact same `graph` +
+`harness` types as hand-written Rust — a language whose programs *are* the
+runtime that interprets them.
+
+**Not in this crate, by design:** the scripted CodeAct/REPL loop — an embedded
+interpreter (Rhai, Python, JavaScript) executing model-written code cells whose
+only host surface is capability calls. That is a host concern. TinyAgents gives
+it everything it needs (the capability `registry`, the harness, typed
+`SessionId`/`CellId`/`CallId`, and the `repl_agent` node kind for binding a
+host-provided scripted node by name) without pulling an interpreter into your
+dependency graph.
 
 ## Features
 
@@ -72,12 +59,10 @@ them.
   checkpoints, interrupts, subgraphs, streaming, topology export, and time
   travel.
 - **Registry** — a named capability catalog (models, tools, agents, graphs,
-  stores, middleware, policy) that `.rag` and `.ragsh` bind by name.
+  stores, middleware, policy) that `.rag` binds by name.
 - **`.rag` expressive language** — a declarative, side-effect-free blueprint
   format that compiles (lexer → parser → compiler) into the runtime; the safe
   boundary for agent-authored plans.
-- **`.ragsh` REPL language** — imperative, capability-bound interactive
-  orchestration; the RLM/CodeAct loop surface.
 - **Recursion & sub-agents** — agents-as-tools, subgraphs, depth tracking, and a
   recursion policy so deep call trees stay bounded and observable.
 - **Durability & checkpoints** — resume long runs, replay history, and travel
@@ -92,13 +77,13 @@ them.
 ## Architecture
 
 ```text
-            +-----------------------+      +-----------------------+
-            |   .rag blueprint      |      |   .ragsh REPL         |
-            | declarative workflow  |      | imperative RLM loop   |
-            +-----------+-----------+      +-----------+-----------+
-                        \                              /
-                         \   compile / lower (by name) /
-                          v                            v
+                         +-----------------------+
+                         |   .rag blueprint      |
+                         | declarative workflow  |
+                         +-----------+-----------+
+                                     |
+                                     |  compile / lower (by name)
+                                     v
 +-------------+        +-------------------------------------------+
 | Application |------->| Capability Registry                       |
 | Rust code   |        | models | tools | agents | graphs | policy |
@@ -148,7 +133,7 @@ The recursion loop — agents call agents, and graphs run graphs:
       |                |  depth +1, recursion policy,
       |                |  child run rolls up usage/cost
       +-- loops back --+--- re-enters the runtime ---+
-          to Agent Node     (graph -> REPL -> graph)
+          to Agent Node     (graph -> subgraph -> graph)
 ```
 
 ## Quick start
@@ -163,7 +148,7 @@ tinyagents = "1.5"
 The OpenAI (and OpenAI-compatible) provider is compiled in by default; the
 build stays offline unless you actually make a call. Two optional Cargo
 features gate heavier dependencies: `sqlite` (embedded SQLite checkpointer)
-and `repl` (embedded Rhai engine for the `.ragsh` session runtime).
+and `tools` (the builtin generic tool family).
 
 To explore locally:
 
@@ -276,12 +261,11 @@ OpenAI-backed examples require `OPENAI_API_KEY` at run time.
 - [crates.io](https://crates.io/crates/tinyagents)
 - [docs.rs API reference](https://docs.rs/tinyagents)
 - [Wiki home](https://github.com/tinyhumansai/tinyagents/wiki)
-  - [Recursion and the RLM model](https://github.com/tinyhumansai/tinyagents/wiki/Recursion-and-RLM)
+  - [Recursion and sub-agents](https://github.com/tinyhumansai/tinyagents/wiki/Recursion-and-RLM)
   - [Harness](https://github.com/tinyhumansai/tinyagents/wiki/Harness)
   - [Graph runtime](https://github.com/tinyhumansai/tinyagents/wiki/Graph-Runtime)
   - [Registry](https://github.com/tinyhumansai/tinyagents/wiki/Registry)
   - [Expressive language `.rag`](https://github.com/tinyhumansai/tinyagents/wiki/Expressive-Language-RAG)
-  - [REPL language `.ragsh`](https://github.com/tinyhumansai/tinyagents/wiki/REPL-Language-RAGSH)
   - [Providers](https://github.com/tinyhumansai/tinyagents/wiki/Providers)
   - [Quick start](https://github.com/tinyhumansai/tinyagents/wiki/Quick-Start)
   - [Examples](https://github.com/tinyhumansai/tinyagents/wiki/Examples)
@@ -320,7 +304,7 @@ for the configuration format.
 ## Contributing
 
 TinyAgents welcomes focused contributions that improve the graph runtime,
-harness contracts, the registry, the `.rag` / `.ragsh` languages, provider
+harness contracts, the registry, the `.rag` language, provider
 adapters, tests, examples, and documentation.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.

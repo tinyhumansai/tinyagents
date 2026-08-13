@@ -371,7 +371,7 @@ fn unregistered(what: &str, node: &str, target: &str) -> TinyAgentsError {
     ))
 }
 
-/// Parses, registry-resolves (with full source spans), and lowers `.rag`/`.ragsh`
+/// Parses, registry-resolves (with full source spans), and lowers `.rag`
 /// `source` into validated blueprints in one call.
 ///
 /// This is the recommended single entry point: it routes generated and

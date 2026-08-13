@@ -1,7 +1,7 @@
 //! Harness model layer.
 //!
 //! The model layer is the innermost rung of the recursive ladder: every level
-//! of the RLM-style harness — a top-level agent, a sub-agent exposed as a tool,
+//! of the harness — a top-level agent, a sub-agent exposed as a tool,
 //! or a node inside a subgraph — ultimately bottoms out in a [`ChatModel`] call
 //! routed through this provider-neutral request/response shape. Because the
 //! shapes are uniform, "a model calling a model" is the same typed surface at

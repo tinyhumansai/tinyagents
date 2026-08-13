@@ -2,7 +2,7 @@
 
 Cross-cutting extension points that wrap agent, model, and tool execution.
 
-In the recursive (RLM-style) harness a sub-agent or sub-graph is just another
+In the recursive harness a sub-agent or sub-graph is just another
 agent loop, so the same before/after hooks bracket the parent run *and* every
 nested model/tool/agent call beneath it. That uniform wrapping is what lets
 concerns like tracing, usage/cost roll-up, and guardrails compose consistently

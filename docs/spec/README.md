@@ -1,14 +1,16 @@
 # TinyAgents System Specification
 
-TinyAgents is a Rust-native LLM application framework inspired by LangChain,
-LangGraph, and CodeAct-style recursive language-model runtimes. The system is
-organized around five modules:
+TinyAgents is a Rust-native LLM application framework inspired by LangChain and
+LangGraph. The system is organized around four modules:
 
 1. the harness
 2. the graph
 3. the registry
 4. the expressive language
-5. the REPL language
+
+Scripted, interpreter-backed orchestration (a CodeAct/REPL loop over
+model-written code cells) is deliberately a *host* concern built on top of these
+modules, not a surface this crate ships. See "Host-side surfaces" below.
 
 The goal is to make agent systems easy to define, inspect, run, test, and
 eventually serialize without hiding the Rust types that make production systems
@@ -34,16 +36,34 @@ them:
   harness-decoupled graph engine, persistent checkpoints, HITL, graph
   observability, blueprints, JSON-RPC run control, and a behavior-preserving
   cutover from an implicit turn loop to an explicit phase machine.
-- RLM contributes the REPL/code-act model: context and prompts as runtime
-  values, recursive sub-model or sub-agent calls as functions, persistent
-  session variables, trajectory logging, and sandbox choices.
+- CodeAct/recursive-language-model runtimes contribute the recursion model:
+  context and prompts as runtime values, recursive sub-model or sub-agent calls
+  as functions, persistent session variables, and trajectory logging. TinyAgents
+  provides the primitives (registry capabilities, sub-agents, session/cell/call
+  ids, event journals); the interpreter and its sandbox stay host-side.
 
 The target architecture is therefore layered: the harness owns model/tool
 execution and policies, the graph owns deterministic state transition and
-durability, the registry owns named capabilities, `.rag` owns serializable graph
-blueprints, and `.ragsh` owns capability-bound interactive orchestration. No
-layer should bypass another layer's safety, policy, observability, or test
-contracts.
+durability, the registry owns named capabilities, and `.rag` owns serializable
+graph blueprints. No layer should bypass another layer's safety, policy,
+observability, or test contracts.
+
+## Host-side surfaces
+
+Some things a recursive agent system needs are intentionally *not* implemented
+here, because a host can implement them on top of the four modules and because
+shipping them would drag an embedded interpreter into every dependent's build:
+
+- the scripted CodeAct/REPL session loop (an embedded Rhai / Python / JavaScript
+  interpreter running model-written code cells)
+- the driver loop that prompts a model for the next code cell and feeds the
+  cell's output back in
+
+What this crate provides for those hosts: the capability `registry` (so a script
+can only reach named `llm` / `tool` / `agent` capabilities), the harness and its
+sub-agent recursion accounting, typed `SessionId` / `CellId` / `CallId`, the
+event journal, and the `.rag` `repl_agent` node kind, which binds a
+host-provided scripted node to a registered `Script` component by name.
 
 ## Detailed Module Docs
 
@@ -88,8 +108,6 @@ contracts.
   - [Design](../modules/registry/design.md)
   - [Model catalog and local snapshots](../modules/registry/model-catalog.md)
 - [Expressive language module](../modules/expressive-language/README.md)
-- [REPL language module](../modules/repl-language/README.md)
-  - [Design](../modules/repl-language/design.md)
 
 Docs should follow the module layout. Do not place standalone specification
 files directly in `docs/` or `docs/modules/`; each high-level topic should have
@@ -105,8 +123,6 @@ it.
 - Keep model providers, tools, memory, and tracing behind stable traits.
 - Support both Rust builder APIs and a compact expressive language for workflow
   definitions.
-- Support a capability-bound REPL language for interactive graph and harness
-  orchestration.
 - Allow agents to author, inspect, compile, and run graph blueprints through the
   same registry-bound compiler path used by human-authored `.rag` files.
 - Allow parent orchestrators and humans to steer orchestrator agents and
@@ -157,7 +173,7 @@ for implementation status.
 
 The crate is a single library at the repository root (`Cargo.toml`), with
 `src/lib.rs` re-exporting the public surface and `src/error.rs` holding the
-crate-wide error type. Each of the five surfaces lives in its own module
+crate-wide error type. Each of the four surfaces lives in its own module
 directory:
 
 ```text
@@ -168,14 +184,13 @@ src/
   harness/     # provider-neutral model calls, tools, middleware, streaming, ...
   language/    # the declarative `.rag` blueprint format (lexer/parser/compiler)
   registry/    # the named capability catalog (models, tools, agents, stores, ...)
-  repl/        # the imperative `.ragsh` session runtime
 ```
 
 Provider implementations (OpenAI and the OpenAI-compatible endpoints for
 Anthropic, Ollama, DeepSeek, Groq, xAI, OpenRouter, Together, and Mistral)
 live inside `src/harness/providers/` and are compiled in unconditionally.
 Two Cargo features gate optional dependencies: `sqlite` (embedded SQLite
-checkpointer) and `repl` (embedded Rhai engine for `.ragsh` sessions).
+checkpointer) and `tools` (the builtin generic tool family).
 
 ## Milestones
 
@@ -214,8 +229,9 @@ Langfuse tracing integration (`LangfuseClient`, `GraphLangfuseExporter`).
 
 Historical decisions that have since been settled, kept for context:
 
-- The expressive language file extension is `.rag` (interactive/imperative
-  orchestration uses the separate `.ragsh` extension).
+- The expressive language file extension is `.rag`. Interactive/imperative
+  orchestration was prototyped as a separate `.ragsh` surface and has since been
+  removed from this crate as a host concern.
 - State schemas remain Rust-owned; `.rag` binds to them by name through the
   registry rather than declaring schemas itself.
 - Provider crates live in this crate as always-compiled modules behind

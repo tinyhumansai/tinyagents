@@ -1,7 +1,8 @@
 //! Model provider integrations — the leaves of the recursion.
 //!
 //! Every recursive call in the runtime — an agent, a sub-agent, a graph node, a
-//! `.ragsh` step — ultimately bottoms out in a concrete model invocation, and
+//! host orchestration step — ultimately bottoms out in a concrete model
+//! invocation, and
 //! that invocation goes through a provider adapter here. Adapters translate
 //! between TinyAgents' provider-neutral request/response types
 //! ([`ModelRequest`]/[`ModelResponse`]) and a provider's own wire API, so the

@@ -1,7 +1,7 @@
 //! Default model-tool-model agent loop.
 //!
-//! This loop is the innermost turn of the recursive-language-model (RLM)
-//! runtime: it is where one model call is driven to completion, and because a
+//! This loop is the innermost turn of the recursive runtime: it is where one
+//! model call is driven to completion, and because a
 //! whole harness can be exposed as a tool
 //! ([`crate::harness::subagent::SubAgentTool`]), the very tools this loop
 //! executes may themselves be other agents — so "a model calling a model" is
