@@ -30,18 +30,15 @@
 //!    durable [`ThreadGoal`] with graph-native continuation and a
 //!    [`TaskBoard`] kanban — exposed as harness tools.
 //! 3. **Registry** ([`registry`]) — a named capability catalog (models, tools,
-//!    agents, graphs, stores, middleware, policy) that `.rag`/`.ragsh` bind by
-//!    name.
+//!    agents, graphs, stores, middleware, policy) that `.rag` binds by name.
 //! 4. **Expressive language `.rag`** ([`language`]) — a declarative,
 //!    side-effect-free blueprint format that compiles (lexer → parser →
 //!    compiler) into the same graph/harness runtime; the safe boundary for
 //!    agent-authored plans.
-//! 5. **REPL language `.ragsh`** ([`repl`]) — imperative, capability-bound
-//!    interactive orchestration; the RLM/CodeAct loop surface.
 //!
 //! ## The recursion story
 //!
-//! Both `.rag` and `.ragsh` lower into the *same* [`graph`] + [`harness`] types
+//! `.rag` lowers into the *same* [`graph`] + [`harness`] types
 //! as hand-written Rust — a language whose programs are the runtime that
 //! interprets them. A harness agent can be exposed *as a tool* to another agent
 //! ([`SubAgent`], [`SubAgentTool`], [`SubAgentSession`]), so orchestration is
@@ -56,14 +53,15 @@
 //! Hosted and local providers (OpenAI plus the OpenAI-compatible endpoints for
 //! Anthropic, Ollama, DeepSeek, Groq, xAI, OpenRouter, Together, and Mistral)
 //! are compiled in unconditionally alongside the offline, deterministic
-//! [`harness::providers::MockModel`]. Three Cargo features gate optional,
+//! [`harness::providers::MockModel`]. Two Cargo features gate optional,
 //! heavier dependencies instead: `sqlite` (embedded SQLite checkpointer,
-//! [`graph::checkpoint::SqliteCheckpointer`]), `repl` (embedded Rhai engine
-//! powering the `.ragsh` session runtime, [`repl::session`]), and `rlm` (the
-//! recursive-language-model runtime: a driver model writes code cells run in
-//! a sandboxed interpreter — embedded Rhai or an external Python/JavaScript
-//! process — whose only host surface is capability calls back into the
-//! registry).
+//! [`graph::checkpoint::SqliteCheckpointer`]) and `tools` (the builtin generic
+//! tool family, [`harness::tools`]).
+//!
+//! Scripted, imperative orchestration surfaces (an embedded interpreter driving
+//! capability calls — the `.ragsh` REPL and the recursive-language-model
+//! runtime that used to ship here) are deliberately *not* part of this crate:
+//! they are host concerns, built on top of [`registry`] and [`harness`].
 //!
 //! ## Crate-root re-exports
 //!
@@ -76,9 +74,6 @@ pub mod graph;
 pub mod harness;
 pub mod language;
 pub mod registry;
-pub mod repl;
-#[cfg(feature = "rlm")]
-pub mod rlm;
 /// Durable session history and run ledger — a persistence domain in its own
 /// right, not part of the agent-loop harness. Requires the `sqlite` feature.
 #[cfg(feature = "sqlite")]
@@ -106,7 +101,7 @@ pub use session::{
 // --- Error: the crate-wide error type and `Result` alias ---
 pub use error::{Result, TinyAgentsError};
 
-// --- Registry: named capability catalog (.rag/.ragsh binding by name) ---
+// --- Registry: named capability catalog (.rag binding by name) ---
 pub use registry::{
     AliasBinding, CapabilityRegistry, ComponentId, ComponentKind, ComponentMetadata,
     DiagnosticSeverity, ModelCapabilities, ModelCatalog, ModelCatalogEntry, ModelCatalogSnapshot,
@@ -116,7 +111,7 @@ pub use registry::{
 
 // --- Language: registry → blueprint binding façade ---
 // The strict, registry-backed entry points the REPL and orchestrators use to
-// turn `.rag`/`.ragsh` source into validated blueprints. `compile_source` runs
+// turn `.rag` source into validated blueprints. `compile_source` runs
 // parse -> compile -> registry-bind in one call.
 pub use language::capability_resolver::{
     CapabilityResolver, bind_capabilities, bind_capabilities_with_registry,
@@ -270,27 +265,4 @@ pub use graph::testkit::{
     GraphAssertions, GraphEventRecorder, GraphRun, RetryCountingNode, StreamCollector,
     assert_graph, failing_node, fanout_node, interrupting_node, noop_node, run_recorded,
     scripted_route_node, scripted_update_node, subagent_fake_node, subgraph_test_node,
-};
-
-// --- REPL language `.ragsh` Rhai session runtime (feature = "repl") ---
-// The imperative orchestration surface. Gated behind the `repl` feature so the
-// default build does not pull in the embedded Rhai engine. `ReplSession` here is
-// the scripting session from `repl::session`; the line-oriented command session
-// remains available as `repl::ReplSession`.
-#[cfg(feature = "repl")]
-pub use repl::session::{
-    LanguageCompiler, ReplCallKind, ReplCallRecord, ReplCancelFlag, ReplCapabilities, ReplPolicy,
-    ReplResult, ReplSession, ReplValue, ReplVariables,
-};
-
-// --- RLM runtime (feature = "rlm") ---
-// The recursive-language-model surface: a driver model writes code cells that
-// run in a sandboxed interpreter (embedded Rhai or an external Python/Node
-// process) whose only host surface is capability calls (`llm`, `tool`,
-// `agent`) back into the registry. Config-driven end to end (`RlmConfig`).
-#[cfg(feature = "rlm")]
-pub use rlm::{
-    CellOutcome, HostCall, InterpreterSpec, RlmCallKind, RlmCallRecord, RlmCancelFlag, RlmConfig,
-    RlmHost, RlmHostApi, RlmInterpreter, RlmOutcome, RlmPolicy, RlmRunner, RlmSession, RlmStep,
-    RlmStopReason, RlmTemplate, TemplateSpec,
 };
