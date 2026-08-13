@@ -599,7 +599,6 @@ pub enum AgentEvent {
         /// Human-readable error description.
         error: String,
     },
-
 }
 
 /// Names the kind of run limit that tripped in an [`AgentEvent::LimitReached`].
