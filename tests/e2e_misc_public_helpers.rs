@@ -351,5 +351,4 @@ fn tool_schema_limits_and_ids_cover_public_helpers() {
     assert!(new_session_id().as_str().starts_with("session-"));
     assert!(new_cell_id().as_str().starts_with("cell-"));
     assert!(new_call_id().as_str().starts_with("call-"));
-
 }
