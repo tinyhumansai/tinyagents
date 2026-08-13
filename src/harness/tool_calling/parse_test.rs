@@ -395,6 +395,8 @@ fn parse_tool_calls_with_pformat_preserves_multi_call_tag_bodies() {
 
 // ── Regression probe: mixed p-format + non-JSON tags ─────────────────────────
 
+use crate::harness::tool_calling::{PFormatRegistry, PFormatToolParams};
+
 /// A response carrying BOTH a p-format tag and a GLM-style tag.
 ///
 /// This is the case the ordinal-pairing rewrite put at risk. Once any tag
