@@ -56,11 +56,25 @@ Persisting sinks (`JournalSink`, `JsonlSink`) bridge the synchronous
 background `AppendWorker`: `on_event` hands the observation to a **bounded**
 channel drained on a dedicated thread, so it never blocks the run on I/O.
 Persistence is **best-effort**: if the queue is full the observation is dropped
-(and counted), backend errors are reported to stderr rather than propagated,
-and neither ever aborts the run. Call `JournalSink::flush` / `JsonlSink::flush`
-to block until the durable log has caught up (for example before reading it back
-or shutting down). Do not rely on a sink for delivery guarantees stronger than
-"usually persisted, never run-blocking."
+(and counted in `AppendWorker::dropped`), backend errors are counted (in
+`AppendWorker::append_failures`) and reported through `tracing` rather than
+propagated, and neither ever aborts the run. Call `JournalSink::flush` /
+`JsonlSink::flush` to block until the durable log has caught up (for example
+before reading it back or shutting down). Do not rely on a sink for delivery
+guarantees stronger than "usually persisted, never run-blocking."
+
+A persistent backend failure (read-only volume, full disk) fails every queued
+observation identically, so reporting is **rate-limited** rather than
+per-observation: the first failure of a run logs at `ERROR` on the
+`tinyagents::observability` target, further failures are counted silently with a
+`WARN` reminder at most once per `APPEND_REPORT_COOLDOWN` (5 minutes), and the
+first success afterwards logs one `WARN` recovery summary carrying how many
+observations were lost. The worker keeps attempting every item while degraded —
+the attempt is what detects recovery. Because reporting goes through `tracing`,
+an embedder with no subscriber installed sees nothing — install a subscriber to
+observe durable-log loss. `AppendWorker::append_failures` counts it, but like
+the queue-full `dropped` count it is crate-internal, so it is not a signal a
+host application can read today.
 
 ## Latency metrics semantics
 

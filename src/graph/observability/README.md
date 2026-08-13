@@ -56,8 +56,11 @@ so existing runs are unchanged.
 async journal API through a background `AppendWorker`: `emit` hands the
 observation to a bounded channel drained on a dedicated thread, so it never
 blocks the executor on I/O. Persistence is **best-effort**: a full queue drops
-(and counts) the overflow, backend errors are reported to stderr rather than
-propagated, and neither aborts the run. The executor calls `GraphEventSink::flush`
+(and counts) the overflow, backend errors are counted and reported through
+`tracing` (rate-limited to one report per failure run plus a reminder every five
+minutes — see the harness `observability` README for the full error policy)
+rather than propagated, and neither aborts the run. The executor calls
+`GraphEventSink::flush`
 after the terminal run event (and callers can call it directly) to block until
 the durable log has caught up. Do not rely on the sink for delivery guarantees
 stronger than "usually persisted, never run-blocking."

@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use crate::error::TinyAgentsError;
 use crate::harness::events::{AgentEvent, EventListener, EventRecord, HarnessRunStatus, LimitKind};
 use crate::harness::ids::{CallId, ComponentId, EventId, ExecutionStatus, RunId, ThreadId};
 use crate::harness::observability::AppendWorker;
@@ -360,6 +361,112 @@ async fn append_worker_drops_and_counts_when_queue_is_full() {
         "a saturated bounded queue must drop and count overflow, got {}",
         worker.dropped()
     );
+}
+
+#[tokio::test]
+async fn append_worker_counts_failed_appends() {
+    // A sink that rejects every append: each failure is counted, and that count
+    // is kept separate from the queue-full drop count (nothing was dropped —
+    // every item reached the sink and was rejected by it).
+    let worker = AppendWorker::spawn("test-failing", 64, move |_n: u64| async move {
+        Err(TinyAgentsError::Storage("sink offline".into()))
+    });
+
+    for n in 0..12 {
+        worker.submit(n);
+    }
+    worker.flush();
+
+    // Both loss counters are surfaced on the debug view, so an operator dumping
+    // a sink can tell "never reached the backend" from "backend rejected it".
+    let debug = format!("{worker:?}");
+    assert!(
+        debug.contains("append_failures: 12") && debug.contains("dropped: 0"),
+        "debug view must distinguish append failures from queue-full drops, got {debug}"
+    );
+
+    assert_eq!(
+        worker.append_failures(),
+        12,
+        "every failed durable append must be counted"
+    );
+    assert_eq!(
+        worker.dropped(),
+        0,
+        "append failures must not be conflated with queue-full drops"
+    );
+}
+
+#[tokio::test]
+async fn append_worker_failure_then_recovery_keeps_attempting() {
+    use std::sync::Mutex;
+
+    // The sink fails the first 3 appends, then starts accepting. A worker that
+    // stopped attempting while degraded would never persist anything after the
+    // failure run; keeping attempts is what detects the recovery.
+    let attempts = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let seen: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+    let counter = Arc::clone(&attempts);
+    let sink = Arc::clone(&seen);
+    // A zero cooldown makes the "still failing" reminder fire on every failure
+    // after the first, exercising the suppression path without a wall clock.
+    let worker = AppendWorker::spawn_with_cooldown(
+        "test-flaky",
+        64,
+        std::time::Duration::ZERO,
+        move |n: u64| {
+            let counter = Arc::clone(&counter);
+            let sink = Arc::clone(&sink);
+            async move {
+                if counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+                    return Err(TinyAgentsError::Storage("sink offline".into()));
+                }
+                sink.lock().unwrap().push(n);
+                Ok(())
+            }
+        },
+    );
+
+    for n in 0..8 {
+        worker.submit(n);
+    }
+    worker.flush();
+
+    assert_eq!(
+        worker.append_failures(),
+        3,
+        "only the appends the sink rejected are counted as failures"
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        (3..8).collect::<Vec<_>>(),
+        "the worker must keep attempting while degraded, so items persist once the sink recovers"
+    );
+}
+
+#[test]
+fn should_report_bounds_repeats_to_one_per_cooldown() {
+    use crate::harness::observability::worker::should_report;
+    use std::time::{Duration, Instant};
+
+    let cooldown = Duration::from_secs(300);
+    let start = Instant::now();
+
+    // The first failure of a run has never reported, so it always reports.
+    assert!(should_report(None, start, cooldown));
+    // A failure inside the cooldown window is suppressed (counted, not logged).
+    assert!(!should_report(
+        Some(start),
+        start + Duration::from_secs(299),
+        cooldown
+    ));
+    // Once the cooldown has elapsed, the run is due for a reminder again.
+    assert!(should_report(Some(start), start + cooldown, cooldown));
+    assert!(should_report(
+        Some(start),
+        start + Duration::from_secs(600),
+        cooldown
+    ));
 }
 
 /// Collects forwarded records for assertions.
