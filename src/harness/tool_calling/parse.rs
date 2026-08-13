@@ -627,7 +627,7 @@ pub fn build_curl_command(url: &str) -> Option<String> {
         return None;
     }
 
-    let escaped = url.replace('\'', "'\\''")
+    let escaped = url.replace('\'', "'\\''");
     Some(format!("curl -s '{}'", escaped))
 }
 
