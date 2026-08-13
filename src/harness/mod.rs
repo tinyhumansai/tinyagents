@@ -20,6 +20,7 @@ pub mod context;
 pub mod cost;
 pub mod embeddings;
 pub mod events;
+pub mod handoff;
 pub mod host;
 pub mod ids;
 pub mod limits;
