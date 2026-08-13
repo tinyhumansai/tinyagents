@@ -11,7 +11,7 @@
 //! Each accommodation here exists because a model actually produced it and the
 //! alternative was dropping a well-formed call and burning an agent iteration.
 //! Concretely, the parsers accept `<tool_call>` tags in several spellings,
-//! ```tool_call fenced blocks, bare JSON objects, Anthropic-style
+//! fenced `tool_call` blocks, bare JSON objects, Anthropic-style
 //! `<invoke name="…"><parameter name="…">` XML, and the compact positional
 //! [`pformat`] syntax.
 //!
