@@ -1001,9 +1001,34 @@ pub fn parse_tool_calls_with_pformat(
         } else {
             // Re-parse this tag body with the canonical JSON logic so a body
             // holding several calls contributes all of them.
+            //
+            // Deliberately the *permissive* (alias-honouring) path rather than
+            // `parse_tool_calls`: a `<tool_call>` tag is an explicit tool-call
+            // marker, so the `args`/`parameters`/`input` aliases apply here.
+            // `parse_tool_calls` forbids them for a bare top-level object, so
+            // routing through it would silently drop an aliased tagged call.
+            let mut from_body: Vec<ParsedToolCall> = Vec::new();
             for value in extract_json_values(body) {
-                combined.extend(parse_tool_calls_from_json_value(&value));
+                from_body.extend(parse_tool_calls_from_json_value(&value));
             }
+
+            // A tag body need not be JSON at all. GLM emits its own grammar
+            // (`shell/command>ls -la`), and once ANY tag in the response yields
+            // a p-format call this walk never falls back to the canonical
+            // result — so without this the GLM call is dropped and nothing
+            // reports it. Tried only when the JSON path found nothing, so a
+            // well-formed JSON body can never be double-counted.
+            if from_body.is_empty() {
+                from_body.extend(parse_glm_style_tool_calls(body).into_iter().map(
+                    |(name, arguments, _raw)| ParsedToolCall {
+                        name,
+                        arguments,
+                        id: None,
+                    },
+                ));
+            }
+
+            combined.extend(from_body);
         }
 
         remaining = &after_open[close_idx + close_tag.len()..];
