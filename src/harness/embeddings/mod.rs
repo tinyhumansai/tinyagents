@@ -1,6 +1,6 @@
 //! Harness embeddings + retrieval module.
 //!
-//! In the recursive (RLM-style) architecture this module is how a model reaches
+//! In the recursive architecture this module is how a model reaches
 //! *outside* its context window: instead of stuffing a whole corpus into one
 //! prompt, an agent (or a sub-agent / REPL step) embeds documents once and then
 //! recursively retrieves only the snippets relevant to the current sub-question,

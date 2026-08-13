@@ -1,7 +1,7 @@
 //! Expressive language (`.rag`) — the declarative blueprint surface of the
 //! recursive runtime.
 //!
-//! In TinyAgents' recursive (RLM-style) architecture, a model can author the
+//! In TinyAgents' recursive architecture, a model can author the
 //! very workflow it is standing inside. `.rag` is the *safe boundary* for that
 //! self-authoring: a capability-by-name blueprint format that lowers into the
 //! exact same [`crate::graph`] and [`crate::harness`] runtime as hand-written

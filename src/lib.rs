@@ -1,4 +1,4 @@
-//! # TinyAgents — a recursive language-model (RLM) harness for Rust
+//! # TinyAgents — a durable agent + graph harness for Rust
 //!
 //! TinyAgents is a typed, durable runtime where **language models call models,
 //! agents call agents, and graphs run graphs** — and where a model can author,
@@ -6,19 +6,15 @@
 //! checkpointed, policy-checked Rust.
 //!
 //! The "recursive" framing is the through-line of the whole crate, not a
-//! footnote. It is architected around the execution model described in
-//! "Recursive Language Models" (Alex L. Zhang, Tim Kraska, Omar Khattab, MIT
-//! CSAIL, 2025; <https://arxiv.org/abs/2512.24601>): rather than stuffing
-//! everything into one context window, a model treats long context as an
-//! external *environment* it interacts with through a REPL — examining,
-//! decomposing, and recursively calling sub-models over snippets. TinyAgents
-//! brings that idea to Rust as a production-shaped harness (sub-model /
-//! sub-agent / sub-graph calls as functions, persistent session values, depth
-//! tracking, and trajectory/event logging). It is *inspired by and architected
-//! around* the RLM execution model, not a reimplementation of the paper's
-//! benchmarks.
+//! footnote: rather than stuffing everything into one context window, a model
+//! treats long context as an external *environment* it decomposes, recursively
+//! calling sub-models, sub-agents, and sub-graphs as functions. TinyAgents
+//! brings that to Rust as a production-shaped harness (capability calls by
+//! name, depth tracking, and trajectory/event logging). The *scripted* form of
+//! that loop — an embedded interpreter running model-written code cells — is a
+//! host concern built on these surfaces, not something this crate ships.
 //!
-//! ## The five surfaces
+//! ## The four surfaces
 //!
 //! 1. **Harness** ([`harness`]) — provider-neutral model calls, typed tools,
 //!    middleware, structured output, streaming, usage/cost, retry/limits, cache,

@@ -1,6 +1,6 @@
 //! Middleware stack.
 //!
-//! In the recursive (RLM-style) harness, middleware is the layer that wraps
+//! In the recursive harness, middleware is the layer that wraps
 //! *every* level of the recursion identically: because a sub-agent or sub-graph
 //! is just another agent loop, the same before/after hooks bracket the parent
 //! run and each nested model/tool/agent call beneath it. That uniform wrapping
