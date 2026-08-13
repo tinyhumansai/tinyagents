@@ -350,17 +350,3 @@ async fn unbounded_loop_back_hits_recursion_limit_deterministically() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// DEFERRED: graph node that REPLs another graph (graph -> .ragsh REPL -> graph).
-// ---------------------------------------------------------------------------
-
-/// Placeholder tracking the graph->REPL->graph composition. The `.ragsh` live
-/// execution engine that would let a node drive another graph through a REPL
-/// session is not built yet (it lands in a later cluster). This test is
-/// intentionally ignored — not faked — so the intent is tracked and this file
-/// fails loudly to be wired up once the REPL engine exists.
-#[tokio::test]
-#[ignore = "pending the .ragsh REPL execution engine (later cluster); lands with that work"]
-async fn graph_repls_another_graph_pending_repl_engine() {
-    panic!("not implemented: requires the .ragsh REPL execution engine");
-}
