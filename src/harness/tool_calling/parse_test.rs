@@ -392,3 +392,67 @@ fn parse_tool_calls_with_pformat_preserves_multi_call_tag_bodies() {
     assert_eq!(calls[1].name, "get_time");
     assert_eq!(calls[1].arguments["tz"], "UTC");
 }
+
+// ── Regression probe: mixed p-format + non-JSON tags ─────────────────────────
+
+/// A response carrying BOTH a p-format tag and a GLM-style tag.
+///
+/// This is the case the ordinal-pairing rewrite put at risk. Once any tag
+/// yields a p-format call the walk stops falling back to the canonical parse,
+/// so a sibling tag whose body is neither p-format nor JSON has only the
+/// `extract_json_values` path left — and GLM bodies are not JSON. If that
+/// drops the GLM call, an agent silently loses a tool invocation it asked for.
+#[test]
+fn a_pformat_tag_does_not_suppress_a_sibling_glm_tag() {
+    let mut reg = PFormatRegistry::new();
+    reg.insert(
+        "echo".to_string(),
+        PFormatToolParams::from_schema(&serde_json::json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } }
+        })),
+    );
+
+    let response = concat!(
+        "<tool_call>echo[hello]</tool_call>\n",
+        "<tool_call>shell/command>ls -la</tool_call>"
+    );
+    let (_narrative, calls) = parse_tool_calls_with_pformat(response, &reg);
+    let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"echo"),
+        "the p-format call must survive: {names:?}"
+    );
+    assert_eq!(
+        calls.len(),
+        2,
+        "the sibling non-JSON tag was dropped — got {names:?}"
+    );
+}
+
+/// The same shape, but the sibling body is JSON inside a markdown fence.
+#[test]
+fn a_pformat_tag_does_not_suppress_a_sibling_fenced_json_tag() {
+    let mut reg = PFormatRegistry::new();
+    reg.insert(
+        "echo".to_string(),
+        PFormatToolParams::from_schema(&serde_json::json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } }
+        })),
+    );
+
+    let response = concat!(
+        "<tool_call>echo[hello]</tool_call>\n",
+        "<tool_call>\n```json\n{\"name\": \"shell\", \"arguments\": {\"command\": \"ls\"}}\n```\n</tool_call>"
+    );
+    let (_narrative, calls) = parse_tool_calls_with_pformat(response, &reg);
+    let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+
+    assert!(names.contains(&"echo"), "p-format call survives: {names:?}");
+    assert!(
+        names.contains(&"shell"),
+        "the fenced-JSON sibling was dropped — got {names:?}"
+    );
+}
