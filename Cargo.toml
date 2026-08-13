@@ -31,7 +31,10 @@ tracing = "0.1"
 # for `DurabilityMode::Async` background checkpoint writes, `spawn_blocking`
 # file I/O, and `block_in_place` JSONL task-store writes (which requires the
 # multi-threaded runtime feature).
-tokio = { version = "1", default-features = false, features = ["sync", "time", "macros", "rt", "rt-multi-thread"] }
+# `fs` is required by `harness::artifacts`, which writes offloaded worker
+# artifacts to disk. It enables more of tokio, not another package, so the
+# kernel-floor package count is unaffected.
+tokio = { version = "1", default-features = false, features = ["sync", "time", "macros", "rt", "rt-multi-thread", "fs"] }
 
 # HTTP client used by hosted providers and the embedded Langfuse exporter. The
 # `stream` feature enables `Response::bytes_stream` for Server-Sent-Events
