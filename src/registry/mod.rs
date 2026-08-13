@@ -13,7 +13,7 @@
 //! two complementary pieces:
 //!
 //! - [`CapabilityRegistry`] ([`capability`]) — the name-addressable catalog of
-//!   models, tools, graph blueprints, routers, and reducers that `.rag`/`.ragsh`
+//!   models, tools, graph blueprints, routers, and reducers that `.rag`
 //!   sources bind against, plus the discovery [`component`] types
 //!   ([`ComponentKind`]/[`ComponentId`]/[`ComponentMetadata`]) that describe
 //!   what is registered.

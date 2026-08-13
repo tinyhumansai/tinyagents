@@ -492,7 +492,7 @@ fn provenance_of(
     }
 }
 
-/// Parses, compiles, and registry-binds `.rag`/`.ragsh` `source` in one call.
+/// Parses, compiles, and registry-binds `.rag` `source` in one call.
 ///
 /// This is the convenience façade for the common path: it runs
 /// `parse -> compile -> registry-bind` and returns the validated blueprints.

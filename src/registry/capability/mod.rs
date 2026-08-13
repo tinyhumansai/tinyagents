@@ -11,7 +11,7 @@
 //! See [`types`] for the data definitions. This module provides registration,
 //! lookup, aliasing, duplicate validation, and conveniences for handing the
 //! catalog's models and tools to a harness ([`to_model_registry`] /
-//! [`to_tool_registry`]) or to the `.rag`/`.ragsh` capability resolver
+//! [`to_tool_registry`]) or to the `.rag` capability resolver
 //! ([`capability_resolver`]).
 //!
 //! [`to_model_registry`]: CapabilityRegistry::to_model_registry
@@ -372,7 +372,7 @@ impl<State: Send + Sync> CapabilityRegistry<State> {
     /// Returns the canonical registered names for `kind` *and* every alias of
     /// that kind, in sorted, de-duplicated order.
     ///
-    /// This is the set of names declarative `.rag`/`.ragsh` source may reference
+    /// This is the set of names declarative `.rag` source may reference
     /// for `kind`: both the canonical registration and any alias resolve to a
     /// real component, so both are valid references. It backs
     /// [`CapabilityResolver::from_registry`](crate::language::compiler::CapabilityResolver::from_registry).
@@ -432,7 +432,7 @@ impl<State: Send + Sync> CapabilityRegistry<State> {
         registry
     }
 
-    /// Builds a fully populated `.rag`/`.ragsh` [`CapabilityResolver`] from every
+    /// Builds a fully populated `.rag` [`CapabilityResolver`] from every
     /// registered capability — models, tools, graph blueprints, routers, and
     /// reducers, including their aliases — plus the default node kinds.
     ///
