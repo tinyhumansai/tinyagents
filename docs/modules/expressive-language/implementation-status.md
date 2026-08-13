@@ -50,7 +50,7 @@ Extended (H2):
 - `agent "name"` — sub-agent reference for a `subagent` node (`NodeSpec::agent`).
 - `graph "name"` — subgraph reference for a `subgraph` node
   (`NodeSpec::subgraph`; binding prefers it over the legacy `model` field).
-- `script "name"` — REPL script capability for a `repl_agent` node
+- `script "name"` — host script capability for a `repl_agent` node
   (`NodeSpec::script`). Declaration only — never inline code.
 - `input "mapping"` — input mapping for sub-agent / subgraph nodes.
 - `command { goto <target> update { key value … } }` — typed command
