@@ -12,6 +12,7 @@
 //! without creating one large runtime file.
 
 pub mod agent_loop;
+pub mod artifacts;
 pub mod cache;
 pub mod cancel;
 pub mod config;
