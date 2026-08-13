@@ -104,7 +104,10 @@ fn parse_tool_call_value_aliased(
         // contexts (`<tool_call>`/`<invoke>`, `tool_calls` array, `function`
         // wrapper) reach this fn with `allow_arg_aliases = true` and keep the
         // permissive behaviour.
-        parse_arguments_value(Some(value.get("arguments")?))
+        match value.get("arguments") {
+            Some(args) => parse_arguments_value(Some(args)),
+            None => return None,
+        }
     };
     Some(ParsedToolCall {
         name,
@@ -334,9 +337,6 @@ fn quote_bare_json_object_keys(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 16);
     let mut in_string = false;
     let mut escaped = false;
-    // Innermost container: `true` = object, `false` = array. A bare token may
-    // only be a key inside an object.
-    let mut in_object: Vec<bool> = Vec::new();
     // True right after a structural `{` or `,` — the only positions where a bare
     // key may begin.
     let mut expect_key = false;
@@ -360,20 +360,7 @@ fn quote_bare_json_object_keys(s: &str) -> String {
                 out.push(c);
             }
             '{' | ',' => {
-                if c == '{' {
-                    in_object.push(true);
-                }
-                expect_key = *in_object.last().unwrap_or(&false);
-                out.push(c);
-            }
-            '[' => {
-                in_object.push(false);
-                expect_key = false;
-                out.push(c);
-            }
-            '}' | ']' => {
-                in_object.pop();
-                expect_key = false;
+                expect_key = true;
                 out.push(c);
             }
             c if c.is_whitespace() => out.push(c), // keep looking for a key
@@ -627,7 +614,7 @@ pub fn build_curl_command(url: &str) -> Option<String> {
         return None;
     }
 
-    let escaped = url.replace('\'', "'\\''");
+    let escaped = url.replace('\'', r#"'\\''"#);
     Some(format!("curl -s '{}'", escaped))
 }
 
@@ -968,9 +955,10 @@ pub fn parse_tool_calls_with_pformat(
     }
 
     // Walk the tags ourselves, preferring a P-Format body per tag and falling
-    // back to parsing the tag body directly with the JSON logic to preserve
-    // all calls produced from multi-call JSON bodies and markdown/GLM grammars.
+    // back to the JSON entry the canonical parser produced at the same ordinal
+    // position (both walk the same ordered set of `<tool_call>`-family tags).
     let mut combined: Vec<ParsedToolCall> = Vec::new();
+    let mut json_idx = 0usize;
     let mut remaining = response;
 
     while !remaining.is_empty() {
@@ -998,12 +986,13 @@ pub fn parse_tool_calls_with_pformat(
                 arguments,
                 id: None,
             });
-        } else {
-            // Re-parse this tag body with the canonical JSON logic so a body
-            // holding several calls contributes all of them.
-            for value in extract_json_values(body) {
-                combined.extend(parse_tool_calls_from_json_value(&value));
-            }
+            // Do NOT advance `json_idx` here: a P-Format tag is one the JSON pass
+            // could not parse, so `parse_tool_calls` produced no `json_calls`
+            // entry for it. Advancing would shift every later JSON tag onto the
+            // wrong `json_calls` index and silently drop a real JSON call.
+        } else if let Some(json_call) = json_calls.get(json_idx) {
+            combined.push(json_call.clone());
+            json_idx += 1;
         }
 
         remaining = &after_open[close_idx + close_tag.len()..];
