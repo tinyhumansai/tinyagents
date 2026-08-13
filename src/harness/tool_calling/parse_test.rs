@@ -358,3 +358,15 @@ fn quote_bare_json_object_keys_respects_string_values() {
     assert_eq!(v["query"], "from:john,to:x");
     assert_eq!(v["n"], 1);
 }
+
+#[test]
+fn quote_bare_json_object_keys_leaves_array_literals_unquoted() {
+    // Bare literals inside arrays must not be quoted. A comma inside an array
+    // should not trigger `expect_key = true` because arrays do not have keys.
+    let out = quote_bare_json_object_keys(r#"{flags:[true,false],n:null}"#);
+    assert_eq!(out, r#"{"flags":[true,false],"n":null}"#);
+    // Parses as strict JSON with the values preserved as booleans and null.
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["flags"], serde_json::json!([true, false]));
+    assert_eq!(v["n"], serde_json::Value::Null);
+}
