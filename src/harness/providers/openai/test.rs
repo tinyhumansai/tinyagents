@@ -17,6 +17,13 @@ use crate::harness::providers::{ProviderKind, ProviderSpec};
 use crate::harness::tool::ToolSchema;
 
 /// Builds a model with a fixed key/model so translation output is deterministic.
+///
+/// NOTE: this uses the default base URL. The stream-required latch now records
+/// discovery in a process-global registry keyed by `base_url`, so a test that
+/// calls `latch_stream_required()` on a `model()` would flip
+/// `requires_streaming()` to `true` for every other test on the default base URL
+/// (e.g. `requires_streaming_flag_skips_non_streaming_attempt`). A test that
+/// latches MUST first override the base URL with a unique `.with_base_url(...)`.
 fn model() -> OpenAiModel {
     OpenAiModel::new("test-key").with_model("gpt-4.1-mini")
 }
@@ -708,7 +715,9 @@ fn requires_streaming_flag_skips_non_streaming_attempt() {
 // agent turn forever (511 events / 2 users on the linked Sentry issue).
 #[test]
 fn stream_required_constraint_latches_after_discovery() {
-    let m = model();
+    // A unique base_url keeps this test's runtime discovery out of the
+    // process-global endpoint registry shared with the DEFAULT_BASE_URL tests.
+    let m = model().with_base_url("https://stream-latch-discovery.invalid/v1");
     assert!(!m.requires_streaming(), "must start un-latched");
 
     m.latch_stream_required();
@@ -728,7 +737,8 @@ fn stream_required_latch_survives_through_a_shared_handle() {
     // Production holds models as `Arc<dyn ChatModel>`, so the latch must be
     // observable through a shared reference — that is the whole reason it is an
     // `AtomicBool` and not a `bool`.
-    let shared: std::sync::Arc<OpenAiModel> = std::sync::Arc::new(model());
+    let shared: std::sync::Arc<OpenAiModel> =
+        std::sync::Arc::new(model().with_base_url("https://stream-latch-shared-handle.invalid/v1"));
     let clone = std::sync::Arc::clone(&shared);
     assert!(!clone.requires_streaming());
 
@@ -737,6 +747,94 @@ fn stream_required_latch_survives_through_a_shared_handle() {
         clone.requires_streaming(),
         "the latch must be visible to every holder of the shared model"
     );
+}
+
+#[test]
+fn redact_base_url_for_log_strips_credentials_and_query() {
+    // A proxy endpoint that carries a secret in userinfo or a query param must
+    // never reach a log line (the latch discovery logs base_url).
+    let redacted = super::transport::redact_base_url_for_log(
+        "https://user:sup3rsecret@proxy.example.com:8443/v1?api_key=abc123#frag",
+    );
+    // Exact match proves userinfo, query AND fragment are all gone (not just
+    // the specific secret tokens) while scheme, host, port and path survive.
+    assert_eq!(
+        redacted, "https://proxy.example.com:8443/v1",
+        "credentials, query and fragment must be stripped; host/port/path kept: {redacted}"
+    );
+
+    // A credential-free URL is unchanged.
+    assert_eq!(
+        super::transport::redact_base_url_for_log("https://api.openai.com/v1"),
+        "https://api.openai.com/v1"
+    );
+
+    // A value that does not parse as a URL is replaced wholesale, never logged.
+    assert_eq!(
+        super::transport::redact_base_url_for_log("::not a url::"),
+        "<unparseable base_url redacted>"
+    );
+}
+
+// openhuman#5497: the per-instance latch is not enough on its own. Hosts build a
+// fresh `OpenAiModel` per workload (chat, summariser, titler, …) all aimed at
+// the same streaming-only endpoint, so a purely per-instance latch lets the
+// guaranteed-400 probe reappear for every workload on every turn. The discovery
+// is therefore shared process-wide, keyed by endpoint.
+#[test]
+fn stream_required_discovery_is_shared_across_instances_by_endpoint() {
+    let base = "https://shared-stream-discovery.invalid/v1";
+
+    let discoverer = OpenAiModel::new("k").with_base_url(base);
+    assert!(!discoverer.requires_streaming(), "must start un-latched");
+    discoverer.latch_stream_required();
+    assert!(discoverer.requires_streaming());
+
+    // A brand-new instance (different key + model, same endpoint) inherits the
+    // constraint without ever issuing its own doomed non-streaming probe.
+    let sibling = OpenAiModel::new("other-key")
+        .with_model("some-other-model")
+        .with_base_url(base);
+    assert!(
+        sibling.requires_streaming(),
+        "a fresh instance for the same endpoint must adopt the shared discovery"
+    );
+
+    // Scoped per endpoint — an unrelated base_url is unaffected.
+    let elsewhere = OpenAiModel::new("k").with_base_url("https://unrelated-endpoint.invalid/v1");
+    assert!(
+        !elsewhere.requires_streaming(),
+        "the shared record must be scoped per endpoint, not global-for-all"
+    );
+}
+
+// An explicit `with_requires_streaming(false)` is an opt-out and must stay one
+// even after a sibling latches the same endpoint — otherwise an aggregating
+// proxy (mixed upstreams behind one base_url) could force a deliberately-opted-
+// out model onto the streaming path with no way back (openhuman#5497 review).
+#[test]
+fn explicit_requires_streaming_opt_out_wins_over_sibling_discovery() {
+    let base = "https://escape-hatch-endpoint.invalid/v1";
+
+    // A sibling discovers the endpoint is streaming-only and records it globally.
+    let discoverer = OpenAiModel::new("k").with_base_url(base);
+    discoverer.latch_stream_required();
+    assert!(discoverer.requires_streaming());
+
+    // A model explicitly opted out on the SAME endpoint keeps the unary path.
+    let opted_out = OpenAiModel::new("k")
+        .with_base_url(base)
+        .with_requires_streaming(false);
+    assert!(
+        !opted_out.requires_streaming(),
+        "an explicit opt-out must win over a sibling's endpoint-wide discovery"
+    );
+
+    // An explicit opt-in is likewise authoritative and needs no discovery.
+    let opted_in = OpenAiModel::new("k")
+        .with_base_url("https://opt-in-endpoint.invalid/v1")
+        .with_requires_streaming(true);
+    assert!(opted_in.requires_streaming());
 }
 
 // The trigger used to be a single case-sensitive `contains("Stream must be set

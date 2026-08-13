@@ -7,7 +7,9 @@
 use super::responses;
 use super::*;
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, RwLock};
 
 use crate::harness::model::StreamAccumulator;
 
@@ -140,6 +142,18 @@ pub struct OpenAiModel {
     /// guaranteed-400 round trip before falling back. See
     /// [`Self::latch_stream_required`].
     stream_required: AtomicBool,
+    /// Whether [`stream_required`](Self::stream_required) was set explicitly by a
+    /// caller via [`with_requires_streaming`](Self::with_requires_streaming), as
+    /// opposed to left at its default or discovered at run time.
+    ///
+    /// When `true`, [`requires_streaming`](Self::requires_streaming) returns the
+    /// instance's own value and does **not** consult the process-wide
+    /// endpoint registry — an explicit opt-out (`with_requires_streaming(false)`)
+    /// therefore wins over a sibling's endpoint-wide discovery. Without this, an
+    /// aggregating proxy that fronts mixed upstreams on one `base_url` would
+    /// force a model the host deliberately opted out (e.g. a titler routed to a
+    /// non-streaming upstream) onto the streaming path with no way back.
+    stream_required_explicit: AtomicBool,
     /// Whether a JSON-Schema `response_format` is sent with OpenAI **strict**
     /// structured output (`"strict": true`).
     ///
@@ -449,6 +463,7 @@ impl OpenAiModel {
             reasoning_tags: Some(ReasoningTagExtraction::default()),
             reasoning_tags_overridden: false,
             stream_required: AtomicBool::new(false),
+            stream_required_explicit: AtomicBool::new(false),
             json_schema_strict: AtomicBool::new(true),
             native_tools_on_wire: AtomicBool::new(true),
             cache_accounting: CacheTokenAccounting::default(),
@@ -457,23 +472,52 @@ impl OpenAiModel {
         }
     }
 
-    /// When the provider requires `stream: true` for every request, routes
-    /// unary [`invoke`](ChatModel::invoke) through the streaming path internally.
+    /// Declares up front whether the provider requires `stream: true` for every
+    /// request. When enabled, unary [`invoke`](ChatModel::invoke) is routed
+    /// through the streaming path internally, skipping the one exploratory
+    /// request that run-time discovery costs.
     ///
-    /// Optional: the transport also discovers this on its own (see
-    /// [`Self::latch_stream_required`]). Set it explicitly to skip the one
-    /// exploratory request that discovery costs.
+    /// This is an **explicit, per-instance override**: it is authoritative for
+    /// this instance and is never overridden by a sibling's endpoint-wide
+    /// discovery (see [`Self::requires_streaming`]). So `with_requires_streaming(false)`
+    /// is a genuine opt-out — a model the host knows does not need streaming
+    /// (e.g. a titler routed to a non-streaming upstream behind an aggregating
+    /// proxy) stays on the unary path even if another model sharing the same
+    /// `base_url` has latched the streaming constraint.
     pub fn with_requires_streaming(self, enabled: bool) -> Self {
         self.stream_required.store(enabled, Ordering::Relaxed);
+        self.stream_required_explicit.store(true, Ordering::Relaxed);
         self
     }
 
-    /// Returns whether this instance currently requires streaming for all
-    /// unary calls — either declared up front via
-    /// [`with_requires_streaming`](Self::with_requires_streaming) or learned
-    /// from a provider rejection.
+    /// Returns whether this instance requires streaming for all unary calls.
+    ///
+    /// Precedence:
+    /// 1. An **explicit** [`with_requires_streaming`](Self::with_requires_streaming)
+    ///    is authoritative and short-circuits the shared registry, so an opt-out
+    ///    is never clobbered by another model on the same endpoint.
+    /// 2. Otherwise a value **learned at run time** on this instance (see
+    ///    [`Self::latch_stream_required`]) wins.
+    /// 3. Otherwise a **sibling's** endpoint-wide discovery is adopted (and
+    ///    cached locally to keep the shared read off the hot path).
     pub fn requires_streaming(&self) -> bool {
-        self.stream_required.load(Ordering::Relaxed)
+        // (1) An explicit setting wins outright — including an explicit `false`,
+        // which must remain a working opt-out.
+        if self.stream_required_explicit.load(Ordering::Relaxed) {
+            return self.stream_required.load(Ordering::Relaxed);
+        }
+        // (2) This instance's own value (default or run-time-latched).
+        if self.stream_required.load(Ordering::Relaxed) {
+            return true;
+        }
+        // (3) A sibling pointed at the same endpoint may have already discovered
+        // the constraint. Adopt it so this fresh instance skips the doomed
+        // non-streaming probe, and cache it locally.
+        if endpoint_requires_streaming(&self.base_url) {
+            self.stream_required.store(true, Ordering::Relaxed);
+            return true;
+        }
+        false
     }
 
     /// Remembers that this endpoint only accepts `stream: true`.
@@ -485,11 +529,17 @@ impl OpenAiModel {
     /// behind the 511 events / 2 users on openhuman#5165. Logs on the
     /// transition only, so the discovery is visible exactly once per process.
     pub(super) fn latch_stream_required(&self) {
-        if !self.stream_required.swap(true, Ordering::Relaxed) {
+        self.stream_required.store(true, Ordering::Relaxed);
+        // Share the discovery process-wide so sibling instances (a fresh model
+        // per workload) skip the probe instead of re-paying the 400. Log on the
+        // first record per endpoint, so a streaming-only proxy is announced
+        // exactly once per process rather than once per instance.
+        if remember_endpoint_requires_streaming(&self.base_url) {
             tracing::info!(
                 provider = %self.provider,
                 model = %self.model,
-                "[openai] provider requires stream:true; latching for subsequent calls"
+                base_url = %redact_base_url_for_log(&self.base_url),
+                "[openai] provider requires stream:true; latching endpoint-wide for subsequent calls"
             );
         }
     }
@@ -2306,6 +2356,65 @@ pub(super) struct Degrade {
 /// there. The stream-specific wording still has to match, so widening the status
 /// set does not widen the false-positive surface meaningfully.
 const STREAM_REQUIRED_STATUSES: [u16; 2] = [400, 422];
+
+/// Process-global set of base URLs known to only accept `stream: true`.
+///
+/// The per-instance [`OpenAiModel::stream_required`] latch stops a *single*
+/// model from re-probing, but hosts build a **fresh `OpenAiModel` per workload**
+/// (chat, summariser, titler, …), each pointed at the same endpoint. Without a
+/// shared record every new instance re-discovers the constraint and pays another
+/// guaranteed-400 round trip — so a streaming-only proxy keeps emitting the 400
+/// on every turn even though one instance already learned better
+/// (openhuman#5497, the multi-instance shape of openhuman#5165).
+///
+/// Keyed by `base_url` because the constraint is a property of the endpoint /
+/// proxy, not of any one model id or instance. Written **only** by runtime
+/// discovery ([`OpenAiModel::latch_stream_required`]); an explicit
+/// [`with_requires_streaming`](OpenAiModel::with_requires_streaming) stays
+/// per-instance so it can still be cleared per instance. Entries are never
+/// removed — a streaming-only endpoint does not stop being one within a process.
+static STREAM_REQUIRED_ENDPOINTS: LazyLock<RwLock<HashSet<String>>> =
+    LazyLock::new(|| RwLock::new(HashSet::new()));
+
+/// Redacts a base URL for logging: drops any embedded credentials (userinfo)
+/// and query/fragment, keeping only `scheme://host[:port]/path`. Some
+/// OpenAI-compatible proxies carry an API key in the URL (userinfo or a query
+/// param), so the raw `base_url` must never reach a log line. A value that does
+/// not parse as a URL is replaced wholesale rather than logged, so a malformed
+/// endpoint cannot leak either.
+pub(super) fn redact_base_url_for_log(base_url: &str) -> String {
+    match reqwest::Url::parse(base_url) {
+        Ok(mut url) => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        }
+        Err(_) => "<unparseable base_url redacted>".to_string(),
+    }
+}
+
+/// Whether `base_url` has already been discovered to require streaming.
+fn endpoint_requires_streaming(base_url: &str) -> bool {
+    STREAM_REQUIRED_ENDPOINTS
+        .read()
+        .is_ok_and(|set| set.contains(base_url))
+}
+
+/// Record that `base_url` only accepts `stream: true`. Returns `true` only for
+/// the call that first inserted it, so discovery logs exactly once per endpoint
+/// per process even under a concurrent first-probe race. Fails open (no record)
+/// if the lock is poisoned — callers still hold their own per-instance latch.
+fn remember_endpoint_requires_streaming(base_url: &str) -> bool {
+    if endpoint_requires_streaming(base_url) {
+        return false;
+    }
+    STREAM_REQUIRED_ENDPOINTS
+        .write()
+        .map(|mut set| set.insert(base_url.to_string()))
+        .unwrap_or(false)
+}
 
 /// Recognises "this endpoint only accepts `stream: true`" from a provider error.
 ///
