@@ -52,6 +52,11 @@ use crate::harness::model::ChatModel;
 /// putting them here would mean the runtime had already made the decision it is
 /// supposed to be delegating.
 ///
+/// [`model_pin`](Self::model_pin) is consistent with that rule rather than an
+/// exception to it. A pin is a *declared fact* — this agent's definition names
+/// this model — not a conclusion the runtime reached. Passing it along still
+/// leaves the host to decide whether to honour it; see the field docs.
+///
 /// Fields are public so a host can pattern-match without accessor ceremony; the
 /// builder methods exist for call sites that construct one inline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -82,21 +87,53 @@ pub struct ModelResolveRequest {
     /// hosts key on first (lead model vs subagent model).
     #[serde(default)]
     pub is_team_lead: bool,
+
+    /// Exact model id the agent's definition pinned, if any.
+    ///
+    /// Distinct from [`role`](Self::role) and the distinction is the whole
+    /// point: a role is a **host taxonomy** ("chat", "background", "thinking"),
+    /// whereas this is a **concrete model id** (`claude-3-5-sonnet`, a BYOK id,
+    /// a local model name). Before this field existed, `role` was the only
+    /// string on the request, so a wiring author needing a pin honoured would
+    /// naturally put the model id there — and a host resolver reasonably
+    /// treating `role` as a role vocabulary would fail to recognise it and fall
+    /// back to a default. The pin would be dropped silently, which is precisely
+    /// the ambiguity this field removes.
+    ///
+    /// **Advisory, not binding.** The host decides whether it can honour the
+    /// pin — the model may be unconfigured, the credentials absent, the
+    /// provider down, or the id simply unknown — and is free to resolve
+    /// something else or return an error. Keeping that judgement host-side is
+    /// deliberate: the runtime has no view of credentials or provider health,
+    /// so a runtime that honoured pins itself would route to models the host
+    /// cannot actually call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_pin: Option<String>,
 }
 
 impl ModelResolveRequest {
-    /// A request for `agent_id` with no role and not a team lead.
+    /// A request for `agent_id` with no role, no model pin, and not a team lead.
     pub fn new(agent_id: impl Into<String>) -> Self {
         Self {
             agent_id: agent_id.into(),
             role: None,
             is_team_lead: false,
+            model_pin: None,
         }
     }
 
     /// Sets the host-defined role.
+    ///
+    /// Pass a *role*, never a model id — see
+    /// [`with_model_pin`](Self::with_model_pin) for the latter.
     pub fn with_role(mut self, role: impl Into<String>) -> Self {
         self.role = Some(role.into());
+        self
+    }
+
+    /// Sets the exact model id the agent's definition pinned.
+    pub fn with_model_pin(mut self, model: impl Into<String>) -> Self {
+        self.model_pin = Some(model.into());
         self
     }
 
@@ -117,6 +154,21 @@ impl ModelResolveRequest {
             .as_deref()
             .map(str::trim)
             .filter(|r| !r.is_empty())
+    }
+
+    /// The pinned model id as a borrowed string, or `None` when unset.
+    ///
+    /// Blank-trims for the same reason [`role`](Self::role) does, and the
+    /// consequence here is worse: a definition with `model = ""` reaching a
+    /// resolver as `Some("")` would be looked up as a model literally named
+    /// empty-string, missing, and reported as an unroutable pin — turning a
+    /// cosmetic config blank into a failed turn instead of the intended
+    /// "no pin, route normally".
+    pub fn model_pin(&self) -> Option<&str> {
+        self.model_pin
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
     }
 }
 
@@ -232,6 +284,7 @@ mod tests {
         assert_eq!(req.agent_id, "planner");
         assert_eq!(req.role(), None);
         assert!(!req.is_team_lead);
+        assert_eq!(req.model_pin(), None);
     }
 
     #[test]
@@ -241,6 +294,49 @@ mod tests {
             .as_team_lead();
         assert_eq!(req.role(), Some("researcher"));
         assert!(req.is_team_lead);
+    }
+
+    #[test]
+    fn model_pin_is_a_separate_channel_from_role() {
+        // The bug #89 exists to prevent: with no pin field, a wiring author
+        // puts the model id in `role`, the host reads it as an unknown role and
+        // silently falls back to a default. The two must never collapse into
+        // one string.
+        let req = ModelResolveRequest::new("planner")
+            .with_role("researcher")
+            .with_model_pin("claude-3-5-sonnet");
+        assert_eq!(req.role(), Some("researcher"));
+        assert_eq!(req.model_pin(), Some("claude-3-5-sonnet"));
+    }
+
+    #[test]
+    fn a_pin_can_be_set_without_a_role() {
+        // The common case for a user-authored agent: it pins a model and
+        // declares no role at all.
+        let req = ModelResolveRequest::new("planner").with_model_pin("local-llama");
+        assert_eq!(req.role(), None);
+        assert_eq!(req.model_pin(), Some("local-llama"));
+    }
+
+    #[test]
+    fn blank_model_pin_reads_as_absent() {
+        // `model = ""` in a definition means "no pin", not a model named "".
+        // Reaching a resolver as Some("") would fail the lookup and turn a
+        // cosmetic config blank into an unroutable turn.
+        for blank in ["", "   ", "\t\n"] {
+            let req = ModelResolveRequest::new("planner").with_model_pin(blank);
+            assert_eq!(
+                req.model_pin(),
+                None,
+                "blank pin {blank:?} must read as absent"
+            );
+        }
+    }
+
+    #[test]
+    fn model_pin_accessor_trims_surrounding_whitespace() {
+        let req = ModelResolveRequest::new("planner").with_model_pin("  gpt-4o  ");
+        assert_eq!(req.model_pin(), Some("gpt-4o"));
     }
 
     #[test]
@@ -269,12 +365,14 @@ mod tests {
         assert!(req.agent_id.is_empty());
         assert_eq!(req.role(), None);
         assert!(!req.is_team_lead);
+        assert_eq!(req.model_pin(), None);
     }
 
     #[test]
     fn request_round_trips_through_serde() {
         let req = ModelResolveRequest::new("planner")
             .with_role("researcher")
+            .with_model_pin("claude-3-5-sonnet")
             .as_team_lead();
         let json = serde_json::to_string(&req).expect("serialize");
         let back: ModelResolveRequest = serde_json::from_str(&json).expect("deserialize");
@@ -291,6 +389,19 @@ mod tests {
         );
         let back: ModelResolveRequest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, req);
+    }
+
+    #[test]
+    fn absent_model_pin_is_omitted_and_restored() {
+        let req = ModelResolveRequest::new("planner");
+        let json = serde_json::to_string(&req).expect("serialize");
+        assert!(
+            !json.contains("model_pin"),
+            "unset model pin must not serialize: {json}"
+        );
+        let back: ModelResolveRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, req);
+        assert_eq!(back.model_pin(), None);
     }
 
     #[test]
@@ -333,9 +444,15 @@ mod tests {
             .resolve(&ModelResolveRequest::new("worker").with_role("scribe"))
             .await
             .expect("resolve worker");
+        // A pin is advisory: a host with exactly one model is entitled to
+        // ignore it, and must not be expected to look the id up.
+        let pinned = resolver
+            .resolve(&ModelResolveRequest::new("pinned").with_model_pin("gpt-4o"))
+            .await
+            .expect("resolve pinned");
         assert!(
-            Arc::ptr_eq(&lead, &worker),
-            "the fixed resolver must not route on agent id, role, or lead status"
+            Arc::ptr_eq(&lead, &worker) && Arc::ptr_eq(&lead, &pinned),
+            "the fixed resolver must not route on agent id, role, lead status, or model pin"
         );
     }
 
