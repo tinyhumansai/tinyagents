@@ -968,10 +968,9 @@ pub fn parse_tool_calls_with_pformat(
     }
 
     // Walk the tags ourselves, preferring a P-Format body per tag and falling
-    // back to the JSON entry the canonical parser produced at the same ordinal
-    // position (both walk the same ordered set of `<tool_call>`-family tags).
+    // back to parsing the tag body directly with the JSON logic to preserve
+    // all calls produced from multi-call JSON bodies and markdown/GLM grammars.
     let mut combined: Vec<ParsedToolCall> = Vec::new();
-    let mut json_idx = 0usize;
     let mut remaining = response;
 
     while !remaining.is_empty() {
@@ -999,13 +998,12 @@ pub fn parse_tool_calls_with_pformat(
                 arguments,
                 id: None,
             });
-            // Do NOT advance `json_idx` here: a P-Format tag is one the JSON pass
-            // could not parse, so `parse_tool_calls` produced no `json_calls`
-            // entry for it. Advancing would shift every later JSON tag onto the
-            // wrong `json_calls` index and silently drop a real JSON call.
-        } else if let Some(json_call) = json_calls.get(json_idx) {
-            combined.push(json_call.clone());
-            json_idx += 1;
+        } else {
+            // Re-parse this tag body with the canonical JSON logic so a body
+            // holding several calls contributes all of them.
+            for value in extract_json_values(body) {
+                combined.extend(parse_tool_calls_from_json_value(&value));
+            }
         }
 
         remaining = &after_open[close_idx + close_tag.len()..];
