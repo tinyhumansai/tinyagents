@@ -104,10 +104,7 @@ fn parse_tool_call_value_aliased(
         // contexts (`<tool_call>`/`<invoke>`, `tool_calls` array, `function`
         // wrapper) reach this fn with `allow_arg_aliases = true` and keep the
         // permissive behaviour.
-        match value.get("arguments") {
-            Some(args) => parse_arguments_value(Some(args)),
-            None => return None,
-        }
+        parse_arguments_value(value.get("arguments"))
     };
     Some(ParsedToolCall {
         name,
