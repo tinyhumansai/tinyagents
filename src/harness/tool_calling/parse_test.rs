@@ -176,7 +176,7 @@ fn glm_helpers_parse_aliases_urls_and_commands() {
     );
     assert_eq!(
         build_curl_command("https://exa'mple.com"),
-        Some("curl -s 'https://exa'\\\\''mple.com'".into())
+        Some("curl -s 'https://exa'\\''mple.com'".into())
     );
     assert!(build_curl_command("ftp://example.com").is_none());
     assert!(build_curl_command("https://example.com/has space").is_none());
