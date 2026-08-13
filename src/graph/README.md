@@ -1,8 +1,7 @@
 # graph
 
 TinyAgents' durable workflow runtime (LangGraph-style), and one of the
-load-bearing surfaces of the crate's recursive
-architecture.
+load-bearing surfaces of the crate's recursive architecture.
 
 Because a node can embed another compiled graph (`subgraph`) or invoke a
 sub-agent, **graphs run graphs** and orchestration recurses while every step

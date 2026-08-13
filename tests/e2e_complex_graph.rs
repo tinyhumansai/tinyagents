@@ -349,4 +349,3 @@ async fn unbounded_loop_back_hits_recursion_limit_deterministically() {
         "expected RecursionLimit(4), got {err:?}"
     );
 }
-
