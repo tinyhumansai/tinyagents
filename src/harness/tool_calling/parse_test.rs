@@ -399,21 +399,12 @@ use crate::harness::tool_calling::{PFormatRegistry, PFormatToolParams};
 
 /// A p-format tag alongside a GLM-style sibling.
 ///
-/// **Known pre-existing limitation, inherited from the code this was ported
-/// from — `#[ignore]`d rather than deleted so it stays visible.**
-///
 /// Once any tag yields a p-format call, the walk stops falling back to the
-/// canonical parse, and the remaining path handles JSON only. A GLM body
-/// (`shell/command>ls`) is not JSON, so that call is silently dropped: the
-/// agent loses a tool invocation it asked for and nothing reports it.
-///
-/// Verified against the pre-port original, which fails this identically — so
-/// it is not a regression from the relocation or from the tag-walk rewrite.
-/// Fixing it means routing the non-p-format branch through the full grammar
-/// set rather than `extract_json_values`, which is a behaviour change and
-/// belongs in its own change with its own review.
+/// canonical parse, so every remaining tag is on its own. A GLM body
+/// (`shell/command>ls -la`) is not JSON, so before the GLM fallback existed
+/// this call was silently dropped — the agent lost a tool invocation it had
+/// asked for and nothing reported it.
 #[test]
-#[ignore = "pre-existing: a GLM sibling tag is dropped once a p-format tag matches"]
 fn a_pformat_tag_does_not_suppress_a_sibling_glm_tag() {
     let mut reg = PFormatRegistry::new();
     reg.insert(
@@ -466,4 +457,66 @@ fn a_pformat_tag_does_not_suppress_a_sibling_fenced_json_tag() {
         names.contains(&"shell"),
         "the fenced-JSON sibling was dropped — got {names:?}"
     );
+}
+
+/// A JSON body that ALSO looks like GLM's `name/key>value` grammar must not
+/// yield the call twice.
+///
+/// The GLM fallback runs only when the JSON path found nothing, and this is
+/// what pins that ordering. If it ever ran unconditionally, a body containing
+/// a `/` and a `>` inside a string value would be counted once as JSON and
+/// again as GLM — the agent would execute the same tool twice.
+#[test]
+fn a_json_body_is_not_double_counted_by_the_glm_fallback() {
+    let mut reg = PFormatRegistry::new();
+    reg.insert(
+        "echo".to_string(),
+        PFormatToolParams::from_schema(&serde_json::json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } }
+        })),
+    );
+
+    let response = concat!(
+        "<tool_call>echo[hello]</tool_call>\n",
+        "<tool_call>{\"name\": \"shell\", \"arguments\": {\"command\": \"cat a/b>c\"}}</tool_call>"
+    );
+    let (_narrative, calls) = parse_tool_calls_with_pformat(response, &reg);
+    let shell_calls = calls.iter().filter(|c| c.name == "shell").count();
+    assert_eq!(
+        shell_calls,
+        1,
+        "the JSON body was counted twice: {:?}",
+        calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()
+    );
+}
+
+/// A tagged body may use the argument-key aliases.
+///
+/// A `<tool_call>` tag is an explicit tool-call marker, so `args` /
+/// `parameters` / `input` are honoured inside it — unlike a bare top-level
+/// object, where they are refused so a plain JSON answer cannot read as a
+/// call. This pins that the tag path keeps the permissive behaviour: routing
+/// it through `parse_tool_calls` instead would silently drop this call.
+#[test]
+fn a_tagged_body_still_honours_argument_key_aliases() {
+    let mut reg = PFormatRegistry::new();
+    reg.insert(
+        "echo".to_string(),
+        PFormatToolParams::from_schema(&serde_json::json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } }
+        })),
+    );
+
+    let response = concat!(
+        "<tool_call>echo[hello]</tool_call>\n",
+        "<tool_call>{\"name\": \"shell\", \"args\": {\"command\": \"ls\"}}</tool_call>"
+    );
+    let (_narrative, calls) = parse_tool_calls_with_pformat(response, &reg);
+    let shell = calls
+        .iter()
+        .find(|c| c.name == "shell")
+        .expect("the aliased tagged call must survive");
+    assert_eq!(shell.arguments["command"], "ls");
 }
