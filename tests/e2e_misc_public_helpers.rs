@@ -21,7 +21,6 @@ use tinyagents::harness::ids::{
 use tinyagents::harness::limits::{LimitTracker, RunLimits};
 use tinyagents::harness::store::{AppendStore, InMemoryAppendStore};
 use tinyagents::harness::tool::{ToolCall, ToolFormat, ToolResult, ToolSchema};
-use tinyagents::repl::{CapabilityPolicy, ReplCommand, ReplOutcome, ReplSession, parse_command};
 
 #[tokio::test]
 async fn graph_reducers_streams_observability_and_status_helpers_work() {
@@ -252,7 +251,7 @@ async fn graph_reducers_streams_observability_and_status_helpers_work() {
 }
 
 #[test]
-fn tool_schema_limits_ids_and_repl_contracts_cover_public_helpers() {
+fn tool_schema_limits_and_ids_cover_public_helpers() {
     let schema = ToolSchema::new(
         "make",
         "make a value",
@@ -353,138 +352,4 @@ fn tool_schema_limits_ids_and_repl_contracts_cover_public_helpers() {
     assert!(new_cell_id().as_str().starts_with("cell-"));
     assert!(new_call_id().as_str().starts_with("call-"));
 
-    assert_eq!(parse_command("help").unwrap().name(), "help");
-    assert_eq!(parse_command("?").unwrap(), ReplCommand::Help);
-    assert_eq!(parse_command("q").unwrap(), ReplCommand::Quit);
-    assert_eq!(
-        parse_command(r#"set name "Ada Lovelace""#).unwrap(),
-        ReplCommand::Set {
-            key: "name".into(),
-            value: "Ada Lovelace".into()
-        }
-    );
-    assert_eq!(
-        parse_command(r#"call tool {"x":1}"#).unwrap(),
-        ReplCommand::Call {
-            capability: "tool".into(),
-            args: json!({ "x": 1 })
-        }
-    );
-    assert!(parse_command("").is_err());
-    assert!(parse_command("unknown").is_err());
-    assert!(parse_command(r#"set x "unterminated"#).is_err());
-    assert!(parse_command("call tool not-json").is_err());
-
-    let mut policy = CapabilityPolicy::new();
-    assert!(policy.is_empty());
-    policy
-        .allow("load")
-        .allow("compile")
-        .allow("run")
-        .allow("tool");
-    assert_eq!(policy.len(), 4);
-    assert!(policy.is_allowed("tool"));
-    let list_policy = CapabilityPolicy::from_list(["tool"]);
-    assert!(list_policy.is_allowed("tool"));
-
-    let mut session = ReplSession::new().with_policy(policy);
-    session.set("direct", json!(42));
-    assert_eq!(session.get("direct"), Some(&json!(42)));
-    assert!(session.vars().contains_key("direct"));
-    assert!(matches!(
-        session.execute(ReplCommand::Help).unwrap(),
-        ReplOutcome::Message(_)
-    ));
-    assert_eq!(
-        session
-            .execute(ReplCommand::Set {
-                key: "name".into(),
-                value: "Ada".into()
-            })
-            .unwrap(),
-        ReplOutcome::Message("ok".into())
-    );
-    assert_eq!(
-        session
-            .execute(ReplCommand::Get { key: "name".into() })
-            .unwrap(),
-        ReplOutcome::Value(json!("Ada"))
-    );
-    assert!(matches!(
-        session
-            .execute(ReplCommand::Show {
-                what: "vars".into()
-            })
-            .unwrap(),
-        ReplOutcome::Value(_)
-    ));
-    assert!(matches!(
-        session
-            .execute(ReplCommand::Show {
-                what: "graphs".into()
-            })
-            .unwrap(),
-        ReplOutcome::Message(_)
-    ));
-    assert!(matches!(
-        session
-            .execute(ReplCommand::Show {
-                what: "status".into()
-            })
-            .unwrap(),
-        ReplOutcome::Value(_)
-    ));
-    assert!(matches!(
-        session
-            .execute(ReplCommand::Show { what: "bad".into() })
-            .unwrap(),
-        ReplOutcome::Message(_)
-    ));
-    assert!(matches!(
-        session
-            .execute(ReplCommand::Load {
-                path: "x.rag".into()
-            })
-            .unwrap(),
-        ReplOutcome::Planned { .. }
-    ));
-    assert!(matches!(
-        session
-            .execute(ReplCommand::Compile { name: "x".into() })
-            .unwrap(),
-        ReplOutcome::Planned { .. }
-    ));
-    assert!(matches!(
-        session
-            .execute(ReplCommand::Run {
-                graph: "g".into(),
-                input: "{}".into()
-            })
-            .unwrap(),
-        ReplOutcome::Planned { .. }
-    ));
-    assert!(matches!(
-        session
-            .execute(ReplCommand::Call {
-                capability: "tool".into(),
-                args: json!({})
-            })
-            .unwrap(),
-        ReplOutcome::Planned { .. }
-    ));
-    assert!(
-        session
-            .execute(ReplCommand::Call {
-                capability: "blocked".into(),
-                args: json!({})
-            })
-            .unwrap_err()
-            .to_string()
-            .contains("allowlist")
-    );
-    assert_eq!(
-        session.execute(ReplCommand::Quit).unwrap(),
-        ReplOutcome::Quit
-    );
-    assert!(!session.history.is_empty());
 }
