@@ -334,6 +334,9 @@ fn quote_bare_json_object_keys(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 16);
     let mut in_string = false;
     let mut escaped = false;
+    // Innermost container: `true` = object, `false` = array. A bare token may
+    // only be a key inside an object.
+    let mut in_object: Vec<bool> = Vec::new();
     // True right after a structural `{` or `,` — the only positions where a bare
     // key may begin.
     let mut expect_key = false;
@@ -357,7 +360,20 @@ fn quote_bare_json_object_keys(s: &str) -> String {
                 out.push(c);
             }
             '{' | ',' => {
-                expect_key = true;
+                if c == '{' {
+                    in_object.push(true);
+                }
+                expect_key = *in_object.last().unwrap_or(&false);
+                out.push(c);
+            }
+            '[' => {
+                in_object.push(false);
+                expect_key = false;
+                out.push(c);
+            }
+            '}' | ']' => {
+                in_object.pop();
+                expect_key = false;
                 out.push(c);
             }
             c if c.is_whitespace() => out.push(c), // keep looking for a key
