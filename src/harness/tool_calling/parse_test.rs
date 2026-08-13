@@ -376,7 +376,7 @@ fn parse_tool_calls_with_pformat_preserves_multi_call_tag_bodies() {
     // A single <tool_call> tag body can hold multiple JSON calls (e.g., two
     // adjacent objects or a {"tool_calls":[...]} envelope). The ordinal pairing
     // must not drop them when re-parsing the tag body.
-    use crate::harness::pformat::PFormatRegistry;
+    use crate::harness::tool_calling::PFormatRegistry;
 
     let registry = PFormatRegistry::new();
     let response = r#"<tool_call>{"name":"get_weather","arguments":{"city":"London"}}{"name":"get_time","arguments":{"tz":"UTC"}}</tool_call>"#;
