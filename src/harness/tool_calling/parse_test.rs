@@ -227,14 +227,6 @@ fn parse_tool_calls_supports_native_json_xml_markdown_and_glm_formats() {
     assert_eq!(calls[0].name, "shell");
 }
 
-/// TAURI-RUST-4PK / 4PJ: the persisted assistant-history JSON must carry each
-/// tool call's `extra_content` (Gemini's `thought_signature`). This is the
-/// writer that the agent loop runs *every* native tool-call turn through, so a
-/// dropped signature here is exactly what re-surfaced the 400 on a history
-/// reload after PR #3553 fixed only the response→request hop. Every call in a
-/// parallel/multi-call turn must keep its own signature; calls without one omit
-/// the field so non-Gemini providers stay byte-identical.
-
 // ── lenient recovery of pipe-garbled <tool_call> tags ────────────────────────
 
 #[test]
