@@ -38,8 +38,8 @@
 //! one-line adapter over its own tool slice. Dispatch and execution stay host-side
 //! too: this module answers "what did the model ask for", never "what happens next".
 
-pub mod parse;
-pub mod pformat;
+pub(crate) mod parse;
+pub(crate) mod pformat;
 
 pub use parse::{ParsedToolCall, parse_tool_calls, parse_tool_calls_with_pformat};
 pub use pformat::{
