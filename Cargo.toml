@@ -24,8 +24,10 @@ futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-# `regex` backs the prompt-guided tool-call parsers in `harness::tool_calling`.
-# Already resolved in OpenHuman's kernel profile, so this adds no package.
+# `regex` has two consumers: the prompt-guided tool-call parsers in
+# `harness::tool_calling`, and the markup / data-URI / whitespace stripping
+# applied to oversized payloads in `harness::handoff`. Already resolved in
+# OpenHuman's kernel profile, so it adds no package there.
 regex = "1"
 thiserror = "2"
 tracing = "0.1"
