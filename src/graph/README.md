@@ -1,13 +1,13 @@
 # graph
 
 TinyAgents' durable workflow runtime (LangGraph-style), and one of the
-load-bearing surfaces of the crate's recursive language-model (RLM)
+load-bearing surfaces of the crate's recursive
 architecture.
 
 Because a node can embed another compiled graph (`subgraph`) or invoke a
 sub-agent, **graphs run graphs** and orchestration recurses while every step
 stays typed, checkpointed, and observable. A workflow authored from a `.rag`
-blueprint or driven from the `.ragsh` REPL lowers into exactly these same
+blueprint or driven from a host orchestrator lowers into exactly these same
 types, so a model can describe, compile, and re-enter the very runtime it is
 executing inside.
 

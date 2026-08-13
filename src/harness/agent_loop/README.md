@@ -1,7 +1,7 @@
 # harness::agent_loop
 
 The default model-tool-model agent loop: the innermost turn of the recursive
-(RLM-style) harness.
+harness.
 
 This loop is where one model call is driven to completion. Because a whole
 harness can be exposed as a tool (`harness::subagent::SubAgentTool`), the
