@@ -43,6 +43,7 @@ pub mod subagent;
 pub mod summarization;
 pub mod testkit;
 pub mod tool;
+pub mod tool_calling;
 #[cfg(feature = "tools")]
 pub mod tools;
 pub mod usage;
