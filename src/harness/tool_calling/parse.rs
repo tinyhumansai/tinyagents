@@ -104,11 +104,7 @@ fn parse_tool_call_value_aliased(
         // contexts (`<tool_call>`/`<invoke>`, `tool_calls` array, `function`
         // wrapper) reach this fn with `allow_arg_aliases = true` and keep the
         // permissive behaviour.
-        if let Some(args) = value.get("arguments") {
-            parse_arguments_value(Some(args))
-        } else {
-            return None;
-        }
+        parse_arguments_value(Some(value.get("arguments")?))
     };
     Some(ParsedToolCall {
         name,
