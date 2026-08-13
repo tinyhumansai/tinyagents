@@ -2,10 +2,10 @@
 //!
 //! The graph module is TinyAgents' durable workflow runtime (LangGraph-style)
 //! and one of the load-bearing surfaces of the crate's recursive language-model
-//! (RLM) architecture: because a node can embed another compiled graph
+//! architecture: because a node can embed another compiled graph
 //! ([`subgraph`]) or invoke a sub-agent, **graphs run graphs** and orchestration
 //! recurses while every step stays typed, checkpointed, and observable. A
-//! workflow authored from a `.rag` blueprint or driven from the `.ragsh` REPL
+//! workflow authored from a `.rag` blueprint or driven from a host orchestrator
 //! lowers into exactly these same types, so a model can describe, compile, and
 //! re-enter the very runtime it is executing inside.
 //!

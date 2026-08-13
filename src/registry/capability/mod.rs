@@ -3,8 +3,8 @@
 //!
 //! This is where a name like `"researcher"` or `"summarize"` becomes a real,
 //! callable handle. By registering capabilities here and then handing the
-//! registry to the language layer, a parent run lets a `.rag` blueprint or
-//! `.ragsh` line spawn sub-models, sub-agents, and sub-graphs it never
+//! registry to the language layer, a parent run lets a `.rag` blueprint or a
+//! host session spawn sub-models, sub-agents, and sub-graphs it never
 //! hardcoded — while the registry's allowlist guarantees those references can
 //! only resolve to capabilities a human actually registered.
 //!
