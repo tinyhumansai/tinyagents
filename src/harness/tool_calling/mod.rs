@@ -41,7 +41,15 @@
 pub(crate) mod parse;
 pub(crate) mod pformat;
 
-pub use parse::{ParsedToolCall, parse_tool_calls, parse_tool_calls_with_pformat};
+// The two entry points, plus the building blocks a host legitimately reaches
+// for on its own. `extract_json_values` in particular is not a test helper:
+// pulling the first JSON object out of model prose is how a host checks a
+// required-output contract, which has nothing to do with tool calls.
+pub use parse::{
+    ParsedToolCall, extract_json_values, parse_arguments_value, parse_glm_style_tool_calls,
+    parse_tool_call_value, parse_tool_calls, parse_tool_calls_from_json_value,
+    parse_tool_calls_with_pformat,
+};
 pub use pformat::{
     PFormatParamType, PFormatRegistry, PFormatToolParams, build_registry, parse_call,
     render_signature, render_signature_from_schema,

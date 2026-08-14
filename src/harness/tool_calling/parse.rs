@@ -42,7 +42,13 @@ fn first_args_by_keys(obj: &serde_json::Value) -> serde_json::Value {
     parse_arguments_value(None)
 }
 
-#[cfg(test)]
+/// Parse a single JSON value as a tool call, honouring the argument-key
+/// aliases.
+///
+/// The permissive entry point: callers reach a value through an explicit
+/// tool-call marker (a `tool_calls` array, a `<tool_call>` tag, a fenced
+/// block), which is what licenses the aliases. Do not use it on arbitrary
+/// model output — see the module docs.
 pub fn parse_tool_call_value(value: &serde_json::Value) -> Option<ParsedToolCall> {
     // Default to the permissive (tagged) behaviour: callers that reach a
     // value through an explicit tool-call marker (`tool_calls` array,
