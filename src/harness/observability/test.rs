@@ -754,3 +754,76 @@ async fn in_memory_backends_recover_len_from_poisoned_lock() {
     assert_eq!(store.len(), 1);
     assert!(!store.is_empty());
 }
+
+#[tokio::test]
+async fn a_long_lived_run_is_trimmed_to_its_per_run_cap() {
+    // `max_runs` bounds the wrong dimension for a run that never ends: one
+    // run is one stream, so it is never evicted and its entries grow for as
+    // long as the run does. With payload capture on, every ModelCompleted
+    // carries the whole conversation so far, so the growth is quadratic in the
+    // number of model calls — measured downstream at 1.8 GiB over 337 calls.
+    let journal = InMemoryEventJournal::with_max_entries_per_run(3);
+
+    for _ in 0..10 {
+        journal
+            .append(obs("run-0", 0, AgentEvent::StateUpdate))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        journal.len("run-0"),
+        3,
+        "the cap must bound one run's stream"
+    );
+    assert_eq!(journal.run_count(), 1);
+}
+
+#[tokio::test]
+async fn a_trimmed_run_keeps_numbering_and_refuses_a_stale_offset() {
+    // The offset a trimmed stream reports must keep counting from where the
+    // run actually is, not from what survives — otherwise a consumer that
+    // exports incrementally would re-export entries it has already shipped.
+    // And an offset that has been trimmed away must *error* rather than
+    // return a short answer, which is the same contract run-level eviction
+    // already has: silently skipping entries is the failure worth refusing.
+    let journal = InMemoryEventJournal::with_max_entries_per_run(2);
+
+    let mut offsets = Vec::new();
+    for _ in 0..5 {
+        offsets.push(
+            journal
+                .append(obs("run-0", 0, AgentEvent::StateUpdate))
+                .await
+                .unwrap(),
+        );
+    }
+    assert_eq!(offsets, vec![0, 1, 2, 3, 4], "numbering must not restart");
+
+    // The last two survive, and reading from the first of them works.
+    let recent = journal.read_from("run-0", 3).await.unwrap();
+    assert_eq!(recent.len(), 2);
+
+    // Everything before that was trimmed, and asking for it is an error.
+    assert!(
+        journal.read_from("run-0", 0).await.is_err(),
+        "an offset trimmed away must be refused, never silently skipped"
+    );
+}
+
+#[tokio::test]
+async fn an_uncapped_journal_retains_everything() {
+    // The default is unbounded, because trimming loses observations and is
+    // only safe for a consumer that has already exported what it drops.
+    let journal = InMemoryEventJournal::new();
+
+    for _ in 0..50 {
+        journal
+            .append(obs("run-0", 0, AgentEvent::StateUpdate))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(journal.len("run-0"), 50);
+    assert_eq!(journal.read_from("run-0", 0).await.unwrap().len(), 50);
+}
