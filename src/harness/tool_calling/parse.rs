@@ -224,7 +224,7 @@ fn normalize_garbled_tool_call_tags(s: &str) -> Cow<'_, str> {
     }
     let mut out = String::with_capacity(s.len());
     let mut cursor = 0usize;
-    for pair in tags.chunks_exact(2) {
+    for pair in tags.as_chunks::<2>().0 {
         let (open_start, open_end) = pair[0];
         let (close_start, close_end) = pair[1];
         out.push_str(&s[cursor..open_start]); // text before the open tag, verbatim
