@@ -17,6 +17,11 @@
 mod claims;
 mod types;
 
+pub use claims::{
+    parse_relative_claim_paths, paths_overlap, plan_shared_workspace_dispatch,
+    writes_shared_workspace, ClaimConflict, ClaimPathError, DispatchMode, DispatchPlan,
+    WorkspaceClaim,
+};
 pub use types::{FailurePolicy, ItemOutcome, ParallelOptions, ParallelOutcome};
 
 use futures::stream::StreamExt;
