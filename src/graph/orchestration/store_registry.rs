@@ -90,6 +90,19 @@ impl<K: Eq + Hash + Clone + Send + Sync> TaskStoreRegistry<K> {
         Ok(self.lock()?.get(key).map(Arc::clone))
     }
 
+    /// Every store opened so far, in unspecified order.
+    ///
+    /// For supervisors that need a view across scopes — reconciling or
+    /// reporting over every workspace this process has touched — without
+    /// knowing the key set in advance.
+    ///
+    /// # Errors
+    ///
+    /// [`TaskStoreRegistryError::Lock`] when the registry mutex is poisoned.
+    pub fn values(&self) -> Result<Vec<Arc<dyn TaskStore>>, TaskStoreRegistryError> {
+        Ok(self.lock()?.values().map(Arc::clone).collect())
+    }
+
     /// Number of scopes with an open store.
     ///
     /// # Errors

@@ -975,6 +975,32 @@ fn registry_get_does_not_open_and_clear_forces_a_reopen() {
 }
 
 #[test]
+fn registry_values_returns_every_open_store() {
+    let registry: TaskStoreRegistry<String> =
+        TaskStoreRegistry::new(|_key| Arc::new(InMemoryTaskStore::new()) as Arc<dyn TaskStore>);
+    assert!(registry.values().expect("values").is_empty());
+
+    registry.get_or_open(&"a".to_string()).expect("opens a");
+    registry.get_or_open(&"b".to_string()).expect("opens b");
+
+    let stores = registry.values().expect("values");
+    assert_eq!(stores.len(), 2);
+
+    // A record written through one store is visible through exactly one of the
+    // returned handles, so callers can sweep across scopes.
+    registry
+        .get_or_open(&"a".to_string())
+        .expect("reuses a")
+        .insert(graph_spec("only-in-a"))
+        .expect("insert");
+    let total: usize = stores
+        .iter()
+        .map(|store| store.list(OrchestrationTaskFilter::default()).len())
+        .sum();
+    assert_eq!(total, 1);
+}
+
+#[test]
 fn registry_debug_reports_open_store_count() {
     let registry: TaskStoreRegistry<String> =
         TaskStoreRegistry::new(|_key| Arc::new(InMemoryTaskStore::new()) as Arc<dyn TaskStore>);
