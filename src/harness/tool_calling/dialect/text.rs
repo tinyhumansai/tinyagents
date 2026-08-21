@@ -115,21 +115,24 @@ fn neutralize_protocol_tags(value: &str) -> Cow<'_, str> {
             if rest.len() < tag.len() || !rest[..tag.len()].eq_ignore_ascii_case(tag.as_bytes()) {
                 return false;
             }
-            // The tag name must actually end here — on a real XML tag
-            // terminator (whitespace, `>`, or a self-closing `/`), not merely
-            // on a byte outside `[A-Za-z0-9_-]`. `.` and `:` are valid XML
-            // name characters, so treating them as boundaries would rewrite
-            // `<tool_result.debug>` and `<tool_call:custom>` — neither of
-            // which is protocol — the same false-positive-is-wasted-fidelity
-            // problem `<tool_calls>` and `<tool_resultant>` guard against
-            // below. Requiring `Some` (not just "not a name char") also keeps
-            // an incomplete, truncated `<tool_result` at the very end of the
-            // string from matching: there is no terminator yet, so it is not
-            // (yet) a protocol tag.
-            matches!(
-                rest.get(tag.len()),
-                Some(byte) if byte.is_ascii_whitespace() || matches!(*byte, b'>' | b'/')
-            )
+            // The tag name must actually end here, on a real XML tag
+            // terminator: whitespace, `>`, a self-closing `/`, or the end of
+            // the body. Not merely "a byte outside `[A-Za-z0-9_-]`" — `.` and
+            // `:` are valid XML name characters, so treating them as
+            // boundaries would rewrite `<tool_result.debug>` and
+            // `<tool_call:custom>`, neither of which is protocol.
+            //
+            // End of body counts, and that is the subtle one. The body is not
+            // the end of the rendered text: the caller appends
+            // "\n</tool_result>" straight after it, so a body ending in a bare
+            // `<tool_result` is followed by a newline in the message the model
+            // actually reads, and that opener swallows the real closing tag.
+            // "No terminator yet, so not a protocol tag" reads correct in
+            // isolation and is wrong in context.
+            match rest.get(tag.len()) {
+                None => true,
+                Some(byte) => byte.is_ascii_whitespace() || matches!(*byte, b'>' | b'/'),
+            }
         });
         if !is_protocol_tag {
             continue;

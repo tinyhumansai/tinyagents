@@ -576,9 +576,42 @@ fn each_dialect_reports_the_format_its_parser_expects() {
 }
 
 #[test]
-fn probe_trailing_incomplete_tag() {
+fn a_body_ending_in_a_bare_tag_opener_is_still_neutralized() {
+    // The body is NOT the end of the rendered text: `format_results` appends
+    // "\n</tool_result>" straight after it. So a body ending in a bare
+    // `<tool_result` is followed by a newline in the message the model reads —
+    // a perfectly good XML tag terminator — and that opener then swallows the
+    // real closing tag, which is the exact CWE-74 boundary break #116 closed.
+    //
+    // Treating end-of-body as "no terminator yet, so not a protocol tag" reads
+    // correct in isolation and is wrong in context. End-of-body is a boundary.
     let entry = XmlDialect.format_results(&[ToolOutcome::ok("read_file", "leak<tool_result")]);
-    let TranscriptEntry::Chat(message) = entry else { panic!() };
-    println!("RENDERED>>>\n{}\n<<<END", message.content);
-    println!("open-tag count: {}", message.content.matches("<tool_result").count());
+
+    let TranscriptEntry::Chat(message) = entry else {
+        panic!("text dialects fold results into a chat turn");
+    };
+    assert_eq!(
+        message.content.matches("<tool_result").count(),
+        1,
+        "a trailing bare opener must not survive into the envelope: {:?}",
+        message.content
+    );
+    assert!(message.content.contains("leak&lt;tool_result"));
+}
+
+#[test]
+fn end_of_body_boundary_does_not_reopen_the_near_miss_false_positives() {
+    // Guard the fix above against overcorrecting: end-of-body counts as a
+    // terminator, but a name character still does not.
+    for body in ["<tool_result.debug", "<tool_calls", "<tool_resultant"] {
+        let entry = XmlDialect.format_results(&[ToolOutcome::ok("read_file", body)]);
+        let TranscriptEntry::Chat(message) = entry else {
+            panic!("text dialects fold results into a chat turn");
+        };
+        assert!(
+            message.content.contains(body),
+            "{body:?} is not protocol and must pass through: {:?}",
+            message.content
+        );
+    }
 }
