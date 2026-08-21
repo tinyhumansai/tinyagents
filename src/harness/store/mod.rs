@@ -400,9 +400,35 @@ impl JsonlAppendStore {
             // outright, since `read_records` decodes strictly. A stream that
             // keeps accepting appends while being permanently unreadable is not
             // a tolerance anyone asked for.
-            let buf = std::str::from_utf8(decodable).map_err(|e| {
-                TinyAgentsError::Validation(format!("append store read error: {e}"))
-            })?;
+            let buf = match std::str::from_utf8(decodable) {
+                Ok(text) => text,
+                // `error_len() == None` means the bytes END mid-character: a
+                // valid prefix cut short. That is a torn WRITE — a crash during
+                // append — which this function already promises to tolerate
+                // ("a trailing partial line is skipped"), and refusing it would
+                // block every future append on the stream forever. Exactly the
+                // failure this change exists to remove, arriving by a different
+                // door.
+                //
+                // Decode the valid prefix. The truncated tail is part of the
+                // trailing line, which the loop below discards anyway when it
+                // fails to parse as JSON.
+                Err(e) if e.error_len().is_none() => {
+                    // Infallible: `valid_up_to()` is by definition the length of
+                    // a valid prefix.
+                    std::str::from_utf8(&decodable[..e.valid_up_to()])
+                        .expect("valid_up_to marks a valid prefix")
+                }
+                // `Some(_)` is a genuinely invalid sequence rather than a
+                // truncation, and stays a hard error: tolerating it lets a
+                // corrupt record shadow an offset that is already on disk, so
+                // the next append silently reuses it.
+                Err(e) => {
+                    return Err(TinyAgentsError::Validation(format!(
+                        "append store read error: {e}"
+                    )));
+                }
+            };
             let lines: Vec<&str> = buf.lines().collect();
             for line in lines.iter().rev() {
                 if line.trim().is_empty() {

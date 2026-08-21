@@ -426,6 +426,57 @@ async fn jsonl_rejects_unsafe_stream_names() {
     assert_eq!(store.append("runs-1.events_v2", json!(1)).await.unwrap(), 0);
 }
 
+/// A crash that truncates mid-character must not block every later append.
+///
+/// `next_offset` promises that "a trailing partial line (a torn write) is
+/// skipped, so a crash mid-append cannot make the stream restart its numbering".
+/// Decoding the window strictly keeps a genuinely corrupt byte loud — a corrupt
+/// record would otherwise shadow an offset already on disk and let the next
+/// append reuse it — but a torn write is not corruption, and refusing it would
+/// wedge the stream permanently. That is the same failure this whole change
+/// exists to remove, arriving by a different door.
+///
+/// `Utf8Error::error_len()` is the discriminator: `None` means the bytes end
+/// mid-character (a valid prefix, cut short), `Some(_)` means an invalid
+/// sequence.
+#[tokio::test]
+async fn a_write_torn_mid_character_does_not_wedge_the_stream() {
+    let dir = TempDir::new("torn-write");
+    let store = JsonlAppendStore::new(&dir.0);
+    for i in 0..30 {
+        store
+            .append("run", json!({"text": format!("—{i}")}))
+            .await
+            .expect("seed");
+    }
+
+    // Cut the file one byte into the last em dash: it now ends inside a
+    // multi-byte character, exactly as an interrupted write would leave it.
+    let path = dir.0.join("run.jsonl");
+    let raw = std::fs::read(&path).expect("read");
+    let em = raw
+        .windows(3)
+        .rposition(|w| w == "—".as_bytes())
+        .expect("the fixture writes em dashes");
+    std::fs::write(&path, &raw[..em + 1]).expect("truncate");
+
+    // The fixture really does end mid-character, or this proves nothing.
+    let err = std::str::from_utf8(&std::fs::read(&path).unwrap())
+        .expect_err("the truncated file must not decode");
+    assert!(
+        err.error_len().is_none(),
+        "fixture should be an INCOMPLETE trailing character, not invalid bytes: {err:?}"
+    );
+
+    // The torn last line is discarded, so numbering continues from the last
+    // record that landed whole.
+    let offset = JsonlAppendStore::new(&dir.0)
+        .append("run", json!({"after": true}))
+        .await
+        .expect("a torn write must not block later appends");
+    assert_eq!(offset, 29, "the torn record is dropped, so 29 is next");
+}
+
 /// A multi-byte character straddling the 4096-byte lookback boundary must not
 /// break `next_offset`.
 ///
