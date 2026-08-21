@@ -344,7 +344,10 @@ pub fn context_detail_from_args(args: &Value) -> Option<String> {
 }
 
 /// [`context_detail_from_args`] with explicit trimming.
-pub fn context_detail_from_args_with(args: &Value, options: ContextDetailOptions) -> Option<String> {
+pub fn context_detail_from_args_with(
+    args: &Value,
+    options: ContextDetailOptions,
+) -> Option<String> {
     const CONTEXT_KEYS: &[&str] = &[
         "to",
         "recipient",

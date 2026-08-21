@@ -11,12 +11,12 @@
 
 use serde_json::Value;
 
+use super::ToolDialect;
 use super::pairing::pair_tool_cycles;
 use super::types::{
     DialectMessage, DialectResponse, ToolCallFormat, ToolOutcome, ToolResultEntry, TranscriptEntry,
 };
 use super::xml::XmlDialect;
-use super::ToolDialect;
 use crate::harness::tool::ToolSchema;
 use crate::harness::tool_calling::ParsedToolCall;
 

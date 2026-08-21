@@ -2,7 +2,7 @@ use serde_json::json;
 
 use super::*;
 use crate::harness::tool::ToolSchema;
-use crate::harness::tool_calling::{build_registry, PFormatRegistry};
+use crate::harness::tool_calling::{PFormatRegistry, build_registry};
 
 fn schema(name: &str, description: &str, parameters: serde_json::Value) -> ToolSchema {
     ToolSchema::new(name, description, parameters)
@@ -69,8 +69,9 @@ fn pformat_dialect_parses_a_positional_call() {
     let registry = build_registry([("get_weather", weather_schema().parameters)]);
     let dialect = PFormatDialect::new(registry);
 
-    let (_text, calls) =
-        dialect.parse_response(&response("<tool_call>get_weather[London|metric]</tool_call>"));
+    let (_text, calls) = dialect.parse_response(&response(
+        "<tool_call>get_weather[London|metric]</tool_call>",
+    ));
 
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].name, "get_weather");
@@ -95,9 +96,8 @@ fn pformat_dialect_falls_back_to_json_per_tag() {
 
 #[test]
 fn pformat_dialect_leaves_the_catalogue_to_the_prompt() {
-    let instructions = PFormatDialect::new(PFormatRegistry::new()).prompt_instructions(&[
-        weather_schema(),
-    ]);
+    let instructions =
+        PFormatDialect::new(PFormatRegistry::new()).prompt_instructions(&[weather_schema()]);
 
     assert!(instructions.contains("P-Format"));
     // Protocol only — listing tools here would duplicate the `## Tools` section.
@@ -127,7 +127,11 @@ fn pformat_registry_refuses_an_unregistered_tool_name() {
 fn native_dialect_reads_the_structured_channel() {
     let (text, calls) = NativeDialect.parse_response(&DialectResponse {
         text: Some("Looking it up".to_string()),
-        tool_calls: vec![native_call("call_1", "get_weather", r#"{"location":"London"}"#)],
+        tool_calls: vec![native_call(
+            "call_1",
+            "get_weather",
+            r#"{"location":"London"}"#,
+        )],
     });
 
     assert_eq!(text, "Looking it up");
@@ -173,12 +177,16 @@ fn text_dialects_render_results_by_name_and_status() {
         };
         assert_eq!(message.role, DialectRole::User);
         assert!(message.content.starts_with(TOOL_RESULTS_PREFIX));
-        assert!(message
-            .content
-            .contains(r#"<tool_result name="get_weather" status="ok">"#));
-        assert!(message
-            .content
-            .contains(r#"<tool_result name="send_email" status="error">"#));
+        assert!(
+            message
+                .content
+                .contains(r#"<tool_result name="get_weather" status="ok">"#)
+        );
+        assert!(
+            message
+                .content
+                .contains(r#"<tool_result name="send_email" status="error">"#)
+        );
     }
 }
 
@@ -214,7 +222,11 @@ fn native_replay_carries_reasoning_and_pairs_the_cycle() {
 
     assert_eq!(messages.len(), 3);
     assert_eq!(messages[1].role, DialectRole::Assistant);
-    assert!(messages[1].content.contains("\"reasoning_content\":\"thinking\""));
+    assert!(
+        messages[1]
+            .content
+            .contains("\"reasoning_content\":\"thinking\"")
+    );
     assert_eq!(messages[2].role, DialectRole::Tool);
     assert!(messages[2].content.contains("\"tool_call_id\":\"call_1\""));
 }
@@ -305,9 +317,13 @@ fn catalogue_signature_matches_what_the_parser_reconstructs() {
     assert!(rendered.contains("Call as: `get_weather[location|unit]`"));
 
     // The catalogue order is the order the parser assigns, not a coincidence.
-    let dialect = PFormatDialect::new(build_registry([("get_weather", weather_schema().parameters)]));
-    let (_text, calls) =
-        dialect.parse_response(&response("<tool_call>get_weather[London|metric]</tool_call>"));
+    let dialect = PFormatDialect::new(build_registry([(
+        "get_weather",
+        weather_schema().parameters,
+    )]));
+    let (_text, calls) = dialect.parse_response(&response(
+        "<tool_call>get_weather[London|metric]</tool_call>",
+    ));
     assert_eq!(calls[0].arguments["location"], "London");
     assert_eq!(calls[0].arguments["unit"], "metric");
 }

@@ -46,7 +46,7 @@ mod text;
 mod types;
 mod xml;
 
-pub use catalogue::{render_json_catalogue, render_pformat_catalogue, CATALOGUE_HEADING};
+pub use catalogue::{CATALOGUE_HEADING, render_json_catalogue, render_pformat_catalogue};
 pub use native::NativeDialect;
 pub use pairing::pair_tool_cycles;
 pub use pformat::PFormatDialect;

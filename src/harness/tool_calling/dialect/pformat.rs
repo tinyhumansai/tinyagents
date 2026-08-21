@@ -11,14 +11,12 @@
 
 use std::sync::Arc;
 
-use super::text;
-use super::types::{
-    DialectMessage, DialectResponse, ToolCallFormat, ToolOutcome, TranscriptEntry,
-};
 use super::ToolDialect;
+use super::text;
+use super::types::{DialectMessage, DialectResponse, ToolCallFormat, ToolOutcome, TranscriptEntry};
 use crate::harness::tool::ToolSchema;
 use crate::harness::tool_calling::{
-    parse_tool_calls_with_pformat, PFormatRegistry, ParsedToolCall,
+    PFormatRegistry, ParsedToolCall, parse_tool_calls_with_pformat,
 };
 
 /// Positional tool calling, driven by a registry of parameter layouts.

@@ -6,14 +6,12 @@
 //! it is the one that works everywhere, which is why it stays the fallback
 //! rather than being retired.
 
+use super::ToolDialect;
 use super::catalogue::render_json_catalogue;
 use super::text;
-use super::types::{
-    DialectMessage, DialectResponse, ToolCallFormat, ToolOutcome, TranscriptEntry,
-};
-use super::ToolDialect;
+use super::types::{DialectMessage, DialectResponse, ToolCallFormat, ToolOutcome, TranscriptEntry};
 use crate::harness::tool::ToolSchema;
-use crate::harness::tool_calling::{parse_tool_calls, ParsedToolCall};
+use crate::harness::tool_calling::{ParsedToolCall, parse_tool_calls};
 
 /// JSON-in-tag tool calling.
 #[derive(Debug, Default, Clone, Copy)]

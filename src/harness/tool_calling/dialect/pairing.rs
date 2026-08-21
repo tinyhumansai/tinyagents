@@ -83,5 +83,8 @@ pub fn pair_tool_cycles(history: &[TranscriptEntry]) -> Vec<&TranscriptEntry> {
         }
     }
 
-    kept_indices.into_iter().map(|index| &history[index]).collect()
+    kept_indices
+        .into_iter()
+        .map(|index| &history[index])
+        .collect()
 }
