@@ -51,8 +51,17 @@ jobs:
       - name: Test all features
         run: cargo test --all-features
 
+      - name: Test optional features independently
+        run: |
+          cargo test --no-default-features --features sqlite
+          cargo test --no-default-features --features tools
+          cargo test --no-default-features --features multimodal
+
       - name: Coverage gate
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Verify line coverage
-        run: cargo llvm-cov --all-features --workspace --fail-under-lines 90
+        run: >-
+          cargo llvm-cov --all-features --workspace
+          --ignore-filename-regex '(^|/)(tests?|examples)/|/test(_.*)?\.rs$'
+          --fail-under-lines 85

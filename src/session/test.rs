@@ -483,6 +483,187 @@ fn session_search_params_defaults() {
     assert!(params.offset.is_none());
 }
 
+// ── Public operation boundary ────────────────────────────────────────────
+
+#[test]
+fn public_session_operations_round_trip_every_record_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path();
+
+    let started = record_session_start(
+        workspace,
+        "parent",
+        "agent",
+        "Agent Name",
+        "session-key",
+        None,
+        Some("thread-1"),
+        Some("cli"),
+        Some("model-1"),
+        Some("transcripts/parent.jsonl"),
+    )
+    .unwrap();
+    assert_eq!(started.status, SessionStatus::Running);
+    assert_eq!(started.thread_id.as_deref(), Some("thread-1"));
+
+    let message_id = record_message(
+        workspace,
+        "parent",
+        "user",
+        "inspect the repository",
+        Some("model-1"),
+        Some(12),
+        Some(4),
+        Some(0.25),
+    )
+    .unwrap();
+    let tool_id = record_tool_call(
+        workspace,
+        "parent",
+        Some(message_id),
+        "read_file",
+        Some(r#"{"path":"Cargo.toml"}"#),
+        Some("package metadata"),
+        "completed",
+        Some(7),
+    )
+    .unwrap();
+
+    let messages = list_messages(workspace, "parent", None).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].id, message_id);
+    assert_eq!(messages[0].input_tokens, Some(12));
+    let tools = list_tool_calls(workspace, "parent", None).unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].id, tool_id);
+    assert_eq!(tools[0].message_id, Some(message_id));
+
+    let ended = record_session_end(
+        workspace,
+        "parent",
+        SessionStatus::Completed,
+        2,
+        12,
+        4,
+        3,
+        0.25,
+    )
+    .unwrap();
+    assert_eq!(ended.status, SessionStatus::Completed);
+    assert_eq!(ended.turn_count, 2);
+    assert!(ended.ended_at.is_some());
+}
+
+#[test]
+fn public_listing_filters_and_caps_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path();
+    for (id, parent, status) in [
+        ("root", None, SessionStatus::Running),
+        ("child-a", Some("root"), SessionStatus::Completed),
+        ("child-b", Some("root"), SessionStatus::Failed),
+    ] {
+        record_session_start(
+            workspace, id, "agent", "Agent", id, parent, None, None, None, None,
+        )
+        .unwrap();
+        if status != SessionStatus::Running {
+            record_session_end(workspace, id, status, 0, 0, 0, 0, 0.0).unwrap();
+        }
+    }
+
+    let children = list_children(workspace, "root").unwrap();
+    assert_eq!(children.len(), 2);
+    let failed =
+        list_sessions(workspace, Some(5000), Some(0), Some("failed"), Some("root")).unwrap();
+    assert_eq!(failed.total, 1);
+    assert_eq!(failed.sessions[0].id, "child-b");
+    let second_page = list_sessions(workspace, Some(1), Some(1), None, None).unwrap();
+    assert_eq!(second_page.total, 3);
+    assert_eq!(second_page.sessions.len(), 1);
+}
+
+#[test]
+fn public_search_combines_all_supported_filters() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path();
+    record_session_start(
+        workspace, "parent", "agent", "Parent", "parent", None, None, None, None, None,
+    )
+    .unwrap();
+    record_session_start(
+        workspace,
+        "match",
+        "researcher",
+        "Research Agent",
+        "key",
+        Some("parent"),
+        Some("thread-7"),
+        Some("api"),
+        None,
+        None,
+    )
+    .unwrap();
+    record_message(
+        workspace,
+        "match",
+        "user",
+        "rare searchable phrase",
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    record_tool_call(
+        workspace,
+        "match",
+        None,
+        "lookup",
+        None,
+        None,
+        "completed",
+        None,
+    )
+    .unwrap();
+
+    let result = search_sessions(
+        workspace,
+        &SessionSearchParams {
+            query: Some("rare phrase".into()),
+            agent_id: Some("researcher".into()),
+            tool_name: Some("lookup".into()),
+            source_channel: Some("api".into()),
+            parent_session_id: Some("parent".into()),
+            status: Some("running".into()),
+            thread_id: Some("thread-7".into()),
+            limit: Some(1),
+            offset: Some(0),
+        },
+    )
+    .unwrap();
+    assert_eq!(result.total, 1);
+    assert_eq!(result.sessions[0].id, "match");
+}
+
+#[test]
+fn public_mark_interrupted_is_idempotent_and_missing_session_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path();
+    assert!(get_session(workspace, "missing").is_err());
+    record_session_start(
+        workspace, "running", "agent", "Agent", "key", None, None, None, None, None,
+    )
+    .unwrap();
+
+    assert_eq!(mark_interrupted(workspace).unwrap(), 1);
+    assert_eq!(mark_interrupted(workspace).unwrap(), 0);
+    assert_eq!(
+        get_session(workspace, "running").unwrap().status,
+        SessionStatus::Interrupted
+    );
+}
+
 // ── store.rs ───────────────────────────────────────────────────────────
 
 #[test]
