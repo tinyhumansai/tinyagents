@@ -37,13 +37,11 @@ pub fn detect_image_mime(
         return Some(header_mime);
     }
 
-    if let Some(path) = path {
-        if let Some(ext) = path.extension().and_then(|value| value.to_str()) {
-            if let Some(mime) = image_mime_from_extension(ext) {
+    if let Some(path) = path
+        && let Some(ext) = path.extension().and_then(|value| value.to_str())
+            && let Some(mime) = image_mime_from_extension(ext) {
                 return Some(mime.to_string());
             }
-        }
-    }
 
     image_mime_from_magic(bytes).map(ToString::to_string)
 }
@@ -55,19 +53,16 @@ pub fn detect_file_mime(
     bytes: &[u8],
     header_content_type: Option<&str>,
 ) -> Option<String> {
-    if let Some(header_mime) = header_content_type.and_then(normalize_content_type) {
-        if file_mime_known(&header_mime) {
+    if let Some(header_mime) = header_content_type.and_then(normalize_content_type)
+        && file_mime_known(&header_mime) {
             return Some(header_mime);
         }
-    }
 
-    if let Some(path) = path {
-        if let Some(ext) = path.extension().and_then(|value| value.to_str()) {
-            if let Some(mime) = file_mime_from_extension(ext) {
+    if let Some(path) = path
+        && let Some(ext) = path.extension().and_then(|value| value.to_str())
+            && let Some(mime) = file_mime_from_extension(ext) {
                 return Some(mime.to_string());
             }
-        }
-    }
 
     if let Some(mime) = file_mime_from_magic(bytes) {
         return Some(mime.to_string());

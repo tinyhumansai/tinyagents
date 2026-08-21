@@ -413,8 +413,7 @@ async fn build_file_payload(
         truncated_chars,
         ..
     } = &payload
-    {
-        if *truncated_chars > 0 {
+        && *truncated_chars > 0 {
             tracing::info!(
                 target: "multimodal",
                 file = %name,
@@ -423,7 +422,6 @@ async fn build_file_payload(
                 "[multimodal::files] truncated extracted text"
             );
         }
-    }
 
     Ok(payload)
 }
