@@ -28,6 +28,8 @@ pub mod memory;
 pub mod message;
 pub mod middleware;
 pub mod model;
+#[cfg(feature = "multimodal")]
+pub mod multimodal;
 pub mod no_progress;
 pub mod observability;
 pub mod prompt;
