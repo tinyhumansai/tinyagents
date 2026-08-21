@@ -132,6 +132,30 @@ pub async fn create_run(
     Ok(run)
 }
 
+/// Import a run log only when the thread has none.
+///
+/// The existence check and the write share the normal per-thread lock, and an
+/// existing log is left untouched even when it uses a newer or undecodable
+/// schema — which makes this suitable for a one-time migration off a legacy
+/// store. Merging is deliberately not offered: two histories for one thread
+/// would double-count the reclaims [`reclaim_stale`]'s budget is derived from.
+///
+/// Returns whether the runs were written.
+pub async fn import_if_absent(
+    store: &Arc<dyn Store>,
+    thread_id: &str,
+    runs: Vec<TaskRun>,
+) -> Result<bool> {
+    let thread_id = validate_thread_id(thread_id)?;
+    let lock = runs_lock(&thread_id);
+    let _guard = lock.lock().await;
+    if store.get(RUNS_NAMESPACE, &key(&thread_id)).await?.is_some() {
+        return Ok(false);
+    }
+    save(store, &thread_id, &runs).await?;
+    Ok(true)
+}
+
 /// Refresh the liveness tick of an **active** run.
 ///
 /// Errors when the run is unknown or already terminal — the heartbeat loop

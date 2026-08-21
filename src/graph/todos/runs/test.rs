@@ -418,3 +418,24 @@ fn default_limits_are_the_documented_policy() {
     assert_eq!(limits.max_reclaim_count, super::DEFAULT_MAX_RECLAIM_COUNT);
     assert!(limits.claim_ttl_secs > limits.heartbeat_stale_secs);
 }
+
+#[tokio::test]
+async fn import_if_absent_never_replaces_an_existing_log() {
+    let store = store();
+    let imported = vec![run_at("legacy-run", "task-1", 10, 20)];
+    assert!(
+        super::store::import_if_absent(&store, "thread-1", imported.clone())
+            .await
+            .unwrap()
+    );
+    assert_eq!(list_runs(&store, "thread-1", None).await.unwrap(), imported);
+
+    // A second import is refused, so a re-run of a migration cannot duplicate
+    // the reclaim history the sweep's budget is counted from.
+    assert!(
+        !super::store::import_if_absent(&store, "thread-1", vec![run_at("other", "task-2", 1, 2)])
+            .await
+            .unwrap()
+    );
+    assert_eq!(list_runs(&store, "thread-1", None).await.unwrap(), imported);
+}

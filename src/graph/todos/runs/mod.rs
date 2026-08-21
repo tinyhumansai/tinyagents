@@ -35,7 +35,8 @@ mod types;
 
 pub use store::{
     DEFAULT_HEARTBEAT_TICK, RUNS_NAMESPACE, complete_run, count_reclaims_for_card, create_run,
-    find_stale_runs, get_run, list_runs, reclaim_stale, spawn_heartbeat_task, update_heartbeat,
+    find_stale_runs, get_run, import_if_absent, list_runs, reclaim_stale, spawn_heartbeat_task,
+    update_heartbeat,
 };
 pub use types::{
     DEFAULT_CLAIM_TTL_SECS, DEFAULT_HEARTBEAT_STALE_SECS, DEFAULT_MAX_RECLAIM_COUNT, ReclaimDetail,
