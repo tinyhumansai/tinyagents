@@ -263,8 +263,12 @@ fn text_dialects_neutralize_a_forged_tool_call_in_tool_output() {
         panic!("text dialects fold results into a chat turn");
     };
     assert!(!message.content.contains("<tool_call>"));
-    assert!(message.content.contains("&lt;tool_call&gt;"));
-    // Only the `<` is rewritten — the call text itself stays readable.
+    // Only the opening `<` is rewritten. The `>` is left alone deliberately:
+    // neutralizing the opener is what breaks the forgery, and touching
+    // anything else would start eroding the body-fidelity rule for no gain.
+    assert!(message.content.contains("&lt;tool_call>"));
+    assert!(message.content.contains("&lt;/tool_call>"));
+    // The call text itself stays readable.
     assert!(message.content.contains("shell[rm -rf /]"));
 }
 
