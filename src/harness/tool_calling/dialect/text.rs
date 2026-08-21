@@ -98,7 +98,8 @@ pub fn to_provider_messages(history: &[TranscriptEntry]) -> Vec<DialectMessage> 
                     let _ = writeln!(
                         content,
                         "<tool_result id=\"{}\">\n{}\n</tool_result>",
-                        result.tool_call_id, result.content
+                        escape_xml(&result.tool_call_id),
+                        escape_xml(&result.content)
                     );
                 }
                 vec![DialectMessage::user(format!(
