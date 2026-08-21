@@ -25,6 +25,18 @@ use crate::harness::tool_calling::ParsedToolCall;
 /// produce.
 const UNKNOWN_CALL_ID: &str = "unknown";
 
+/// Type name of a JSON value, for logging without exposing its contents.
+fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 /// Provider-native structured tool calling.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NativeDialect;
