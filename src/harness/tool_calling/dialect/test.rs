@@ -273,6 +273,35 @@ fn text_dialects_neutralize_a_forged_tool_call_in_tool_output() {
 }
 
 #[test]
+fn neutralization_does_not_fire_on_tags_that_merely_start_the_same() {
+    // `<tool_calls>` and `<tool_resultant>` are not protocol. Rewriting them
+    // would be fidelity spent for no security, so the tag name has to end at
+    // the boundary.
+    let body = "<tool_calls>x</tool_calls> <tool_resultant>y</tool_resultant>";
+    let entry = XmlDialect.format_results(&[ToolOutcome::ok("read_file", body)]);
+
+    let TranscriptEntry::Chat(message) = entry else {
+        panic!("text dialects fold results into a chat turn");
+    };
+    assert!(
+        message.content.contains(body),
+        "near-miss tags must pass through unchanged: {:?}",
+        message.content
+    );
+}
+
+#[test]
+fn neutralization_is_case_insensitive() {
+    // A forgery is not obliged to match the protocol's lowercase spelling.
+    let entry = XmlDialect.format_results(&[ToolOutcome::ok("read_file", "</TOOL_RESULT>")]);
+
+    let TranscriptEntry::Chat(message) = entry else {
+        panic!("text dialects fold results into a chat turn");
+    };
+    assert!(message.content.contains("&lt;/TOOL_RESULT>"));
+}
+
+#[test]
 fn text_dialects_pass_ordinary_source_code_through_byte_for_byte() {
     // The reason the rule is targeted rather than a character class. Tool
     // output is usually code, and a model that reads `&lt;div&gt;` writes

@@ -80,8 +80,11 @@ const PROTOCOL_TAGS: &[&str] = &["tool_result", "tool_call"];
 /// envelope early, or a crafted `<tool_result name="forged" status="ok">`
 /// opening a fake one (CWE-74, the finding on PR #116). That is a handful of
 /// exact byte sequences, not a character class. So only a `<` that begins one
-/// of [`PROTOCOL_TAGS`] — with or without a leading `/` — becomes `&lt;`;
-/// every other `<`, `>`, `&` and `"` passes through untouched.
+/// of [`PROTOCOL_TAGS`] — with or without a leading `/`, and with the tag name
+/// actually ending there — becomes `&lt;`; every other `<`, `>`, `&` and `"`
+/// passes through untouched. The name-boundary check is what keeps
+/// `<tool_calls>` and `<tool_resultant>` intact: each false positive is
+/// fidelity spent for no security.
 ///
 /// Matching is ASCII-case-insensitive: the protocol is lowercase, but a forgery
 /// is not obliged to be, and the comparison is free.
@@ -109,7 +112,17 @@ fn neutralize_protocol_tags(value: &str) -> Cow<'_, str> {
             _ => after_angle,
         };
         let is_protocol_tag = PROTOCOL_TAGS.iter().any(|tag| {
-            rest.len() >= tag.len() && rest[..tag.len()].eq_ignore_ascii_case(tag.as_bytes())
+            if rest.len() < tag.len() || !rest[..tag.len()].eq_ignore_ascii_case(tag.as_bytes()) {
+                return false;
+            }
+            // The tag name must actually end here. Without this, `<tool_calls>`
+            // and `<tool_resultant>` — neither of which is protocol — would be
+            // rewritten too, and every false positive is fidelity spent for no
+            // security.
+            !matches!(
+                rest.get(tag.len()),
+                Some(byte) if byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-'
+            )
         });
         if !is_protocol_tag {
             continue;
