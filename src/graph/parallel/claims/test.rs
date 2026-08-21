@@ -34,19 +34,32 @@ fn skips_empty_entries_so_trailing_separators_are_harmless() {
 
 #[test]
 fn empty_spec_yields_no_paths() {
-    assert_eq!(parse_relative_claim_paths("").expect("parses"), Vec::<PathBuf>::new());
+    assert_eq!(
+        parse_relative_claim_paths("").expect("parses"),
+        Vec::<PathBuf>::new()
+    );
 }
 
 #[test]
 fn rejects_absolute_paths() {
     let err = parse_relative_claim_paths("/etc/passwd").expect_err("absolute is rejected");
-    assert_eq!(err, ClaimPathError::Absolute { raw: "/etc/passwd".to_string() });
+    assert_eq!(
+        err,
+        ClaimPathError::Absolute {
+            raw: "/etc/passwd".to_string()
+        }
+    );
 }
 
 #[test]
 fn rejects_parent_dir_escapes() {
     let err = parse_relative_claim_paths("../outside.rs").expect_err("escape is rejected");
-    assert_eq!(err, ClaimPathError::Escaping { raw: "../outside.rs".to_string() });
+    assert_eq!(
+        err,
+        ClaimPathError::Escaping {
+            raw: "../outside.rs".to_string()
+        }
+    );
 }
 
 #[test]
@@ -98,11 +111,23 @@ fn read_only_never_writes_even_when_other_flags_are_set() {
 #[test]
 fn file_writes_installs_and_destructive_all_count_as_writing() {
     for effects in [
-        ToolSideEffects { writes_files: true, ..Default::default() },
-        ToolSideEffects { installs_dependencies: true, ..Default::default() },
-        ToolSideEffects { destructive: true, ..Default::default() },
+        ToolSideEffects {
+            writes_files: true,
+            ..Default::default()
+        },
+        ToolSideEffects {
+            installs_dependencies: true,
+            ..Default::default()
+        },
+        ToolSideEffects {
+            destructive: true,
+            ..Default::default()
+        },
     ] {
-        assert!(writes_shared_workspace(&effects), "{effects:?} should count as writing");
+        assert!(
+            writes_shared_workspace(&effects),
+            "{effects:?} should count as writing"
+        );
     }
 }
 
@@ -152,7 +177,8 @@ fn an_isolated_worker_that_writes_still_runs_in_parallel() {
 
 #[test]
 fn a_shared_writer_with_a_claim_is_serialized() {
-    let plan = plan_shared_workspace_dispatch(&[WorkspaceClaim::writing("w1", vec![p("src/a.rs")])]);
+    let plan =
+        plan_shared_workspace_dispatch(&[WorkspaceClaim::writing("w1", vec![p("src/a.rs")])]);
     assert_eq!(plan.modes, vec![Some(DispatchMode::Serial)]);
     assert!(plan.conflicts.is_empty());
     assert!(plan.has_serial_work());
@@ -165,7 +191,12 @@ fn a_shared_writer_without_a_claim_is_rejected_as_unbounded() {
     assert_eq!(plan.modes, vec![None]);
     assert_eq!(
         plan.conflicts,
-        vec![(0, ClaimConflict::UnboundedWrite { worker_id: "w1".to_string() })]
+        vec![(
+            0,
+            ClaimConflict::UnboundedWrite {
+                worker_id: "w1".to_string()
+            }
+        )]
     );
 }
 
@@ -267,7 +298,10 @@ fn mixed_batches_keep_every_index_aligned_with_the_input() {
     assert_eq!(plan.parallel_indices(), vec![0, 1]);
     assert_eq!(plan.serial_indices(), vec![2]);
     assert_eq!(
-        plan.conflicts.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+        plan.conflicts
+            .iter()
+            .map(|(index, _)| *index)
+            .collect::<Vec<_>>(),
         vec![3, 4]
     );
 }
@@ -281,7 +315,9 @@ fn an_empty_batch_plans_nothing() {
 
 #[test]
 fn claim_conflict_reports_the_worker_it_rejected() {
-    let unbounded = ClaimConflict::UnboundedWrite { worker_id: "w1".to_string() };
+    let unbounded = ClaimConflict::UnboundedWrite {
+        worker_id: "w1".to_string(),
+    };
     assert_eq!(unbounded.worker_id(), "w1");
     let overlap = ClaimConflict::Overlap {
         worker_id: "w2".to_string(),

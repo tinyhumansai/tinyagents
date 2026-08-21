@@ -33,9 +33,7 @@
 
 mod types;
 
-pub use types::{
-    ClaimConflict, ClaimPathError, DispatchMode, DispatchPlan, WorkspaceClaim,
-};
+pub use types::{ClaimConflict, ClaimPathError, DispatchMode, DispatchPlan, WorkspaceClaim};
 
 use std::path::{Component, Path, PathBuf};
 
