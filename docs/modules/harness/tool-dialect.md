@@ -81,6 +81,34 @@ Two properties are worth knowing before touching it:
 The repair belongs here, at serialization, rather than at the write sites: those
 are many, and none of them can see the final sequence.
 
+## Envelope integrity
+
+Tool names and outputs are tool-controlled, so the text dialects cannot
+interpolate them into `<tool_result …>` unexamined: a body containing a literal
+`</tool_result>` would close the envelope early, and a crafted
+`<tool_result name="forged" status="ok">` would open a fake one (CWE-74).
+
+The rule differs by position, deliberately:
+
+| Position | Rule | Why |
+| --- | --- | --- |
+| attribute (`name`, `tool_call_id`) | escape `& < > "` | a `"` ends the attribute; these are short identifiers, so escaping costs nothing legible |
+| body (`output`, `content`) | rewrite `<` to `&lt;` **only** where it opens `<tool_result` / `<tool_call` (with or without `/`, ASCII-case-insensitive) | everything else passes through byte-for-byte |
+
+Escaping the body wholesale is the obvious implementation and the wrong one.
+Tool output is usually source code, and this envelope is how prompt-guided
+models — the p-format path local models use — read it. Turning
+`<div className="x">` into `&lt;div className=&quot;x&quot;&gt;` on every
+result is a real cost, and a model that reads mangled code writes mangled code
+back. The security property only ever required blocking a handful of exact byte
+sequences, not a character class.
+
+**This is boundary integrity, not prompt-injection defence.** A tool can still
+return prose arguing the model should do something, and no escaping rule fixes
+that — a file the agent legitimately reads can contain anything. The guarantee
+is narrower and worth stating exactly: tool output cannot masquerade as the
+transcript's own protocol structure.
+
 ## What stays with the host
 
 Executing a tool. Permission checks, sandboxing, approval gates, per-call

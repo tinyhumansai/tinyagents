@@ -9,6 +9,22 @@
 //! envelope is advertised to the model in the protocol block; if the two
 //! dialects rendered it separately, one of them could drift from what the
 //! prompt promises and the model would be reading a format nothing emits.
+//!
+//! # Envelope integrity, without mangling the payload
+//!
+//! Tool names and outputs are tool-controlled, so neither can be interpolated
+//! into the envelope unexamined — a body spelling `</tool_result>` would close
+//! it early (CWE-74). The two get different rules because they land in
+//! different places, and the difference is the point:
+//!
+//! * a **name** is an attribute value, so [`escape_attribute`] escapes the lot;
+//! * an **output** is the body, so [`neutralize_protocol_tags`] rewrites only
+//!   the protocol tag openers and lets everything else through byte-for-byte.
+//!
+//! Escaping the body wholesale is the obvious implementation and the wrong one:
+//! tool output is usually source code, and this is the channel prompt-guided
+//! models read it through, so `&lt;div&gt;` is a fidelity cost paid on every
+//! result to defend against a handful of exact byte sequences.
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
@@ -147,7 +163,9 @@ pub fn format_results(results: &[ToolOutcome]) -> TranscriptEntry {
 ///
 /// Assistant tool calls degrade to `text` verbatim, and persisted results are
 /// re-wrapped by **id** — which is what the durable record stores — into one
-/// user turn.
+/// user turn, under the same envelope rules [`format_results`] applies: the id
+/// is escaped as an attribute, the content only has protocol tag openers
+/// neutralized.
 ///
 /// `text` must be the **raw** model response the text dialect originally
 /// parsed (tags and all), not the narrative-only text
