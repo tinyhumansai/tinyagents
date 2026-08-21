@@ -18,12 +18,37 @@ use super::types::{DialectMessage, ToolOutcome, TranscriptEntry};
 /// text-mode model.
 pub const TOOL_RESULTS_PREFIX: &str = "[Tool results]\n";
 
+/// Escape XML metacharacters so a tool-controlled value cannot forge
+/// `<tool_result>` protocol boundaries in the rendered transcript.
+///
+/// Tool names and outputs are model- and tool-controlled; a value containing a
+/// literal `</tool_result>` (or a crafted `<tool_result name="forged" …>`)
+/// would otherwise be indistinguishable from real envelope structure once
+/// interpolated verbatim, letting tool output influence how the model reads
+/// subsequent tool calls (CWE-74). Escaping `&`, `<`, `>`, and `"` neutralizes
+/// both the tag delimiters and the attribute-value quote.
+fn escape_xml(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Render freshly executed outcomes into the transcript entry a text dialect
 /// appends after an assistant turn.
 ///
 /// Results are keyed by **tool name** and carry an explicit `status`, because a
 /// text-mode model has no call ids to correlate by — the name and the ordering
-/// are all it has.
+/// are all it has. The name and output are tool-controlled, so both are
+/// escaped ([`escape_xml`]) before interpolation to keep them from forging
+/// `<tool_result>` envelope boundaries.
 pub fn format_results(results: &[ToolOutcome]) -> TranscriptEntry {
     let mut content = String::new();
     for result in results {
@@ -31,7 +56,9 @@ pub fn format_results(results: &[ToolOutcome]) -> TranscriptEntry {
         let _ = writeln!(
             content,
             "<tool_result name=\"{}\" status=\"{}\">\n{}\n</tool_result>",
-            result.name, status, result.output
+            escape_xml(&result.name),
+            status,
+            escape_xml(&result.output)
         );
     }
     TranscriptEntry::Chat(DialectMessage::user(format!(
