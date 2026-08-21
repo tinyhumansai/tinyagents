@@ -96,6 +96,7 @@ pub fn task_status_label(status: OrchestrationTaskStatus) -> &'static str {
         OrchestrationTaskStatus::Failed => "failed",
         OrchestrationTaskStatus::Cancelled => "cancelled",
         OrchestrationTaskStatus::TimedOut => "timed_out",
+        OrchestrationTaskStatus::Abandoned => "abandoned",
     }
 }
 
