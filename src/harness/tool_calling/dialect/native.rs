@@ -113,10 +113,13 @@ impl ToolDialect for NativeDialect {
             results
                 .iter()
                 .map(|result| ToolResultEntry {
-                    tool_call_id: result
-                        .tool_call_id
-                        .clone()
-                        .unwrap_or_else(|| UNKNOWN_CALL_ID.to_string()),
+                    tool_call_id: result.tool_call_id.clone().unwrap_or_else(|| {
+                        tracing::warn!(
+                            "tool outcome had no tool_call_id; substituting {UNKNOWN_CALL_ID:?} \
+                             (pair_tool_cycles will drop this cycle on id-set mismatch)"
+                        );
+                        UNKNOWN_CALL_ID.to_string()
+                    }),
                     content: result.output.clone(),
                 })
                 .collect(),
