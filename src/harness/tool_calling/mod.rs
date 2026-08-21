@@ -35,9 +35,15 @@
 //! This module takes **schemas**, never a tool trait object. A host's tool type
 //! is its own vocabulary, and depending on it here would defeat the point — so
 //! [`pformat::build_registry`] takes `(name, schema)` pairs and the host keeps a
-//! one-line adapter over its own tool slice. Dispatch and execution stay host-side
-//! too: this module answers "what did the model ask for", never "what happens next".
+//! one-line adapter over its own tool slice.
+//!
+//! **Executing** a tool stays host-side: permission checks, sandboxing,
+//! approval gates and timeouts are the host's policy and belong where they can
+//! be audited. Everything *around* execution — the catalogue the model reads,
+//! the results it is shown, the transcript it is replayed — is not
+//! host-specific, and lives in [`dialect`].
 
+pub mod dialect;
 pub(crate) mod parse;
 pub(crate) mod pformat;
 
