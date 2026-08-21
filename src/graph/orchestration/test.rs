@@ -1099,8 +1099,8 @@ fn reconcile_respects_the_filter() {
     store
         .insert(OrchestrationTaskSpec::new(
             "agent-task",
-            OrchestrationTaskKind::Agent {
-                agent_id: "worker".into(),
+            OrchestrationTaskKind::SubAgent {
+                agent: "worker".into(),
             },
         ))
         .expect("insert");
@@ -1108,7 +1108,7 @@ fn reconcile_respects_the_filter() {
 
     let report = reconcile_orphaned_tasks(
         &store,
-        OrchestrationTaskFilter::default().with_kind("agent"),
+        OrchestrationTaskFilter::default().with_kind("sub_agent"),
         &|_| "driver died".to_string(),
     );
 
