@@ -10,6 +10,7 @@
 //! dialects rendered it separately, one of them could drift from what the
 //! prompt promises and the model would be reading a format nothing emits.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use super::types::{DialectMessage, ToolOutcome, TranscriptEntry};
@@ -18,16 +19,13 @@ use super::types::{DialectMessage, ToolOutcome, TranscriptEntry};
 /// text-mode model.
 pub const TOOL_RESULTS_PREFIX: &str = "[Tool results]\n";
 
-/// Escape XML metacharacters so a tool-controlled value cannot forge
-/// `<tool_result>` protocol boundaries in the rendered transcript.
+/// Escape XML metacharacters in a value that goes inside an **attribute**.
 ///
-/// Tool names and outputs are model- and tool-controlled; a value containing a
-/// literal `</tool_result>` (or a crafted `<tool_result name="forged" …>`)
-/// would otherwise be indistinguishable from real envelope structure once
-/// interpolated verbatim, letting tool output influence how the model reads
-/// subsequent tool calls (CWE-74). Escaping `&`, `<`, `>`, and `"` neutralizes
-/// both the tag delimiters and the attribute-value quote.
-fn escape_xml(value: &str) -> String {
+/// Attribute values sit between quotes in `<tool_result name="…" status="…">`,
+/// so a `"` ends the attribute and a `<`/`>` ends the tag. They are short
+/// identifiers — a tool name, a call id — where escaping costs nothing legible,
+/// so the blunt rule is the right one here.
+fn escape_attribute(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
@@ -41,14 +39,93 @@ fn escape_xml(value: &str) -> String {
     out
 }
 
+/// Tag names a tool-controlled **body** must not be able to spell literally.
+///
+/// `tool_result` is the envelope this module renders; `tool_call` is what the
+/// parser recognizes in model output. Both are protocol structure, and a body
+/// that can produce either verbatim can make the transcript read as though it
+/// contains boundaries or calls that nothing emitted.
+const PROTOCOL_TAGS: &[&str] = &["tool_result", "tool_call"];
+
+/// Neutralize protocol tag openers in a tool-controlled body, and **only**
+/// those.
+///
+/// # Why not just escape every metacharacter
+///
+/// Because the body is usually source code, and escaping all of `& < > "`
+/// turns `<div className="x">` into `&lt;div className=&quot;x&quot;&gt;`
+/// before the model ever sees it. That is the primary tool-output channel for
+/// prompt-guided models — the p-format path local models use — so the cost
+/// lands exactly where tool output matters most: the model reads mangled code,
+/// and may write mangled code back.
+///
+/// The security property does not require that. What must not happen is a body
+/// spelling a **protocol boundary**: a literal `</tool_result>` closing the
+/// envelope early, or a crafted `<tool_result name="forged" status="ok">`
+/// opening a fake one (CWE-74, the finding on PR #116). That is a handful of
+/// exact byte sequences, not a character class. So only a `<` that begins one
+/// of [`PROTOCOL_TAGS`] — with or without a leading `/` — becomes `&lt;`;
+/// every other `<`, `>`, `&` and `"` passes through untouched.
+///
+/// Matching is ASCII-case-insensitive: the protocol is lowercase, but a forgery
+/// is not obliged to be, and the comparison is free.
+///
+/// # What this does not claim
+///
+/// Boundary integrity, not prompt-injection defence. A tool can still return
+/// prose that *argues* the model should do something, and no escaping rule
+/// fixes that — a file the agent legitimately reads can contain anything. This
+/// guarantees only that tool output cannot masquerade as the transcript's own
+/// protocol structure.
+///
+/// Returns [`Cow::Borrowed`] when nothing matched, which is the overwhelmingly
+/// common case and makes "ordinary content is passed through unchanged" a
+/// property of the type rather than a promise in a comment.
+fn neutralize_protocol_tags(value: &str) -> Cow<'_, str> {
+    let bytes = value.as_bytes();
+    let mut out: Option<String> = None;
+    let mut copied_to = 0;
+
+    for (index, _) in value.char_indices().filter(|(_, ch)| *ch == '<') {
+        let after_angle = &bytes[index + 1..];
+        let rest = match after_angle.first() {
+            Some(b'/') => &after_angle[1..],
+            _ => after_angle,
+        };
+        let is_protocol_tag = PROTOCOL_TAGS.iter().any(|tag| {
+            rest.len() >= tag.len() && rest[..tag.len()].eq_ignore_ascii_case(tag.as_bytes())
+        });
+        if !is_protocol_tag {
+            continue;
+        }
+
+        let buffer = out.get_or_insert_with(|| String::with_capacity(value.len() + 8));
+        buffer.push_str(&value[copied_to..index]);
+        buffer.push_str("&lt;");
+        copied_to = index + 1;
+    }
+
+    match out {
+        Some(mut buffer) => {
+            buffer.push_str(&value[copied_to..]);
+            Cow::Owned(buffer)
+        }
+        None => Cow::Borrowed(value),
+    }
+}
+
 /// Render freshly executed outcomes into the transcript entry a text dialect
 /// appends after an assistant turn.
 ///
 /// Results are keyed by **tool name** and carry an explicit `status`, because a
 /// text-mode model has no call ids to correlate by — the name and the ordering
-/// are all it has. The name and output are tool-controlled, so both are
-/// escaped ([`escape_xml`]) before interpolation to keep them from forging
-/// `<tool_result>` envelope boundaries.
+/// are all it has.
+///
+/// Both the name and the output are tool-controlled, and each gets the rule
+/// that fits where it lands: the name is an attribute value, so it is fully
+/// escaped ([`escape_attribute`]); the output is the body, so only protocol
+/// tag openers are neutralized ([`neutralize_protocol_tags`]) and the rest
+/// reaches the model byte-for-byte.
 pub fn format_results(results: &[ToolOutcome]) -> TranscriptEntry {
     let mut content = String::new();
     for result in results {
@@ -56,9 +133,9 @@ pub fn format_results(results: &[ToolOutcome]) -> TranscriptEntry {
         let _ = writeln!(
             content,
             "<tool_result name=\"{}\" status=\"{}\">\n{}\n</tool_result>",
-            escape_xml(&result.name),
+            escape_attribute(&result.name),
             status,
-            escape_xml(&result.output)
+            neutralize_protocol_tags(&result.output)
         );
     }
     TranscriptEntry::Chat(DialectMessage::user(format!(
@@ -98,8 +175,8 @@ pub fn to_provider_messages(history: &[TranscriptEntry]) -> Vec<DialectMessage> 
                     let _ = writeln!(
                         content,
                         "<tool_result id=\"{}\">\n{}\n</tool_result>",
-                        escape_xml(&result.tool_call_id),
-                        escape_xml(&result.content)
+                        escape_attribute(&result.tool_call_id),
+                        neutralize_protocol_tags(&result.content)
                     );
                 }
                 vec![DialectMessage::user(format!(
