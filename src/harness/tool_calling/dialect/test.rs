@@ -162,6 +162,35 @@ fn native_dialect_recovers_a_call_the_model_narrated_as_text() {
 }
 
 #[test]
+fn native_dialect_defaults_non_object_arguments_to_empty_object() {
+    // A valid-but-non-object payload ("null", "42", "[]", a bare string, …)
+    // deserializes successfully, so gating the fallback on parse *success*
+    // (rather than on the parsed shape) let it through as-is — downstream key
+    // access and schema validation expect an object. Regression for the
+    // argument-shape finding CodeRabbit raised on PR #116.
+    for arguments in ["null", "42", "[]", "\"x\""] {
+        let response = DialectResponse {
+            text: None,
+            tool_calls: vec![NativeToolCall {
+                id: "call_1".to_string(),
+                name: "get_weather".to_string(),
+                arguments: arguments.to_string(),
+                extra_content: None,
+            }],
+        };
+
+        let (_text, calls) = NativeDialect.parse_response(&response);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].arguments,
+            json!({}),
+            "non-object arguments {arguments:?} must default to an empty object"
+        );
+    }
+}
+
+#[test]
 fn text_dialects_render_results_by_name_and_status() {
     let results = vec![
         ToolOutcome::ok("get_weather", "18C"),
