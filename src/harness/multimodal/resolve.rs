@@ -413,15 +413,16 @@ async fn build_file_payload(
         truncated_chars,
         ..
     } = &payload
-        && *truncated_chars > 0 {
-            tracing::info!(
-                target: "multimodal",
-                file = %name,
-                truncated_chars,
-                max_extracted_text_chars,
-                "[multimodal::files] truncated extracted text"
-            );
-        }
+        && *truncated_chars > 0
+    {
+        tracing::info!(
+            target: "multimodal",
+            file = %name,
+            truncated_chars,
+            max_extracted_text_chars,
+            "[multimodal::files] truncated extracted text"
+        );
+    }
 
     Ok(payload)
 }
