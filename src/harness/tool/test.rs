@@ -485,3 +485,40 @@ fn marking_is_refused_rather_than_silently_lost_when_raw_is_not_an_object() {
     assert!(moved.is_trusted_verbatim());
     assert_eq!(moved.raw.as_ref().unwrap()["value"], json!("opaque"));
 }
+
+#[test]
+fn context_detail_from_args_with_clamps_ellipsis_longer_than_max_chars() {
+    // A misconfigured caller (ellipsis longer than the cap) must not blow past
+    // max_chars — regression for the truncation overflow CodeRabbit flagged on
+    // PR #116: `saturating_sub` zeroed `keep`, but the full ellipsis was still
+    // appended unclamped, so `max_chars = 2, ellipsis = "..."` rendered 3 chars.
+    let args = json!({ "path": "a much longer value than the tiny cap allows" });
+    let options = ContextDetailOptions {
+        max_chars: 2,
+        ellipsis: "...",
+    };
+
+    let rendered = context_detail_from_args_with(&args, options).expect("value present");
+
+    assert!(
+        rendered.chars().count() <= options.max_chars,
+        "rendered value {rendered:?} ({} chars) exceeds max_chars {}",
+        rendered.chars().count(),
+        options.max_chars
+    );
+    assert_eq!(rendered, "..");
+}
+
+#[test]
+fn context_detail_from_args_with_respects_max_chars_when_ellipsis_fits() {
+    let args = json!({ "path": "a much longer value than the small cap allows" });
+    let options = ContextDetailOptions {
+        max_chars: 10,
+        ellipsis: "...",
+    };
+
+    let rendered = context_detail_from_args_with(&args, options).expect("value present");
+
+    assert_eq!(rendered.chars().count(), options.max_chars);
+    assert!(rendered.ends_with("..."));
+}
