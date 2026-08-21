@@ -2,7 +2,7 @@ use serde_json::json;
 
 use super::*;
 use crate::harness::tool::ToolSchema;
-use crate::harness::tool_calling::build_registry;
+use crate::harness::tool_calling::{build_registry, PFormatRegistry};
 
 fn schema(name: &str, description: &str, parameters: serde_json::Value) -> ToolSchema {
     ToolSchema::new(name, description, parameters)
