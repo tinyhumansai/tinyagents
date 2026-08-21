@@ -674,7 +674,7 @@ async fn the_extractor_is_consulted_for_what_it_claims_and_nothing_else() {
     // bytes.
     let zip = format!(
         "data:application/zip;name=a.zip;base64,{}",
-        STANDARD.encode(&[b'P', b'K', 0x03, 0x04])
+        STANDARD.encode([b'P', b'K', 0x03, 0x04])
     );
     let payload = resolve_file(
         &zip,
