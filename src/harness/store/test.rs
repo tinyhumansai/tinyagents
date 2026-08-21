@@ -425,3 +425,52 @@ async fn jsonl_rejects_unsafe_stream_names() {
     // Allowed characters round-trip.
     assert_eq!(store.append("runs-1.events_v2", json!(1)).await.unwrap(), 0);
 }
+
+/// A multi-byte character straddling the 4096-byte lookback boundary must not
+/// break `next_offset`.
+///
+/// `next_offset` seeks to `len - 4096` and reads from there. That is an
+/// arbitrary BYTE offset, so it can land inside a UTF-8 character — and reading
+/// the remainder as a `String` then fails with "stream did not contain valid
+/// UTF-8" even though the file is perfectly well formed.
+///
+/// It is permanent, not transient: the error returns before the window can
+/// widen, so the same offset fails identically on every subsequent append.
+/// Observed on a hosted tenant as 584 consecutive failures with observations
+/// dropped throughout, and 104 of its 557 journal files in the same state — any
+/// stream containing enough non-ASCII text eventually lands on this.
+#[tokio::test]
+async fn append_survives_a_character_torn_by_the_lookback_window() {
+    let dir = TempDir::new("torn-utf8");
+    let store = JsonlAppendStore::new(&dir.0);
+
+    // Build a stream whose byte at `len - 4096` falls INSIDE a multi-byte
+    // character. Each record carries an em dash (3 bytes in UTF-8), so padding
+    // the payload one byte at a time walks the boundary across the character
+    // until it tears.
+    for pad in 0..24usize {
+        let dir = TempDir::new(&format!("torn-utf8-{pad}"));
+        let store = JsonlAppendStore::new(&dir.0);
+        for _ in 0..40 {
+            store
+                .append("run", json!({"text": format!("—{}", "x".repeat(pad + 90))}))
+                .await
+                .expect("append should not fail on a torn character");
+        }
+        // Re-open and append again: this is the path that reads back the tail to
+        // find the next offset, and the one that failed in production.
+        let reopened = JsonlAppendStore::new(&dir.0);
+        let offset = reopened
+            .append("run", json!({"text": "after reopen"}))
+            .await
+            .unwrap_or_else(|e| panic!("pad {pad}: append after reopen failed: {e}"));
+        assert_eq!(
+            offset, 40,
+            "pad {pad}: numbering must continue, not restart"
+        );
+    }
+
+    // The simple case still works.
+    store.append("plain", json!({"a": 1})).await.unwrap();
+    assert_eq!(store.append("plain", json!({"a": 2})).await.unwrap(), 1);
+}

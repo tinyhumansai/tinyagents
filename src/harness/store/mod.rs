@@ -350,14 +350,49 @@ impl JsonlAppendStore {
             file.seek(SeekFrom::Start(start)).map_err(|e| {
                 TinyAgentsError::Validation(format!("append store seek error: {e}"))
             })?;
-            let mut buf = String::new();
-            file.read_to_string(&mut buf).map_err(|e| {
+            // Read BYTES, not a String. `read_to_string` requires everything
+            // from `start` onward to be valid UTF-8, and `start` is an arbitrary
+            // byte offset — so whenever it lands inside a multi-byte character
+            // the read fails with "stream did not contain valid UTF-8" even
+            // though the file is perfectly well formed.
+            //
+            // This code already anticipated a torn LINE, one byte further on.
+            // A torn CHARACTER is the same hazard at finer grain, and it was
+            // fatal rather than skipped: the `?` returns before the window can
+            // grow, so the identical offset fails identically forever. Observed
+            // on a hosted tenant as 584 consecutive failures and counting, with
+            // observations dropped for as long as it ran; 104 of its 557 journal
+            // files had a last-4096-byte window that could not decode.
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).map_err(|e| {
                 TinyAgentsError::Validation(format!("append store read error: {e}"))
             })?;
-            // Only lines that are certainly complete: when the window did not
-            // reach the start of the file, its first line may be cut in half.
-            let complete_from = usize::from(start > 0);
-            let lines: Vec<&str> = buf.lines().skip(complete_from).collect();
+            // Decode from the first newline when the window did not reach the
+            // start of the file. That discards the possibly-half first line,
+            // which this function wanted anyway — and because a newline is
+            // always a character boundary in UTF-8, whatever follows one is
+            // guaranteed to decode. The two problems have the same answer.
+            let decodable = if start > 0 {
+                match bytes.iter().position(|b| *b == b'\n') {
+                    Some(newline) => &bytes[newline + 1..],
+                    // No newline in the whole window: every byte belongs to one
+                    // unterminated line, so there is nothing complete to read.
+                    // Widen rather than guess.
+                    None if start > 0 => {
+                        window = window.saturating_mul(4);
+                        continue;
+                    }
+                    None => &bytes[..],
+                }
+            } else {
+                &bytes[..]
+            };
+            // Lossy on purpose: the bytes are already known to start on a
+            // character boundary, so this cannot mangle a record. It only keeps
+            // a genuinely corrupt byte somewhere in the middle from failing the
+            // whole read, and such a line simply fails to parse as JSON below.
+            let buf = String::from_utf8_lossy(decodable);
+            let lines: Vec<&str> = buf.lines().collect();
             for line in lines.iter().rev() {
                 if line.trim().is_empty() {
                     continue;
