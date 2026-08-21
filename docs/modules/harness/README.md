@@ -248,6 +248,7 @@ Feature details:
 - [State graph runtime feature](state-graph.md)
 - [Prompt feature](prompt.md)
 - [Tool feature](tool.md)
+- [Tool dialects](tool-dialect.md)
 - [Workspace isolation feature](workspace.md)
 - [Middleware feature](middleware.md)
 - [Sub-agent and orchestrator steering](subagent-steering.md)
