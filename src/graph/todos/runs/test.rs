@@ -8,7 +8,7 @@ use super::store::{
 };
 use super::types::{RunLimits, RunOutcome, TaskRun, staleness_reason};
 use crate::graph::todos::store as board;
-use crate::graph::todos::types::{TaskBoardCard, TaskCardStatus};
+use crate::graph::todos::types::TaskCardStatus;
 use crate::harness::store::{InMemoryStore, Store};
 
 fn store() -> Arc<dyn Store> {
@@ -366,11 +366,4 @@ fn default_limits_are_the_documented_policy() {
     assert_eq!(limits.claim_ttl_secs, super::DEFAULT_CLAIM_TTL_SECS);
     assert_eq!(limits.max_reclaim_count, super::DEFAULT_MAX_RECLAIM_COUNT);
     assert!(limits.claim_ttl_secs > limits.heartbeat_stale_secs);
-}
-
-/// Unused import guard: `TaskBoardCard` is referenced by the board helpers.
-#[test]
-fn board_card_type_is_in_scope() {
-    let card = TaskBoardCard::new("t");
-    assert_eq!(card.status, TaskCardStatus::Todo);
 }
