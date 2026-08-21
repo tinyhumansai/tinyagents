@@ -251,6 +251,13 @@ pub use graph::parallel::{
     FailurePolicy, ItemOutcome, ParallelOptions, ParallelOutcome, map_reduce,
 };
 
+// --- Graph: shared-workspace claim arbitration ---
+pub use graph::parallel::{
+    ClaimConflict, ClaimPathError, DispatchMode, DispatchPlan, WorkspaceClaim,
+    parse_relative_claim_paths, paths_overlap, plan_shared_workspace_dispatch,
+    writes_shared_workspace,
+};
+
 // --- Graph: export / visualization ---
 // Topology types are surfaced at the crate root; the `to_json`/`to_mermaid`
 // free functions stay behind `graph::export::` to avoid generic-name clashes.
