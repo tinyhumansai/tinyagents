@@ -115,13 +115,20 @@ fn neutralize_protocol_tags(value: &str) -> Cow<'_, str> {
             if rest.len() < tag.len() || !rest[..tag.len()].eq_ignore_ascii_case(tag.as_bytes()) {
                 return false;
             }
-            // The tag name must actually end here. Without this, `<tool_calls>`
-            // and `<tool_resultant>` — neither of which is protocol — would be
-            // rewritten too, and every false positive is fidelity spent for no
-            // security.
-            !matches!(
+            // The tag name must actually end here — on a real XML tag
+            // terminator (whitespace, `>`, or a self-closing `/`), not merely
+            // on a byte outside `[A-Za-z0-9_-]`. `.` and `:` are valid XML
+            // name characters, so treating them as boundaries would rewrite
+            // `<tool_result.debug>` and `<tool_call:custom>` — neither of
+            // which is protocol — the same false-positive-is-wasted-fidelity
+            // problem `<tool_calls>` and `<tool_resultant>` guard against
+            // below. Requiring `Some` (not just "not a name char") also keeps
+            // an incomplete, truncated `<tool_result` at the very end of the
+            // string from matching: there is no terminator yet, so it is not
+            // (yet) a protocol tag.
+            matches!(
                 rest.get(tag.len()),
-                Some(byte) if byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-'
+                Some(byte) if byte.is_ascii_whitespace() || matches!(*byte, b'>' | b'/')
             )
         });
         if !is_protocol_tag {
