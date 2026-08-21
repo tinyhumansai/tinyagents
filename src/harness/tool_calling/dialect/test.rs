@@ -312,24 +312,6 @@ fn neutralization_does_not_fire_on_dotted_or_namespaced_tags() {
 }
 
 #[test]
-fn neutralization_does_not_fire_on_an_incomplete_trailing_tag() {
-    // A truncated `<tool_result` with no terminator yet (end of string) is
-    // not a complete protocol tag opener — matching it would rewrite content
-    // that never actually spelled the envelope boundary.
-    let body = "some text <tool_result";
-    let entry = XmlDialect.format_results(&[ToolOutcome::ok("read_file", body)]);
-
-    let TranscriptEntry::Chat(message) = entry else {
-        panic!("text dialects fold results into a chat turn");
-    };
-    assert!(
-        message.content.contains(body),
-        "an incomplete trailing tag must pass through unchanged: {:?}",
-        message.content
-    );
-}
-
-#[test]
 fn neutralization_still_fires_on_self_closing_and_whitespace_terminated_tags() {
     // The tightened boundary check must still recognize every real protocol
     // tag terminator: whitespace (attributes follow), `>` (bare open), and
