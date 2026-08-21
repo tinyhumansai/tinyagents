@@ -40,7 +40,7 @@ impl ReconcileOutcome {
 }
 
 /// One task considered by a reconciliation sweep.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ReconciledTask {
     /// The task that was swept.
     pub task_id: TaskId,
@@ -54,7 +54,7 @@ pub struct ReconciledTask {
 }
 
 /// The result of one reconciliation sweep.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ReconcileReport {
     /// Every orphan considered, in store order.
     pub tasks: Vec<ReconciledTask>,
