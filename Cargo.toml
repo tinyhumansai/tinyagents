@@ -65,6 +65,24 @@ rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = { version = "0.10", optional = true }
 
+# ── `multimodal` feature deps ────────────────────────────────────────────
+# Both are optional and reached only through `harness::multimodal`, so a host
+# that does not turn the feature on resolves neither.
+#
+# `base64` decodes and re-encodes `data:` URI payloads. The engine choice is
+# load-bearing rather than incidental: a complete four-character group is what
+# `STANDARD` accepts (padded or not) and only a partial group needs
+# `STANDARD_NO_PAD`, so `harness::multimodal::data_uri` picks by length instead
+# of trying both — trying both decoded a multi-MB image twice for every
+# unpadded payload.
+base64 = { version = "0.22", optional = true }
+# `flate2` decompresses `application/gzip` data URIs that carry an
+# `original_mime=` parameter — the shape a renderer emits when it compresses an
+# attachment before handing it over. Decompression is bounded by `Read::take`
+# against the caller's byte cap, so a zip bomb fails the cap rather than the
+# allocator.
+flate2 = { version = "1", optional = true }
+
 [features]
 default = []
 # Embedded SQLite-backed checkpointer (`graph::checkpoint::SqliteCheckpointer`).
@@ -72,6 +90,12 @@ sqlite = ["dep:rusqlite"]
 # Builtin generic tools (`harness::tools`) kept out of the default dependency
 # graph so host applications can choose whether they want these implementations.
 tools = ["dep:chrono-tz"]
+# Attachment resolution for `[IMAGE:…]` / `[FILE:…]` markers
+# (`harness::multimodal`): marker parsing, `data:` URI decoding, MIME
+# detection, size/count limits, and the rendered provider payload. Off by
+# default because a host that never carries attachments should not resolve
+# `base64` / `flate2`.
+multimodal = ["dep:base64", "dep:flate2"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
