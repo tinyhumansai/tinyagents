@@ -8,10 +8,18 @@
 //! single-`InProgress` invariant ([`store`]), and the model-facing multiplexer
 //! tool ([`tool`]).
 //!
+//! Two layers sit on top of the board for hosts that run cards autonomously:
+//! [`runs`] records who claimed a card, heartbeats while they work, and hands
+//! the card back when a worker goes silent; [`dispatch`] is the scheduling
+//! policy — which card is next, whether it needs approval first, what prompt
+//! its run gets, and how an in-flight run is cancelled.
+//!
 //! Ported from OpenHuman's task board / `todos` modules, minus the app-specific
 //! coupling (progress events, RPC envelopes, in-memory scratch fallback): a
 //! board is always `(Store, thread_id)`.
 
+pub mod dispatch;
+pub mod runs;
 pub mod store;
 mod tool;
 mod types;
