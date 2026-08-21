@@ -50,7 +50,18 @@ use super::payload::FilePayload;
 /// reference.
 #[async_trait]
 pub trait TextExtractor: Send + Sync {
+    /// Whether this extractor has anything to say about `mime`.
+    ///
+    /// Required rather than defaulted, and consulted before every call.
+    /// Extraction can be expensive well before it fails — a host that runs its
+    /// parser out-of-process pays a round trip and a copy of the bytes — so
+    /// "offer it everything and let it refuse" would charge every `.zip` and
+    /// `.xlsx` attachment for a refusal that was knowable from the MIME type.
+    fn handles(&self, mime: &str) -> bool;
+
     /// Extract text from `bytes` of type `mime`, or explain why not.
+    ///
+    /// Called only when [`TextExtractor::handles`] returned `true`.
     ///
     /// `Err` is a plain reason string because the caller never branches on it —
     /// every failure takes the same degrade-to-reference path, and the string
@@ -68,6 +79,10 @@ pub struct NoTextExtractor;
 
 #[async_trait]
 impl TextExtractor for NoTextExtractor {
+    fn handles(&self, _mime: &str) -> bool {
+        false
+    }
+
     async fn extract(&self, mime: &str, _bytes: &[u8]) -> std::result::Result<String, String> {
         Err(format!("no text extractor is configured for '{mime}'"))
     }
@@ -369,10 +384,12 @@ async fn build_file_payload(
         "[multimodal::files] resolved file ref"
     );
 
-    // Plain-text formats decode here; anything else is offered to the host's
-    // extractor, and a refusal degrades the file to a metadata reference rather
-    // than failing the turn.
-    let extracted = if super::mime::is_extractable_text_mime(&mime) {
+    // Plain-text formats decode in `FilePayload::from_resolved`; a format the
+    // host's extractor claims is offered to it, and a refusal degrades the file
+    // to a metadata reference rather than failing the turn. Everything else —
+    // the binary-only formats — goes straight to a reference without the
+    // extractor ever seeing the bytes.
+    let extracted = if super::mime::is_extractable_text_mime(&mime) || !extractor.handles(&mime) {
         None
     } else {
         match extractor.extract(&mime, &bytes).await {
