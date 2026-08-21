@@ -274,14 +274,7 @@ async fn one_thread_sweep_does_not_disturb_another() {
     );
 }
 
-/// Give a spawned task room to wake, do its store write, and park again.
-async fn settle() {
-    for _ in 0..16 {
-        tokio::task::yield_now().await;
-    }
-}
-
-#[tokio::test(start_paused = true)]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_heartbeat_task_keeps_a_long_run_alive_and_stops_on_cancel() {
     let store = store();
     let thread = "feature-heartbeat";
@@ -290,47 +283,46 @@ async fn a_heartbeat_task_keeps_a_long_run_alive_and_stops_on_cancel() {
         .expect("open run");
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
+    // A fast tick keeps the test quick; the cadence is a parameter precisely so
+    // a caller (or a test) is not stuck with the 30s production default.
+    let tick = Duration::from_millis(20);
     task_run_store::spawn_heartbeat_task(
         store.clone(),
         thread.to_string(),
         run.run_id.clone(),
         cancel_rx,
-        Duration::from_secs(30),
+        tick,
     );
 
-    // Staleness is judged against the wall clock, which a paused tokio timer
-    // does not move — so the run is aged by rewriting its stamps, and a tick
-    // proves itself by writing a fresh one back.
+    // Staleness is judged against the wall clock, so the run is aged by
+    // rewriting its stamps; a tick proves itself by writing a fresh one back.
     let limits = RunLimits {
         heartbeat_stale_secs: 60,
         claim_ttl_secs: u64::MAX,
         max_reclaim_count: 3,
     };
-    for _ in 0..3 {
-        abandon(&store, thread, &run.run_id).await;
-        tokio::time::advance(Duration::from_secs(30)).await;
-        settle().await;
-        assert!(
-            task_run_store::find_stale_runs(&store, thread, &limits)
-                .await
-                .expect("stale check")
-                .is_empty(),
-            "a heartbeating run is never stale"
-        );
-    }
+    abandon(&store, thread, &run.run_id).await;
+    tokio::time::sleep(tick * 10).await;
+    assert!(
+        task_run_store::find_stale_runs(&store, thread, &limits)
+            .await
+            .expect("stale check")
+            .is_empty(),
+        "a heartbeating run is never stale"
+    );
 
     // Once cancelled the ticks stop, so the next silence is not papered over.
     cancel_tx.send(true).expect("cancel heartbeat");
-    settle().await;
+    tokio::time::sleep(tick * 2).await;
     abandon(&store, thread, &run.run_id).await;
-    tokio::time::advance(Duration::from_secs(120)).await;
-    settle().await;
+    tokio::time::sleep(tick * 10).await;
     assert_eq!(
         task_run_store::find_stale_runs(&store, thread, &limits)
             .await
             .expect("stale check")
             .len(),
-        1
+        1,
+        "a cancelled heartbeat stops keeping the claim alive"
     );
 }
 
