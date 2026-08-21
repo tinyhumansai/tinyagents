@@ -68,9 +68,17 @@ pub fn format_results(results: &[ToolOutcome]) -> TranscriptEntry {
 
 /// Replay a transcript as flat chat messages.
 ///
-/// Assistant tool calls degrade to their narrative text (the calls themselves
-/// were already in that text, as tags), and persisted results are re-wrapped by
-/// **id** — which is what the durable record stores — into one user turn.
+/// Assistant tool calls degrade to `text` verbatim, and persisted results are
+/// re-wrapped by **id** — which is what the durable record stores — into one
+/// user turn.
+///
+/// `text` must be the **raw** model response the text dialect originally
+/// parsed (tags and all), not the narrative-only text
+/// [`ToolDialect::parse_response`](super::ToolDialect::parse_response) returns
+/// with the `<tool_call>` tags stripped. A host that persists the parsed
+/// narrative into `TranscriptEntry::AssistantToolCalls::text` replays an
+/// assistant turn with no visible call, followed by a `<tool_result>` turn
+/// that answers nothing the model can see.
 pub fn to_provider_messages(history: &[TranscriptEntry]) -> Vec<DialectMessage> {
     history
         .iter()
