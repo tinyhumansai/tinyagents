@@ -55,7 +55,33 @@ bound to `ToolExecutionContext::thread_id` (never a tool argument). Domain error
 (unknown id, invariant violation) are surfaced to the model as tool errors
 rather than failing the run.
 
+## Runs and dispatch
+
+Two layers sit on top of the board for hosts that run cards autonomously.
+
+`graph::todos::runs` is the claim/heartbeat/reclaim log (`task_run_store`). A
+worker claims a card, opens a `TaskRun`, ticks a heartbeat while it works, and
+closes the run with a `RunOutcome`. `reclaim_stale` sweeps runs whose heartbeat
+or claim aged out under `RunLimits`, closes them `Reclaimed`, and returns their
+card to `Todo` — or parks it at `Blocked` once the card has exceeded
+`max_reclaim_count`, so a card that keeps killing workers stops cycling. The
+staleness policy itself is the pure, clock-injected `staleness_reason`. See
+[`src/graph/todos/runs/README.md`](../../../src/graph/todos/runs/README.md).
+
+`graph::todos::dispatch` is the scheduling policy: `pick_next_card` (urgency,
+then board order, optionally agent-assigned only), `requires_plan_approval`
+(the card's own mode outranks the global gate), `PollCadence` (idle backoff),
+`build_task_prompt` / `build_progress_instruction`, and `ActiveRunRegistry`
+(in-flight runs with race-free removal, so a terminal write-back happens once).
+See [`src/graph/todos/dispatch/README.md`](../../../src/graph/todos/dispatch/README.md).
+
+Executing a card is out of scope for the crate — that needs a host's agent and
+tool belt. `tests/e2e_graph_task_dispatch.rs` is the reference assembly.
+
 ## Testing
 
-Unit tests in `src/graph/todos/test.rs` (types, store invariants, tool); an
-end-to-end model-driven tool run in `tests/e2e_graph_todos.rs`.
+Unit tests in `src/graph/todos/test.rs` (types, store invariants, tool),
+`src/graph/todos/runs/test.rs`, and `src/graph/todos/dispatch/test.rs`; an
+end-to-end model-driven tool run in `tests/e2e_graph_todos.rs`; feature coverage
+for the run lifecycle in `tests/feature_graph_task_runs.rs`; and the full
+dispatch loop in `tests/e2e_graph_task_dispatch.rs`.
