@@ -43,6 +43,9 @@ impl std::error::Error for TaskStoreRegistryError {}
 
 type OpenFn<K> = dyn Fn(&K) -> Arc<dyn TaskStore> + Send + Sync;
 
+/// The registry's cache, guarded for the lifetime of one accessor call.
+type StoreGuard<'a, K> = std::sync::MutexGuard<'a, HashMap<K, Arc<dyn TaskStore>>>;
+
 /// A process-wide cache of [`TaskStore`]s keyed by scope.
 pub struct TaskStoreRegistry<K: Eq + Hash + Clone + Send + Sync> {
     stores: Mutex<HashMap<K, Arc<dyn TaskStore>>>,
@@ -115,10 +118,7 @@ impl<K: Eq + Hash + Clone + Send + Sync> TaskStoreRegistry<K> {
         Ok(())
     }
 
-    fn lock(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, HashMap<K, Arc<dyn TaskStore>>>, TaskStoreRegistryError>
-    {
+    fn lock(&self) -> Result<StoreGuard<'_, K>, TaskStoreRegistryError> {
         self.stores
             .lock()
             .map_err(|err| TaskStoreRegistryError::Lock(err.to_string()))
@@ -142,15 +142,15 @@ impl<K: Eq + Hash + Clone + Send + Sync> std::fmt::Debug for TaskStoreRegistry<K
 /// is a far smaller harm than refusing to run orchestration at all, and a host
 /// on a read-only volume should still be able to spawn work.
 pub fn open_jsonl_task_store_or_memory(path: &Path) -> Arc<dyn TaskStore> {
-    if let Some(parent) = path.parent() {
-        if let Err(err) = std::fs::create_dir_all(parent) {
-            tracing::warn!(
-                dir = %parent.display(),
-                error = %err,
-                "[orchestration] task store directory unavailable; falling back to memory"
-            );
-            return Arc::new(InMemoryTaskStore::new());
-        }
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!(
+            dir = %parent.display(),
+            error = %err,
+            "[orchestration] task store directory unavailable; falling back to memory"
+        );
+        return Arc::new(InMemoryTaskStore::new());
     }
 
     match JsonlTaskStore::open(path) {
