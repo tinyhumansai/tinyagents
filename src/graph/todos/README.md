@@ -93,4 +93,6 @@ let tool = TodoTool::new(store.clone());
 | `types.rs` | Card/board model, `parse_status`, `render_markdown`, `normalise_board`, `CardPatch`, `TodosSnapshot`. |
 | `store.rs` | `Store`-backed CRUD, per-thread RMW lock, single-in-progress invariant, CAS `claim_card`. |
 | `tool.rs` | The `todo` multiplexer tool. |
+| `runs/` | Claim / heartbeat / reclaim log over the board — see [`runs/README.md`](runs/README.md). |
+| `dispatch/` | Selection, approval gate, poll cadence, prompts, in-flight run registry — see [`dispatch/README.md`](dispatch/README.md). |
 | `test.rs` | Unit tests (types, store, tool). |

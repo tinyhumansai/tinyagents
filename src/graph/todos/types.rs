@@ -372,11 +372,16 @@ pub(crate) fn new_card_id() -> String {
     format!("task-{}", next_seq())
 }
 
-/// Current unix time in milliseconds, as a string. Dependency-free (no `chrono`).
-pub(crate) fn now_stamp() -> String {
+/// Current unix time in milliseconds. Dependency-free (no `chrono`).
+pub(crate) fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-        .to_string()
+}
+
+/// Current unix time in milliseconds, as a string — the timestamp format every
+/// board and run record uses.
+pub(crate) fn now_stamp() -> String {
+    now_millis().to_string()
 }

@@ -225,18 +225,25 @@ pub use graph::{
 // the tools and continuation helpers are re-exported flat for discoverability.
 pub use graph::goals::store as goal_store;
 pub use graph::{
-    GoalProgress, GoalTool, GoalToolKind, ThreadGoal, ThreadGoalStatus, TurnOutcome,
-    active_goal_context_block, goal_gate_node, goal_tools, note_user_turn, register_goal_tools,
-    run_continuation_tick,
+    BudgetVerdict, GoalBudgetGuard, GoalProgress, GoalTool, GoalToolKind, ThreadGoal,
+    ThreadGoalStatus, TurnOutcome, account_turn, accrues_usage, active_goal_context_block,
+    goal_gate_node, goal_tools, note_user_turn, register_goal_tools, run_continuation_tick,
+    turn_tokens,
 };
 
 // --- Graph: per-thread task board (kanban todos) ---
-// `todo_store` is the programmatic CRUD surface (add/edit/claim_card/...); the
-// tool and data model are re-exported flat for discoverability.
+// `todo_store` is the programmatic CRUD surface (add/edit/claim_card/...);
+// `task_run_store` is the claim/heartbeat/reclaim log a dispatcher writes
+// alongside it. The tool, data model, and dispatch policy are re-exported flat
+// for discoverability.
+pub use graph::todos::runs::store as task_run_store;
 pub use graph::todos::store as todo_store;
 pub use graph::{
-    CardPatch, TaskApprovalMode, TaskBoard, TaskBoardCard, TaskCardStatus, TodoTool, TodosSnapshot,
-    normalise_board, parse_status, register_todo_tools, render_markdown, todo_tools,
+    ActiveRun, ActiveRunRegistry, CardPatch, PollCadence, ReclaimDetail, ReclaimResult, RunLimits,
+    RunOutcome, TaskApprovalMode, TaskBoard, TaskBoardCard, TaskCardStatus, TaskPromptTools,
+    TaskRun, TodoTool, TodosSnapshot, build_progress_instruction, build_task_prompt, card_urgency,
+    has_card_in_progress, normalise_board, parse_status, pick_next_card, register_todo_tools,
+    render_markdown, requires_plan_approval, staleness_reason, todo_tools,
 };
 
 // --- Graph: parallel map/reduce helper ---

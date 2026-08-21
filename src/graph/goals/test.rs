@@ -632,3 +632,196 @@ mod continuation_tests {
         assert!(note_user_turn(&s, "missing").await.unwrap().is_none());
     }
 }
+
+mod budget_tests {
+    use std::sync::Arc;
+
+    use super::super::budget::{
+        BudgetVerdict, GoalBudgetGuard, account_turn, accrues_usage, turn_tokens,
+    };
+    use super::super::store;
+    use super::{ThreadGoalStatus, goal};
+    use crate::harness::store::{InMemoryStore, Store};
+
+    fn kv() -> Arc<dyn Store> {
+        Arc::new(InMemoryStore::default())
+    }
+
+    #[test]
+    fn a_turns_charge_is_its_input_plus_output() {
+        assert_eq!(turn_tokens(120, 80), 200);
+        // Saturating, so an absurd provider report cannot wrap to a tiny charge.
+        assert_eq!(turn_tokens(u64::MAX, 1), u64::MAX);
+    }
+
+    #[test]
+    fn only_an_active_goal_accrues_usage() {
+        assert!(accrues_usage(ThreadGoalStatus::Active));
+        assert!(!accrues_usage(ThreadGoalStatus::Paused));
+        assert!(!accrues_usage(ThreadGoalStatus::BudgetLimited));
+        assert!(!accrues_usage(ThreadGoalStatus::Complete));
+    }
+
+    #[tokio::test]
+    async fn a_turn_is_charged_against_the_active_goal() {
+        let kv = kv();
+        store::set(&kv, "t1", "ship it", Some(1_000)).await.unwrap();
+
+        let updated = account_turn(&kv, "t1", 100, 50, 12, true)
+            .await
+            .unwrap()
+            .expect("goal charged");
+        assert_eq!(updated.tokens_used, 150);
+        assert_eq!(updated.time_used_seconds, 12);
+        assert_eq!(updated.status, ThreadGoalStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn crossing_the_budget_flips_the_goal_to_budget_limited() {
+        let kv = kv();
+        store::set(&kv, "t1", "ship it", Some(100)).await.unwrap();
+
+        let updated = account_turn(&kv, "t1", 60, 60, 1, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, ThreadGoalStatus::BudgetLimited);
+        assert!(updated.over_budget());
+
+        // A limited goal stops accruing: incidental chat afterwards is free.
+        assert!(
+            account_turn(&kv, "t1", 500, 500, 5, true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let after = store::get(&kv, "t1").await.unwrap().unwrap();
+        assert_eq!(after.tokens_used, 120);
+    }
+
+    #[tokio::test]
+    async fn a_thread_with_no_goal_or_an_idle_turn_changes_nothing() {
+        let kv = kv();
+        assert!(
+            account_turn(&kv, "missing", 10, 10, 1, true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        store::set(&kv, "t1", "ship it", None).await.unwrap();
+        let unchanged = account_turn(&kv, "t1", 0, 0, 0, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.tokens_used, 0);
+    }
+
+    #[tokio::test]
+    async fn a_user_turn_clears_suppression_but_a_continuation_does_not() {
+        let kv = kv();
+        let goal = store::set(&kv, "t1", "ship it", None).await.unwrap();
+        store::set_continuation_suppressed_if(&kv, "t1", &goal.goal_id, true)
+            .await
+            .unwrap();
+
+        // The continuation's own accounting must not clear its one-shot flag,
+        // or the loop would never stop.
+        account_turn(&kv, "t1", 10, 10, 1, false).await.unwrap();
+        assert!(
+            store::get(&kv, "t1")
+                .await
+                .unwrap()
+                .unwrap()
+                .continuation_suppressed
+        );
+
+        // A person re-engaging re-arms the next idle continuation.
+        account_turn(&kv, "t1", 10, 10, 1, true).await.unwrap();
+        assert!(
+            !store::get(&kv, "t1")
+                .await
+                .unwrap()
+                .unwrap()
+                .continuation_suppressed
+        );
+    }
+
+    #[test]
+    fn a_guard_is_only_armed_for_an_active_goal_with_a_budget() {
+        assert!(GoalBudgetGuard::for_goal(&goal(ThreadGoalStatus::Active, Some(100), 0)).is_some());
+        assert!(GoalBudgetGuard::for_goal(&goal(ThreadGoalStatus::Active, None, 0)).is_none());
+        assert!(GoalBudgetGuard::for_goal(&goal(ThreadGoalStatus::Paused, Some(100), 0)).is_none());
+        assert!(
+            GoalBudgetGuard::for_goal(&goal(ThreadGoalStatus::Complete, Some(100), 0)).is_none()
+        );
+    }
+
+    #[test]
+    fn the_verdict_counts_in_flight_spend_against_the_ceiling() {
+        let guard =
+            GoalBudgetGuard::for_goal(&goal(ThreadGoalStatus::Active, Some(1_000), 0)).unwrap();
+        assert_eq!(guard.budget(), 1_000);
+        assert_eq!(guard.goal_id(), "goal-0");
+        assert_eq!(guard.thread_id(), "t");
+
+        assert_eq!(guard.verdict_for(400, 300), BudgetVerdict::Continue);
+        // Reaching the budget stops the turn — it does not have to exceed it.
+        let verdict = guard.verdict_for(400, 600);
+        assert!(verdict.is_stop());
+        match verdict {
+            BudgetVerdict::Stop { reason } => {
+                assert!(reason.contains("1000 tokens >= 1000 budget"), "{reason}")
+            }
+            BudgetVerdict::Continue => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_guard_stops_a_turn_that_would_overrun() {
+        let kv = kv();
+        let stored = store::set(&kv, "t1", "ship it", Some(500)).await.unwrap();
+        let guard = GoalBudgetGuard::for_goal(&stored).unwrap();
+        account_turn(&kv, "t1", 200, 100, 1, true).await.unwrap();
+
+        assert_eq!(
+            guard.check(&kv, 100).await.unwrap(),
+            BudgetVerdict::Continue
+        );
+        assert!(guard.check(&kv, 200).await.unwrap().is_stop());
+    }
+
+    #[tokio::test]
+    async fn a_guard_stands_down_when_its_goal_is_replaced_or_gone() {
+        let kv = kv();
+        let stored = store::set(&kv, "t1", "ship it", Some(10)).await.unwrap();
+        let guard = GoalBudgetGuard::for_goal(&stored).unwrap();
+        // Armed and biting on the goal it was built for.
+        assert!(guard.check(&kv, 50).await.unwrap().is_stop());
+
+        // A fresh objective mints a new goal id: the old guard no longer applies.
+        store::set(&kv, "t1", "a different objective", Some(10))
+            .await
+            .unwrap();
+        assert_eq!(guard.check(&kv, 50).await.unwrap(), BudgetVerdict::Continue);
+
+        // And a cleared goal leaves nothing to enforce.
+        store::clear(&kv, "t1").await.unwrap();
+        assert_eq!(guard.check(&kv, 50).await.unwrap(), BudgetVerdict::Continue);
+    }
+
+    #[tokio::test]
+    async fn a_guard_stands_down_once_its_goal_is_no_longer_active() {
+        let kv = kv();
+        let stored = store::set(&kv, "t1", "ship it", Some(10)).await.unwrap();
+        let guard = GoalBudgetGuard::for_goal(&stored).unwrap();
+        store::pause(&kv, "t1").await.unwrap();
+
+        // A paused goal is not burning a live budget, so a user-present turn is
+        // never hard-stopped by it.
+        assert_eq!(
+            guard.check(&kv, 1_000).await.unwrap(),
+            BudgetVerdict::Continue
+        );
+    }
+}
