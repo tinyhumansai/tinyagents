@@ -914,3 +914,304 @@ async fn jsonl_store_persists_inside_current_thread_runtime() {
     assert_eq!(store.history(&task_id).len(), 2);
     let _ = std::fs::remove_file(&path);
 }
+
+// --- TaskStoreRegistry ---------------------------------------------------
+
+#[test]
+fn registry_opens_each_key_once_and_shares_the_same_store() {
+    let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&opens);
+    let registry: TaskStoreRegistry<String> = TaskStoreRegistry::new(move |_key| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Arc::new(InMemoryTaskStore::new()) as Arc<dyn TaskStore>
+    });
+
+    let first = registry.get_or_open(&"a".to_string()).expect("opens");
+    let second = registry.get_or_open(&"a".to_string()).expect("reuses");
+
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "same key must reuse one store"
+    );
+    assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(registry.len().expect("len"), 1);
+}
+
+#[test]
+fn registry_keeps_distinct_keys_isolated() {
+    let registry: TaskStoreRegistry<String> =
+        TaskStoreRegistry::new(|_key| Arc::new(InMemoryTaskStore::new()) as Arc<dyn TaskStore>);
+
+    let a = registry.get_or_open(&"a".to_string()).expect("opens a");
+    let b = registry.get_or_open(&"b".to_string()).expect("opens b");
+    assert!(!Arc::ptr_eq(&a, &b), "distinct keys must not share a store");
+
+    a.insert(graph_spec("only-in-a")).expect("insert");
+    assert_eq!(a.list(OrchestrationTaskFilter::default()).len(), 1);
+    assert!(
+        b.list(OrchestrationTaskFilter::default()).is_empty(),
+        "records must not leak across scopes"
+    );
+    assert_eq!(registry.len().expect("len"), 2);
+}
+
+#[test]
+fn registry_get_does_not_open_and_clear_forces_a_reopen() {
+    let registry: TaskStoreRegistry<String> =
+        TaskStoreRegistry::new(|_key| Arc::new(InMemoryTaskStore::new()) as Arc<dyn TaskStore>);
+
+    assert!(registry.is_empty().expect("is_empty"));
+    assert!(registry.get(&"a".to_string()).expect("get").is_none());
+    assert!(registry.is_empty().expect("still empty"));
+
+    let first = registry.get_or_open(&"a".to_string()).expect("opens");
+    assert!(registry.get(&"a".to_string()).expect("get").is_some());
+
+    registry.clear().expect("clear");
+    assert!(registry.is_empty().expect("cleared"));
+
+    let reopened = registry.get_or_open(&"a".to_string()).expect("reopens");
+    assert!(!Arc::ptr_eq(&first, &reopened), "clear must force a reopen");
+}
+
+#[test]
+fn registry_values_returns_every_open_store() {
+    let registry: TaskStoreRegistry<String> =
+        TaskStoreRegistry::new(|_key| Arc::new(InMemoryTaskStore::new()) as Arc<dyn TaskStore>);
+    assert!(registry.values().expect("values").is_empty());
+
+    registry.get_or_open(&"a".to_string()).expect("opens a");
+    registry.get_or_open(&"b".to_string()).expect("opens b");
+
+    let stores = registry.values().expect("values");
+    assert_eq!(stores.len(), 2);
+
+    // A record written through one store is visible through exactly one of the
+    // returned handles, so callers can sweep across scopes.
+    registry
+        .get_or_open(&"a".to_string())
+        .expect("reuses a")
+        .insert(graph_spec("only-in-a"))
+        .expect("insert");
+    let total: usize = stores
+        .iter()
+        .map(|store| store.list(OrchestrationTaskFilter::default()).len())
+        .sum();
+    assert_eq!(total, 1);
+}
+
+#[test]
+fn registry_debug_reports_open_store_count() {
+    let registry: TaskStoreRegistry<String> =
+        TaskStoreRegistry::new(|_key| Arc::new(InMemoryTaskStore::new()) as Arc<dyn TaskStore>);
+    registry.get_or_open(&"a".to_string()).expect("opens");
+    assert!(format!("{registry:?}").contains("TaskStoreRegistry"));
+}
+
+#[test]
+fn registry_lock_error_displays_the_poison_detail() {
+    let err = TaskStoreRegistryError::Lock("poisoned".to_string());
+    assert!(err.to_string().contains("poisoned"));
+}
+
+#[test]
+fn jsonl_fallback_opens_a_durable_store_and_replays_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("nested").join("tasks.jsonl");
+
+    let store = open_jsonl_task_store_or_memory(&path);
+    store.insert(graph_spec("t1")).expect("insert");
+    assert!(path.exists(), "durable store must create its log");
+
+    // Reopening replays the log rather than starting empty.
+    let reopened = open_jsonl_task_store_or_memory(&path);
+    assert_eq!(reopened.list(OrchestrationTaskFilter::default()).len(), 1);
+}
+
+#[test]
+fn jsonl_fallback_degrades_to_memory_when_the_log_is_unreadable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // A directory where the log file should be: `JsonlTaskStore::open` cannot
+    // use it, so the caller must still get a working store.
+    let path = dir.path().join("tasks.jsonl");
+    std::fs::create_dir(&path).expect("create dir in the log's place");
+
+    let store = open_jsonl_task_store_or_memory(&path);
+    store
+        .insert(graph_spec("t1"))
+        .expect("memory store still accepts work");
+    assert_eq!(store.list(OrchestrationTaskFilter::default()).len(), 1);
+}
+
+// --- reconcile_orphaned_tasks -------------------------------------------
+
+#[test]
+fn reconcile_settles_live_tasks_and_leaves_terminal_ones_alone() {
+    let store = InMemoryTaskStore::new();
+
+    store.insert(graph_spec("pending")).expect("insert");
+
+    store.insert(graph_spec("running")).expect("insert");
+    store
+        .mark_running(&TaskId::new("running"))
+        .expect("running");
+
+    store.insert(graph_spec("awaiting")).expect("insert");
+    store
+        .mark_running(&TaskId::new("awaiting"))
+        .expect("running");
+    store
+        .mark_awaiting(&TaskId::new("awaiting"))
+        .expect("awaiting");
+
+    store.insert(graph_spec("done")).expect("insert");
+    store.mark_running(&TaskId::new("done")).expect("running");
+    store
+        .complete(&TaskId::new("done"), OrchestrationTaskResult::text("ok"))
+        .expect("complete");
+
+    let report = reconcile_orphaned_tasks(&store, OrchestrationTaskFilter::default(), &|_record| {
+        "driver died".to_string()
+    });
+
+    assert_eq!(
+        report.reconciled_count(),
+        3,
+        "three live tasks were settled"
+    );
+    assert_eq!(report.error_count(), 0);
+    assert!(
+        report
+            .tasks
+            .iter()
+            .all(|task| task.outcome == ReconcileOutcome::Failed),
+        "live-but-not-cancelling tasks settle as failed"
+    );
+
+    for id in ["pending", "running", "awaiting"] {
+        let record = store.get(&TaskId::new(id)).expect("record");
+        assert_eq!(record.status, OrchestrationTaskStatus::Failed);
+        assert_eq!(record.error.as_deref(), Some("driver died"));
+    }
+    // The already-terminal task was not touched.
+    let done = store.get(&TaskId::new("done")).expect("record");
+    assert_eq!(done.status, OrchestrationTaskStatus::Completed);
+}
+
+#[test]
+fn reconcile_honours_a_pending_cancellation() {
+    let store = InMemoryTaskStore::new();
+    store.insert(graph_spec("cancelling")).expect("insert");
+    store
+        .mark_running(&TaskId::new("cancelling"))
+        .expect("running");
+    store
+        .request_cancel(&TaskId::new("cancelling"))
+        .expect("cancel");
+
+    let report = reconcile_orphaned_tasks(&store, OrchestrationTaskFilter::default(), &|_| {
+        "driver died".to_string()
+    });
+
+    assert_eq!(report.tasks.len(), 1);
+    assert_eq!(report.tasks[0].outcome, ReconcileOutcome::Cancelled);
+    assert_eq!(
+        report.tasks[0].prior_status,
+        OrchestrationTaskStatus::CancelRequested
+    );
+    assert_eq!(
+        store
+            .get(&TaskId::new("cancelling"))
+            .expect("record")
+            .status,
+        OrchestrationTaskStatus::Cancelled
+    );
+}
+
+#[test]
+fn reconcile_reason_closure_sees_the_record_being_settled() {
+    let store = InMemoryTaskStore::new();
+    store.insert(graph_spec("t1")).expect("insert");
+    store.mark_running(&TaskId::new("t1")).expect("running");
+
+    reconcile_orphaned_tasks(&store, OrchestrationTaskFilter::default(), &|record| {
+        format!("orphaned (was `{}`)", task_status_label(record.status))
+    });
+
+    assert_eq!(
+        store
+            .get(&TaskId::new("t1"))
+            .expect("record")
+            .error
+            .as_deref(),
+        Some("orphaned (was `running`)")
+    );
+}
+
+#[test]
+fn reconcile_respects_the_filter() {
+    let store = InMemoryTaskStore::new();
+    store
+        .insert(OrchestrationTaskSpec::new(
+            "agent-task",
+            OrchestrationTaskKind::SubAgent {
+                agent: "worker".into(),
+            },
+        ))
+        .expect("insert");
+    store.insert(graph_spec("graph-task")).expect("insert");
+
+    let report = reconcile_orphaned_tasks(
+        &store,
+        OrchestrationTaskFilter::default().with_kind("sub_agent"),
+        &|_| "driver died".to_string(),
+    );
+
+    assert_eq!(report.tasks.len(), 1);
+    assert_eq!(report.tasks[0].task_id.as_str(), "agent-task");
+    assert_eq!(
+        store
+            .get(&TaskId::new("graph-task"))
+            .expect("record")
+            .status,
+        OrchestrationTaskStatus::Pending,
+        "a filtered-out task must not be swept"
+    );
+}
+
+#[test]
+fn reconcile_on_an_empty_store_reports_nothing() {
+    let store = InMemoryTaskStore::new();
+    let report = reconcile_orphaned_tasks(&store, OrchestrationTaskFilter::default(), &|_| {
+        "driver died".to_string()
+    });
+    assert!(report.is_empty());
+    assert_eq!(report.reconciled_count(), 0);
+    assert_eq!(report.error_count(), 0);
+    assert_eq!(report.settled().count(), 0);
+}
+
+#[test]
+fn reconcile_outcome_error_is_not_counted_as_settled() {
+    let error = ReconcileOutcome::Error("boom".to_string());
+    assert!(!error.is_settled());
+    assert!(ReconcileOutcome::Failed.is_settled());
+    assert!(ReconcileOutcome::Cancelled.is_settled());
+}
+
+#[test]
+fn task_status_label_covers_every_status() {
+    for (status, expected) in [
+        (OrchestrationTaskStatus::Pending, "pending"),
+        (OrchestrationTaskStatus::Running, "running"),
+        (OrchestrationTaskStatus::Awaiting, "awaiting"),
+        (OrchestrationTaskStatus::CancelRequested, "cancel_requested"),
+        (OrchestrationTaskStatus::Completed, "completed"),
+        (OrchestrationTaskStatus::Failed, "failed"),
+        (OrchestrationTaskStatus::Cancelled, "cancelled"),
+        (OrchestrationTaskStatus::TimedOut, "timed_out"),
+        (OrchestrationTaskStatus::Abandoned, "abandoned"),
+    ] {
+        assert_eq!(task_status_label(status), expected);
+    }
+}

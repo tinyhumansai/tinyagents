@@ -162,8 +162,31 @@ impl InMemoryEventJournal {
     /// append) once exceeded. `0` means unbounded.
     pub fn with_max_runs(max_runs: usize) -> Self {
         Self {
-            state: Arc::new(Mutex::new(EventJournalState::default())),
             max_runs,
+            ..Self::default()
+        }
+    }
+
+    /// Creates a new, empty in-memory journal that retains at most
+    /// `max_entries_per_run` observations **within** each run's stream,
+    /// dropping the oldest once exceeded. `0` means unbounded, which is the
+    /// default.
+    ///
+    /// This bounds a dimension [`Self::with_max_runs`] cannot: a single
+    /// long-lived run is one stream, so it is never evicted and its entries
+    /// grow for as long as the run does. See
+    /// [`DEFAULT_JOURNAL_MAX_ENTRIES_PER_RUN`] for the measured shape that
+    /// motivates it.
+    ///
+    /// **Trimming loses observations.** A dropped entry is gone, and
+    /// [`Self::read_from`] will refuse an offset below what survives rather
+    /// than silently returning a short answer — so this is for a consumer that
+    /// exports as it goes and only ever reads recent offsets. A consumer that
+    /// reads the whole stream once at the end of the run must not use it.
+    pub fn with_max_entries_per_run(max_entries_per_run: usize) -> Self {
+        Self {
+            max_entries_per_run,
+            ..Self::default()
         }
     }
 
@@ -243,6 +266,17 @@ impl HarnessEventJournal for InMemoryEventJournal {
         });
         let offset = stream.base_offset + stream.entries.len() as u64;
         stream.entries.push(obs);
+        // Drop the oldest entries once this run's stream is over its cap,
+        // advancing `base_offset` by exactly as many as were dropped. That
+        // field already exists for run-level eviction and means the same thing
+        // here — "the first entry retained is this offset" — so `read_from`
+        // keeps numbering correctly and refuses a stale offset rather than
+        // silently returning a short answer.
+        if self.max_entries_per_run > 0 && stream.entries.len() > self.max_entries_per_run {
+            let excess = stream.entries.len() - self.max_entries_per_run;
+            stream.entries.drain(..excess);
+            stream.base_offset += excess as u64;
+        }
         Ok(offset)
     }
 

@@ -199,6 +199,29 @@ pub trait HarnessEventJournal: Send + Sync {
 /// retains before evicting the oldest (by insertion order) to bound memory.
 pub const DEFAULT_JOURNAL_MAX_RUNS: usize = 10_000;
 
+/// Default number of observations retained **within** one run's stream.
+///
+/// `0`, meaning unbounded, which is the behaviour every existing caller has.
+/// The per-run cap exists because `max_runs` bounds the wrong dimension for a
+/// long-lived run: a run that never ends is one stream, so it is never evicted,
+/// and its `Vec` grows for as long as the run does.
+///
+/// That is not a theoretical shape. With
+/// [`PayloadCapture::model_io`][crate::harness::runtime::PayloadCapture::model_io]
+/// enabled, every
+/// [`ModelCompleted`][crate::harness::events::AgentEvent::ModelCompleted]
+/// carries the request messages — which are the whole conversation so far — so
+/// observation *n* retains a copy of what observations `1..n` already retained
+/// and the stream grows quadratically in the number of model calls. Measured on
+/// a downstream agent run: 337 model calls against 1.8 GiB of resident memory,
+/// about 5.5 MB per call at inputs of ~114k tokens, climbing monotonically at
+/// ~1.9 MiB/s.
+///
+/// Left unbounded by default because trimming *loses* observations: it is only
+/// safe for a consumer that has already exported what it drops, so the caller
+/// has to opt in with [`InMemoryEventJournal::with_max_entries_per_run`].
+pub const DEFAULT_JOURNAL_MAX_ENTRIES_PER_RUN: usize = 0;
+
 /// A single run's retained observations, plus the offset its first retained
 /// entry corresponds to.
 ///
@@ -243,6 +266,9 @@ pub(crate) struct EventJournalState {
 pub struct InMemoryEventJournal {
     pub(crate) state: Arc<Mutex<EventJournalState>>,
     pub(crate) max_runs: usize,
+    /// Observations retained within one run's stream, oldest dropped first.
+    /// `0` is unbounded; see [`DEFAULT_JOURNAL_MAX_ENTRIES_PER_RUN`].
+    pub(crate) max_entries_per_run: usize,
 }
 
 impl Default for InMemoryEventJournal {
@@ -250,6 +276,7 @@ impl Default for InMemoryEventJournal {
         Self {
             state: Arc::new(Mutex::new(EventJournalState::default())),
             max_runs: DEFAULT_JOURNAL_MAX_RUNS,
+            max_entries_per_run: DEFAULT_JOURNAL_MAX_ENTRIES_PER_RUN,
         }
     }
 }

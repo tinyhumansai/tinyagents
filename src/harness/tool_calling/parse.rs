@@ -224,9 +224,13 @@ fn normalize_garbled_tool_call_tags(s: &str) -> Cow<'_, str> {
     }
     let mut out = String::with_capacity(s.len());
     let mut cursor = 0usize;
-    for pair in tags.chunks_exact(2) {
-        let (open_start, open_end) = pair[0];
-        let (close_start, close_end) = pair[1];
+    // `as_chunks::<2>()` rather than `chunks_exact(2)`: the chunk size is a
+    // constant, so this hands back fixed-size arrays and the two destructurings
+    // below need no bounds check. `chunks_exact_to_as_chunks` (clippy, Rust
+    // 1.98) flags the older form.
+    for &[open, close] in tags.as_chunks::<2>().0 {
+        let (open_start, open_end) = open;
+        let (close_start, close_end) = close;
         out.push_str(&s[cursor..open_start]); // text before the open tag, verbatim
         out.push_str("<tool_call>");
         // Strip the `call:` prefix, then try to recover a Kimi-family

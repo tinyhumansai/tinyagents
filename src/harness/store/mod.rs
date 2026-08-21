@@ -350,23 +350,86 @@ impl JsonlAppendStore {
             file.seek(SeekFrom::Start(start)).map_err(|e| {
                 TinyAgentsError::Validation(format!("append store seek error: {e}"))
             })?;
-            let mut raw = Vec::new();
-            file.read_to_end(&mut raw).map_err(|e| {
+            // Read BYTES, not a String. `read_to_string` requires everything
+            // from `start` onward to be valid UTF-8, and `start` is an arbitrary
+            // byte offset — so whenever it lands inside a multi-byte character
+            // the read fails with "stream did not contain valid UTF-8" even
+            // though the file is perfectly well formed.
+            //
+            // This code already anticipated a torn LINE, one byte further on.
+            // A torn CHARACTER is the same hazard at finer grain, and it was
+            // fatal rather than skipped: the `?` returns before the window can
+            // grow, so the identical offset fails identically forever. Observed
+            // on a hosted tenant as 584 consecutive failures and counting, with
+            // observations dropped for as long as it ran; 104 of its 557 journal
+            // files had a last-4096-byte window that could not decode.
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).map_err(|e| {
                 TinyAgentsError::Validation(format!("append store read error: {e}"))
             })?;
-            // The window starts at an arbitrary byte offset, so it can begin in
-            // the middle of a multi-byte character. `read_to_string` rejects
-            // that outright ("stream did not contain valid UTF-8"), which fails
-            // the whole append and drops the journal record silently — and
-            // permanently, because the file then stops growing, so every later
-            // append reads the same broken window. Lossy decoding is safe here:
-            // the damaged bytes are by definition in the first line, which is
-            // discarded below anyway (`complete_from`).
-            let buf = String::from_utf8_lossy(&raw);
-            // Only lines that are certainly complete: when the window did not
-            // reach the start of the file, its first line may be cut in half.
-            let complete_from = usize::from(start > 0);
-            let lines: Vec<&str> = buf.lines().skip(complete_from).collect();
+            // Decode from the first newline when the window did not reach the
+            // start of the file. That discards the possibly-half first line,
+            // which this function wanted anyway — and because a newline is
+            // always a character boundary in UTF-8, whatever follows one is
+            // guaranteed to decode. The two problems have one answer.
+            let decodable = if start > 0 {
+                let Some(newline) = bytes.iter().position(|b| *b == b'\n') else {
+                    // No newline in the whole window: every byte belongs to one
+                    // unterminated line, so there is nothing complete to read
+                    // and no guaranteed boundary to decode from. Widen rather
+                    // than guess. Load-bearing precisely because the decode
+                    // below is strict.
+                    window = window.saturating_mul(4);
+                    continue;
+                };
+                &bytes[newline + 1..]
+            } else {
+                &bytes[..]
+            };
+            // STRICT, not lossy. The boundary is guaranteed above, so a failure
+            // here means a genuinely corrupt byte rather than a torn character,
+            // and that must stay a hard error exactly as it was before.
+            //
+            // Tolerating it would be worse than the bug being fixed: a corrupt
+            // byte inside a record's structural region makes that line
+            // unparseable, `next_offset` then returns the PREVIOUS record's
+            // offset, and the next append silently reuses an offset already on
+            // disk. Measured on a 30-record stream with one byte set to 0xFF —
+            // lossy decoding returned `Ok(29)` with a record at offset 29
+            // already written, while `read_from` still refused the stream
+            // outright, since `read_records` decodes strictly. A stream that
+            // keeps accepting appends while being permanently unreadable is not
+            // a tolerance anyone asked for.
+            let buf = match std::str::from_utf8(decodable) {
+                Ok(text) => text,
+                // `error_len() == None` means the bytes END mid-character: a
+                // valid prefix cut short. That is a torn WRITE — a crash during
+                // append — which this function already promises to tolerate
+                // ("a trailing partial line is skipped"), and refusing it would
+                // block every future append on the stream forever. Exactly the
+                // failure this change exists to remove, arriving by a different
+                // door.
+                //
+                // Decode the valid prefix. The truncated tail is part of the
+                // trailing line, which the loop below discards anyway when it
+                // fails to parse as JSON.
+                Err(e) if e.error_len().is_none() => {
+                    // Infallible: `valid_up_to()` is by definition the length of
+                    // a valid prefix.
+                    std::str::from_utf8(&decodable[..e.valid_up_to()])
+                        .expect("valid_up_to marks a valid prefix")
+                }
+                // `Some(_)` is a genuinely invalid sequence rather than a
+                // truncation, and stays a hard error: tolerating it lets a
+                // corrupt record shadow an offset that is already on disk, so
+                // the next append silently reuses it.
+                Err(e) => {
+                    return Err(TinyAgentsError::Validation(format!(
+                        "append store read error: {e}"
+                    )));
+                }
+            };
+            let lines: Vec<&str> = buf.lines().collect();
             for line in lines.iter().rev() {
                 if line.trim().is_empty() {
                     continue;

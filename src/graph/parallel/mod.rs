@@ -14,8 +14,14 @@
 //! yields items as they finish, and each future carries its input index so the
 //! completed results are re-sorted into input-order slots before being returned.
 
+mod claims;
 mod types;
 
+pub use claims::{
+    ClaimConflict, ClaimPathError, DispatchMode, DispatchPlan, WorkspaceClaim,
+    parse_relative_claim_paths, paths_overlap, plan_shared_workspace_dispatch,
+    writes_shared_workspace,
+};
 pub use types::{FailurePolicy, ItemOutcome, ParallelOptions, ParallelOutcome};
 
 use futures::stream::StreamExt;
