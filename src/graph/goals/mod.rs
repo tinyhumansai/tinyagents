@@ -14,7 +14,7 @@
 //! app-specific coupling (event bus, RPC envelopes, heartbeat scheduler): the
 //! primitive is provider-neutral and drives off the graph runtime.
 
-mod budget;
+pub mod budget;
 mod continuation;
 mod prompt;
 pub mod store;
