@@ -274,10 +274,8 @@ async fn one_thread_sweep_does_not_disturb_another() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_heartbeat_task_keeps_a_long_run_alive_and_stops_on_cancel() {
-    tokio::time::pause();
-
     let store = store();
     let thread = "feature-heartbeat";
     let run = task_run_store::create_run(&store, thread, None, "task-1", "worker")
@@ -293,28 +291,31 @@ async fn a_heartbeat_task_keeps_a_long_run_alive_and_stops_on_cancel() {
         Duration::from_secs(30),
     );
 
-    // A run that would be stale on its start stamp alone stays healthy because
-    // the background task keeps ticking it.
+    // Staleness is judged against the wall clock, which a paused tokio timer
+    // does not move — so the run is aged by rewriting its stamps, and a tick
+    // proves itself by writing a fresh one back.
     let limits = RunLimits {
         heartbeat_stale_secs: 60,
         claim_ttl_secs: u64::MAX,
         max_reclaim_count: 3,
     };
-    for _ in 0..4 {
+    for _ in 0..3 {
+        abandon(&store, thread, &run.run_id).await;
         tokio::time::advance(Duration::from_secs(30)).await;
         tokio::task::yield_now().await;
+        assert!(
+            task_run_store::find_stale_runs(&store, thread, &limits)
+                .await
+                .expect("stale check")
+                .is_empty(),
+            "a heartbeating run is never stale"
+        );
     }
-    assert!(
-        task_run_store::find_stale_runs(&store, thread, &limits)
-            .await
-            .expect("stale check")
-            .is_empty(),
-        "a heartbeating run is never stale"
-    );
 
-    // Once cancelled, the ticks stop and the run ages out.
+    // Once cancelled the ticks stop, so the next silence is not papered over.
     cancel_tx.send(true).expect("cancel heartbeat");
     tokio::task::yield_now().await;
+    abandon(&store, thread, &run.run_id).await;
     tokio::time::advance(Duration::from_secs(120)).await;
     tokio::task::yield_now().await;
     assert_eq!(
