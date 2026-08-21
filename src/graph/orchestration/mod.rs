@@ -18,8 +18,7 @@ mod tool;
 mod types;
 
 pub use reconcile::{
-    ReconcileOutcome, ReconcileReport, ReconciledTask, reconcile_orphaned_tasks,
-    task_status_label,
+    ReconcileOutcome, ReconcileReport, ReconciledTask, reconcile_orphaned_tasks, task_status_label,
 };
 pub use runtime::DetachedTaskRegistry;
 pub use store::{InMemoryTaskStore, JsonlTaskStore, TaskStore};

@@ -929,7 +929,10 @@ fn registry_opens_each_key_once_and_shares_the_same_store() {
     let first = registry.get_or_open(&"a".to_string()).expect("opens");
     let second = registry.get_or_open(&"a".to_string()).expect("reuses");
 
-    assert!(Arc::ptr_eq(&first, &second), "same key must reuse one store");
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "same key must reuse one store"
+    );
     assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(registry.len().expect("len"), 1);
 }
@@ -1008,7 +1011,9 @@ fn jsonl_fallback_degrades_to_memory_when_the_log_is_unreadable() {
     std::fs::create_dir(&path).expect("create dir in the log's place");
 
     let store = open_jsonl_task_store_or_memory(&path);
-    store.insert(graph_spec("t1")).expect("memory store still accepts work");
+    store
+        .insert(graph_spec("t1"))
+        .expect("memory store still accepts work");
     assert_eq!(store.list(OrchestrationTaskFilter::default()).len(), 1);
 }
 
@@ -1021,11 +1026,17 @@ fn reconcile_settles_live_tasks_and_leaves_terminal_ones_alone() {
     store.insert(graph_spec("pending")).expect("insert");
 
     store.insert(graph_spec("running")).expect("insert");
-    store.mark_running(&TaskId::new("running")).expect("running");
+    store
+        .mark_running(&TaskId::new("running"))
+        .expect("running");
 
     store.insert(graph_spec("awaiting")).expect("insert");
-    store.mark_running(&TaskId::new("awaiting")).expect("running");
-    store.mark_awaiting(&TaskId::new("awaiting")).expect("awaiting");
+    store
+        .mark_running(&TaskId::new("awaiting"))
+        .expect("running");
+    store
+        .mark_awaiting(&TaskId::new("awaiting"))
+        .expect("awaiting");
 
     store.insert(graph_spec("done")).expect("insert");
     store.mark_running(&TaskId::new("done")).expect("running");
@@ -1037,10 +1048,17 @@ fn reconcile_settles_live_tasks_and_leaves_terminal_ones_alone() {
         "driver died".to_string()
     });
 
-    assert_eq!(report.reconciled_count(), 3, "three live tasks were settled");
+    assert_eq!(
+        report.reconciled_count(),
+        3,
+        "three live tasks were settled"
+    );
     assert_eq!(report.error_count(), 0);
     assert!(
-        report.tasks.iter().all(|task| task.outcome == ReconcileOutcome::Failed),
+        report
+            .tasks
+            .iter()
+            .all(|task| task.outcome == ReconcileOutcome::Failed),
         "live-but-not-cancelling tasks settle as failed"
     );
 
@@ -1058,8 +1076,12 @@ fn reconcile_settles_live_tasks_and_leaves_terminal_ones_alone() {
 fn reconcile_honours_a_pending_cancellation() {
     let store = InMemoryTaskStore::new();
     store.insert(graph_spec("cancelling")).expect("insert");
-    store.mark_running(&TaskId::new("cancelling")).expect("running");
-    store.request_cancel(&TaskId::new("cancelling")).expect("cancel");
+    store
+        .mark_running(&TaskId::new("cancelling"))
+        .expect("running");
+    store
+        .request_cancel(&TaskId::new("cancelling"))
+        .expect("cancel");
 
     let report = reconcile_orphaned_tasks(&store, OrchestrationTaskFilter::default(), &|_| {
         "driver died".to_string()
@@ -1072,7 +1094,10 @@ fn reconcile_honours_a_pending_cancellation() {
         OrchestrationTaskStatus::CancelRequested
     );
     assert_eq!(
-        store.get(&TaskId::new("cancelling")).expect("record").status,
+        store
+            .get(&TaskId::new("cancelling"))
+            .expect("record")
+            .status,
         OrchestrationTaskStatus::Cancelled
     );
 }
@@ -1088,7 +1113,11 @@ fn reconcile_reason_closure_sees_the_record_being_settled() {
     });
 
     assert_eq!(
-        store.get(&TaskId::new("t1")).expect("record").error.as_deref(),
+        store
+            .get(&TaskId::new("t1"))
+            .expect("record")
+            .error
+            .as_deref(),
         Some("orphaned (was `running`)")
     );
 }
@@ -1115,7 +1144,10 @@ fn reconcile_respects_the_filter() {
     assert_eq!(report.tasks.len(), 1);
     assert_eq!(report.tasks[0].task_id.as_str(), "agent-task");
     assert_eq!(
-        store.get(&TaskId::new("graph-task")).expect("record").status,
+        store
+            .get(&TaskId::new("graph-task"))
+            .expect("record")
+            .status,
         OrchestrationTaskStatus::Pending,
         "a filtered-out task must not be swept"
     );
