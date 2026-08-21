@@ -61,8 +61,32 @@ it spent into `State`, and the caller's `progress` / `run_turn` closure reports
 it. `made_progress == false` is the graph analogue of OpenHuman's "the turn
 produced no tool calls".
 
+## Budget enforcement
+
+`store::account_usage` is the raw write; `graph::goals::budget` is the policy
+around it — the two halves of enforcement a host would otherwise reimplement.
+
+- `account_turn(store, thread_id, input, output, secs, user_initiated)` charges
+  a finished turn against the thread's **active** goal (a paused, complete, or
+  budget-limited goal accrues nothing from incidental conversation) and returns
+  the goal as it stands afterwards, including a flip to `BudgetLimited`. A
+  `user_initiated` turn also clears the one-shot `continuation_suppressed` flag;
+  a continuation must not clear its own, or it would loop.
+- `GoalBudgetGuard::for_goal(goal)` arms only for an active goal that has a
+  budget. `check(store, in_flight_tokens)` adds the turn's spend so far to the
+  accounted total and returns `BudgetVerdict::Stop` once it reaches the ceiling
+  — checked mid-turn, this bounds a run to a small overshoot instead of
+  discovering the overrun after the fact. `verdict_for` is the same decision
+  with no store read. The guard captures the `goal_id` it was armed for, so a
+  goal replaced mid-turn quietly disarms it rather than enforcing a ceiling that
+  no longer describes the work.
+
+Neither aborts anything: `account_turn` reports, the guard returns a verdict,
+and wiring a stop into a turn stays the host's call.
+
 ## Testing
 
-Unit tests in `src/graph/goals/test.rs` (types, store, tools, and the gate loop
-on `InMemoryStore`); an end-to-end self-driving loop in
-`tests/e2e_graph_goals.rs`.
+Unit tests in `src/graph/goals/test.rs` (types, store, tools, the gate loop, and
+budget enforcement on `InMemoryStore`); an end-to-end self-driving loop in
+`tests/e2e_graph_goals.rs`; feature coverage for budget accounting and the
+mid-turn guard in `tests/feature_graph_goal_budget.rs`.
