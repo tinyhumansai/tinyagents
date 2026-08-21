@@ -101,9 +101,10 @@ fn pformat_dialect_leaves_the_catalogue_to_the_prompt() {
 
     assert!(instructions.contains("P-Format"));
     // Protocol only — listing tools here would duplicate the `## Tools` section.
-    // (`get_weather` still appears, as the syntax example.)
-    assert!(!instructions.contains("Call as:"));
+    // (`get_weather` and `Call as:` still appear — as the syntax example and as
+    // a pointer at the `## Tools` section that owns the real listing.)
     assert!(!instructions.contains("Look up the weather"));
+    assert!(!instructions.contains("get_weather[location|unit]"));
     assert!(!PFormatDialect::new(PFormatRegistry::new()).embeds_tool_catalogue());
 }
 
