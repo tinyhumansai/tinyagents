@@ -274,6 +274,13 @@ async fn one_thread_sweep_does_not_disturb_another() {
     );
 }
 
+/// Give a spawned task room to wake, do its store write, and park again.
+async fn settle() {
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_heartbeat_task_keeps_a_long_run_alive_and_stops_on_cancel() {
     let store = store();
@@ -302,7 +309,7 @@ async fn a_heartbeat_task_keeps_a_long_run_alive_and_stops_on_cancel() {
     for _ in 0..3 {
         abandon(&store, thread, &run.run_id).await;
         tokio::time::advance(Duration::from_secs(30)).await;
-        tokio::task::yield_now().await;
+        settle().await;
         assert!(
             task_run_store::find_stale_runs(&store, thread, &limits)
                 .await
@@ -314,10 +321,10 @@ async fn a_heartbeat_task_keeps_a_long_run_alive_and_stops_on_cancel() {
 
     // Once cancelled the ticks stop, so the next silence is not papered over.
     cancel_tx.send(true).expect("cancel heartbeat");
-    tokio::task::yield_now().await;
+    settle().await;
     abandon(&store, thread, &run.run_id).await;
     tokio::time::advance(Duration::from_secs(120)).await;
-    tokio::task::yield_now().await;
+    settle().await;
     assert_eq!(
         task_run_store::find_stale_runs(&store, thread, &limits)
             .await
