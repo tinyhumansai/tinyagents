@@ -37,14 +37,25 @@ impl ToolDialect for NativeDialect {
             .iter()
             .map(|call| ParsedToolCall {
                 name: call.name.clone(),
-                arguments: serde_json::from_str(&call.arguments).unwrap_or_else(|error| {
-                    tracing::warn!(
-                        tool = %call.name,
-                        %error,
-                        "failed to parse native tool call arguments as JSON; defaulting to empty object"
-                    );
-                    Value::Object(serde_json::Map::new())
-                }),
+                arguments: match serde_json::from_str::<Value>(&call.arguments) {
+                    Ok(value @ Value::Object(_)) => value,
+                    Ok(other) => {
+                        tracing::warn!(
+                            tool = %call.name,
+                            kind = value_kind(&other),
+                            "native tool call arguments were not a JSON object; defaulting to empty object"
+                        );
+                        Value::Object(serde_json::Map::new())
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            tool = %call.name,
+                            %error,
+                            "failed to parse native tool call arguments as JSON; defaulting to empty object"
+                        );
+                        Value::Object(serde_json::Map::new())
+                    }
+                },
                 id: Some(call.id.clone()),
             })
             .collect();
