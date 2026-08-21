@@ -15,7 +15,8 @@
 //! streaming/events ([`stream`]), run-status snapshots ([`status`]), graph
 //! export/visualization ([`export`]), subgraph embedding ([`subgraph`]), and
 //! per-thread productivity primitives — a durable goal ([`goals`]) and a kanban
-//! task board ([`todos`]) — exposed as harness tools.
+//! task board ([`todos`], with its claim/heartbeat run log and dispatch policy)
+//! — exposed as harness tools.
 //!
 //! Each concern lives in its own submodule with `types.rs` (definitions),
 //! `mod.rs` (implementations), and `test.rs` (unit tests).
@@ -64,9 +65,10 @@ pub use export::{
     blueprint_to_mermaid, blueprint_to_topology, from_json, to_json, to_mermaid,
 };
 pub use goals::{
-    GoalProgress, GoalTool, GoalToolKind, ThreadGoal, ThreadGoalStatus, TurnOutcome,
-    active_goal_context_block, goal_gate_node, goal_tools, note_user_turn, register_goal_tools,
-    run_continuation_tick,
+    BudgetVerdict, GoalBudgetGuard, GoalProgress, GoalTool, GoalToolKind, ThreadGoal,
+    ThreadGoalStatus, TurnOutcome, account_turn, accrues_usage, active_goal_context_block,
+    goal_gate_node, goal_tools, note_user_turn, register_goal_tools, run_continuation_tick,
+    turn_tokens,
 };
 pub use observability::{
     GraphEventJournal, GraphHealthSummary, GraphLangfuseExporter, GraphLatencyMetrics,
@@ -101,6 +103,13 @@ pub use testkit::{
     GraphAssertions, GraphEventRecorder, GraphRun, RetryCountingNode, StreamCollector,
     assert_graph, failing_node, fanout_node, interrupting_node, noop_node, run_recorded,
     scripted_route_node, scripted_update_node, subagent_fake_node, subgraph_test_node,
+};
+pub use todos::dispatch::{
+    ActiveRun, ActiveRunRegistry, PollCadence, TaskPromptTools, build_progress_instruction,
+    build_task_prompt, card_urgency, has_card_in_progress, pick_next_card, requires_plan_approval,
+};
+pub use todos::runs::{
+    ReclaimDetail, ReclaimResult, RunLimits, RunOutcome, TaskRun, staleness_reason,
 };
 pub use todos::{
     CardPatch, TaskApprovalMode, TaskBoard, TaskBoardCard, TaskCardStatus, TodoTool, TodosSnapshot,
