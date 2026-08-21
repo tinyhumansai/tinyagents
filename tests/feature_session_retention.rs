@@ -82,6 +82,20 @@ fn individual_age_pruners_remove_only_eligible_rows() {
     )
     .unwrap();
 
+    let past = Utc::now() - Duration::days(1);
+    assert_eq!(
+        session::prune_tool_calls_before(dir.path(), past).unwrap(),
+        0
+    );
+    assert_eq!(
+        session::prune_run_events_before(dir.path(), past).unwrap(),
+        0
+    );
+    assert_eq!(
+        session::prune_run_telemetry_before(dir.path(), past).unwrap(),
+        0
+    );
+
     let future = Utc::now() + Duration::seconds(1);
     assert_eq!(
         session::prune_tool_calls_before(dir.path(), future).unwrap(),
@@ -99,20 +113,6 @@ fn individual_age_pruners_remove_only_eligible_rows() {
         session::list_tool_calls(dir.path(), "records", None)
             .unwrap()
             .is_empty()
-    );
-
-    let past = Utc::now() - Duration::days(1);
-    assert_eq!(
-        session::prune_tool_calls_before(dir.path(), past).unwrap(),
-        0
-    );
-    assert_eq!(
-        session::prune_run_events_before(dir.path(), past).unwrap(),
-        0
-    );
-    assert_eq!(
-        session::prune_run_telemetry_before(dir.path(), past).unwrap(),
-        0
     );
 }
 
