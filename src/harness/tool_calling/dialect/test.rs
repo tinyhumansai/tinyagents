@@ -574,3 +574,11 @@ fn each_dialect_reports_the_format_its_parser_expects() {
     assert_eq!(NativeDialect.tool_call_format(), ToolCallFormat::Native);
     assert!(NativeDialect.should_send_tool_specs());
 }
+
+#[test]
+fn probe_trailing_incomplete_tag() {
+    let entry = XmlDialect.format_results(&[ToolOutcome::ok("read_file", "leak<tool_result")]);
+    let TranscriptEntry::Chat(message) = entry else { panic!() };
+    println!("RENDERED>>>\n{}\n<<<END", message.content);
+    println!("open-tag count: {}", message.content.matches("<tool_result").count());
+}
