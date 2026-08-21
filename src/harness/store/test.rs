@@ -425,3 +425,132 @@ async fn jsonl_rejects_unsafe_stream_names() {
     // Allowed characters round-trip.
     assert_eq!(store.append("runs-1.events_v2", json!(1)).await.unwrap(), 0);
 }
+
+/// A crash that truncates mid-character must not block every later append.
+///
+/// `next_offset` promises that "a trailing partial line (a torn write) is
+/// skipped, so a crash mid-append cannot make the stream restart its numbering".
+/// Decoding the window strictly keeps a genuinely corrupt byte loud — a corrupt
+/// record would otherwise shadow an offset already on disk and let the next
+/// append reuse it — but a torn write is not corruption, and refusing it would
+/// wedge the stream permanently. That is the same failure this whole change
+/// exists to remove, arriving by a different door.
+///
+/// `Utf8Error::error_len()` is the discriminator: `None` means the bytes end
+/// mid-character (a valid prefix, cut short), `Some(_)` means an invalid
+/// sequence.
+#[tokio::test]
+async fn a_write_torn_mid_character_does_not_wedge_the_stream() {
+    let dir = TempDir::new("torn-write");
+    let store = JsonlAppendStore::new(&dir.0);
+    for i in 0..30 {
+        store
+            .append("run", json!({"text": format!("—{i}")}))
+            .await
+            .expect("seed");
+    }
+
+    // Cut the file one byte into the last em dash: it now ends inside a
+    // multi-byte character, exactly as an interrupted write would leave it.
+    let path = dir.0.join("run.jsonl");
+    let raw = std::fs::read(&path).expect("read");
+    let em = raw
+        .windows(3)
+        .rposition(|w| w == "—".as_bytes())
+        .expect("the fixture writes em dashes");
+    std::fs::write(&path, &raw[..em + 1]).expect("truncate");
+
+    // The fixture really does end mid-character, or this proves nothing.
+    let err = std::str::from_utf8(&std::fs::read(&path).unwrap())
+        .expect_err("the truncated file must not decode");
+    assert!(
+        err.error_len().is_none(),
+        "fixture should be an INCOMPLETE trailing character, not invalid bytes: {err:?}"
+    );
+
+    // The torn last line is discarded, so numbering continues from the last
+    // record that landed whole.
+    let offset = JsonlAppendStore::new(&dir.0)
+        .append("run", json!({"after": true}))
+        .await
+        .expect("a torn write must not block later appends");
+    assert_eq!(offset, 29, "the torn record is dropped, so 29 is next");
+}
+
+/// A multi-byte character straddling the 4096-byte lookback boundary must not
+/// break `next_offset`.
+///
+/// `next_offset` seeks to `len - 4096` and reads from there. That is an
+/// arbitrary BYTE offset, so it can land inside a UTF-8 character — and reading
+/// the remainder as a `String` then fails with "stream did not contain valid
+/// UTF-8" even though the file is perfectly well formed.
+///
+/// It is permanent, not transient: the error returns before the window can
+/// widen, so the same offset fails identically on every subsequent append.
+/// Observed on a hosted tenant as 584 consecutive failures with observations
+/// dropped throughout, and 104 of its 557 journal files in the same state — any
+/// stream containing enough non-ASCII text lands on this eventually.
+///
+/// The fixture ASSERTS that it reproduces. Whether a given pad tears depends on
+/// the exact serialized width of a `StoreRecord` line — field names, the digits
+/// in `created_at_ms`, how many digits the offset has. Only one or two of the
+/// pads below actually land mid-character today, so adding a field to
+/// `StoreRecord` or letting offsets reach three digits could shift every
+/// alignment off the character and leave this test green while covering
+/// nothing. On a bug that silently dropped data for weeks, a vacuous test is
+/// worse than none, so `torn` is checked at the end.
+#[tokio::test]
+async fn append_survives_a_character_torn_by_the_lookback_window() {
+    /// Mirrors the constant `next_offset` starts its lookback window at.
+    const WINDOW: usize = 4096;
+
+    let mut torn = Vec::new();
+
+    // Each record carries an em dash (3 bytes in UTF-8); padding the payload one
+    // byte at a time walks the 4096-byte boundary across that character.
+    for pad in 0..24usize {
+        let dir = TempDir::new(&format!("torn-utf8-{pad}"));
+        let store = JsonlAppendStore::new(&dir.0);
+        for _ in 0..40 {
+            store
+                .append("run", json!({"text": format!("—{}", "x".repeat(pad + 90))}))
+                .await
+                .expect("append should not fail on a torn character");
+        }
+
+        // Does this pad actually put the window start inside a character?
+        let raw = std::fs::read(dir.0.join("run.jsonl")).expect("read stream");
+        if raw.len() > WINDOW {
+            let start = raw.len() - WINDOW;
+            let text = std::str::from_utf8(&raw).expect("the file itself is valid UTF-8");
+            if !text.is_char_boundary(start) {
+                torn.push(pad);
+            }
+        }
+
+        // Re-open and append again: this is the path that reads back the tail to
+        // find the next offset, and the one that failed in production.
+        let reopened = JsonlAppendStore::new(&dir.0);
+        let offset = reopened
+            .append("run", json!({"text": "after reopen"}))
+            .await
+            .unwrap_or_else(|e| panic!("pad {pad}: append after reopen failed: {e}"));
+        assert_eq!(
+            offset, 40,
+            "pad {pad}: numbering must continue, not restart"
+        );
+    }
+
+    assert!(
+        !torn.is_empty(),
+        "no pad put the window start inside a character, so this test proved \
+         nothing. The record layout has shifted; adjust the padding range until \
+         at least one alignment tears again."
+    );
+
+    // The simple case still works.
+    let dir = TempDir::new("torn-utf8-plain");
+    let store = JsonlAppendStore::new(&dir.0);
+    store.append("plain", json!({"a": 1})).await.unwrap();
+    assert_eq!(store.append("plain", json!({"a": 2})).await.unwrap(), 1);
+}
