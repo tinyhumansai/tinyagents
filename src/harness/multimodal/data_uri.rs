@@ -13,7 +13,7 @@
 
 use std::io::Read;
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use flate2::read::GzDecoder;
 
 /// A decoded `data:` URI.

@@ -20,7 +20,9 @@ pub enum MultimodalError {
     },
 
     /// A resolved image exceeded the configured per-image byte cap.
-    #[error("multimodal image size limit exceeded for '{input}': {size_bytes} bytes > {max_bytes} bytes")]
+    #[error(
+        "multimodal image size limit exceeded for '{input}': {size_bytes} bytes > {max_bytes} bytes"
+    )]
     ImageTooLarge {
         /// The reference as written in the marker.
         input: String,

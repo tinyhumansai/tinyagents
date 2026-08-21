@@ -153,15 +153,12 @@ async fn resolve_remote_image(
     max_bytes: usize,
     remote_client: &Client,
 ) -> Result<String> {
-    let response =
-        remote_client
-            .get(source)
-            .send()
-            .await
-            .map_err(|error| MultimodalError::RemoteFetchFailed {
-                input: source.to_string(),
-                reason: error.to_string(),
-            })?;
+    let response = remote_client.get(source).send().await.map_err(|error| {
+        MultimodalError::RemoteFetchFailed {
+            input: source.to_string(),
+            reason: error.to_string(),
+        }
+    })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -194,12 +191,13 @@ async fn resolve_remote_image(
 
     check_image_size(source, bytes.len(), max_bytes)?;
 
-    let mime = detect_image_mime(None, bytes.as_ref(), content_type.as_deref()).ok_or_else(|| {
-        MultimodalError::UnsupportedMime {
-            input: source.to_string(),
-            mime: "unknown".to_string(),
-        }
-    })?;
+    let mime =
+        detect_image_mime(None, bytes.as_ref(), content_type.as_deref()).ok_or_else(|| {
+            MultimodalError::UnsupportedMime {
+                input: source.to_string(),
+                mime: "unknown".to_string(),
+            }
+        })?;
 
     check_image_mime(source, &mime)?;
 
@@ -448,12 +446,13 @@ async fn read_local_file(source: &str, max_bytes: usize) -> Result<(Vec<u8>, Pat
 
     check_file_size(source, metadata.len() as usize, max_bytes)?;
 
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|error| MultimodalError::LocalFileReadFailed {
-            input: source.to_string(),
-            reason: error.to_string(),
-        })?;
+    let bytes =
+        tokio::fs::read(&path)
+            .await
+            .map_err(|error| MultimodalError::LocalFileReadFailed {
+                input: source.to_string(),
+                reason: error.to_string(),
+            })?;
 
     check_file_size(source, bytes.len(), max_bytes)?;
 

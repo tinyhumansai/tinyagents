@@ -22,8 +22,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use base64::{
-    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
     Engine as _,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
 };
 
 /// Prefix of an inline image marker.

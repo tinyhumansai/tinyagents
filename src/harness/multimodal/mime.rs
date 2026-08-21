@@ -83,11 +83,7 @@ pub fn detect_file_mime(
 /// Strip parameters from a `Content-Type` header and lower-case it.
 pub fn normalize_content_type(content_type: &str) -> Option<String> {
     let mime = content_type.split(';').next()?.trim().to_ascii_lowercase();
-    if mime.is_empty() {
-        None
-    } else {
-        Some(mime)
-    }
+    if mime.is_empty() { None } else { Some(mime) }
 }
 
 /// Image MIME for a file extension.

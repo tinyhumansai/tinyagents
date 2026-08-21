@@ -10,7 +10,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use super::config::{FileLimits, ImageLimits};
 use super::data_uri::{data_uri_param, gunzip, parse_data_uri, percent_decode};
@@ -25,15 +25,15 @@ use super::mime::{
     image_ext_from_mime, image_mime_from_magic, is_extractable_text_mime, looks_like_utf8_text,
 };
 use super::payload::{
-    compose_multimodal_message, escape_attr, format_size, truncate_chars, FilePayload,
+    FilePayload, compose_multimodal_message, escape_attr, format_size, truncate_chars,
 };
-use super::resolve::{resolve_file, resolve_image, NoTextExtractor, TextExtractor};
+use super::resolve::{NoTextExtractor, TextExtractor, resolve_file, resolve_image};
 
 /// A 1×1 PNG. Small enough to inline, real enough to sniff.
 const PNG_BYTES: &[u8] = &[
     0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 0x00, 0x00, 0x00, 0x0d, b'I', b'H', b'D',
-    b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
-    0x15, 0xc4, 0x89,
+    b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15,
+    0xc4, 0x89,
 ];
 
 fn png_data_uri() -> String {
@@ -436,7 +436,9 @@ fn composing_renders_text_then_images_then_files() {
 
     assert!(rendered.starts_with("look at these"));
     assert!(rendered.contains("[IMAGE:data:image/png;base64,AAAA]"));
-    assert!(rendered.contains(r#"[FILE-EXTRACTED: name="notes.txt" size="11 B" mime="text/plain"]"#));
+    assert!(
+        rendered.contains(r#"[FILE-EXTRACTED: name="notes.txt" size="11 B" mime="text/plain"]"#)
+    );
     assert!(rendered.trim_end().ends_with("[/FILE-EXTRACTED]"));
     assert!(!rendered.contains("truncated"));
 }
@@ -621,10 +623,7 @@ async fn a_file_whose_mime_is_not_allowlisted_is_refused_after_detection() {
     )
     .await
     .expect_err("refused");
-    assert!(matches!(
-        error,
-        MultimodalError::UnsupportedFileMime { .. }
-    ));
+    assert!(matches!(error, MultimodalError::UnsupportedFileMime { .. }));
 }
 
 /// Counts how often the extractor is consulted, so the `handles` short-circuit
@@ -641,8 +640,7 @@ impl TextExtractor for CountingExtractor {
     }
 
     async fn extract(&self, _mime: &str, _bytes: &[u8]) -> std::result::Result<String, String> {
-        self.calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok("extracted page".to_string())
     }
 }
