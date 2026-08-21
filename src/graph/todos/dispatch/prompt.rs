@@ -73,7 +73,11 @@ pub fn build_task_prompt(card: &TaskBoardCard, tools: &TaskPromptTools) -> Strin
         let provider = meta.get("provider").and_then(|v| v.as_str());
         let external_id = meta.get("external_id").and_then(|v| v.as_str());
         let url = meta.get("url").and_then(|v| v.as_str());
-        let origin = source_origin(provider, meta.get("repo").and_then(|v| v.as_str()), external_id);
+        let origin = source_origin(
+            provider,
+            meta.get("repo").and_then(|v| v.as_str()),
+            external_id,
+        );
 
         // Gated on a known provider so the origin string is always meaningful:
         // an id-only card would otherwise render a bare "#123".
@@ -139,7 +143,11 @@ fn source_origin(provider: Option<&str>, repo: Option<&str>, external_id: Option
 /// asked for: append progress as it happens, and **block instead of guessing**
 /// when the run needs a decision it cannot make. A run that blocks leaves the
 /// card paused for a human rather than force-completed.
-pub fn build_progress_instruction(card_id: &str, thread_id: &str, tools: &TaskPromptTools) -> String {
+pub fn build_progress_instruction(
+    card_id: &str,
+    thread_id: &str,
+    tools: &TaskPromptTools,
+) -> String {
     let update = &tools.update_task;
     format!(
         "\n\nThis task is tracked as card `{card_id}` on the `{thread_id}` board. As you work, \

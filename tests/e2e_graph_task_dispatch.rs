@@ -239,7 +239,10 @@ async fn the_dispatcher_runs_the_most_urgent_agent_card_and_leaves_human_work_al
         .clone();
     let prompt = run_card(&store, &card, &run_id).await;
     assert!(prompt.contains("apply the migration"), "{prompt}");
-    assert!(prompt.contains(&card_id), "the run is told which card it owns");
+    assert!(
+        prompt.contains(&card_id),
+        "the run is told which card it owns"
+    );
 
     // Tick 2: with the first card done, the remaining agent card goes next.
     let Tick::Dispatched { card_id, .. } = tick(&store, false).await else {
@@ -258,7 +261,11 @@ async fn the_dispatcher_runs_the_most_urgent_agent_card_and_leaves_human_work_al
     assert!(statuses.contains(&(low, TaskCardStatus::InProgress)));
 
     // The evidence the run reported is on the card it was working.
-    let done = board.cards.iter().find(|c| c.status == TaskCardStatus::Done).unwrap();
+    let done = board
+        .cards
+        .iter()
+        .find(|c| c.status == TaskCardStatus::Done)
+        .unwrap();
     assert_eq!(done.evidence, vec!["ran the migration".to_string()]);
 }
 
@@ -283,7 +290,10 @@ async fn a_plan_awaiting_approval_never_runs_until_it_is_approved() {
     todo_store::decide_plan(&store, THREAD, &card_id, true)
         .await
         .expect("approve plan");
-    let Tick::Dispatched { card_id: claimed, .. } = tick(&store, true).await else {
+    let Tick::Dispatched {
+        card_id: claimed, ..
+    } = tick(&store, true).await
+    else {
         panic!("an approved plan runs");
     };
     assert_eq!(claimed, card_id);
@@ -332,9 +342,15 @@ async fn a_cancelled_run_leaves_its_card_blocked_rather_than_stranded() {
     );
 
     // A cancel for some *other* run must not tear this one down.
-    assert!(registry.take_if(THREAD, Some("run-from-a-previous-request")).is_none());
+    assert!(
+        registry
+            .take_if(THREAD, Some("run-from-a-previous-request"))
+            .is_none()
+    );
 
-    let active = registry.take_if(THREAD, Some(&run_id)).expect("the live run");
+    let active = registry
+        .take_if(THREAD, Some(&run_id))
+        .expect("the live run");
     active.cancel();
     assert!(work.await.unwrap_err().is_cancelled());
     assert!(heartbeat_rx.changed().await.is_ok());
@@ -370,7 +386,11 @@ async fn a_cancelled_run_leaves_its_card_blocked_rather_than_stranded() {
     assert!(registry.is_empty());
 
     // And the board is free again: a later tick is not blocked by a ghost.
-    assert_eq!(tick(&store, false).await, Tick::Idle, "a blocked card is not re-run");
+    assert_eq!(
+        tick(&store, false).await,
+        Tick::Idle,
+        "a blocked card is not re-run"
+    );
 }
 
 #[tokio::test]
@@ -390,7 +410,11 @@ async fn an_abandoned_run_is_reclaimed_by_the_next_tick() {
         run.started_at = "0".to_string();
         run.last_heartbeat_at = "0".to_string();
     }
-    let key: String = THREAD.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    let key: String = THREAD
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     store
         .put(
             task_run_store::RUNS_NAMESPACE,
@@ -402,7 +426,11 @@ async fn an_abandoned_run_is_reclaimed_by_the_next_tick() {
 
     // The next tick reclaims the dead run and re-dispatches the card in the
     // same sweep — recovery needs no operator intervention.
-    let Tick::Dispatched { card_id: reclaimed, run_id: fresh } = tick(&store, false).await else {
+    let Tick::Dispatched {
+        card_id: reclaimed,
+        run_id: fresh,
+    } = tick(&store, false).await
+    else {
         panic!("expected a re-dispatch");
     };
     assert_eq!(reclaimed, card_id);

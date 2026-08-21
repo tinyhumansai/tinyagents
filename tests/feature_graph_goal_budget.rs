@@ -34,7 +34,10 @@ async fn an_autonomous_run_spends_down_its_budget_and_stops() {
             .expect("account")
             .expect("goal charged");
         assert_eq!(updated.status, ThreadGoalStatus::Active);
-        assert_eq!(guard.check(&store, 0).await.unwrap(), BudgetVerdict::Continue);
+        assert_eq!(
+            guard.check(&store, 0).await.unwrap(),
+            BudgetVerdict::Continue
+        );
     }
     let goal = goal_store::get(&store, "thread-1").await.unwrap().unwrap();
     assert_eq!(goal.tokens_used, 200);
@@ -42,7 +45,10 @@ async fn an_autonomous_run_spends_down_its_budget_and_stops() {
 
     // Mid-turn, the guard sees the projected spend cross the ceiling and calls
     // a stop before the turn burns through it.
-    assert_eq!(guard.check(&store, 50).await.unwrap(), BudgetVerdict::Continue);
+    assert_eq!(
+        guard.check(&store, 50).await.unwrap(),
+        BudgetVerdict::Continue
+    );
     let verdict = guard.check(&store, 100).await.unwrap();
     assert!(verdict.is_stop(), "{verdict:?}");
 
@@ -81,7 +87,11 @@ async fn a_limited_goal_stops_charging_and_stops_hard_stopping() {
             .is_none()
     );
     assert_eq!(
-        goal_store::get(&store, "thread-1").await.unwrap().unwrap().tokens_used,
+        goal_store::get(&store, "thread-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .tokens_used,
         used
     );
     assert_eq!(
@@ -118,7 +128,9 @@ async fn a_replaced_objective_starts_a_fresh_budget_and_disarms_the_old_guard() 
         .await
         .expect("set goal");
     let stale_guard = GoalBudgetGuard::for_goal(&first).expect("guard");
-    account_turn(&store, "thread-1", 50, 40, 1, true).await.expect("account");
+    account_turn(&store, "thread-1", 50, 40, 1, true)
+        .await
+        .expect("account");
 
     // A new objective mints a new goal id and resets the counters.
     let second = goal_store::set(&store, "thread-1", "objective two", Some(100))
@@ -182,5 +194,10 @@ async fn a_thread_with_no_goal_is_untouched_and_unguarded() {
             .expect("account")
             .is_none()
     );
-    assert!(goal_store::get(&store, "no-goal-here").await.unwrap().is_none());
+    assert!(
+        goal_store::get(&store, "no-goal-here")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

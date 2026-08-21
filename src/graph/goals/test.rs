@@ -681,12 +681,20 @@ mod budget_tests {
         let kv = kv();
         store::set(&kv, "t1", "ship it", Some(100)).await.unwrap();
 
-        let updated = account_turn(&kv, "t1", 60, 60, 1, true).await.unwrap().unwrap();
+        let updated = account_turn(&kv, "t1", 60, 60, 1, true)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(updated.status, ThreadGoalStatus::BudgetLimited);
         assert!(updated.over_budget());
 
         // A limited goal stops accruing: incidental chat afterwards is free.
-        assert!(account_turn(&kv, "t1", 500, 500, 5, true).await.unwrap().is_none());
+        assert!(
+            account_turn(&kv, "t1", 500, 500, 5, true)
+                .await
+                .unwrap()
+                .is_none()
+        );
         let after = store::get(&kv, "t1").await.unwrap().unwrap();
         assert_eq!(after.tokens_used, 120);
     }
@@ -694,10 +702,18 @@ mod budget_tests {
     #[tokio::test]
     async fn a_thread_with_no_goal_or_an_idle_turn_changes_nothing() {
         let kv = kv();
-        assert!(account_turn(&kv, "missing", 10, 10, 1, true).await.unwrap().is_none());
+        assert!(
+            account_turn(&kv, "missing", 10, 10, 1, true)
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         store::set(&kv, "t1", "ship it", None).await.unwrap();
-        let unchanged = account_turn(&kv, "t1", 0, 0, 0, true).await.unwrap().unwrap();
+        let unchanged = account_turn(&kv, "t1", 0, 0, 0, true)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(unchanged.tokens_used, 0);
     }
 
@@ -712,20 +728,30 @@ mod budget_tests {
         // The continuation's own accounting must not clear its one-shot flag,
         // or the loop would never stop.
         account_turn(&kv, "t1", 10, 10, 1, false).await.unwrap();
-        assert!(store::get(&kv, "t1").await.unwrap().unwrap().continuation_suppressed);
+        assert!(
+            store::get(&kv, "t1")
+                .await
+                .unwrap()
+                .unwrap()
+                .continuation_suppressed
+        );
 
         // A person re-engaging re-arms the next idle continuation.
         account_turn(&kv, "t1", 10, 10, 1, true).await.unwrap();
-        assert!(!store::get(&kv, "t1").await.unwrap().unwrap().continuation_suppressed);
+        assert!(
+            !store::get(&kv, "t1")
+                .await
+                .unwrap()
+                .unwrap()
+                .continuation_suppressed
+        );
     }
 
     #[test]
     fn a_guard_is_only_armed_for_an_active_goal_with_a_budget() {
         assert!(GoalBudgetGuard::for_goal(&goal(ThreadGoalStatus::Active, Some(100), 0)).is_some());
         assert!(GoalBudgetGuard::for_goal(&goal(ThreadGoalStatus::Active, None, 0)).is_none());
-        assert!(
-            GoalBudgetGuard::for_goal(&goal(ThreadGoalStatus::Paused, Some(100), 0)).is_none()
-        );
+        assert!(GoalBudgetGuard::for_goal(&goal(ThreadGoalStatus::Paused, Some(100), 0)).is_none());
         assert!(
             GoalBudgetGuard::for_goal(&goal(ThreadGoalStatus::Complete, Some(100), 0)).is_none()
         );
@@ -758,7 +784,10 @@ mod budget_tests {
         let guard = GoalBudgetGuard::for_goal(&stored).unwrap();
         account_turn(&kv, "t1", 200, 100, 1, true).await.unwrap();
 
-        assert_eq!(guard.check(&kv, 100).await.unwrap(), BudgetVerdict::Continue);
+        assert_eq!(
+            guard.check(&kv, 100).await.unwrap(),
+            BudgetVerdict::Continue
+        );
         assert!(guard.check(&kv, 200).await.unwrap().is_stop());
     }
 
@@ -790,6 +819,9 @@ mod budget_tests {
 
         // A paused goal is not burning a live budget, so a user-present turn is
         // never hard-stopped by it.
-        assert_eq!(guard.check(&kv, 1_000).await.unwrap(), BudgetVerdict::Continue);
+        assert_eq!(
+            guard.check(&kv, 1_000).await.unwrap(),
+            BudgetVerdict::Continue
+        );
     }
 }

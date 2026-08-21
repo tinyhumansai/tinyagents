@@ -39,10 +39,7 @@ pub fn has_card_in_progress(cards: &[TaskBoardCard]) -> bool {
 /// `agent_assigned_only` restricts the pick to cards with an `assigned_agent`.
 /// A host uses it for boards that mix human-authored and agent-authored cards,
 /// so an autonomous sweep never picks up a card a person wrote for themselves.
-pub fn pick_next_card(
-    cards: &[TaskBoardCard],
-    agent_assigned_only: bool,
-) -> Option<TaskBoardCard> {
+pub fn pick_next_card(cards: &[TaskBoardCard], agent_assigned_only: bool) -> Option<TaskBoardCard> {
     cards
         .iter()
         .filter(|card| matches!(card.status, TaskCardStatus::Todo | TaskCardStatus::Ready))

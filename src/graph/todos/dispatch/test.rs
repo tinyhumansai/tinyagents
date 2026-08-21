@@ -131,12 +131,24 @@ fn urgency_defaults_to_zero_for_odd_metadata() {
 fn a_cards_own_approval_mode_outranks_the_global_default() {
     // Required holds even when the global switch is off — otherwise a plan
     // stamped for review would execute before anyone saw it.
-    assert!(requires_plan_approval(false, Some(&TaskApprovalMode::Required)));
-    assert!(requires_plan_approval(true, Some(&TaskApprovalMode::Required)));
+    assert!(requires_plan_approval(
+        false,
+        Some(&TaskApprovalMode::Required)
+    ));
+    assert!(requires_plan_approval(
+        true,
+        Some(&TaskApprovalMode::Required)
+    ));
 
     // NotRequired means review already happened.
-    assert!(!requires_plan_approval(true, Some(&TaskApprovalMode::NotRequired)));
-    assert!(!requires_plan_approval(false, Some(&TaskApprovalMode::NotRequired)));
+    assert!(!requires_plan_approval(
+        true,
+        Some(&TaskApprovalMode::NotRequired)
+    ));
+    assert!(!requires_plan_approval(
+        false,
+        Some(&TaskApprovalMode::NotRequired)
+    ));
 }
 
 #[test]
@@ -183,7 +195,10 @@ fn cadence_is_monotonic_and_never_exceeds_its_ceiling() {
     for idle in 1..40u32 {
         let delay = cadence.next_delay(idle);
         assert!(delay >= previous, "backoff must not shrink as idle grows");
-        assert!(delay <= cadence.max_backoff, "backoff must not exceed the ceiling");
+        assert!(
+            delay <= cadence.max_backoff,
+            "backoff must not exceed the ceiling"
+        );
         previous = delay;
     }
 }
@@ -244,10 +259,16 @@ fn a_sourced_card_gets_provenance_and_a_write_back_instruction() {
     }));
 
     let prompt = build_task_prompt(&card, &TaskPromptTools::default());
-    assert!(prompt.contains("github tinyhumansai/tinyagents#412"), "{prompt}");
+    assert!(
+        prompt.contains("github tinyhumansai/tinyagents#412"),
+        "{prompt}"
+    );
     assert!(prompt.contains("memory_recall"), "{prompt}");
     assert!(prompt.contains("https://example.invalid/412"), "{prompt}");
-    assert!(prompt.contains("record the outcome on the upstream source"), "{prompt}");
+    assert!(
+        prompt.contains("record the outcome on the upstream source"),
+        "{prompt}"
+    );
 }
 
 #[test]
@@ -298,7 +319,10 @@ fn spawn_pending() -> tokio::task::JoinHandle<()> {
     tokio::spawn(async { std::future::pending::<()>().await })
 }
 
-async fn active_run(run_id: &str, card_id: &str) -> (ActiveRun<&'static str>, tokio::task::JoinHandle<()>) {
+async fn active_run(
+    run_id: &str,
+    card_id: &str,
+) -> (ActiveRun<&'static str>, tokio::task::JoinHandle<()>) {
     let handle = spawn_pending();
     let (heartbeat_cancel, _rx) = tokio::sync::watch::channel(false);
     (
@@ -341,7 +365,9 @@ async fn a_scoped_cancel_ignores_a_superseded_run() {
     assert!(registry.take_if("thread-1", Some("run-old")).is_none());
     assert!(registry.contains("thread-1"));
 
-    let taken = registry.take_if("thread-1", Some("run-new")).expect("matching run");
+    let taken = registry
+        .take_if("thread-1", Some("run-new"))
+        .expect("matching run");
     assert_eq!(taken.run_id, "run-new");
 }
 
@@ -364,7 +390,9 @@ async fn registering_over_a_live_run_hands_back_the_displaced_one() {
     let (second, _h2) = active_run("run-2", "task-2").await;
     registry.register("thread-1", first);
 
-    let displaced = registry.register("thread-1", second).expect("displaced run");
+    let displaced = registry
+        .register("thread-1", second)
+        .expect("displaced run");
     assert_eq!(displaced.run_id, "run-1");
     assert_eq!(registry.len(), 1);
     assert_eq!(registry.thread_ids(), vec!["thread-1".to_string()]);
@@ -404,6 +432,9 @@ async fn draining_returns_every_live_run() {
 
     let mut drained: Vec<String> = registry.drain().into_iter().map(|(id, _)| id).collect();
     drained.sort();
-    assert_eq!(drained, vec!["thread-1".to_string(), "thread-2".to_string()]);
+    assert_eq!(
+        drained,
+        vec!["thread-1".to_string(), "thread-2".to_string()]
+    );
     assert!(registry.is_empty());
 }

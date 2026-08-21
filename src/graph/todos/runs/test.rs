@@ -80,7 +80,12 @@ async fn runs_are_scoped_to_their_thread() {
     let a = list_runs(&store, "thread-a", None).await.unwrap();
     assert_eq!(a.len(), 1);
     assert_eq!(a[0].run_id, "run-a");
-    assert!(get_run(&store, "thread-a", "run-b").await.unwrap().is_none());
+    assert!(
+        get_run(&store, "thread-a", "run-b")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -98,7 +103,11 @@ async fn a_supplied_run_id_cannot_be_reused_on_one_thread() {
 #[tokio::test]
 async fn create_rejects_a_blank_thread_id() {
     let store = store();
-    assert!(create_run(&store, "   ", None, "task-1", "worker").await.is_err());
+    assert!(
+        create_run(&store, "   ", None, "task-1", "worker")
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -108,7 +117,9 @@ async fn heartbeat_advances_the_liveness_stamp() {
         .await
         .unwrap();
 
-    update_heartbeat(&store, "thread-1", &run.run_id).await.unwrap();
+    update_heartbeat(&store, "thread-1", &run.run_id)
+        .await
+        .unwrap();
 
     let after = get_run(&store, "thread-1", &run.run_id)
         .await
@@ -136,11 +147,22 @@ async fn heartbeat_and_completion_reject_a_finished_run() {
     .unwrap();
 
     // A finished run is not resurrected, and it is not completed twice.
-    assert!(update_heartbeat(&store, "thread-1", &run.run_id).await.is_err());
     assert!(
-        complete_run(&store, "thread-1", &run.run_id, RunOutcome::Failed, None, vec![])
+        update_heartbeat(&store, "thread-1", &run.run_id)
             .await
             .is_err()
+    );
+    assert!(
+        complete_run(
+            &store,
+            "thread-1",
+            &run.run_id,
+            RunOutcome::Failed,
+            None,
+            vec![]
+        )
+        .await
+        .is_err()
     );
 }
 
@@ -206,9 +228,16 @@ async fn find_stale_runs_ignores_completed_runs() {
     let run = create_run(&store, "thread-1", None, "task-1", "worker")
         .await
         .unwrap();
-    complete_run(&store, "thread-1", &run.run_id, RunOutcome::Success, None, vec![])
-        .await
-        .unwrap();
+    complete_run(
+        &store,
+        "thread-1",
+        &run.run_id,
+        RunOutcome::Success,
+        None,
+        vec![],
+    )
+    .await
+    .unwrap();
 
     // Zero limits would make any *active* run stale; this one is finished.
     let limits = RunLimits {
@@ -216,7 +245,12 @@ async fn find_stale_runs_ignores_completed_runs() {
         claim_ttl_secs: 0,
         max_reclaim_count: 3,
     };
-    assert!(find_stale_runs(&store, "thread-1", &limits).await.unwrap().is_empty());
+    assert!(
+        find_stale_runs(&store, "thread-1", &limits)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// Force `run_id` to look ancient by rewriting its stamps in place.
@@ -226,7 +260,11 @@ async fn age_run(store: &Arc<dyn Store>, thread_id: &str, run_id: &str) {
         run.started_at = "0".to_string();
         run.last_heartbeat_at = "0".to_string();
     }
-    let key: String = thread_id.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    let key: String = thread_id
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     store
         .put(
             super::store::RUNS_NAMESPACE,
@@ -266,7 +304,10 @@ async fn reclaim_returns_a_wedged_card_to_the_queue() {
     assert_eq!(result.details[0].card_id, card_id);
     assert_eq!(result.details[0].new_card_status, "todo");
 
-    let closed = get_run(&store, thread_id, &run.run_id).await.unwrap().unwrap();
+    let closed = get_run(&store, thread_id, &run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(closed.outcome, Some(RunOutcome::Reclaimed));
     assert!(closed.error.is_some(), "the reason is recorded on the run");
 
@@ -304,7 +345,9 @@ async fn a_card_that_keeps_wedging_workers_parks_as_blocked() {
     }
 
     assert_eq!(
-        count_reclaims_for_card(&store, thread_id, &card_id).await.unwrap(),
+        count_reclaims_for_card(&store, thread_id, &card_id)
+            .await
+            .unwrap(),
         2
     );
     let snapshot = board::list(&store, thread_id).await.unwrap();
@@ -327,7 +370,9 @@ async fn reclaim_leaves_a_healthy_run_alone() {
     )
     .await
     .unwrap();
-    create_run(&store, thread_id, None, &card_id, "worker").await.unwrap();
+    create_run(&store, thread_id, None, &card_id, "worker")
+        .await
+        .unwrap();
 
     let result = reclaim_stale(&store, thread_id, &RunLimits::default())
         .await
@@ -355,14 +400,20 @@ fn a_run_round_trips_through_json() {
     // camelCase on the wire, so a host's UI and RPC layer read it directly.
     assert_eq!(json["runId"], "run-1");
     assert_eq!(json["cardId"], "task-1");
-    assert!(json.get("completedAt").is_none(), "absent fields stay absent");
+    assert!(
+        json.get("completedAt").is_none(),
+        "absent fields stay absent"
+    );
     assert_eq!(serde_json::from_value::<TaskRun>(json).unwrap(), run);
 }
 
 #[test]
 fn default_limits_are_the_documented_policy() {
     let limits = RunLimits::default();
-    assert_eq!(limits.heartbeat_stale_secs, super::DEFAULT_HEARTBEAT_STALE_SECS);
+    assert_eq!(
+        limits.heartbeat_stale_secs,
+        super::DEFAULT_HEARTBEAT_STALE_SECS
+    );
     assert_eq!(limits.claim_ttl_secs, super::DEFAULT_CLAIM_TTL_SECS);
     assert_eq!(limits.max_reclaim_count, super::DEFAULT_MAX_RECLAIM_COUNT);
     assert!(limits.claim_ttl_secs > limits.heartbeat_stale_secs);

@@ -63,7 +63,11 @@ impl<Context> ActiveRunRegistry<Context> {
 
     /// Record `run` as the live run on `thread_id`, returning any entry it
     /// displaced (which the caller should cancel).
-    pub fn register(&self, thread_id: impl Into<String>, run: ActiveRun<Context>) -> Option<ActiveRun<Context>> {
+    pub fn register(
+        &self,
+        thread_id: impl Into<String>,
+        run: ActiveRun<Context>,
+    ) -> Option<ActiveRun<Context>> {
         self.lock().insert(thread_id.into(), run)
     }
 
@@ -137,6 +141,8 @@ impl<Context> ActiveRunRegistry<Context> {
         // A panic inside the map would leave it poisoned; the map holds no
         // invariant that a panic could break, so recovering is safe and keeps
         // one bad run from wedging cancellation for every other thread.
-        self.runs.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
