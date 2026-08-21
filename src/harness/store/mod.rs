@@ -371,27 +371,38 @@ impl JsonlAppendStore {
             // start of the file. That discards the possibly-half first line,
             // which this function wanted anyway — and because a newline is
             // always a character boundary in UTF-8, whatever follows one is
-            // guaranteed to decode. The two problems have the same answer.
+            // guaranteed to decode. The two problems have one answer.
             let decodable = if start > 0 {
-                match bytes.iter().position(|b| *b == b'\n') {
-                    Some(newline) => &bytes[newline + 1..],
+                let Some(newline) = bytes.iter().position(|b| *b == b'\n') else {
                     // No newline in the whole window: every byte belongs to one
-                    // unterminated line, so there is nothing complete to read.
-                    // Widen rather than guess.
-                    None if start > 0 => {
-                        window = window.saturating_mul(4);
-                        continue;
-                    }
-                    None => &bytes[..],
-                }
+                    // unterminated line, so there is nothing complete to read
+                    // and no guaranteed boundary to decode from. Widen rather
+                    // than guess. Load-bearing precisely because the decode
+                    // below is strict.
+                    window = window.saturating_mul(4);
+                    continue;
+                };
+                &bytes[newline + 1..]
             } else {
                 &bytes[..]
             };
-            // Lossy on purpose: the bytes are already known to start on a
-            // character boundary, so this cannot mangle a record. It only keeps
-            // a genuinely corrupt byte somewhere in the middle from failing the
-            // whole read, and such a line simply fails to parse as JSON below.
-            let buf = String::from_utf8_lossy(decodable);
+            // STRICT, not lossy. The boundary is guaranteed above, so a failure
+            // here means a genuinely corrupt byte rather than a torn character,
+            // and that must stay a hard error exactly as it was before.
+            //
+            // Tolerating it would be worse than the bug being fixed: a corrupt
+            // byte inside a record's structural region makes that line
+            // unparseable, `next_offset` then returns the PREVIOUS record's
+            // offset, and the next append silently reuses an offset already on
+            // disk. Measured on a 30-record stream with one byte set to 0xFF —
+            // lossy decoding returned `Ok(29)` with a record at offset 29
+            // already written, while `read_from` still refused the stream
+            // outright, since `read_records` decodes strictly. A stream that
+            // keeps accepting appends while being permanently unreadable is not
+            // a tolerance anyone asked for.
+            let buf = std::str::from_utf8(decodable).map_err(|e| {
+                TinyAgentsError::Validation(format!("append store read error: {e}"))
+            })?;
             let lines: Vec<&str> = buf.lines().collect();
             for line in lines.iter().rev() {
                 if line.trim().is_empty() {

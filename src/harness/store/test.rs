@@ -438,16 +438,25 @@ async fn jsonl_rejects_unsafe_stream_names() {
 /// widen, so the same offset fails identically on every subsequent append.
 /// Observed on a hosted tenant as 584 consecutive failures with observations
 /// dropped throughout, and 104 of its 557 journal files in the same state — any
-/// stream containing enough non-ASCII text eventually lands on this.
+/// stream containing enough non-ASCII text lands on this eventually.
+///
+/// The fixture ASSERTS that it reproduces. Whether a given pad tears depends on
+/// the exact serialized width of a `StoreRecord` line — field names, the digits
+/// in `created_at_ms`, how many digits the offset has. Only one or two of the
+/// pads below actually land mid-character today, so adding a field to
+/// `StoreRecord` or letting offsets reach three digits could shift every
+/// alignment off the character and leave this test green while covering
+/// nothing. On a bug that silently dropped data for weeks, a vacuous test is
+/// worse than none, so `torn` is checked at the end.
 #[tokio::test]
 async fn append_survives_a_character_torn_by_the_lookback_window() {
-    let dir = TempDir::new("torn-utf8");
-    let store = JsonlAppendStore::new(&dir.0);
+    /// Mirrors the constant `next_offset` starts its lookback window at.
+    const WINDOW: usize = 4096;
 
-    // Build a stream whose byte at `len - 4096` falls INSIDE a multi-byte
-    // character. Each record carries an em dash (3 bytes in UTF-8), so padding
-    // the payload one byte at a time walks the boundary across the character
-    // until it tears.
+    let mut torn = Vec::new();
+
+    // Each record carries an em dash (3 bytes in UTF-8); padding the payload one
+    // byte at a time walks the 4096-byte boundary across that character.
     for pad in 0..24usize {
         let dir = TempDir::new(&format!("torn-utf8-{pad}"));
         let store = JsonlAppendStore::new(&dir.0);
@@ -457,6 +466,17 @@ async fn append_survives_a_character_torn_by_the_lookback_window() {
                 .await
                 .expect("append should not fail on a torn character");
         }
+
+        // Does this pad actually put the window start inside a character?
+        let raw = std::fs::read(dir.0.join("run.jsonl")).expect("read stream");
+        if raw.len() > WINDOW {
+            let start = raw.len() - WINDOW;
+            let text = std::str::from_utf8(&raw).expect("the file itself is valid UTF-8");
+            if !text.is_char_boundary(start) {
+                torn.push(pad);
+            }
+        }
+
         // Re-open and append again: this is the path that reads back the tail to
         // find the next offset, and the one that failed in production.
         let reopened = JsonlAppendStore::new(&dir.0);
@@ -470,7 +490,16 @@ async fn append_survives_a_character_torn_by_the_lookback_window() {
         );
     }
 
+    assert!(
+        !torn.is_empty(),
+        "no pad put the window start inside a character, so this test proved \
+         nothing. The record layout has shifted; adjust the padding range until \
+         at least one alignment tears again."
+    );
+
     // The simple case still works.
+    let dir = TempDir::new("torn-utf8-plain");
+    let store = JsonlAppendStore::new(&dir.0);
     store.append("plain", json!({"a": 1})).await.unwrap();
     assert_eq!(store.append("plain", json!({"a": 2})).await.unwrap(), 1);
 }
