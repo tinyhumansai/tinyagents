@@ -14,6 +14,7 @@
 //! yields items as they finish, and each future carries its input index so the
 //! completed results are re-sorted into input-order slots before being returned.
 
+mod claims;
 mod types;
 
 pub use types::{FailurePolicy, ItemOutcome, ParallelOptions, ParallelOutcome};
