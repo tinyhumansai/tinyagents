@@ -76,12 +76,12 @@ pub async fn account_turn(
     }
 
     let mut current = goal;
-    if current.continuation_suppressed && user_initiated {
-        if let Some(updated) =
+    if current.continuation_suppressed
+        && user_initiated
+        && let Some(updated) =
             store::set_continuation_suppressed_if(store, thread_id, &current.goal_id, false).await?
-        {
-            current = updated;
-        }
+    {
+        current = updated;
     }
 
     let delta = turn_tokens(input_tokens, output_tokens);
