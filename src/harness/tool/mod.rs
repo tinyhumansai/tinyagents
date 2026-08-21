@@ -402,11 +402,14 @@ fn render_context_value(value: &Value, options: ContextDetailOptions) -> Option<
         return None;
     }
     if raw.chars().count() > options.max_chars {
-        let keep = options
-            .max_chars
-            .saturating_sub(options.ellipsis.chars().count());
+        // Clamp the ellipsis itself to max_chars first: an ellipsis longer than
+        // the cap (a misconfigured caller) would otherwise survive
+        // `saturating_sub`'s zero and still get appended in full, pushing the
+        // rendered value past `max_chars`.
+        let ellipsis: String = options.ellipsis.chars().take(options.max_chars).collect();
+        let keep = options.max_chars.saturating_sub(ellipsis.chars().count());
         let truncated: String = raw.chars().take(keep).collect();
-        Some(format!("{truncated}{}", options.ellipsis))
+        Some(format!("{truncated}{ellipsis}"))
     } else {
         Some(raw)
     }
