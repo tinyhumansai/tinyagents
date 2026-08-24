@@ -2496,6 +2496,137 @@ async fn slow_tool_call_is_timed_out_by_remaining_budget() {
 }
 
 #[tokio::test]
+async fn per_model_call_ceiling_times_out_a_slow_call_with_run_time_left() {
+    use std::time::Duration;
+
+    use crate::harness::testkit::SlowModel;
+
+    // The run has plenty of wall clock left (60s), but the per-model-call
+    // ceiling (20ms) is tighter than the model's 200ms sleep, so the ceiling
+    // interrupts the call — and the error must name the ceiling, not the run's
+    // remaining budget, so triage can tell a wedged call from an exhausted run.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "slow",
+        Arc::new(SlowModel::new(Duration::from_millis(200), "too late")),
+    );
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default().with_max_model_call_ms(Some(20)),
+        ..RunPolicy::default()
+    });
+
+    let config = RunConfig::new("per-call-cap-run").with_timeout_ms(60_000);
+    let err = harness
+        .invoke(&(), (), config, vec![Message::user("hi")])
+        .await
+        .expect_err("a call slower than the per-call ceiling must time out");
+
+    match &err {
+        TinyAgentsError::Timeout(msg) => {
+            assert!(msg.contains("per-model-call ceiling"), "{msg}");
+        }
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn per_model_call_ceiling_bounds_calls_without_any_run_deadline() {
+    use std::time::Duration;
+
+    use crate::harness::testkit::SlowModel;
+
+    // With no run timeout and no policy wall clock, a model call used to be
+    // awaited unbounded. The per-call ceiling alone must bound it.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "slow",
+        Arc::new(SlowModel::new(Duration::from_millis(200), "too late")),
+    );
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default().with_max_model_call_ms(Some(20)),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("the ceiling alone must bound an otherwise-unbounded call");
+
+    match &err {
+        TinyAgentsError::Timeout(msg) => {
+            assert!(msg.contains("per-model-call ceiling"), "{msg}");
+        }
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn run_remainder_bounds_a_model_call_when_tighter_than_the_ceiling() {
+    use std::time::Duration;
+
+    use crate::harness::testkit::SlowModel;
+
+    // A generous ceiling (10s) never extends a call past the run's own
+    // deadline (20ms): the tighter source wins, and the error blames the
+    // remaining wall-clock budget.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "slow",
+        Arc::new(SlowModel::new(Duration::from_millis(200), "too late")),
+    );
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default().with_max_model_call_ms(Some(10_000)),
+        ..RunPolicy::default()
+    });
+
+    let config = RunConfig::new("remainder-tighter-run").with_timeout_ms(20);
+    let err = harness
+        .invoke(&(), (), config, vec![Message::user("hi")])
+        .await
+        .expect_err("the run deadline must still bound the call");
+
+    match &err {
+        TinyAgentsError::Timeout(msg) => {
+            assert!(msg.contains("remaining wall-clock budget"), "{msg}");
+        }
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn per_model_call_ceiling_does_not_bound_tool_calls() {
+    use std::time::Duration;
+
+    // A 20ms per-model-call ceiling with a 100ms tool: tool calls keep the
+    // remaining-only budget (a sub-agent delegation is a tool call wrapping an
+    // entire child run), so the run completes despite the tool outliving the
+    // model-call ceiling many times over.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "slow", json!({})),
+            text_response("done", 0, 0),
+        ])),
+    );
+    harness.register_tool(Arc::new(SlowTool {
+        delay: Duration::from_millis(100),
+    }));
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default().with_max_model_call_ms(Some(20)),
+        ..RunPolicy::default()
+    });
+
+    let config = RunConfig::new("tool-uncapped-run").with_timeout_ms(60_000);
+    let run = harness
+        .invoke(&(), (), config, vec![Message::user("go")])
+        .await
+        .expect("the tool call must not inherit the per-model-call ceiling");
+
+    assert_eq!(run.text(), Some("done".to_string()));
+}
+
+#[tokio::test]
 async fn inherited_tool_timeout_is_enforced_without_a_run_deadline() {
     use std::time::Duration;
 
