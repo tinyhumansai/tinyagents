@@ -1993,9 +1993,19 @@ impl OpenAiModel {
         url: &str,
     ) -> Result<reqwest::Response> {
         let response = builder.send().await.map_err(|e| {
-            let error =
-                self.provider_error(format!("{what} to {url} failed: {e}"), None, None, None);
-            TinyAgentsError::Model(self.provider_failure_message(&error))
+            // Structured, not flattened. A transport failure has no HTTP status,
+            // but it does have a provider, a model, and a computed `retryable` —
+            // and a host that matches on `TinyAgentsError::Provider` to log
+            // those fields would otherwise fall through to its generic arm and
+            // record a connection reset as "(non-provider error)" with nothing
+            // to act on. `Display` renders identically either way, so only the
+            // machine-readable half changes.
+            TinyAgentsError::from_provider_error(self.provider_error(
+                format!("{what} to {url} failed: {e}"),
+                None,
+                None,
+                None,
+            ))
         })?;
 
         let status = response.status();
@@ -2131,23 +2141,6 @@ impl OpenAiModel {
             retry_after_ms: None,
             raw,
         }
-    }
-
-    fn provider_failure_message(&self, error: &ProviderError) -> String {
-        format!(
-            "{} returned{}{}: {}",
-            error.provider,
-            error
-                .status
-                .map(|status| format!(" HTTP {status}"))
-                .unwrap_or_default(),
-            error
-                .code
-                .as_deref()
-                .map(|code| format!(" ({code})"))
-                .unwrap_or_default(),
-            error.message
-        )
     }
 
     /// Decodes a non-2xx body into a structured [`ProviderError`].

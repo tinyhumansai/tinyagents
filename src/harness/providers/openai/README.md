@@ -224,10 +224,12 @@ into a structured `ProviderError` (HTTP status, provider error code, and a
 everything else — including 401/400 — is not) and surfaced as
 `TinyAgentsError::Provider`, so `harness::retry::is_retryable` can classify
 retryability instead of retrying every provider failure indiscriminately.
-Transport-level failures (connection errors, body-read failures) have no such
-structure to preserve and surface as a plain `TinyAgentsError::Model` string
-via `provider_failure_message`. Malformed JSON bodies surface as
-`TinyAgentsError::Serialization`.
+Transport-level failures (connection errors, body-read failures) carry no HTTP
+status, but they do carry a provider, a model, and a computed `retryable`, so
+they are raised as `TinyAgentsError::Provider` with `status: None` rather than
+flattened — a host that classifies on the variant would otherwise see a
+connection reset as an unstructured error. `Display` is identical either way.
+Malformed JSON bodies surface as `TinyAgentsError::Serialization`.
 
 ## Operational constraints
 
