@@ -49,6 +49,13 @@ impl RunLimits {
         self
     }
 
+    /// Sets a per-model-call wall-clock ceiling in milliseconds. `None`
+    /// removes the ceiling. See [`RunLimits::max_model_call_ms`].
+    pub fn with_max_model_call_ms(mut self, ms: Option<u64>) -> Self {
+        self.max_model_call_ms = ms;
+        self
+    }
+
     /// Sets the per-call retry cap (a retry *count*, not counting the first
     /// attempt). See [`RunLimits::max_retries_per_call`].
     pub fn with_max_retries_per_call(mut self, n: usize) -> Self {

@@ -82,6 +82,29 @@ const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
 /// Default overall timeout applied to unary calls when the request does not set
 /// [`ModelRequest::timeout_ms`]. Streaming calls get no overall cap by default.
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 600;
+/// HTTP/2 PING keepalive interval and ack timeout for the default provider
+/// client. Streaming calls deliberately carry no overall request timeout (a
+/// total cap would truncate a legitimately long stream — e.g. a reasoning
+/// model that is app-silent for minutes), so transport-level PINGs are what
+/// distinguishes "thinking" from "dead": a peer that stops acking fails the
+/// in-flight call in roughly `interval + timeout` (~1 min) even with zero
+/// application bytes flowing. Only applies where TLS ALPN negotiated h2;
+/// plaintext HTTP/1.1 endpoints (local Ollama/LM Studio) are unaffected.
+const DEFAULT_KEEP_ALIVE_SECS: u64 = 30;
+
+/// Builds the default `reqwest` client for provider transports: connect
+/// timeout plus HTTP/2 PING keepalives (see [`DEFAULT_KEEP_ALIVE_SECS`]).
+/// Hosts that need different transport policy inject their own client via
+/// `with_client`, which opts out of all of this.
+pub(crate) fn default_provider_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
+        .http2_keep_alive_interval(std::time::Duration::from_secs(DEFAULT_KEEP_ALIVE_SECS))
+        .http2_keep_alive_timeout(std::time::Duration::from_secs(DEFAULT_KEEP_ALIVE_SECS))
+        .http2_keep_alive_while_idle(true)
+        .build()
+        .expect("default reqwest client builds")
+}
 
 mod convert;
 mod local;

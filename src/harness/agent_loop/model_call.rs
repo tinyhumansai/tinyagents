@@ -6,6 +6,16 @@
 //! Split out of `agent_loop/mod.rs`; see that module's doc comment for
 //! the full loop lifecycle, limits, and backoff design.
 
+/// Timeout-message label for a call bounded by the run's remaining wall-clock
+/// budget: the run is out of time, not (necessarily) this call wedged.
+pub(super) const RUN_BOUND_LABEL: &str = "remaining wall-clock budget";
+
+/// Timeout-message label for a model call bounded by the per-call ceiling
+/// ([`RunLimits::max_model_call_ms`][crate::harness::limits::RunLimits::max_model_call_ms]):
+/// this one call ran past the time any single call is allowed, with run time
+/// still left.
+pub(super) const PER_CALL_BOUND_LABEL: &str = "per-model-call ceiling";
+
 use super::*;
 use crate::harness::cache::{
     CachePolicy, CacheSkipReason, apply_prompt_cache_breakpoints, scoped_cache_key,
@@ -325,14 +335,16 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 if ctx.cancellation.is_cancelled() {
                     return Err(TinyAgentsError::Cancelled);
                 }
-                // Bound this individual provider call by the run's *remaining*
-                // wall-clock budget so a hung or slow model call is interrupted
+                // Bound this individual provider call by the tighter of the
+                // run's *remaining* wall-clock budget and the per-model-call
+                // ceiling, so a hung or slow model call is interrupted
                 // mid-flight, not merely detected by the between-call deadline
                 // check. reqwest/futures are cancel-safe, so dropping the future
-                // on elapse cancels the underlying request. When neither the run
-                // config nor the harness policy configures a timeout the call is
-                // awaited unbounded.
-                let remaining = self.call_budget(ctx);
+                // on elapse cancels the underlying request. Recomputed here,
+                // inside the attempt loop, so every retry attempt gets a fresh
+                // per-call window. When neither the run config nor the harness
+                // policy configures any timeout the call is awaited unbounded.
+                let (remaining, bound) = self.model_call_budget(ctx);
                 let attempt_result = if streaming {
                     let fut = self.invoke_model_streaming_once(
                         state,
@@ -342,7 +354,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                         call_id,
                         &mut deltas_emitted,
                     );
-                    Self::with_call_budget(remaining, run_id.as_str(), "model call", fut).await
+                    Self::with_call_budget(remaining, run_id.as_str(), "model call", bound, fut)
+                        .await
                 } else {
                     // Race the wall-clock-bounded unary call against cooperative
                     // cancellation, mirroring the streaming path: a cancel
@@ -354,8 +367,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     // still short-circuits before the request is ever issued.
                     let cancellation = ctx.cancellation.clone();
                     let fut = model.invoke(state, request.clone());
-                    let budgeted =
-                        Self::with_call_budget(remaining, run_id.as_str(), "model call", fut);
+                    let budgeted = Self::with_call_budget(
+                        remaining,
+                        run_id.as_str(),
+                        "model call",
+                        bound,
+                        fut,
+                    );
                     tokio::select! {
                         biased;
                         _ = cancellation.cancelled() => Err(TinyAgentsError::Cancelled),
@@ -510,6 +528,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// (`None`). Honoring the policy source lets a sub-agent whose child
     /// [`RunConfig`] carries no per-run timeout still be bounded by its
     /// harness's policy-level wall-clock cap.
+    ///
+    /// This is the budget for **tool calls**, which are bounded only by the
+    /// run's remaining time (a sub-agent delegation is a tool call wrapping an
+    /// entire child run). Model calls go through
+    /// [`model_call_budget`](Self::model_call_budget), which additionally
+    /// clamps to the per-call ceiling
+    /// [`RunLimits::max_model_call_ms`][crate::harness::limits::RunLimits::max_model_call_ms].
     pub(super) fn call_budget(&self, ctx: &RunContext<Ctx>) -> Option<Duration> {
         let config_budget = ctx.remaining_wall_clock();
         let policy_budget = self.policy.limits.max_wall_clock_ms.map(|ms| {
@@ -525,6 +550,35 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         }
     }
 
+    /// Computes the wall-clock budget for the next individual **model** call:
+    /// the tighter of the run's remaining budget ([`call_budget`](Self::call_budget))
+    /// and the per-call ceiling
+    /// [`RunLimits::max_model_call_ms`][crate::harness::limits::RunLimits::max_model_call_ms].
+    ///
+    /// Computed afresh for every call *and every retry attempt*, so each
+    /// attempt gets its own full per-call window rather than inheriting an
+    /// earlier attempt's consumption — while still never overshooting the run
+    /// deadline. Returns the budget together with the label of whichever bound
+    /// is in force, so the timeout error names the ceiling that actually fired
+    /// (a per-call ceiling means "this one call wedged"; the run's remainder
+    /// means "the run is out of time") — field triage needs to tell them apart.
+    pub(super) fn model_call_budget(
+        &self,
+        ctx: &RunContext<Ctx>,
+    ) -> (Option<Duration>, &'static str) {
+        let run_budget = self.call_budget(ctx);
+        let per_call = self
+            .policy
+            .limits
+            .max_model_call_ms
+            .map(Duration::from_millis);
+        match (run_budget, per_call) {
+            (Some(run), Some(cap)) if cap < run => (Some(cap), PER_CALL_BOUND_LABEL),
+            (None, Some(cap)) => (Some(cap), PER_CALL_BOUND_LABEL),
+            (run, _) => (run, RUN_BOUND_LABEL),
+        }
+    }
+
     /// Awaits a single call future (model or tool), optionally bounded by
     /// `budget`.
     ///
@@ -534,14 +588,18 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// [`TinyAgentsError::Timeout`] is returned. When `budget` is `None` (no
     /// run timeout configured) the future is awaited without a bound.
     ///
-    /// `budget` is the run's *remaining* wall-clock budget at the time the call
-    /// is issued, so each successive call gets a tighter bound as the deadline
-    /// approaches. `what` names the kind of call in the timeout message (e.g.
-    /// `"model call"`, `"tool call"`).
+    /// `budget` is either the run's *remaining* wall-clock budget at the time
+    /// the call is issued (each successive call gets a tighter bound as the
+    /// deadline approaches) or, for model calls, the per-call ceiling when that
+    /// is tighter. `what` names the kind of call in the timeout message (e.g.
+    /// `"model call"`, `"tool call"`); `bound` names which budget source is in
+    /// force ([`RUN_BOUND_LABEL`] / [`PER_CALL_BOUND_LABEL`]) so the message
+    /// says which ceiling fired.
     pub(super) async fn with_call_budget<T, F>(
         budget: Option<Duration>,
         run_id: &str,
         what: &str,
+        bound: &str,
         fut: F,
     ) -> Result<T>
     where
@@ -551,8 +609,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             Some(budget) => match tokio::time::timeout(budget, fut).await {
                 Ok(result) => result,
                 Err(_) => Err(TinyAgentsError::Timeout(format!(
-                    "{what} for run `{run_id}` exceeded its remaining wall-clock budget \
-                     ({} ms)",
+                    "{what} for run `{run_id}` exceeded its {bound} ({} ms)",
                     budget.as_millis()
                 ))),
             },

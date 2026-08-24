@@ -48,6 +48,13 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
     "stream",
+    # `http2` lets TLS endpoints negotiate HTTP/2 via ALPN, which is what
+    # enables the transport-liveness PING keepalives the provider clients
+    # configure (`http2_keep_alive_*`): a dead peer fails the in-flight call in
+    # under a minute even when zero application bytes are flowing — e.g. a
+    # provider stream that goes silent during long hidden reasoning. Plaintext
+    # endpoints (local Ollama/LM Studio) have no ALPN and stay on HTTP/1.1.
+    "http2",
 ] }
 
 # Optional embedded SQLite checkpointer backend (`graph::checkpoint::sqlite`).

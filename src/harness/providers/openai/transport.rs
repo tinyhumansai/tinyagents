@@ -432,10 +432,7 @@ impl OpenAiModel {
     /// (`gpt-4.1-mini`), and the default base URL (`https://api.openai.com/v1`).
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
-                .build()
-                .expect("default reqwest client builds"),
+            client: default_provider_client(),
             caller_owned_client: false,
             api_key: api_key.into(),
             auth: AuthStyle::Bearer,
