@@ -2915,3 +2915,63 @@ fn stream_cleanup_scrubs_leaked_markup_from_live_deltas() {
     assert_eq!(completed.tool_calls().len(), 1);
     assert_eq!(completed.tool_calls()[0].name, "lookup");
 }
+
+// ── transport-level failures keep their structure ───────────────────────────
+
+/// A transport failure must reach the caller as `TinyAgentsError::Provider`.
+///
+/// It carries no HTTP status — nothing answered — but it does carry the
+/// provider, the model, and a computed `retryable`, and a host that classifies
+/// on the variant needs all three. Flattening it into
+/// `TinyAgentsError::Model(String)` sends a connection reset down the generic
+/// arm of a host's logger, where it is recorded with no status, no provider and
+/// no retryability, and the operator reading it cannot tell a dead endpoint
+/// from a rejected request.
+#[tokio::test]
+async fn a_transport_failure_is_reported_as_a_structured_provider_error() {
+    // Bind, read the port, then drop the listener: the port is now almost
+    // certainly closed, so the connect fails without waiting on a timeout.
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        listener.local_addr().expect("read the bound port").port()
+    };
+
+    let model = OpenAiModel::compatible_provider(
+        "OpenHuman",
+        "test-key",
+        format!("http://127.0.0.1:{port}/openai/v1"),
+        "chat-v1",
+    );
+
+    let error = ChatModel::<()>::invoke(&model, &(), ModelRequest::new(vec![Message::user("hi")]))
+        .await
+        .expect_err("a closed port cannot answer");
+
+    let TinyAgentsError::Provider(provider_error) = &error else {
+        panic!("expected a structured Provider error, got: {error:?}");
+    };
+    assert_eq!(provider_error.provider, "OpenHuman");
+    assert_eq!(provider_error.model.as_deref(), Some("chat-v1"));
+    assert!(
+        provider_error.status.is_none(),
+        "nothing answered, so there is no status to report"
+    );
+    assert!(
+        provider_error.retryable,
+        "a transport failure is worth retrying; the flag is what says so"
+    );
+
+    // The rendered text is the no-regression half: `Display for ProviderError`
+    // reproduces what `provider_failure_message` used to build by hand, and both
+    // error variants render as `model error: {0}`, so nothing a user or a log
+    // reader sees changes.
+    let rendered = error.to_string();
+    assert!(
+        rendered.starts_with("model error: OpenHuman returned: "),
+        "the user-facing wording must not change, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("/openai/v1/chat/completions"),
+        "the failing URL is what makes this diagnosable, got: {rendered}"
+    );
+}

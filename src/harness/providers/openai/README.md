@@ -224,9 +224,18 @@ into a structured `ProviderError` (HTTP status, provider error code, and a
 everything else — including 401/400 — is not) and surfaced as
 `TinyAgentsError::Provider`, so `harness::retry::is_retryable` can classify
 retryability instead of retrying every provider failure indiscriminately.
-Transport-level failures (connection errors, body-read failures) have no such
-structure to preserve and surface as a plain `TinyAgentsError::Model` string
-via `provider_failure_message`. Malformed JSON bodies surface as
+A **send** failure — no final HTTP status was available, so there is nothing to
+report as one — still carries a provider, a model, and a computed `retryable`,
+so `send_checked` raises it as `TinyAgentsError::Provider` with `status: None`
+rather than flattening it; a host that classifies on the variant would
+otherwise see a connection reset as an unstructured error. `Display` is
+identical either way. Note that "no final status" is not the same as "never
+reached a server": the client keeps reqwest's default redirect policy, so a
+redirect loop or an exceeded redirect limit lands here too, after servers have
+answered with 3xx.
+
+**Body-read** failures after a 2xx (`list_models`, `invoke_responses`) remain
+plain `TinyAgentsError::Model` strings. Malformed JSON bodies surface as
 `TinyAgentsError::Serialization`.
 
 ## Operational constraints
