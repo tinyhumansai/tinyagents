@@ -577,7 +577,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 let outcome = fut.await.map(|wrapped| wrapped.into_result());
                 apply_tool_error_policy(&error_policy, &policy_call, outcome)
             };
-            let outcome = Self::with_call_budget(run_budget, &run_id, "tool call", guarded).await;
+            let outcome = Self::with_call_budget(
+                run_budget,
+                &run_id,
+                "tool call",
+                super::model_call::RUN_BOUND_LABEL,
+                guarded,
+            )
+            .await;
             let result = match outcome {
                 Ok(result) => result,
                 Err(err) => {
@@ -700,7 +707,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 // failure, inside the run-budget wrapper that stays fatal.
                 let guarded =
                     async move { apply_tool_error_policy(&error_policy, &policy_call, fut.await) };
-                Self::with_call_budget(run_budget, &run_id, "tool call", guarded).await
+                Self::with_call_budget(
+                    run_budget,
+                    &run_id,
+                    "tool call",
+                    super::model_call::RUN_BOUND_LABEL,
+                    guarded,
+                )
+                .await
             });
         }
 

@@ -27,6 +27,32 @@ pub struct RunLimits {
     pub max_tool_calls: usize,
     /// Maximum elapsed wall-clock time in milliseconds. `None` means no limit.
     pub max_wall_clock_ms: Option<u64>,
+    /// Maximum wall-clock time in milliseconds for a **single model call**,
+    /// applied afresh to every call (and every retry attempt). `None` means no
+    /// per-call ceiling.
+    ///
+    /// This bounds an individual hung or wedged provider call independently of
+    /// [`max_wall_clock_ms`](Self::max_wall_clock_ms), which measures the whole
+    /// run. Without it the only per-call bound is the run's *remaining*
+    /// wall-clock budget, which conflates two different guards: hang detection
+    /// (a wedged call should die fast) and runaway-run bounding (a run should
+    /// not live forever). With only the run deadline, a host must choose one
+    /// number for both — a generous run ceiling means a hung call can hold the
+    /// run for that whole ceiling, and a tight one kills late calls in long,
+    /// *productive* runs even though every earlier call succeeded.
+    ///
+    /// The effective budget for a model call is the tighter of this ceiling and
+    /// the run's remaining wall-clock budget, so a per-call cap can never
+    /// extend a run past its deadline. Deliberately **not** applied to tool
+    /// calls: a sub-agent delegation is a tool call wrapping an entire child
+    /// run and must not inherit a model-call-sized cap; tools carry their own
+    /// [`ToolTimeoutSettings`][crate::harness::tool::ToolTimeoutSettings]
+    /// deadlines and remain bounded by the run's remaining budget.
+    ///
+    /// Size it generously: a hidden-reasoning model call can be legitimately
+    /// silent for minutes, so this is a backstop for calls that will never
+    /// return, not a latency target.
+    pub max_model_call_ms: Option<u64>,
     /// Maximum number of retry *attempts* (not counting the first try)
     /// permitted for an individual model call. Reconciled with
     /// [`crate::harness::retry::RetryPolicy::max_attempts`] by the agent loop
@@ -150,6 +176,7 @@ impl Default for RunLimits {
             max_model_calls: 25,
             max_tool_calls: 50,
             max_wall_clock_ms: None,
+            max_model_call_ms: None,
             max_retries_per_call: 3,
             max_depth: Self::DEFAULT_MAX_DEPTH,
             behavior: LimitBehavior::Error,
