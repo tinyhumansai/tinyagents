@@ -29,15 +29,15 @@ pub use error_policy::{ToolErrorPolicy, is_control_flow_error};
 // the prefix list is how one of them silently stops stripping a prefix the
 // other does. The definitions live in `tinytools` so a host that never links
 // this crate still renders a tool name the same way.
-pub use tinytools::{
-    ContextDetailOptions, context_detail_from_args, context_detail_from_args_with,
-    humanize_tool_name,
-};
 pub use injected::{project_injected_arguments, strip_injected_arguments};
 pub use prompt::*;
 pub use schema::*;
 pub use schema_prepare::*;
 pub use timeout::*;
+pub use tinytools::{
+    ContextDetailOptions, context_detail_from_args, context_detail_from_args_with,
+    humanize_tool_name,
+};
 pub use types::*;
 
 impl ToolSchema {
