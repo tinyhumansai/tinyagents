@@ -240,13 +240,12 @@ impl ToolExecutionContext {
 /// Only the facts a tool actually reads are exposed. The run id, event sink,
 /// cancellation token and streaming flag stay harness-internal — a tool that
 /// wanted them would be reaching into the run rather than doing its job.
+///
+/// `workspace` needs no conversion: [`WorkspaceDescriptor`] is `tinytools`'
+/// type, re-exported by this crate, so the field is already the right one.
 impl tinytools::ToolRunContext for ToolExecutionContext {
-    fn workspace_root(&self) -> Option<&std::path::Path> {
-        self.workspace.as_ref().map(|w| w.root.as_path())
-    }
-
-    fn workspace_policy_id(&self) -> Option<&str> {
-        self.workspace.as_ref().map(|w| w.policy_id.as_str())
+    fn workspace(&self) -> Option<&tinytools::WorkspaceDescriptor> {
+        self.workspace.as_ref()
     }
 
     fn thread_id(&self) -> Option<&str> {
