@@ -90,13 +90,11 @@ fn enforce_blocks_unsafe_paths_and_emits_violation() {
 
     let ws = WorkspaceDescriptor::new("/work/agent-a");
     // Allowed path passes silently with no event.
-    ws.enforce(Path::new("/work/agent-a/out.txt"), &events)
-        .unwrap();
+    enforce_workspace_path(&ws, Path::new("/work/agent-a/out.txt"), &events).unwrap();
     assert!(recorder.is_empty());
 
     // Unsafe path fails closed and emits a violation.
-    let err = ws
-        .enforce(Path::new("/etc/passwd"), &events)
+    let err = enforce_workspace_path(&ws, Path::new("/etc/passwd"), &events)
         .expect_err("path outside root must be blocked");
     assert!(err.to_string().contains("outside the allowed workspace"));
     assert_eq!(recorder.events()[0].event.kind(), "workspace.violation");
