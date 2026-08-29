@@ -25,7 +25,7 @@ use tinyagents::harness::tool::{
     SandboxMode, Tool, ToolCall, ToolExecutionContext, ToolResult, ToolSchema,
 };
 use tinyagents::harness::usage::Usage;
-use tinyagents::harness::workspace::{cleanup_workspace, prepare_workspace};
+use tinyagents::harness::workspace::{cleanup_workspace, enforce_workspace_path, prepare_workspace};
 use tinyagents::language::Blueprint;
 use tinyagents::{
     CapabilityRegistry, ComponentKind, DiagnosticSeverity, RegistrySnapshot, SharedRootWorkspace,
