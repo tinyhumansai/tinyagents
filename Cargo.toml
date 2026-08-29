@@ -82,7 +82,7 @@ chrono-tz = { version = "0.10", optional = true }
 # `STANDARD_NO_PAD`, so `harness::multimodal::data_uri` picks by length instead
 # of trying both — trying both decoded a multi-MB image twice for every
 # unpadded payload.
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 # `flate2` decompresses `application/gzip` data URIs that carry an
 # `original_mime=` parameter — the shape a renderer emits when it compresses an
 # attachment before handing it over. Decompression is bounded by `Read::take`
