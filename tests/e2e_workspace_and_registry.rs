@@ -202,8 +202,7 @@ impl Tool<()> for WorkspaceEnforcingTool {
             .expect("the run was configured with a workspace");
         let root = ws.root.display().to_string();
         // Enforcing an out-of-root path fails closed and emits a violation event.
-        let blocked = ws
-            .enforce(Path::new("/etc/shadow"), &context.events)
+        let blocked = enforce_workspace_path(&ws, Path::new("/etc/shadow"), &context.events)
             .is_err();
         Ok(ToolResult::text(
             call.id,
