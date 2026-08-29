@@ -258,19 +258,9 @@ impl tinytools::ToolRunContext for ToolExecutionContext {
     }
 }
 
-/// How strictly a tool must be sandboxed when it executes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SandboxMode {
-    /// Inherit whatever the run's execution environment provides (the default).
-    #[default]
-    Inherit,
-    /// The tool is safe to run without any sandbox.
-    Disabled,
-    /// The tool must run inside an isolated execution environment; policy
-    /// enforcement fails closed if no sandbox is available.
-    Required,
-}
+// `SandboxMode` rides on `WorkspaceDescriptor`, which is `tinytools`' type, so
+// the mode has to be the same type on both sides of that field.
+pub use tinytools::SandboxMode;
 
 /// How a tool is allowed to reach the caller's workspace / filesystem root.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
