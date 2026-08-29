@@ -229,6 +229,35 @@ impl ToolExecutionContext {
     }
 }
 
+/// Lets a tool read this context without depending on the harness.
+///
+/// A tool is written against `tinytools`, which cannot name this type: this
+/// crate depends on `tinytools`, so an edge back would be a cycle. The
+/// vocabulary therefore declares a narrow trait and this crate implements it,
+/// which is what lets a host hand a live [`ToolExecutionContext`] to a tool
+/// that has never heard of the harness.
+///
+/// Only the facts a tool actually reads are exposed. The run id, event sink,
+/// cancellation token and streaming flag stay harness-internal — a tool that
+/// wanted them would be reaching into the run rather than doing its job.
+impl tinytools::ToolRunContext for ToolExecutionContext {
+    fn workspace_root(&self) -> Option<&std::path::Path> {
+        self.workspace.as_ref().map(|w| w.root.as_path())
+    }
+
+    fn workspace_policy_id(&self) -> Option<&str> {
+        self.workspace.as_ref().map(|w| w.policy_id.as_str())
+    }
+
+    fn thread_id(&self) -> Option<&str> {
+        self.thread_id.as_ref().map(ThreadId::as_str)
+    }
+
+    fn max_turn_output_tokens(&self) -> Option<u32> {
+        self.max_turn_output_tokens
+    }
+}
+
 /// How strictly a tool must be sandboxed when it executes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
