@@ -122,7 +122,7 @@ moved there with it — so the event-emitting half of the old `enforce()` method
 is a free function here instead of an inherent method on a foreign type.
 
 ```rust
-use tinyagents::harness::workspace::enforce_workspace_path;
+use tinyagents::harness::workspace::{WorkspaceDescriptor, enforce_workspace_path};
 
 let ws = WorkspaceDescriptor::new("/work/agent-a");
 enforce_workspace_path(&ws, std::path::Path::new("/work/agent-a/out.txt"), &events)?; // allowed, no event
