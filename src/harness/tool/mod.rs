@@ -22,53 +22,6 @@ use crate::error::{Result, TinyAgentsError};
 pub use schema::*;
 pub use types::*;
 
-impl ToolSchema {
-    /// Creates a tool schema.
-    pub fn new(name: impl Into<String>, description: impl Into<String>, parameters: Value) -> Self {
-        Self {
-            name: name.into(),
-            description: description.into(),
-            parameters,
-            format: ToolFormat::Json,
-        }
-    }
-
-    /// Sets the preferred model-visible tool-call format.
-    pub fn with_format(mut self, format: ToolFormat) -> Self {
-        self.format = format;
-        self
-    }
-
-    /// Validates a model-supplied tool call against this tool's schema.
-    ///
-    /// The harness supports the JSON Schema subset used for model-visible tool
-    /// declarations: `type`, object `properties`, `required`,
-    /// `additionalProperties: false`, array `items`, and `enum`. Unknown schema
-    /// keywords are ignored so providers can still receive richer schemas while
-    /// the local execution boundary fails closed for the structural constraints
-    /// it understands.
-    pub fn validate_call(&self, call: &ToolCall) -> Result<()> {
-        if call.name != self.name {
-            return Err(TinyAgentsError::Validation(format!(
-                "tool call `{}` does not match schema `{}`",
-                call.name, self.name
-            )));
-        }
-        validate_schema_value(
-            &self.parameters,
-            &call.arguments,
-            &format!("tool `{}` arguments", self.name),
-        )
-    }
-}
-
-impl ToolFormat {
-    /// Returns `true` for the default JSON/function-call format.
-    pub fn is_json(&self) -> bool {
-        matches!(self, ToolFormat::Json)
-    }
-}
-
 impl ToolTimeout {
     /// Returns `true` for the default inherited timeout behavior.
     pub fn is_inherit(&self) -> bool {
@@ -102,42 +55,6 @@ impl ToolDisplay {
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
-    }
-}
-
-impl ToolCall {
-    /// Creates a tool call with the given id, name, and arguments.
-    pub fn new(id: impl Into<String>, name: impl Into<String>, arguments: Value) -> Self {
-        Self {
-            id: id.into(),
-            name: name.into(),
-            arguments,
-            invalid: None,
-        }
-    }
-
-    /// Creates a tool call the provider could not parse: `raw` (the unparseable
-    /// arguments string) is preserved as the arguments value and `reason`
-    /// records why parsing failed. The agent loop feeds `reason` back to the
-    /// model as an error tool result instead of failing the run.
-    pub fn invalid(
-        id: impl Into<String>,
-        name: impl Into<String>,
-        raw: impl Into<String>,
-        reason: impl Into<String>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            name: name.into(),
-            arguments: Value::String(raw.into()),
-            invalid: Some(reason.into()),
-        }
-    }
-
-    /// Returns `true` when the model emitted unparseable arguments for this call
-    /// (see [`Self::invalid`]).
-    pub fn is_invalid(&self) -> bool {
-        self.invalid.is_some()
     }
 }
 
