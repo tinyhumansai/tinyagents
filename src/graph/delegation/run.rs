@@ -297,10 +297,21 @@ pub(super) fn is_incompatible_checkpoint_error(e: &crate::TinyAgentsError) -> bo
     matches!(e, crate::TinyAgentsError::Checkpoint(msg) if msg.contains("decode [schema]"))
 }
 
-/// Whether a loaded checkpoint still has work to resume: a non-finalized,
-/// non-cancelled run that still schedules a real (non-`END`) node.
+/// Whether a loaded checkpoint still has work to resume: a non-finalized run
+/// that still schedules a real (non-`END`) node.
+///
+/// Cancellation alone does NOT mean finalized: every cancellation route goes
+/// through `goto finalize` (see `graph.rs`), so a checkpoint can be
+/// `cancelled == true` with `final_output == None` and `next_nodes ==
+/// ["finalize"]` if the process stopped after the cancellation update was
+/// checkpointed but before `finalize` ran. Treating `cancelled` as an
+/// independent terminal signal classified that live boundary as terminal, so
+/// `run_or_resume_delegation` returned the run unfinished and never produced
+/// the cancellation summary. `final_output` — the one field `finalize`
+/// itself sets — is the actual terminal signal; the schedule is what decides
+/// whether there is still work to resume.
 fn checkpoint_is_resumable(checkpoint: &Checkpoint<DelegationState>) -> bool {
-    if checkpoint.state.final_output.is_some() || checkpoint.state.cancelled {
+    if checkpoint.state.final_output.is_some() {
         return false;
     }
     checkpoint.next_nodes.iter().any(|n| n.as_str() != END)
