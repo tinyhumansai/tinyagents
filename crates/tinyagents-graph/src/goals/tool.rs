@@ -24,9 +24,9 @@ use super::types::ThreadGoal;
 use tinyagents_harness::error::Result;
 use tinyagents_harness::store::Store;
 use tinyagents_harness::tool::{
-    Tool, ToolCall, ToolExecutionContext, ToolPolicy, ToolRegistry, ToolResult, ToolSchema,
-    ToolSideEffects,
+    Tool, ToolExecutionContext, ToolPolicy, ToolRegistry, ToolResult, ToolSideEffects,
 };
+use tinyinference::tool::{ToolCall, ToolSchema};
 
 /// Which thread-goal control a [`GoalTool`] implements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
