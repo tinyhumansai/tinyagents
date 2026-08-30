@@ -11,6 +11,24 @@ categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
 async-trait = "0.1"
+# The tool vocabulary. This crate re-exports the host-facing naming/context
+# helpers (`humanize_tool_name`, `context_detail_from_args`, `WorkspaceDescriptor`,
+# `SandboxMode`, …) rather than declaring its own copies, so a host and this
+# harness read a tool's workspace root and display name identically.
+#
+# `harness::tool::Tool<State>` itself stays a distinct, harness-owned trait —
+# it is generic over application `State` and its signature carries this
+# crate's own model-facing dialect types (`ToolCall` / `ToolResult` /
+# `ToolPolicy` / `ToolTimeout`), which are a deliberately separate concern from
+# `tinytools::Tool`'s host-facing shape. The interop point is
+# `ToolExecutionContext` implementing `tinytools::ToolRunContext` (below in
+# `harness::tool::types`), which lets a tool read its workspace descriptor
+# without this crate naming `ToolExecutionContext` inside `tinytools` (the
+# edge points one way: `tinytools` must never depend on this crate).
+#
+# Path-only for now, which is what stops this crate being published. Publishing
+# `tinytools` is the prerequisite; see that repository's AGENTS.md.
+tinytools = { path = "vendor/tinytools/crates/tinytools" }
 # Cheap, reference-counted byte buffers. Used only on the *internal* SSE
 # byte-stream seam (`harness::providers::openai::sse::SseState`) so each
 # network chunk from `reqwest::Response::bytes_stream` is forwarded without a

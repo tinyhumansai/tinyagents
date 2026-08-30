@@ -229,19 +229,37 @@ impl ToolExecutionContext {
     }
 }
 
-/// How strictly a tool must be sandboxed when it executes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SandboxMode {
-    /// Inherit whatever the run's execution environment provides (the default).
-    #[default]
-    Inherit,
-    /// The tool is safe to run without any sandbox.
-    Disabled,
-    /// The tool must run inside an isolated execution environment; policy
-    /// enforcement fails closed if no sandbox is available.
-    Required,
+/// Lets a tool read this context without depending on the harness.
+///
+/// A tool is written against `tinytools`, which cannot name this type: this
+/// crate depends on `tinytools`, so an edge back would be a cycle. The
+/// vocabulary therefore declares a narrow trait and this crate implements it,
+/// which is what lets a host hand a live [`ToolExecutionContext`] to a tool
+/// that has never heard of the harness.
+///
+/// Only the facts a tool actually reads are exposed. The run id, event sink,
+/// cancellation token and streaming flag stay harness-internal — a tool that
+/// wanted them would be reaching into the run rather than doing its job.
+///
+/// `workspace` needs no conversion: [`WorkspaceDescriptor`] is `tinytools`'
+/// type, re-exported by this crate, so the field is already the right one.
+impl tinytools::ToolRunContext for ToolExecutionContext {
+    fn workspace(&self) -> Option<&tinytools::WorkspaceDescriptor> {
+        self.workspace.as_ref()
+    }
+
+    fn thread_id(&self) -> Option<&str> {
+        self.thread_id.as_ref().map(ThreadId::as_str)
+    }
+
+    fn max_turn_output_tokens(&self) -> Option<u32> {
+        self.max_turn_output_tokens
+    }
 }
+
+// `SandboxMode` rides on `WorkspaceDescriptor`, which is `tinytools`' type, so
+// the mode has to be the same type on both sides of that field.
+pub use tinytools::SandboxMode;
 
 /// How a tool is allowed to reach the caller's workspace / filesystem root.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

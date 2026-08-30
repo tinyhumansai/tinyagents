@@ -1,3 +1,6 @@
 [submodule "wiki"]
 	path = wiki
 	url = https://github.com/tinyhumansai/tinyagents.wiki.git
+[submodule "vendor/tinytools"]
+	path = vendor/tinytools
+	url = https://github.com/tinyhumansai/tinytools.git

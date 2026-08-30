@@ -21,6 +21,11 @@ jobs:
           # This job executes repo code (cargo build/test); don't persist the
           # token in git config.
           persist-credentials: false
+          # `vendor/tinytools` is a path dependency of this crate, so cargo
+          # cannot even resolve the manifest without it. Without this the build
+          # fails at `Updating crates.io index` with "failed to read
+          # vendor/tinytools/crates/tinytools/Cargo.toml".
+          submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
         with:

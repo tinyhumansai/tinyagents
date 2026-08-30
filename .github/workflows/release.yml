@@ -31,6 +31,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          # Required to resolve the `vendor/tinytools` path dependency.
+          submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
         with:

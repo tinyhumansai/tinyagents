@@ -25,7 +25,9 @@ use tinyagents::harness::tool::{
     SandboxMode, Tool, ToolCall, ToolExecutionContext, ToolResult, ToolSchema,
 };
 use tinyagents::harness::usage::Usage;
-use tinyagents::harness::workspace::{cleanup_workspace, prepare_workspace};
+use tinyagents::harness::workspace::{
+    cleanup_workspace, enforce_workspace_path, prepare_workspace,
+};
 use tinyagents::language::Blueprint;
 use tinyagents::{
     CapabilityRegistry, ComponentKind, DiagnosticSeverity, RegistrySnapshot, SharedRootWorkspace,
@@ -202,9 +204,8 @@ impl Tool<()> for WorkspaceEnforcingTool {
             .expect("the run was configured with a workspace");
         let root = ws.root.display().to_string();
         // Enforcing an out-of-root path fails closed and emits a violation event.
-        let blocked = ws
-            .enforce(Path::new("/etc/shadow"), &context.events)
-            .is_err();
+        let blocked =
+            enforce_workspace_path(&ws, Path::new("/etc/shadow"), &context.events).is_err();
         Ok(ToolResult::text(
             call.id,
             call.name,

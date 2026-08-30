@@ -112,17 +112,22 @@ assert_eq!(kinds, vec!["workspace.prepared", "workspace.cleanup"]);
 
 ## Fail-closed path enforcement
 
-Before a tool touches a path, call `WorkspaceDescriptor::enforce(path, &events)`.
+Before a tool touches a path, call `enforce_workspace_path(&ws, path, &events)`.
 It is a fail-closed gate: an allowed path returns `Ok(())` silently; a path
 outside every allowed root emits `AgentEvent::WorkspaceViolation { path }` and
 returns `TinyAgentsError::Validation`, so the caller blocks the operation.
 
-```rust
-let ws = WorkspaceDescriptor::new("/work/agent-a");
-ws.enforce(std::path::Path::new("/work/agent-a/out.txt"), &events)?; // allowed, no event
+`WorkspaceDescriptor` is now `tinytools`' type — its lexical `allows()` check
+moved there with it — so the event-emitting half of the old `enforce()` method
+is a free function here instead of an inherent method on a foreign type.
 
-let err = ws
-    .enforce(std::path::Path::new("/etc/passwd"), &events)
+```rust
+use tinyagents::harness::workspace::{WorkspaceDescriptor, enforce_workspace_path};
+
+let ws = WorkspaceDescriptor::new("/work/agent-a");
+enforce_workspace_path(&ws, std::path::Path::new("/work/agent-a/out.txt"), &events)?; // allowed, no event
+
+let err = enforce_workspace_path(&ws, std::path::Path::new("/etc/passwd"), &events)
     .expect_err("path outside root must be blocked");
 assert!(err.to_string().contains("outside the allowed workspace"));
 // A `workspace.violation` event was emitted for audit.

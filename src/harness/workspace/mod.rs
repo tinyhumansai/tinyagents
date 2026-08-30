@@ -14,6 +14,7 @@ mod policy;
 mod types;
 
 pub use git::*;
+pub use policy::enforce_workspace_path;
 pub use types::*;
 
 use std::path::PathBuf;
