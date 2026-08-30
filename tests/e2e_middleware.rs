@@ -110,7 +110,7 @@ impl FlakyModel {
 
 #[async_trait]
 impl ChatModel<()> for FlakyModel {
-    async fn invoke(&self, state: &(), request: ModelRequest) -> tinyagents::Result<ModelResponse> {
+    async fn invoke(&self, state: &(), request: ModelRequest) -> tinyinference::Result<ModelResponse> {
         let n = {
             // Scope the guard so it is dropped before the `.await` below
             // (a `MutexGuard` is not `Send`).

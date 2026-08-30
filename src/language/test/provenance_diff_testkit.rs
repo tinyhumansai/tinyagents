@@ -342,7 +342,7 @@ pub(super) mod testkit {
             &self,
             _state: &TestState,
             _request: ModelRequest,
-        ) -> Result<ModelResponse> {
+        ) -> tinyinference::Result<ModelResponse> {
             Ok(ModelResponse::assistant("echo"))
         }
     }
