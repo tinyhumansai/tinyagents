@@ -26,6 +26,7 @@ pub mod channel;
 pub mod checkpoint;
 pub mod command;
 pub mod compiled;
+pub mod delegation;
 pub mod export;
 pub mod goals;
 pub mod observability;
@@ -59,6 +60,12 @@ pub use checkpoint::{
 };
 pub use command::{Command, Interrupt, NodeResult, RouteTarget, Send};
 pub use compiled::{CompiledGraph, GraphExecution, GraphInput, ResumeTarget, StateSnapshot};
+pub use delegation::{
+    CURRENT_SCHEMA_VERSION as DELEGATION_SCHEMA_VERSION, DelegationConfig, DelegationOutcome,
+    DelegationStage, DelegationStageOutput, DelegationState, PendingApproval, StepRecord,
+    delegation_graph_topology, deny_decision, resume_delegation, run_delegation,
+    run_delegation_durable, run_or_resume_delegation,
+};
 pub use export::{
     ChannelInfo, ConditionalEdgeInfo, EdgeInfo, GraphPolicySummary, GraphTopology, NodeInfo,
     NodePolicySummary, RouteInfo, ValidationReport, WaitingEdgeInfo, blueprint_to_json,
