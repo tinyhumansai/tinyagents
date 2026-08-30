@@ -70,7 +70,16 @@ pub fn has_cycle(nodes: &[DagNode<'_>]) -> bool {
     let mut indegree: HashMap<&str, usize> = ids.iter().map(|&id| (id, 0)).collect();
     let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
 
+    // A repeated id is reported separately as `DagIssue::DuplicateNode`; the
+    // cycle graph must still be built from exactly one declaration per id, or
+    // two conflicting declarations of the same id (e.g. `a[]` and `a[b]`) get
+    // merged into edges that no single declaration actually names, which can
+    // fabricate a cycle that would not exist under either declaration alone.
+    let mut processed: HashSet<&str> = HashSet::with_capacity(ids.len());
     for node in nodes {
+        if !processed.insert(node.id) {
+            continue;
+        }
         for &dep in &node.depends_on {
             if ids.contains(dep) {
                 // Edge dep -> node: `node` runs after `dep`.
