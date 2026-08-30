@@ -144,14 +144,35 @@ fn stopwords_removed() {
 
 #[test]
 fn verb_detection_handles_aliases() {
+    // Exact assertion, not `contains(Send) || contains(Create)`: the
+    // regression this pins is specifically that `Send` must be retained
+    // ALONGSIDE `Create` here, not merely that one of the two survives — an
+    // implementation that suppresses `Send` whenever ANY verb is found would
+    // still pass a permissive `||` assertion while reintroducing the exact
+    // ranking regression (`SLACK_SEND_MESSAGE` falling out of the top-k).
     let v = detect_verbs("post a message to general channel");
-    assert!(v.contains(&ToolVerb::Send) || v.contains(&ToolVerb::Create));
+    assert_eq!(v, HashSet::from([ToolVerb::Create, ToolVerb::Send]));
 
     let v = detect_verbs("delete all promotional emails");
     assert!(v.contains(&ToolVerb::Delete));
 
     let v = detect_verbs("merge pull request 42");
     assert!(v.contains(&ToolVerb::Merge));
+}
+
+#[test]
+fn resource_noun_does_not_add_send_alongside_an_explicit_conflicting_verb() {
+    // "read email" and "delete a message" must not ALSO detect Send from the
+    // resource noun — only the explicit action verb should be present.
+    let v = detect_verbs("read email");
+    assert_eq!(v, HashSet::from([ToolVerb::Read]));
+
+    let v = detect_verbs("delete a message");
+    assert_eq!(v, HashSet::from([ToolVerb::Delete]));
+
+    // No explicit verb at all: the resource noun alone may still imply Send.
+    let v = detect_verbs("message support channel");
+    assert!(v.contains(&ToolVerb::Send));
 }
 
 #[test]

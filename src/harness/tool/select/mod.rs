@@ -120,9 +120,14 @@ fn verb_aliases(v: ToolVerb) -> &'static [&'static str] {
         ToolVerb::Create => &[
             "create", "make", "new", "add", "start", "write", "post", "draft",
         ],
-        ToolVerb::Send => &[
-            "send", "email", "message", "dm", "reply", "forward", "notify",
-        ],
+        // Deliberately action words only ("send", "reply", ...) — the
+        // ambiguous resource nouns ("email", "message", "dm") that used to
+        // live here moved to `SEND_NOUN_ALIASES`, checked separately in
+        // `detect_verbs` only when no explicit verb is otherwise present.
+        // Keeping them here made "read email" or "delete a message" match
+        // Send *alongside* the explicit Read/Delete intent, since a noun
+        // is not the same signal as an action word.
+        ToolVerb::Send => &["send", "reply", "forward", "notify"],
         ToolVerb::Read => &["read", "get", "fetch", "show", "view", "see", "retrieve"],
         ToolVerb::List => &["list", "search", "find", "lookup", "browse"],
         ToolVerb::Update => &[
@@ -132,6 +137,14 @@ fn verb_aliases(v: ToolVerb) -> &'static [&'static str] {
         ToolVerb::Merge => &["merge", "accept", "approve"],
     }
 }
+
+/// Resource nouns associated with `ToolVerb::Send` (as distinct from the
+/// actual action words in `verb_aliases`). A resource noun alone is a much
+/// weaker signal than an action word: "message support" has no explicit verb
+/// and inferring Send from "message" is reasonable, but "delete a message" or
+/// "read email" already carry an explicit conflicting verb (Delete, Read),
+/// and a noun must not add Send alongside it — see `detect_verbs`.
+const SEND_NOUN_ALIASES: &[&str] = &["email", "message", "dm"];
 
 const ALL_VERBS: [ToolVerb; 7] = [
     ToolVerb::Create,
@@ -169,6 +182,39 @@ fn detect_verbs(prompt: &str) -> HashSet<ToolVerb> {
         for alias in verb_aliases(v) {
             if contains_whole_word(&lowered, alias) {
                 found.insert(v);
+                break;
+            }
+        }
+    }
+    // Resource nouns for Send are checked whenever `Send` was not already
+    // matched by one of its action aliases above. This is exactly equivalent
+    // to the pre-extraction behaviour, where these nouns lived in `Send`'s
+    // own alias list: `Send` was added iff ANY of its aliases matched, action
+    // word or noun. Splitting the nouns out keeps the verb table honest
+    // (a noun is not an action word) without changing which verbs are found.
+    //
+    // Gating this on `found.is_empty()` instead is NOT equivalent and is a
+    // real ranking regression: "Post a message to #general" matches "post"
+    // (a `Create` alias), so `found` is non-empty and `Send` is never added
+    // — which ranks SLACK_CREATE_CHANNEL above SLACK_SEND_MESSAGE and drops
+    // SLACK_SEND_MESSAGE out of the top 15 entirely. Pinned by the host's
+    // pre-extraction ranking snapshot.
+    // A noun does not override a verb that CONFLICTS with sending ("read
+    // email", "delete a message" are Read/Delete, not Send). It does apply
+    // alongside `Create`, because "post/write/draft a message" is a send
+    // intent expressed with a creation verb — and suppressing it there is
+    // what dropped SLACK_SEND_MESSAGE out of the top 15 for "Post a message
+    // to #general". Pinned by the host's pre-extraction ranking snapshot.
+    let conflicts_with_send = found.iter().any(|v| {
+        matches!(
+            v,
+            ToolVerb::Read | ToolVerb::List | ToolVerb::Update | ToolVerb::Delete | ToolVerb::Merge
+        )
+    });
+    if !found.contains(&ToolVerb::Send) && !conflicts_with_send {
+        for alias in SEND_NOUN_ALIASES {
+            if contains_whole_word(&lowered, alias) {
+                found.insert(ToolVerb::Send);
                 break;
             }
         }

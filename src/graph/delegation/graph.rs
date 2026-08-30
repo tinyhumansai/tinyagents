@@ -181,8 +181,25 @@ where
     // pause via `ApprovalRequestCard`), which parks a live in-memory chat turn
     // and is deliberately left untouched.
     if require_review_approval {
+        let cancel_approval = cancel.clone();
         builder = builder.add_node("approval", move |s: DelegationState, ctx: NodeContext| {
+            let cancel = cancel_approval.clone();
             async move {
+                // Cancellation must be honoured here exactly like every other
+                // node: without this check, a cancellation that arrives while
+                // a gated run is waiting for approval (or during the
+                // preceding review worker) is invisible to this boundary. A
+                // decisionless retry would then interrupt again indefinitely
+                // (nothing ever routes it to `finalize`), while an approving
+                // resume would finalize successfully despite the run having
+                // been cancelled.
+                if cancel.is_cancelled() {
+                    return Ok(NodeResult::Command(
+                        Command::default()
+                            .with_update(DelegationUpdate::Cancelled)
+                            .with_goto(["finalize"]),
+                    ));
+                }
                 match ctx.resume {
                     None => {
                         let payload = json!({
