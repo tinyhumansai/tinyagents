@@ -830,8 +830,8 @@ async fn concurrent_runs_on_one_middleware_release_their_own_reservations() {
         .unwrap();
     // Expected from the crate's shared estimator (which charges every content
     // block, tool call, and the role label) rather than a hand-copied number.
-    let expected = tinyinference::message::count_tokens_approximately(&[Message::user("x".repeat(40))])
-        + tinyinference::message::count_tokens_approximately(&[Message::user("y".repeat(400))]);
+    let expected = crate::token_estimation::count_tokens_approximately(&[Message::user("x".repeat(40))])
+        + crate::token_estimation::count_tokens_approximately(&[Message::user("y".repeat(400))]);
     let reserved = tracker.snapshot().reserved_input_total;
     assert_eq!(
         reserved, expected,
@@ -902,7 +902,7 @@ async fn shared_tracker_reservation_is_atomic_under_concurrency() {
     // Derived from the shared estimator so the test tracks it instead of
     // pinning a stale hand-computed constant.
     let per_call_tokens =
-        tinyinference::message::count_tokens_approximately(&[Message::user("x".repeat(40))]);
+        crate::token_estimation::count_tokens_approximately(&[Message::user("x".repeat(40))]);
     let concurrent_capacity = 4u64;
     let attempts = 10usize;
     let limits = BudgetLimits {

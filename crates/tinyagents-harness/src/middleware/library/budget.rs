@@ -126,13 +126,13 @@ impl BudgetLimits {
 /// reservation.
 ///
 /// Uses the crate's shared
-/// [`count_tokens_approximately`][tinyinference::message::count_tokens_approximately]
+/// [`count_tokens_approximately`][crate::token_estimation::count_tokens_approximately]
 /// estimator. Summing `estimate_tokens(&m.text())` counted only textual content
 /// blocks, so a request dominated by large JSON tool results or image blocks
 /// preflighted at close to zero tokens and sailed past a token budget it in
 /// fact blew through.
 fn estimated_input_tokens(request: &ModelRequest) -> u64 {
-    tinyinference::message::count_tokens_approximately(&request.messages)
+    crate::token_estimation::count_tokens_approximately(&request.messages)
 }
 
 impl BudgetMiddleware {
