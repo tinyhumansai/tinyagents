@@ -11,9 +11,9 @@
 //! response cache is in-process.
 
 use tinyagents_harness::cache::{
-    CacheLayoutEvent, CachePolicy, InMemoryResponseCache, PromptCacheLayout, ResponseCache,
-    cache_key,
+    CacheLayoutEvent, InMemoryResponseCache, PromptCacheLayout, ResponseCache, cache_key,
 };
+use tinyinference::cache::CachePolicy;
 use tinyinference::message::Message;
 use tinyinference::model::{ModelRequest, ModelResponse, PromptSegment, SegmentRole};
 use tinyagents_harness::summarization::{

@@ -12,9 +12,9 @@ use async_trait::async_trait;
 
 use tinyagents_harness::Result;
 use tinyagents_harness::cache::{
-    CachePolicy, InMemoryResponseCache, cache_key, credential_fingerprint, model_cache_identity,
-    scoped_cache_key,
+    InMemoryResponseCache, cache_key, credential_fingerprint, model_cache_identity, scoped_cache_key,
 };
+use tinyinference::cache::CachePolicy;
 use tinyinference::message::Message;
 use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyagents_harness::runtime::AgentHarness;
