@@ -22,7 +22,7 @@ use crate::events::EventSink;
 use crate::ids::{RunId, ThreadId};
 use crate::tool::{ToolErrorPolicy, context_detail_from_args, humanize_tool_name};
 
-pub use tinyinference::tool::{ToolCall, ToolDelta, ToolFormat, ToolSchema};
+pub(crate) use tinyinference::tool::{ToolCall, ToolDelta, ToolFormat, ToolSchema};
 
 /// The outcome of executing a [`ToolCall`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
