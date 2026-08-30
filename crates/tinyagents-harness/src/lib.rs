@@ -76,8 +76,5 @@ pub use steering::{
     SteeringCommand, SteeringCommandKind, SteeringHandle, SteeringOutcome, SteeringPolicy,
 };
 pub use subagent::{SubAgent, SubAgentSession, SubAgentTool};
-pub use tool::{
-    Tool as HarnessTool, ToolCall as HarnessToolCall, ToolFormat, ToolRegistry,
-    ToolResult as HarnessToolResult, ToolSchema,
-};
+pub use tool::{Tool as HarnessTool, ToolRegistry, ToolResult as HarnessToolResult};
 pub use workspace::{SharedRootWorkspace, WorkspaceDescriptor, WorkspaceIsolation};
