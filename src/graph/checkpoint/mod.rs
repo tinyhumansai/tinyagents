@@ -35,6 +35,32 @@ use async_trait::async_trait;
 use crate::harness::ids::CheckpointId;
 use crate::{Result, TinyAgentsError};
 
+/// Builds a `TinyAgentsError::Checkpoint` for a failed `serde_json` decode,
+/// tagging the message with whether the failure looks like a genuine
+/// shape/schema mismatch or ambiguous/likely corruption.
+///
+/// `serde_json::Error::classify()` distinguishes `Category::Data` (the JSON
+/// parsed fine but didn't match the target type — a missing field, a renamed
+/// variant, a type change: exactly what a legacy or newer schema produces)
+/// from `Category::Syntax` / `Category::Eof` / `Category::Io` (the bytes
+/// themselves are malformed or truncated — a write torn by a crash, disk
+/// corruption, or a partial copy). Both backends previously tagged every
+/// failure here identically as `"decode …"`, and a caller (see
+/// `graph::delegation::run::is_incompatible_checkpoint_error`) that expired
+/// any checkpoint whose error mentioned "decode" would delete a corrupted
+/// record indistinguishably from an outdated one — silently discarding
+/// evidence of real storage corruption instead of surfacing it. This tag is
+/// the stable discriminator that lets the caller tell the two apart.
+pub(super) fn decode_json_err(context: &str, err: serde_json::Error) -> TinyAgentsError {
+    let tag = match err.classify() {
+        serde_json::error::Category::Data => "schema",
+        serde_json::error::Category::Syntax
+        | serde_json::error::Category::Eof
+        | serde_json::error::Category::Io => "corrupt",
+    };
+    TinyAgentsError::Checkpoint(format!("decode [{tag}] {context}: {err}"))
+}
+
 /// Persists and retrieves graph checkpoints keyed by thread.
 #[async_trait]
 pub trait Checkpointer<State>: Send + Sync
