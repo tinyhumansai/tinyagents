@@ -176,6 +176,28 @@ fn resource_noun_does_not_add_send_alongside_an_explicit_conflicting_verb() {
 }
 
 #[test]
+fn compound_task_preserves_send_alongside_a_distant_unrelated_verb() {
+    // A genuinely compound task: "find Alice" (List) AND "email her the
+    // report" (Send) are two independent intents joined by "and", not one
+    // verb governing the noun. Suppressing Send here (as a blanket
+    // "any conflicting verb anywhere in the prompt" gate would) drops
+    // GMAIL_SEND_EMAIL from the gated tool set entirely for a query that
+    // genuinely needs it.
+    let v = detect_verbs("find Alice and email her the report");
+    assert!(
+        v.contains(&ToolVerb::Send),
+        "a distant, unrelated List verb must not suppress a compound task's \
+         Send intent: {v:?}"
+    );
+    assert!(v.contains(&ToolVerb::List));
+
+    // Still suppressed when the conflicting verb is close enough to read as
+    // the noun's direct object, even with a determiner between them.
+    let v = detect_verbs("delete that old email");
+    assert_eq!(v, HashSet::from([ToolVerb::Delete]));
+}
+
+#[test]
 fn tool_verb_handles_plurals() {
     assert_eq!(tool_verb("SLACK_DELETES_A_MESSAGE"), Some(ToolVerb::Delete));
     assert_eq!(
