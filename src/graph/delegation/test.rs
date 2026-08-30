@@ -705,7 +705,7 @@ async fn cancelled_checkpoint_still_scheduling_finalize_is_resumed_not_terminal(
             schema_version: CURRENT_SCHEMA_VERSION,
             ..Default::default()
         },
-        next_nodes: vec![crate::graph::NodeId::from("finalize")],
+        next_nodes: vec![crate::harness::ids::NodeId::from("finalize")],
         completed_tasks: vec![],
         pending_writes: vec![],
         interrupts: vec![],
