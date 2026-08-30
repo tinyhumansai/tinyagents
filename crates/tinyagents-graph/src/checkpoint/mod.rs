@@ -56,16 +56,45 @@ use tinyagents_harness::ids::CheckpointId;
 /// prefix; `what` names the field being decoded (e.g. `"record"`,
 /// `"next_nodes"`) with no leading `"decode "` — this function supplies that
 /// wording once, alongside the tag.
+///
+/// **Only `what == "record"` — the whole-`Checkpoint<State>` decode, where
+/// `State` is the one thing this module knows can legitimately evolve across
+/// a caller's schema versions — is eligible for `[schema]` at all.**
+/// `"namespace"`, `"next_nodes"`, `"header"` and `"write payload"` are
+/// checkpoint-internal engine metadata with no versioned shape of their own;
+/// a `Category::Data` failure decoding any of those is corruption by
+/// construction; classifying it as `[schema]` and pruning would have been
+/// simply wrong.
+///
+/// Even for `"record"`, `Category::Data` is a HEURISTIC, not a proof: this
+/// module is generic over `State` (see the module docs) and has no way to
+/// positively identify a specific caller's known-legacy shape from a byte
+/// stream alone — a decode failure produced by data corruption that happens
+/// to still be syntactically valid JSON (e.g. a `state.schema_version` field
+/// whose value was flipped from a number to a string) also classifies as
+/// `Category::Data`, indistinguishable at this layer from a genuine older
+/// schema. This is an accepted, bounded residual risk, not a claim of
+/// perfect precision: the worst case is an unnecessary fresh restart from
+/// `plan` for what was actually corruption, which is a strict improvement
+/// over the state before this classifier existed (100% of decode failures,
+/// corrupt or not, were pruned identically). Closing the remaining gap
+/// precisely would need the generic `Checkpointer` trait to expose the raw
+/// bytes on a failed decode so a caller could apply its OWN positive-shape
+/// check — a real API addition, tracked as follow-up rather than done here.
 pub(super) fn decode_json_err(
     backend: &str,
     what: &str,
     err: serde_json::Error,
 ) -> TinyAgentsError {
-    let tag = match err.classify() {
-        serde_json::error::Category::Data => "schema",
-        serde_json::error::Category::Syntax
-        | serde_json::error::Category::Eof
-        | serde_json::error::Category::Io => "corrupt",
+    let tag = if what == "record" {
+        match err.classify() {
+            serde_json::error::Category::Data => "schema",
+            serde_json::error::Category::Syntax
+            | serde_json::error::Category::Eof
+            | serde_json::error::Category::Io => "corrupt",
+        }
+    } else {
+        "corrupt"
     };
     TinyAgentsError::Checkpoint(format!("{backend}: decode [{tag}] {what}: {err}"))
 }

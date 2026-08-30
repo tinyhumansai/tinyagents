@@ -8,7 +8,9 @@ description = "Provider-neutral model, tool, middleware, and agent-loop runtime.
 
 [dependencies]
 async-trait = "0.1"
-base64 = { version = "0.23", optional = true }
+# Keep this aligned with reqwest's transitive version so consumers do not
+# resolve a second base64 package solely for multimodal data URIs.
+base64 = { version = "0.22", optional = true }
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = { version = "0.10", optional = true }

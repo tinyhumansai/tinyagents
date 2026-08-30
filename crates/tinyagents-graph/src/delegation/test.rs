@@ -828,6 +828,226 @@ async fn cancelled_checkpoint_still_scheduling_finalize_is_resumed_not_terminal(
     assert!(outcome.state.cancelled);
 }
 
+#[tokio::test]
+async fn cancellation_at_the_approval_node_routes_to_finalize() {
+    // Cancellation arriving while a gated run is parked at the approval
+    // interrupt (or during the preceding review worker) must be honoured at
+    // that boundary exactly like every other node. Without the check, a
+    // decisionless retry interrupts again indefinitely, and an approving
+    // resume finalizes successfully despite the cancellation.
+    let cancel = CancellationToken::new();
+    let dir = tempfile::tempdir().unwrap();
+    let cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::checkpoint::FileCheckpointer::new(dir.path()));
+    let config = DelegationConfig {
+        require_review_approval: true,
+        checkpointer: Some(cp.clone()),
+        thread_id: Some("cancel-at-approval".to_string()),
+        cancel: cancel.clone(),
+        ..DelegationConfig::default()
+    };
+    let outcome = run_delegation_durable(config, flow_runner(0))
+        .await
+        .expect("parks on approval");
+    outcome.pending.expect("parked on the approval interrupt");
+    assert!(
+        outcome.state.final_output.is_none(),
+        "not finalized yet — still awaiting approval"
+    );
+
+    // Cancel while parked, then resume with an approval decision: the
+    // cancellation must win, not the approval.
+    cancel.cancel();
+    let resumed_config = DelegationConfig {
+        require_review_approval: true,
+        checkpointer: Some(cp),
+        thread_id: Some("cancel-at-approval".to_string()),
+        cancel,
+        ..DelegationConfig::default()
+    };
+    let resumed = resume_delegation(resumed_config, json!("approve_once"), flow_runner(0))
+        .await
+        .expect("resumes");
+    assert!(resumed.pending.is_none(), "resume clears the pause");
+    assert!(
+        resumed.state.cancelled,
+        "cancellation must be honoured at the approval boundary, not silently \
+         overridden by an approving resume"
+    );
+    assert!(
+        resumed.state.final_output.is_some(),
+        "cancellation routes to finalize, producing a cancellation summary"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_resume_delegation_calls_for_the_same_thread_never_overlap() {
+    // The approval interrupt's resume path routes straight from `approval` to
+    // `finalize` WITHOUT calling `run_stage` at all (`finalize` only reads
+    // accumulated state), so a `run_stage`-based concurrency probe cannot
+    // observe the lock during `resume_delegation` — it only ever sees the
+    // SETUP `run_delegation_durable` call's stage execution. Instrument the
+    // checkpointer's `get` instead, since that IS on `resume_delegation`'s
+    // critical path (the schema-mismatch check reads the checkpoint before
+    // dispatching), and is where two racing resumes would actually overlap
+    // without the per-thread lock.
+    struct BlockingGetCheckpointer<S> {
+        inner: Arc<dyn Checkpointer<S>>,
+        concurrent: Arc<AtomicUsize>,
+        max_concurrent: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Checkpointer<DelegationState> for BlockingGetCheckpointer<DelegationState> {
+        async fn put(
+            &self,
+            checkpoint: Checkpoint<DelegationState>,
+        ) -> crate::Result<tinyagents_harness::ids::CheckpointId> {
+            self.inner.put(checkpoint).await
+        }
+
+        async fn get(
+            &self,
+            thread_id: &str,
+            checkpoint_id: Option<&str>,
+        ) -> crate::Result<Option<Checkpoint<DelegationState>>> {
+            let now = self.concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_concurrent.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let result = self.inner.get(thread_id, checkpoint_id).await;
+            self.concurrent.fetch_sub(1, Ordering::SeqCst);
+            result
+        }
+
+        async fn list(
+            &self,
+            thread_id: &str,
+        ) -> crate::Result<Vec<crate::checkpoint::CheckpointMetadata>> {
+            self.inner.list(thread_id).await
+        }
+
+        async fn list_threads(&self) -> crate::Result<Vec<String>> {
+            self.inner.list_threads().await
+        }
+
+        async fn delete_thread(&self, thread_id: &str) -> crate::Result<()> {
+            self.inner.delete_thread(thread_id).await
+        }
+
+        async fn delete_checkpoints(
+            &self,
+            thread_id: &str,
+            ids: &[String],
+        ) -> crate::Result<usize> {
+            self.inner.delete_checkpoints(thread_id, ids).await
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let real_cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::checkpoint::FileCheckpointer::new(dir.path()));
+
+    // Park on the approval interrupt first, through the real checkpointer.
+    let setup_config = DelegationConfig {
+        require_review_approval: true,
+        checkpointer: Some(real_cp.clone()),
+        thread_id: Some("racing-resume-thread".to_string()),
+        ..DelegationConfig::default()
+    };
+    run_delegation_durable(setup_config, flow_runner(0))
+        .await
+        .expect("parks on approval")
+        .pending
+        .expect("parked on the approval interrupt");
+
+    let concurrent = Arc::new(AtomicUsize::new(0));
+    let max_concurrent = Arc::new(AtomicUsize::new(0));
+    let wrapped: Arc<dyn Checkpointer<DelegationState>> = Arc::new(BlockingGetCheckpointer {
+        inner: real_cp,
+        concurrent: concurrent.clone(),
+        max_concurrent: max_concurrent.clone(),
+    });
+    let make_config = || DelegationConfig {
+        require_review_approval: true,
+        checkpointer: Some(wrapped.clone()),
+        thread_id: Some("racing-resume-thread".to_string()),
+        ..DelegationConfig::default()
+    };
+
+    let (r1, r2) = tokio::join!(
+        resume_delegation(make_config(), json!("approve_once"), flow_runner(0)),
+        resume_delegation(make_config(), json!("approve_once"), flow_runner(0)),
+    );
+    // Exactly one of the two racing resumes may succeed in applying the
+    // decision; a second resume of an already-finalized thread is expected to
+    // either no-op or surface a graph-level error — either is acceptable, but
+    // overlapping `get` calls across the two resumes is not: that is exactly
+    // the race the per-thread lock exists to prevent.
+    assert!(r1.is_ok() || r2.is_ok(), "at least one resume must succeed");
+    assert_eq!(
+        max_concurrent.load(Ordering::SeqCst),
+        1,
+        "the per-thread lock must serialize the two resumes' checkpoint reads; \
+         observed overlapping `get` calls"
+    );
+}
+#[tokio::test]
+async fn resume_delegation_rejects_a_schema_mismatched_checkpoint() {
+    // `resume_delegation` is a public entry point a host calls directly with
+    // an approver's decision — it bypasses `run_or_resume_delegation`'s
+    // match arms entirely, so `CompiledGraph::resume` would otherwise apply
+    // the decision to a schema-mismatched checkpoint with no check at all.
+    // During a rollback/mixed-version deployment, serde can decode a newer
+    // additive checkpoint by ignoring unknown fields, letting an older
+    // binary consume the approval under outdated semantics.
+    let dir = tempfile::tempdir().unwrap();
+    let seed: crate::checkpoint::FileCheckpointer<DelegationState> =
+        crate::checkpoint::FileCheckpointer::new(dir.path());
+    let checkpoint = Checkpoint {
+        thread_id: "resume-future-schema".to_string(),
+        checkpoint_id: "cp-future".to_string(),
+        run_id: None,
+        parent_checkpoint_id: None,
+        namespace: vec![],
+        state: DelegationState {
+            plan: Some("PLAN".to_string()),
+            schema_version: CURRENT_SCHEMA_VERSION + 1,
+            ..Default::default()
+        },
+        next_nodes: vec![tinyagents_harness::ids::NodeId::from("approval")],
+        completed_tasks: vec![],
+        pending_writes: vec![],
+        interrupts: vec![Interrupt {
+            id: "int-1".to_string(),
+            node: tinyagents_harness::ids::NodeId::from("approval"),
+            payload: json!({}),
+        }],
+        pending_activations: None,
+        barrier_arrivals: vec![],
+        metadata: json!({}),
+    };
+    seed.put(checkpoint)
+        .await
+        .expect("seed future-schema checkpoint parked on approval");
+
+    let cp: Arc<dyn Checkpointer<DelegationState>> = Arc::new(
+        crate::checkpoint::FileCheckpointer::<DelegationState>::new(dir.path()),
+    );
+    let config = DelegationConfig {
+        require_review_approval: true,
+        checkpointer: Some(cp),
+        thread_id: Some("resume-future-schema".to_string()),
+        ..DelegationConfig::default()
+    };
+    let err = resume_delegation(config, json!("approve_once"), flow_runner(0))
+        .await
+        .expect_err("must refuse to resume a schema-mismatched checkpoint");
+    assert!(
+        err.contains("schema_version"),
+        "error should name the mismatch: {err}"
+    );
+}
+
 #[test]
 fn incompatible_checkpoint_error_matches_schema_not_corrupt_or_operational() {
     use crate::TinyAgentsError;
@@ -869,6 +1089,38 @@ fn incompatible_checkpoint_error_matches_schema_not_corrupt_or_operational() {
     assert!(!is_incompatible_checkpoint_error(&TinyAgentsError::Resume(
         "no checkpoint".to_string()
     )));
+}
+
+#[test]
+fn decode_json_err_only_tags_schema_for_the_record_context() {
+    use crate::checkpoint::decode_json_err;
+
+    // `Category::Data` errors decoding checkpoint-internal metadata
+    // ("namespace", "next_nodes", "header", "write payload") must NEVER be
+    // tagged `[schema]` — those fields have no versioned shape of their own,
+    // so a Data-category failure there is corruption by construction, not a
+    // caller's schema evolution.
+    let data_err = serde_json::from_str::<u32>("\"not a number\"").unwrap_err();
+    assert_eq!(data_err.classify(), serde_json::error::Category::Data);
+    for what in ["namespace", "next_nodes", "header", "write payload"] {
+        let wrapped = decode_json_err("sqlite checkpointer", what, {
+            serde_json::from_str::<u32>("\"not a number\"").unwrap_err()
+        });
+        assert!(
+            format!("{wrapped}").contains(&format!("decode [corrupt] {what}")),
+            "non-record contexts must always tag [corrupt], even for a \
+             Data-category error: {wrapped}"
+        );
+    }
+    let _ = data_err;
+
+    // The "record" context is the only one eligible for [schema].
+    let wrapped = decode_json_err(
+        "sqlite checkpointer",
+        "record",
+        serde_json::from_str::<u32>("\"not a number\"").unwrap_err(),
+    );
+    assert!(format!("{wrapped}").contains("decode [schema] record"));
 }
 
 #[test]

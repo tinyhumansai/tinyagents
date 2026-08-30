@@ -157,6 +157,48 @@ where
     F: Fn(DelegationStage, DelegationState) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Result<DelegationStageOutput, String>> + Send + 'static,
 {
+    // This is the public entry point a host calls directly with an approver's
+    // decision — it does NOT go through `run_or_resume_delegation`, so it must
+    // provide its own two protections that function otherwise only gets:
+    //
+    // 1. Per-thread serialization: two concurrent approval callbacks for the
+    //    SAME paused thread (a retried callback racing with a deny, say) must
+    //    not both load the same interrupt checkpoint and independently
+    //    finalize opposite decisions, appending competing histories. Uses the
+    //    SAME `thread_lock` map as `run_or_resume_delegation`, so the two
+    //    entry points serialize against each other too, not just themselves.
+    // 2. Schema-version validation: `CompiledGraph::resume` (inside
+    //    `resume_graph`) applies the decision to whatever checkpoint it
+    //    finds, with no schema check of its own — that check lives in
+    //    `run_or_resume_delegation`'s match arms, which this path bypasses.
+    //    During a rollback or mixed-version deployment, serde can decode a
+    //    checkpoint written by a newer binary by ignoring its added fields,
+    //    letting an older binary consume the approval and finalize the state
+    //    under outdated semantics. Reject rather than guess.
+    let thread_id = config
+        .thread_id
+        .clone()
+        .ok_or_else(|| "delegation resume requires a thread_id".to_string())?;
+    let cp = config
+        .checkpointer
+        .clone()
+        .ok_or_else(|| "delegation resume requires a checkpointer".to_string())?;
+
+    let lock = thread_lock(&thread_id);
+    let _guard = lock.lock().await;
+
+    if let Some(checkpoint) = cp
+        .get(thread_id.as_str(), None)
+        .await
+        .map_err(|e| format!("delegation checkpoint read failed for thread {thread_id}: {e}"))?
+        && checkpoint.state.schema_version != CURRENT_SCHEMA_VERSION
+    {
+        return Err(format!(
+            "delegation resume refused for thread {thread_id}: checkpoint schema_version {}              does not match this binary's schema_version {} — the approval decision was NOT              applied",
+            checkpoint.state.schema_version, CURRENT_SCHEMA_VERSION
+        ));
+    }
+
     let approved = decision_is_approve(&decision);
     tinyagents_tracing::info!(
         approved,
