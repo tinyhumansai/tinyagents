@@ -878,68 +878,115 @@ async fn cancellation_at_the_approval_node_routes_to_finalize() {
 
 #[tokio::test]
 async fn concurrent_resume_delegation_calls_for_the_same_thread_never_overlap() {
-    // `resume_delegation` is a public entry point that bypasses
-    // `run_or_resume_delegation` entirely, so it needs its OWN per-thread
-    // serialization — two concurrent approval callbacks for the same paused
-    // thread (a retried callback racing with a deny, say) must not both load
-    // the same interrupt checkpoint and independently finalize, appending
-    // competing histories.
-    let concurrent = Arc::new(AtomicUsize::new(0));
-    let max_concurrent = Arc::new(AtomicUsize::new(0));
-    let make_runner = || {
-        let concurrent = concurrent.clone();
-        let max_concurrent = max_concurrent.clone();
-        move |stage: DelegationStage, _s: DelegationState| {
-            let concurrent = concurrent.clone();
-            let max_concurrent = max_concurrent.clone();
-            Box::pin(async move {
-                let now = concurrent.fetch_add(1, Ordering::SeqCst) + 1;
-                max_concurrent.fetch_max(now, Ordering::SeqCst);
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                concurrent.fetch_sub(1, Ordering::SeqCst);
-                let text = match stage {
-                    DelegationStage::Review => "approve".to_string(),
-                    _ => "ok".to_string(),
-                };
-                Ok::<_, String>(DelegationStageOutput::done(text))
-            }) as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
+    // The approval interrupt's resume path routes straight from `approval` to
+    // `finalize` WITHOUT calling `run_stage` at all (`finalize` only reads
+    // accumulated state), so a `run_stage`-based concurrency probe cannot
+    // observe the lock during `resume_delegation` — it only ever sees the
+    // SETUP `run_delegation_durable` call's stage execution. Instrument the
+    // checkpointer's `get` instead, since that IS on `resume_delegation`'s
+    // critical path (the schema-mismatch check reads the checkpoint before
+    // dispatching), and is where two racing resumes would actually overlap
+    // without the per-thread lock.
+    struct BlockingGetCheckpointer<S> {
+        inner: Arc<dyn Checkpointer<S>>,
+        concurrent: Arc<AtomicUsize>,
+        max_concurrent: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Checkpointer<DelegationState> for BlockingGetCheckpointer<DelegationState> {
+        async fn put(
+            &self,
+            checkpoint: Checkpoint<DelegationState>,
+        ) -> crate::Result<crate::harness::ids::CheckpointId> {
+            self.inner.put(checkpoint).await
         }
-    };
+
+        async fn get(
+            &self,
+            thread_id: &str,
+            checkpoint_id: Option<&str>,
+        ) -> crate::Result<Option<Checkpoint<DelegationState>>> {
+            let now = self.concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_concurrent.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let result = self.inner.get(thread_id, checkpoint_id).await;
+            self.concurrent.fetch_sub(1, Ordering::SeqCst);
+            result
+        }
+
+        async fn list(
+            &self,
+            thread_id: &str,
+        ) -> crate::Result<Vec<crate::graph::checkpoint::CheckpointMetadata>> {
+            self.inner.list(thread_id).await
+        }
+
+        async fn list_threads(&self) -> crate::Result<Vec<String>> {
+            self.inner.list_threads().await
+        }
+
+        async fn delete_thread(&self, thread_id: &str) -> crate::Result<()> {
+            self.inner.delete_thread(thread_id).await
+        }
+
+        async fn delete_checkpoints(
+            &self,
+            thread_id: &str,
+            ids: &[String],
+        ) -> crate::Result<usize> {
+            self.inner.delete_checkpoints(thread_id, ids).await
+        }
+    }
 
     let dir = tempfile::tempdir().unwrap();
-    let cp: Arc<dyn Checkpointer<DelegationState>> =
+    let real_cp: Arc<dyn Checkpointer<DelegationState>> =
         Arc::new(crate::graph::checkpoint::FileCheckpointer::new(dir.path()));
-    let make_config = || DelegationConfig {
+
+    // Park on the approval interrupt first, through the real checkpointer.
+    let setup_config = DelegationConfig {
         require_review_approval: true,
-        checkpointer: Some(cp.clone()),
+        checkpointer: Some(real_cp.clone()),
         thread_id: Some("racing-resume-thread".to_string()),
         ..DelegationConfig::default()
     };
-
-    // Park on the approval interrupt first.
-    run_delegation_durable(make_config(), make_runner())
+    run_delegation_durable(setup_config, flow_runner(0))
         .await
         .expect("parks on approval")
         .pending
         .expect("parked on the approval interrupt");
 
+    let concurrent = Arc::new(AtomicUsize::new(0));
+    let max_concurrent = Arc::new(AtomicUsize::new(0));
+    let wrapped: Arc<dyn Checkpointer<DelegationState>> = Arc::new(BlockingGetCheckpointer {
+        inner: real_cp,
+        concurrent: concurrent.clone(),
+        max_concurrent: max_concurrent.clone(),
+    });
+    let make_config = || DelegationConfig {
+        require_review_approval: true,
+        checkpointer: Some(wrapped.clone()),
+        thread_id: Some("racing-resume-thread".to_string()),
+        ..DelegationConfig::default()
+    };
+
     let (r1, r2) = tokio::join!(
-        resume_delegation(make_config(), json!("approve_once"), make_runner()),
-        resume_delegation(make_config(), json!("approve_once"), make_runner()),
+        resume_delegation(make_config(), json!("approve_once"), flow_runner(0)),
+        resume_delegation(make_config(), json!("approve_once"), flow_runner(0)),
     );
     // Exactly one of the two racing resumes may succeed in applying the
     // decision; a second resume of an already-finalized thread is expected to
     // either no-op or surface a graph-level error — either is acceptable, but
-    // no overlapping stage execution across the two calls is not.
+    // overlapping `get` calls across the two resumes is not: that is exactly
+    // the race the per-thread lock exists to prevent.
     assert!(r1.is_ok() || r2.is_ok(), "at least one resume must succeed");
     assert_eq!(
         max_concurrent.load(Ordering::SeqCst),
         1,
-        "the per-thread lock must serialize the two resumes' stage execution; \
-         observed overlapping stage invocations"
+        "the per-thread lock must serialize the two resumes' checkpoint reads; \
+         observed overlapping `get` calls"
     );
 }
-
 #[tokio::test]
 async fn resume_delegation_rejects_a_schema_mismatched_checkpoint() {
     // `resume_delegation` is a public entry point a host calls directly with
