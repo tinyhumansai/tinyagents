@@ -31,7 +31,7 @@ struct CheckpointIdHeader {
 
 use super::{
     Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointTuple, Checkpointer, PendingWrite,
-    merge_writes,
+    decode_json_err, merge_writes,
 };
 use crate::harness::ids::CheckpointId;
 use crate::{Result, TinyAgentsError};
