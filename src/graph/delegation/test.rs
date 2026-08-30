@@ -825,6 +825,70 @@ async fn cancelled_checkpoint_still_scheduling_finalize_is_resumed_not_terminal(
 }
 
 #[tokio::test]
+async fn concurrent_resume_delegation_calls_for_the_same_thread_never_overlap() {
+    // `resume_delegation` is a public entry point that bypasses
+    // `run_or_resume_delegation` entirely, so it needs its OWN per-thread
+    // serialization — two concurrent approval callbacks for the same paused
+    // thread (a retried callback racing with a deny, say) must not both load
+    // the same interrupt checkpoint and independently finalize, appending
+    // competing histories.
+    let concurrent = Arc::new(AtomicUsize::new(0));
+    let max_concurrent = Arc::new(AtomicUsize::new(0));
+    let make_runner = || {
+        let concurrent = concurrent.clone();
+        let max_concurrent = max_concurrent.clone();
+        move |stage: DelegationStage, _s: DelegationState| {
+            let concurrent = concurrent.clone();
+            let max_concurrent = max_concurrent.clone();
+            Box::pin(async move {
+                let now = concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+                max_concurrent.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                concurrent.fetch_sub(1, Ordering::SeqCst);
+                let text = match stage {
+                    DelegationStage::Review => "approve".to_string(),
+                    _ => "ok".to_string(),
+                };
+                Ok::<_, String>(DelegationStageOutput::done(text))
+            }) as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
+        }
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::new(dir.path()));
+    let make_config = || DelegationConfig {
+        require_review_approval: true,
+        checkpointer: Some(cp.clone()),
+        thread_id: Some("racing-resume-thread".to_string()),
+        ..DelegationConfig::default()
+    };
+
+    // Park on the approval interrupt first.
+    run_delegation_durable(make_config(), make_runner())
+        .await
+        .expect("parks on approval")
+        .pending
+        .expect("parked on the approval interrupt");
+
+    let (r1, r2) = tokio::join!(
+        resume_delegation(make_config(), json!("approve_once"), make_runner()),
+        resume_delegation(make_config(), json!("approve_once"), make_runner()),
+    );
+    // Exactly one of the two racing resumes may succeed in applying the
+    // decision; a second resume of an already-finalized thread is expected to
+    // either no-op or surface a graph-level error — either is acceptable, but
+    // no overlapping stage execution across the two calls is not.
+    assert!(r1.is_ok() || r2.is_ok(), "at least one resume must succeed");
+    assert_eq!(
+        max_concurrent.load(Ordering::SeqCst),
+        1,
+        "the per-thread lock must serialize the two resumes' stage execution; \
+         observed overlapping stage invocations"
+    );
+}
+
+#[tokio::test]
 async fn resume_delegation_rejects_a_schema_mismatched_checkpoint() {
     // `resume_delegation` is a public entry point a host calls directly with
     // an approver's decision — it bypasses `run_or_resume_delegation`'s
