@@ -50,6 +50,23 @@ where
     F: Fn(DelegationStage, DelegationState) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Result<DelegationStageOutput, String>> + Send + 'static,
 {
+    // `require_review_approval` documents that it needs a checkpointer +
+    // thread_id (interrupts require durability). Without this check either
+    // may be absent and the graph still parks on the approval interrupt: no
+    // checkpoint is written, `into_outcome` fills `PendingApproval::thread_id`
+    // with an empty string, and `resume_delegation` then fails with
+    // "delegation resume requires a thread_id"/"a checkpointer" — the pause
+    // can never be released and the delegated work is stranded. Reject the
+    // misconfiguration up front instead.
+    if config.require_review_approval && (config.checkpointer.is_none() || config.thread_id.is_none())
+    {
+        return Err(
+            "delegation human-approval gate (require_review_approval) requires both a \
+             checkpointer and a thread_id"
+                .to_string(),
+        );
+    }
+
     let thread_id = config.thread_id.clone();
     let mut graph = build_delegation_graph(
         config.max_revisions,
