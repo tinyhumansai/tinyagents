@@ -144,8 +144,14 @@ fn stopwords_removed() {
 
 #[test]
 fn verb_detection_handles_aliases() {
+    // Exact assertion, not `contains(Send) || contains(Create)`: the
+    // regression this pins is specifically that `Send` must be retained
+    // ALONGSIDE `Create` here, not merely that one of the two survives — an
+    // implementation that suppresses `Send` whenever ANY verb is found would
+    // still pass a permissive `||` assertion while reintroducing the exact
+    // ranking regression (`SLACK_SEND_MESSAGE` falling out of the top-k).
     let v = detect_verbs("post a message to general channel");
-    assert!(v.contains(&ToolVerb::Send) || v.contains(&ToolVerb::Create));
+    assert_eq!(v, HashSet::from([ToolVerb::Create, ToolVerb::Send]));
 
     let v = detect_verbs("delete all promotional emails");
     assert!(v.contains(&ToolVerb::Delete));
