@@ -155,6 +155,21 @@ fn verb_detection_handles_aliases() {
 }
 
 #[test]
+fn resource_noun_does_not_add_send_alongside_an_explicit_conflicting_verb() {
+    // "read email" and "delete a message" must not ALSO detect Send from the
+    // resource noun — only the explicit action verb should be present.
+    let v = detect_verbs("read email");
+    assert_eq!(v, HashSet::from([ToolVerb::Read]));
+
+    let v = detect_verbs("delete a message");
+    assert_eq!(v, HashSet::from([ToolVerb::Delete]));
+
+    // No explicit verb at all: the resource noun alone may still imply Send.
+    let v = detect_verbs("message support channel");
+    assert!(v.contains(&ToolVerb::Send));
+}
+
+#[test]
 fn tool_verb_handles_plurals() {
     assert_eq!(tool_verb("SLACK_DELETES_A_MESSAGE"), Some(ToolVerb::Delete));
     assert_eq!(
