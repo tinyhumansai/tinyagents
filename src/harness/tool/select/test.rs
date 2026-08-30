@@ -1,3 +1,6 @@
+//! Unit tests for prompt-driven tool selection: verb classification,
+//! abbreviation expansion, stopword filtering, and ranked overlap scoring.
+
 use super::*;
 
 fn tool<'a>(name: &'a str, desc: &'a str) -> SelectableTool<'a> {
