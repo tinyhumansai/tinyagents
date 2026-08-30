@@ -599,7 +599,7 @@ fn parse_relaxed_object(raw: &str) -> Option<Value> {
         // A non-object parsed strictly is not a tool call; do not try to
         // "repair" it into one.
         Ok(_) => None,
-        Err(_) => tinyinference::providers::openai::relaxed_json::recover_relaxed_object(raw),
+        Err(_) => crate::relaxed_json::recover_relaxed_object(raw),
     }
 }
 
