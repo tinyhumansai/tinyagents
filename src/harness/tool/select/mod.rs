@@ -176,22 +176,56 @@ fn detect_verbs(prompt: &str) -> HashSet<ToolVerb> {
     found
 }
 
-/// Classify a tool name (e.g. `"GITHUB_CREATE_A_PULL_REQUEST"`) by verb.
-/// Returns `None` when no verb prefix is recognised — such tools are kept as
-/// neutral by the gate.
+/// Whether `word` (already uppercased) is one of the recognised verb
+/// prefixes, tolerating a trailing plural `S` (`"CREATES"` -> `"CREATE"`).
+fn word_is_verb_prefix(word_upper: &str) -> bool {
+    let trimmed = word_upper.strip_suffix('S').unwrap_or(word_upper);
+    ALL_VERBS.iter().any(|&v| {
+        tool_verb_prefixes(v)
+            .iter()
+            .any(|&prefix| word_upper == prefix || trimmed == prefix)
+    })
+}
+
+/// Classify a tool name (e.g. `"GITHUB_CREATE_A_PULL_REQUEST"` or the
+/// canonical lowercase `"github_create_a_pull_request"`) by verb. Returns
+/// `None` when no verb prefix is recognised — such tools are kept as neutral
+/// by the gate.
+///
+/// `ToolSchema::name` is canonical `snake_case`, so segments are uppercased
+/// before comparison against the (uppercase) verb prefix tables — comparing
+/// raw case previously left every canonical lowercase name unclassified,
+/// silently disabling the verb gate for them.
+///
+/// The first segment is only stripped as an assumed vendor prefix when it is
+/// NOT itself a recognised verb. An unprefixed action slug (e.g.
+/// `"create_a_pull_request"`, no vendor segment) has its verb in that first
+/// position; unconditionally stripping it discarded the only verb present.
 fn tool_verb(name: &str) -> Option<ToolVerb> {
-    // Strip the vendor prefix (everything up to and including the first `_`).
-    let stripped = match name.split_once('_') {
-        Some((_, rest)) => rest,
-        None => name,
+    let first_segment = name.split('_').next().unwrap_or(name);
+    let first_is_verb = word_is_verb_prefix(&first_segment.to_ascii_uppercase());
+
+    // Strip an assumed vendor prefix (everything up to and including the
+    // first `_`) unless the first segment is itself the verb.
+    let stripped = if first_is_verb {
+        name
+    } else {
+        match name.split_once('_') {
+            Some((_, rest)) => rest,
+            None => name,
+        }
     };
+
     // Check the first two words.
     for word in stripped.split('_').take(2) {
-        let trimmed = word.strip_suffix('S').unwrap_or(word);
-        for &v in &ALL_VERBS {
-            for &prefix in tool_verb_prefixes(v) {
-                if word == prefix || trimmed == prefix {
-                    return Some(v);
+        let word_upper = word.to_ascii_uppercase();
+        if word_is_verb_prefix(&word_upper) {
+            let trimmed = word_upper.strip_suffix('S').unwrap_or(&word_upper);
+            for &v in &ALL_VERBS {
+                for &prefix in tool_verb_prefixes(v) {
+                    if word_upper == prefix || trimmed == prefix {
+                        return Some(v);
+                    }
                 }
             }
         }
