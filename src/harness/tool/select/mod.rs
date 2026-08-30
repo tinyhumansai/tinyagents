@@ -175,6 +175,45 @@ fn tool_verb_prefixes(v: ToolVerb) -> &'static [&'static str] {
     }
 }
 
+/// Word tokens of `prompt`, in order, lowercase, alphanumeric-only (contiguous
+/// runs split on anything else). Unlike `tokenize`'s `HashSet`, order and
+/// duplicates matter here — this feeds the proximity check in `detect_verbs`.
+fn ordered_words(prompt: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for c in prompt.chars() {
+        if c.is_ascii_alphanumeric() {
+            current.push(c.to_ascii_lowercase());
+        } else if !current.is_empty() {
+            out.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// Verbs whose action words genuinely conflict with a Send-resource-noun
+/// reading: "read email" / "delete a message" name Read/Delete, not Send.
+const SEND_CONFLICTING_VERBS: &[ToolVerb] = &[
+    ToolVerb::Read,
+    ToolVerb::List,
+    ToolVerb::Update,
+    ToolVerb::Delete,
+    ToolVerb::Merge,
+];
+
+/// How many words on either side of a Send-resource-noun still count as "this
+/// conflicting verb's direct object" rather than an unrelated clause. Covers
+/// "read email" (distance 1) and "delete a message" (distance 2, one
+/// determiner between) without reaching across a conjunction into a second,
+/// independent clause: "find Alice and email her the report" is distance 3
+/// from "find" to "email" (find, alice, and, email), outside this window, so
+/// the compound task's Send intent is preserved instead of being suppressed
+/// by an unrelated verb earlier in the sentence.
+const CONFLICT_PROXIMITY_WINDOW: usize = 2;
+
 fn detect_verbs(prompt: &str) -> HashSet<ToolVerb> {
     let lowered = prompt.to_ascii_lowercase();
     let mut found = HashSet::new();
@@ -186,36 +225,55 @@ fn detect_verbs(prompt: &str) -> HashSet<ToolVerb> {
             }
         }
     }
+    if found.contains(&ToolVerb::Send) {
+        return found;
+    }
+
     // Resource nouns for Send are checked whenever `Send` was not already
-    // matched by one of its action aliases above. This is exactly equivalent
-    // to the pre-extraction behaviour, where these nouns lived in `Send`'s
-    // own alias list: `Send` was added iff ANY of its aliases matched, action
-    // word or noun. Splitting the nouns out keeps the verb table honest
-    // (a noun is not an action word) without changing which verbs are found.
+    // matched by one of its action aliases above. This is close to (but not
+    // identical to) the pre-extraction behaviour, where these nouns lived in
+    // `Send`'s own alias list unconditionally: `Send` was added iff ANY of
+    // its aliases matched, action word or noun, with no gate at all.
     //
-    // Gating this on `found.is_empty()` instead is NOT equivalent and is a
-    // real ranking regression: "Post a message to #general" matches "post"
-    // (a `Create` alias), so `found` is non-empty and `Send` is never added
-    // — which ranks SLACK_CREATE_CHANNEL above SLACK_SEND_MESSAGE and drops
-    // SLACK_SEND_MESSAGE out of the top 15 entirely. Pinned by the host's
-    // pre-extraction ranking snapshot.
-    // A noun does not override a verb that CONFLICTS with sending ("read
-    // email", "delete a message" are Read/Delete, not Send). It does apply
-    // alongside `Create`, because "post/write/draft a message" is a send
-    // intent expressed with a creation verb — and suppressing it there is
-    // what dropped SLACK_SEND_MESSAGE out of the top 15 for "Post a message
-    // to #general". Pinned by the host's pre-extraction ranking snapshot.
-    let conflicts_with_send = found.iter().any(|v| {
-        matches!(
-            v,
-            ToolVerb::Read | ToolVerb::List | ToolVerb::Update | ToolVerb::Delete | ToolVerb::Merge
-        )
-    });
-    if !found.contains(&ToolVerb::Send) && !conflicts_with_send {
-        for alias in SEND_NOUN_ALIASES {
-            if contains_whole_word(&lowered, alias) {
+    // A blanket "any conflicting verb found anywhere in the prompt" gate is
+    // NOT equivalent and is a real ranking regression: "Post a message to
+    // #general" matches "post" (a `Create` alias, not conflicting, so this
+    // case is unaffected) but "find Alice and email her the report" matches
+    // "find" (a `List` alias, which DOES conflict) and would suppress Send
+    // for a genuinely compound task that needs both List and Send tools —
+    // dropping GMAIL_SEND_EMAIL from the gated set entirely rather than
+    // merely deprioritizing it, since the verb gate filters out (not just
+    // down-ranks) a tool whose verb isn't in the query's detected verb set.
+    //
+    // Proximity is the fix: a conflicting verb only suppresses the noun when
+    // it appears within `CONFLICT_PROXIMITY_WINDOW` words of THAT specific
+    // noun occurrence — i.e. when the noun reads as the verb's direct object
+    // ("read email", "delete a message") rather than a separate clause
+    // joined by "and" naming an unrelated intent. `Create` is deliberately
+    // never in `SEND_CONFLICTING_VERBS` at any distance: "post/write/draft a
+    // message" is a send intent expressed with a creation verb, which is
+    // what dropped SLACK_SEND_MESSAGE out of the top 15 when this was
+    // (wrongly) gated on `found.is_empty()` instead. Both are pinned by the
+    // host's pre-extraction ranking snapshot and real-data suite.
+    let words = ordered_words(&lowered);
+    let conflicting_aliases: Vec<&'static str> = SEND_CONFLICTING_VERBS
+        .iter()
+        .flat_map(|&v| verb_aliases(v).iter().copied())
+        .collect();
+
+    'nouns: for alias in SEND_NOUN_ALIASES {
+        for (i, word) in words.iter().enumerate() {
+            if word != alias {
+                continue;
+            }
+            let lo = i.saturating_sub(CONFLICT_PROXIMITY_WINDOW);
+            let hi = (i + CONFLICT_PROXIMITY_WINDOW).min(words.len().saturating_sub(1));
+            let conflict_nearby = (lo..=hi)
+                .filter(|&j| j != i)
+                .any(|j| conflicting_aliases.contains(&words[j].as_str()));
+            if !conflict_nearby {
                 found.insert(ToolVerb::Send);
-                break;
+                break 'nouns;
             }
         }
     }
