@@ -157,6 +157,50 @@ async fn human_gated_run_parks_on_interrupt_then_resume_approves() {
 }
 
 #[tokio::test]
+async fn human_gated_without_checkpointer_or_thread_id_is_rejected() {
+    // `require_review_approval` documents that it needs both a checkpointer
+    // and a thread_id (interrupts require durability). Without this guard the
+    // run would still park on the approval interrupt with nothing persisted,
+    // filling `PendingApproval::thread_id` with an empty string and stranding
+    // the pause forever (`resume_delegation` has no checkpoint/thread to
+    // resume from). Both misconfigurations must be rejected up front.
+    let neither = DelegationConfig {
+        require_review_approval: true,
+        ..DelegationConfig::default()
+    };
+    let err = run_delegation_durable(neither, flow_runner(0))
+        .await
+        .expect_err("must reject: no checkpointer, no thread_id");
+    assert!(
+        err.contains("require_review_approval"),
+        "error should name the misconfigured field: {err}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::new(dir.path()));
+    let checkpointer_only = DelegationConfig {
+        require_review_approval: true,
+        checkpointer: Some(cp),
+        thread_id: None,
+        ..DelegationConfig::default()
+    };
+    run_delegation_durable(checkpointer_only, flow_runner(0))
+        .await
+        .expect_err("must reject: checkpointer without a thread_id");
+
+    let thread_only = DelegationConfig {
+        require_review_approval: true,
+        checkpointer: None,
+        thread_id: Some("hg-no-cp".to_string()),
+        ..DelegationConfig::default()
+    };
+    run_delegation_durable(thread_only, flow_runner(0))
+        .await
+        .expect_err("must reject: thread_id without a checkpointer");
+}
+
+#[tokio::test]
 async fn ttl_expiry_resume_with_deny_blocks_the_result() {
     let dir = tempfile::tempdir().unwrap();
     let cp: Arc<dyn Checkpointer<DelegationState>> =
