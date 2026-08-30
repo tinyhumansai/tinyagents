@@ -224,8 +224,10 @@ pub use graph::{
 // Pure structure, no runtime state: a host projects its own nodes into the
 // borrowed `DagNode` view, so workflow phases, task boards and plan steps all
 // share one Kahn's-algorithm implementation. See `graph::dag`'s module docs for
-// how dangling edges and duplicate ids are treated.
-pub use graph::dag::{DagIssue, DagNode, has_cycle, validate_dag};
+// how dangling edges and duplicate ids are treated. The free functions
+// `has_cycle` / `validate_dag` stay behind `graph::dag::` to avoid generic-name
+// clashes at the crate root, matching `graph::export`.
+pub use graph::dag::{DagIssue, DagNode};
 
 // --- Graph: multi-stage sub-agent delegation (plan → execute ⇄ review → finalize) ---
 // The per-stage worker is injected, so the host supplies how a stage runs while
