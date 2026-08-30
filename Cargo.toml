@@ -112,7 +112,19 @@ chrono-tz = { version = "0.10", optional = true }
 # `STANDARD_NO_PAD`, so `harness::multimodal::data_uri` picks by length instead
 # of trying both — trying both decoded a multi-MB image twice for every
 # unpadded payload.
-base64 = { version = "0.23", optional = true }
+#
+# Pinned to `0.22`, one minor behind what dependabot proposed (#125), on
+# purpose: `hyper-util` -> `hyper-rustls` -> `reqwest` already pulls `0.22.1`
+# into every consumer's graph (openhuman, tinyagents, tinycortex, tinymemory),
+# so a direct `0.23` requirement here resolves as a SECOND copy rather than
+# reusing that one — +1 package with no capability gained, which is exactly
+# what trips a consumer's kernel-dependency-floor ratchet (see
+# `tinyhumansai/openhuman`'s `scripts/kernel-floor.limits`). Unify with the
+# ecosystem's version instead of letting this crate's direct dependency get
+# ahead of it. Dependabot will likely re-propose `0.23` once `reqwest`'s own
+# tree moves past `0.22` — that will be fine to accept at that point, since it
+# will no longer create a duplicate.
+base64 = { version = "0.22", optional = true }
 # `flate2` decompresses `application/gzip` data URIs that carry an
 # `original_mime=` parameter — the shape a renderer emits when it compresses an
 # attachment before handing it over. Decompression is bounded by `Read::take`
