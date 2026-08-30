@@ -384,19 +384,24 @@ fn into_outcome(
 /// bare bool, or an object carrying `approved`/`decision` — so the existing
 /// decision contract routes into `Command::resume` unchanged.
 pub(super) fn decision_is_approve(decision: &Value) -> bool {
+    /// Recognised string spellings for an approval decision. Also used for
+    /// the object-shaped `{"decision": ..}` form below: a prefix check there
+    /// (`starts_with("approve")`) previously treated any unvalidated string
+    /// beginning with "approve" (e.g. an attacker- or bug-supplied
+    /// `"approve_not_authorized"`) as approval, releasing the durable
+    /// human-approval gate for a decision value nothing actually approved.
+    const APPROVE_STRINGS: &[&str] = &["approve_once", "approve_always_for_tool", "approve", "approved"];
+
     match decision {
         Value::Bool(b) => *b,
-        Value::String(s) => matches!(
-            s.as_str(),
-            "approve_once" | "approve_always_for_tool" | "approve" | "approved"
-        ),
+        Value::String(s) => APPROVE_STRINGS.contains(&s.as_str()),
         Value::Object(m) => {
             if let Some(b) = m.get("approved").and_then(Value::as_bool) {
                 return b;
             }
             m.get("decision")
                 .and_then(Value::as_str)
-                .map(|d| d.starts_with("approve"))
+                .map(|d| APPROVE_STRINGS.contains(&d))
                 .unwrap_or(false)
         }
         _ => false,
