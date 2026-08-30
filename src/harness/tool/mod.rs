@@ -15,6 +15,7 @@ pub mod injected;
 mod prompt;
 mod schema;
 mod schema_prepare;
+pub mod select;
 mod timeout;
 mod types;
 
@@ -33,6 +34,7 @@ pub use injected::{project_injected_arguments, strip_injected_arguments};
 pub use prompt::*;
 pub use schema::*;
 pub use schema_prepare::*;
+pub use select::*;
 pub use timeout::*;
 pub use tinytools::{
     ContextDetailOptions, context_detail_from_args, context_detail_from_args_with,

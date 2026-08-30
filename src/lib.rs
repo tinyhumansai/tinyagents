@@ -220,6 +220,27 @@ pub use graph::{
     register_orchestration_tools,
 };
 
+// --- Graph: dependency-DAG validation (unique ids, landed edges, acyclicity) ---
+// Pure structure, no runtime state: a host projects its own nodes into the
+// borrowed `DagNode` view, so workflow phases, task boards and plan steps all
+// share one Kahn's-algorithm implementation. See `graph::dag`'s module docs for
+// how dangling edges and duplicate ids are treated. The free functions
+// `has_cycle` / `validate_dag` stay behind `graph::dag::` to avoid generic-name
+// clashes at the crate root, matching `graph::export`.
+pub use graph::dag::{DagIssue, DagNode};
+
+// --- Graph: multi-stage sub-agent delegation (plan → execute ⇄ review → finalize) ---
+// The per-stage worker is injected, so the host supplies how a stage runs while
+// this crate owns the routing, revision budget, checkpoint/resume classification
+// and the durable human-approval interrupt. `DelegationState` is an on-disk
+// format — see `graph::delegation`'s README before changing its shape.
+pub use graph::delegation::{
+    CURRENT_SCHEMA_VERSION as DELEGATION_SCHEMA_VERSION, DelegationConfig, DelegationOutcome,
+    DelegationStage, DelegationStageOutput, DelegationState, PendingApproval, StepRecord,
+    delegation_graph_topology, deny_decision, resume_delegation, run_delegation,
+    run_delegation_durable, run_or_resume_delegation,
+};
+
 // --- Graph: per-thread goal (durable objective + graph-native continuation) ---
 // `goal_store` is the programmatic CRUD surface (get/set/complete/account_usage);
 // the tools and continuation helpers are re-exported flat for discoverability.

@@ -26,9 +26,21 @@ async-trait = "0.1"
 # without this crate naming `ToolExecutionContext` inside `tinytools` (the
 # edge points one way: `tinytools` must never depend on this crate).
 #
-# Path-only for now, which is what stops this crate being published. Publishing
-# `tinytools` is the prerequisite; see that repository's AGENTS.md.
-tinytools = { path = "vendor/tinytools/crates/tinytools" }
+# Vendored as a git submodule at `vendor/tinytools`, pinned to a commit on
+# that repository's `main` branch (verify with `git -C vendor/tinytools log
+# -1`); update the submodule pointer deliberately, the same as any other
+# dependency bump, not incidentally.
+#
+# `version` is required alongside `path` for `cargo package`/`cargo publish`
+# to accept this manifest at all (a path-only dependency fails packaging with
+# "all dependencies must have a version requirement specified"). It does not
+# by itself make this crate publishable: `cargo publish` additionally
+# resolves every dependency against the registry, so publishing still fails
+# until `tinytools` itself is published on crates.io at a compatible version.
+# That is the real prerequisite; see that repository's AGENTS.md. Keep this
+# version requirement in sync with `vendor/tinytools/crates/tinytools`'s own
+# `Cargo.toml` version.
+tinytools = { path = "vendor/tinytools/crates/tinytools", version = "0.1.0" }
 # Cheap, reference-counted byte buffers. Used only on the *internal* SSE
 # byte-stream seam (`harness::providers::openai::sse::SseState`) so each
 # network chunk from `reqwest::Response::bytes_stream` is forwarded without a

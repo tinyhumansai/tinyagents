@@ -34,7 +34,7 @@ use serde::de::DeserializeOwned;
 
 use super::{
     Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource, CheckpointTuple,
-    Checkpointer, PendingWrite, merge_writes,
+    Checkpointer, PendingWrite, decode_json_err, merge_writes,
 };
 use crate::harness::ids::{CheckpointId, NodeId};
 use crate::{Result, TinyAgentsError};
@@ -192,10 +192,10 @@ struct MetaRow {
 /// Reconstructs a [`CheckpointMetadata`] from the projected listing columns,
 /// without touching the full serialized record.
 fn row_metadata(row: MetaRow) -> Result<CheckpointMetadata> {
-    let namespace: Vec<String> =
-        serde_json::from_str(&row.namespace_json).map_err(|e| sqlite_err("decode namespace", e))?;
+    let namespace: Vec<String> = serde_json::from_str(&row.namespace_json)
+        .map_err(|e| decode_json_err("sqlite checkpointer", "namespace", e))?;
     let next_nodes: Vec<NodeId> = serde_json::from_str(&row.next_nodes_json)
-        .map_err(|e| sqlite_err("decode next_nodes", e))?;
+        .map_err(|e| decode_json_err("sqlite checkpointer", "next_nodes", e))?;
     Ok(CheckpointMetadata {
         thread_id: row.thread_id,
         checkpoint_id: row.checkpoint_id,
@@ -291,9 +291,11 @@ where
                 .map_err(|e| sqlite_err("query latest checkpoint", e))?,
         };
         match record {
-            Some(json) => Ok(Some(
-                serde_json::from_str(&json).map_err(|e| sqlite_err("decode record", e))?,
-            )),
+            Some(json) => {
+                Ok(Some(serde_json::from_str(&json).map_err(|e| {
+                    decode_json_err("sqlite checkpointer", "record", e)
+                })?))
+            }
             None => Ok(None),
         }
     }
@@ -333,9 +335,11 @@ where
                 .map_err(|e| sqlite_err("query latest scoped checkpoint", e))?,
         };
         match record {
-            Some(json) => Ok(Some(
-                serde_json::from_str(&json).map_err(|e| sqlite_err("decode record", e))?,
-            )),
+            Some(json) => {
+                Ok(Some(serde_json::from_str(&json).map_err(|e| {
+                    decode_json_err("sqlite checkpointer", "record", e)
+                })?))
+            }
             None => Ok(None),
         }
     }
@@ -367,8 +371,10 @@ where
             let mut records: Vec<Checkpoint<State>> = Vec::new();
             for row in rows {
                 let json = row.map_err(|e| sqlite_err("read record row", e))?;
-                records
-                    .push(serde_json::from_str(&json).map_err(|e| sqlite_err("decode record", e))?);
+                records.push(
+                    serde_json::from_str(&json)
+                        .map_err(|e| decode_json_err("sqlite checkpointer", "record", e))?,
+                );
             }
             let writes = read_writes_by_checkpoint(&conn, thread_id, &namespace_json)?;
             (records, writes)
@@ -473,7 +479,10 @@ where
         let mut out = Vec::new();
         for row in rows {
             let json = row.map_err(|e| sqlite_err("read record row", e))?;
-            out.push(serde_json::from_str(&json).map_err(|e| sqlite_err("decode record", e))?);
+            out.push(
+                serde_json::from_str(&json)
+                    .map_err(|e| decode_json_err("sqlite checkpointer", "record", e))?,
+            );
         }
         Ok(out)
     }
@@ -649,7 +658,7 @@ fn map_write_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<PendingWrit
                 channel,
                 payload,
             }),
-            Err(e) => Err(sqlite_err("decode write payload", e)),
+            Err(e) => Err(decode_json_err("sqlite checkpointer", "write payload", e)),
         },
     )
 }
@@ -686,7 +695,7 @@ fn read_writes_by_checkpoint(
         let (checkpoint_id, node, task_id, idx, channel, payload_json) =
             row.map_err(|e| sqlite_err("read write row", e))?;
         let payload = serde_json::from_str(&payload_json)
-            .map_err(|e| sqlite_err("decode write payload", e))?;
+            .map_err(|e| decode_json_err("sqlite checkpointer", "write payload", e))?;
         let write = PendingWrite {
             node: NodeId::from(node),
             task_id,
