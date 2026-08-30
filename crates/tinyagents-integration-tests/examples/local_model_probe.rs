@@ -16,7 +16,7 @@
 use futures::StreamExt;
 use serde_json::json;
 
-use tinyagents_harness::tool::{ToolCall, ToolSchema};
+use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyinference::message::{AssistantMessage, Message};
 use tinyinference::model::{
     ChatModel, ModelRequest, ModelResponse, ModelStreamItem, ResponseFormat, ToolChoice,

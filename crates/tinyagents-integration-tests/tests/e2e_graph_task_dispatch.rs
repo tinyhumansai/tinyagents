@@ -20,7 +20,7 @@ use tinyagents_graph::*;
 use tinyagents_harness::context::RunConfig;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::store::{InMemoryStore, Store};
-use tinyagents_harness::tool::ToolCall;
+use tinyinference::tool::ToolCall;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;

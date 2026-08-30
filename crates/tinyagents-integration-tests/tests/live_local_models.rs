@@ -56,7 +56,8 @@ use tinyagents_harness::Result;
 use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy};
 use tinyagents_harness::testkit::{EventRecorder, Trajectory};
-use tinyagents_harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
+use tinyagents_harness::tool::{Tool, ToolResult};
+use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyinference::message::Message;
 use tinyinference::model::{
     ChatModel, ModelRequest, ModelStreamItem, ResponseFormat, StreamAccumulator, ToolChoice,

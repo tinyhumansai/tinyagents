@@ -37,7 +37,7 @@ use serde_json::{Value, json};
 use tinyagents_graph::*;
 use tinyagents_harness::middleware::AgentRun;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
-use tinyagents_harness::tool::ToolCall;
+use tinyinference::tool::ToolCall;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;

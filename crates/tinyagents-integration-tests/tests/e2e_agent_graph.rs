@@ -24,7 +24,7 @@ use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::middleware::UsageAccountingMiddleware;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, ScriptedModel, Trajectory};
-use tinyagents_harness::tool::ToolCall;
+use tinyinference::tool::ToolCall;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;

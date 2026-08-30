@@ -25,7 +25,7 @@ use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::structured::{
     StructuredExtractor, StructuredStrategy, response_format_for_strategy,
 };
-use tinyagents_harness::tool::ToolCall;
+use tinyinference::tool::ToolCall;
 use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyinference::model::{ModelProfile, ModelResponse, ResponseFormat};
 use tinyinference::providers::MockModel;

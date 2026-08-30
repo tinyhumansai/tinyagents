@@ -24,7 +24,7 @@ use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::middleware::ToolPolicyMiddleware;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::ScriptedModel;
-use tinyagents_harness::tool::ToolCall as TC;
+use tinyinference::tool::ToolCall as TC;
 use tinyagents_harness::tool::{
     SandboxMode, Tool, ToolAccess, ToolCall, ToolPolicy, ToolResult, ToolRuntime, ToolSchema,
     ToolSideEffects,

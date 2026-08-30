@@ -16,7 +16,7 @@ use tinyagents_harness::observability::{
 };
 use tinyagents_harness::store::{AppendStore, InMemoryAppendStore, JsonlAppendStore};
 use tinyagents_harness::testkit::{FakeTool, Trajectory};
-use tinyagents_harness::tool::ToolCall;
+use tinyinference::tool::ToolCall;
 use tinyagents_registry::{CapabilityRegistry, ComponentId, ComponentKind, ComponentMetadata};
 use tinyinference::providers::MockModel;
 

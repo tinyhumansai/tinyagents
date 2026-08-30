@@ -31,7 +31,7 @@ use tinyagents_harness::store::{
 use tinyagents_harness::summarization::{
     ConcatSummarizer, SummarizationPolicy, Summarizer, TrimStrategy, estimate_tokens, trim_messages,
 };
-use tinyagents_harness::tool::ToolSchema;
+use tinyinference::tool::ToolSchema;
 use tinyinference::message::Message;
 use tinyinference::model::{ModelRequest, ModelResponse, ResponseFormat};
 

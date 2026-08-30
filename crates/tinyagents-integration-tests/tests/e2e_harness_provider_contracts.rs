@@ -9,7 +9,7 @@ use tinyagents_harness::stream::{StreamChunk, StreamMode, StreamSink, stream as 
 use tinyagents_harness::structured::{
     StructuredExtractor, StructuredStrategy, response_format_for_strategy,
 };
-use tinyagents_harness::tool::{ToolCall, ToolDelta, ToolFormat, ToolSchema};
+use tinyinference::tool::{ToolCall, ToolDelta, ToolFormat, ToolSchema};
 use tinyagents_registry::catalog::{
     ModelCapabilities, ModelCatalog, ModelCatalogEntry, ModelCatalogSnapshot, ModelCatalogSource,
     ModelPricing,

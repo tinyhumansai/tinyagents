@@ -14,7 +14,8 @@ use tinyagents_harness::middleware::{
     StructuredOutputValidatorMiddleware, TimeoutMiddleware, ToolAllowlistMiddleware, ToolBaseCall,
     ToolHandler, ToolMiddleware, TracingMiddleware,
 };
-use tinyagents_harness::tool::{ToolCall, ToolDelta, ToolResult, ToolSchema};
+use tinyagents_harness::tool::{ToolResult};
+use tinyinference::tool::{ToolCall, ToolDelta, ToolSchema};
 use tinyagents_language::{lexer, parser};
 use tinyinference::message::Message;
 use tinyinference::model::{ModelDelta, ModelRequest, ModelResponse, ResponseFormat};

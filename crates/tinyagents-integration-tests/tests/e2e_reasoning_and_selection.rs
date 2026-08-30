@@ -24,7 +24,7 @@ use tinyagents_harness::middleware::{ContextualToolSelectionMiddleware, ToolSele
 use tinyagents_harness::model_registry::{ModelRegistry, ModelSelection};
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, ScriptedModel, StreamingMock};
-use tinyagents_harness::tool::ToolSchema;
+use tinyinference::tool::ToolSchema;
 use tinyinference::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
 use tinyinference::model::{
     ChatModel, ModelProfile, ModelRequest, ModelResolutionSource, ModelResponse, ModelStatus,

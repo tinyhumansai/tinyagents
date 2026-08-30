@@ -16,7 +16,7 @@ use serde_json::json;
 use tinyagents_harness::TinyAgentsError;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::FakeTool;
-use tinyagents_harness::tool::ToolCall;
+use tinyinference::tool::ToolCall;
 use tinyinference::message::Message;
 use tinyinference::model::{ChatModel, ModelProfile, ModelRequest, ModelResponse, ToolChoice};
 

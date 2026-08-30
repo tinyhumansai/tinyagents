@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use tinyagents_harness::tool::ToolSchema;
+use tinyinference::tool::ToolSchema;
 use tinyinference::message::Message;
 use tinyinference::model::{ChatModel, ModelRequest, ReasoningEffort, ResponseFormat, ToolChoice};
 use tinyinference::providers::openai::OpenAiModel;

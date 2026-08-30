@@ -19,7 +19,8 @@ use serde_json::json;
 
 use tinyagents_harness::Result;
 use tinyagents_harness::runtime::AgentHarness;
-use tinyagents_harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
+use tinyagents_harness::tool::{Tool, ToolResult};
+use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyinference::message::Message;
 use tinyinference::providers::openai::OpenAiModel;
 

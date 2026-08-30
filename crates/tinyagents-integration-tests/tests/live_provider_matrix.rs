@@ -61,7 +61,7 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use serde_json::json;
-use tinyagents_harness::tool::ToolSchema;
+use tinyinference::tool::ToolSchema;
 use tinyinference::message::Message;
 use tinyinference::model::{
     ChatModel, ModelRequest, ModelStreamItem, StreamAccumulator, ToolChoice,

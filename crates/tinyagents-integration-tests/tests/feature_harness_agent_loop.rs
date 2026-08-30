@@ -24,7 +24,7 @@ use tinyagents_harness::ids::ExecutionStatus;
 use tinyagents_harness::limits::RunLimits;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, Trajectory};
-use tinyagents_harness::tool::ToolCall;
+use tinyinference::tool::ToolCall;
 use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyinference::model::ModelResponse;
 use tinyinference::providers::MockModel;

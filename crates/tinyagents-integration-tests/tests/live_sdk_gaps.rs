@@ -97,8 +97,8 @@ impl tinyagents_harness::tool::Tool<()> for AddTool {
         "Adds one to the provided number x and returns the result."
     }
 
-    fn schema(&self) -> tinyagents_harness::tool::ToolSchema {
-        tinyagents_harness::tool::ToolSchema::new(
+    fn schema(&self) -> tinyinference::tool::ToolSchema {
+        tinyinference::tool::ToolSchema::new(
             "add",
             "Adds one to the provided number x and returns the result.",
             serde_json::json!({
@@ -116,7 +116,7 @@ impl tinyagents_harness::tool::Tool<()> for AddTool {
     async fn call(
         &self,
         _state: &(),
-        call: tinyagents_harness::tool::ToolCall,
+        call: tinyinference::tool::ToolCall,
     ) -> tinyagents_harness::Result<tinyagents_harness::tool::ToolResult> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let x = call

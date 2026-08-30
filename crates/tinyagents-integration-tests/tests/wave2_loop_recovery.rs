@@ -12,7 +12,8 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use tinyagents_harness::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy, UnknownToolPolicy};
-use tinyagents_harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
+use tinyagents_harness::tool::{Tool, ToolResult};
+use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyinference::message::Message;
 use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 

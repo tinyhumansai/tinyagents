@@ -27,7 +27,7 @@ use tinyagents_harness::events::{AgentEvent, RecordingListener};
 use tinyagents_harness::ids::{ExecutionStatus, RunId};
 use tinyagents_harness::runtime::{AgentHarness, PayloadCapture, RunPolicy};
 use tinyagents_harness::testkit::FakeTool;
-use tinyagents_harness::tool::ToolCall;
+use tinyinference::tool::ToolCall;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;

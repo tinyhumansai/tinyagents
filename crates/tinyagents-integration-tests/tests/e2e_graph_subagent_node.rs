@@ -13,7 +13,7 @@ use tinyagents_graph::{
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::subagent::SubAgent;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, ScriptedModel};
-use tinyagents_harness::tool::ToolCall;
+use tinyinference::tool::ToolCall;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;

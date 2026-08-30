@@ -23,7 +23,7 @@
 use tinyagents_harness::summarization::{
     ConcatSummarizer, SummarizationPolicy, Summarizer, TrimStrategy, trim_messages,
 };
-use tinyagents_harness::tool::ToolCall;
+use tinyinference::tool::ToolCall;
 use tinyinference::message::{AssistantMessage, Message};
 
 /// The provider invariant, checked locally so this file depends on no new
