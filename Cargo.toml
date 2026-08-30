@@ -28,7 +28,7 @@ async-trait = "0.1"
 #
 # Path-only for now, which is what stops this crate being published. Publishing
 # `tinytools` is the prerequisite; see that repository's AGENTS.md.
-tinytools = { path = "vendor/tinytools/crates/tinytools" }
+tinytools = { path = "vendor/tinytools/crates/tinytools", version = "0.1.0" }
 # Cheap, reference-counted byte buffers. Used only on the *internal* SSE
 # byte-stream seam (`harness::providers::openai::sse::SseState`) so each
 # network chunk from `reqwest::Response::bytes_stream` is forwarded without a
