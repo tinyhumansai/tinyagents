@@ -26,7 +26,13 @@ jobs:
     runs-on: ubuntu-latest
     environment: Production
     env:
-      CRATE_NAME: tinyagents
+      # The crate previously named `tinyagents` was split into per-concern
+      # crates in `crates/*` (see commit 612ea5e). Version is now inherited
+      # from `[workspace.package].version` in the root Cargo.toml rather
+      # than set literally in a crate's own `[package]` table, so we track
+      # it via `tinyagents-harness`, which is always present and shares the
+      # workspace-inherited version.
+      CRATE_NAME: tinyagents-harness
     steps:
       - uses: actions/checkout@v7
         with:
