@@ -1,3 +1,24 @@
+//! Structure of the delegation graph: nodes, routing, the state reducer, and
+//! the recursion/retry policy that bounds the `execute` ⇄ `review` loop.
+
+use std::future::Future;
+
+use serde_json::json;
+
+use super::run::decision_is_approve;
+use super::types::{
+    DelegationConfig, DelegationStage, DelegationStageOutput, DelegationState, DelegationUpdate,
+    StepRecord,
+};
+use crate::CancellationToken;
+use crate::graph::export::GraphTopology;
+use crate::graph::recursion::RecursionPolicy;
+use crate::graph::{
+    ClosureStateReducer, Command, CompiledGraph, END, GraphBuilder, Interrupt, NodeContext,
+    NodeResult,
+};
+use crate::harness::retry::RetryPolicy;
+
 /// Build (but do not run) the delegation `CompiledGraph`. Shared by
 /// [`run_delegation`] and [`delegation_graph_topology`] so the graph's structure
 /// has one definition.

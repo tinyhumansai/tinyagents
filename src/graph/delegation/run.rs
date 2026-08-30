@@ -1,3 +1,19 @@
+//! Driving the delegation graph: fresh runs, durable resumes, and the
+//! checkpoint classification that decides between the two.
+
+use std::future::Future;
+use std::sync::Arc;
+
+use serde_json::{Value, json};
+
+use super::graph::build_delegation_graph;
+use super::types::{
+    CURRENT_SCHEMA_VERSION, DelegationConfig, DelegationOutcome, DelegationStage,
+    DelegationStageOutput, DelegationState, DelegationUpdate, PendingApproval,
+};
+use crate::graph::checkpoint::{Checkpoint, Checkpointer};
+use crate::graph::{Command, END};
+
 /// Run the plan→execute⇄review→finalize delegation graph, invoking `run_stage`
 /// for each stage. Returns the final [`DelegationState`].
 ///
