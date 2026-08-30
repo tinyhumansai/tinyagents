@@ -14,7 +14,7 @@
 use serde_json::{Map, Value, json};
 
 use tinyagents_harness::TinyAgentsError;
-use tinyagents_harness::message::Message;
+use tinyinference::message::Message;
 use tinyagents_harness::prompt::{MessagesTemplate, PromptBuilder, PromptTemplate, TemplateRole};
 use tinyagents_harness::tool::ToolSchema;
 

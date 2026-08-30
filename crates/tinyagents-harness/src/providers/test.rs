@@ -5,9 +5,9 @@
 use futures::StreamExt;
 use serde_json::json;
 
-use crate::message::{Message, MessageDelta};
-use crate::model::{ChatModel, ModelRequest, ModelStreamItem};
-use crate::providers::{MockModel, ProviderKind, ProviderSpec};
+use tinyinference::message::{Message, MessageDelta};
+use tinyinference::model::{ChatModel, ModelRequest, ModelStreamItem};
+use tinyinference::providers::{MockModel, ProviderKind, ProviderSpec};
 
 // ---------------------------------------------------------------------------
 // Shared helper: a unit state used throughout

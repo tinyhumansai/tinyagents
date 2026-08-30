@@ -10,8 +10,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::message::Message;
-use crate::model::{PromptSegment, ResponseFormat};
+use tinyinference::message::Message;
+use tinyinference::model::{PromptSegment, ResponseFormat};
 use crate::tool::ToolSchema;
 
 /// The role a rendered message will take in the conversation.
@@ -93,7 +93,7 @@ pub struct MessagesTemplate {
 /// [`push_instructions`]: PromptBuilder::push_instructions
 /// [`push_history`]: PromptBuilder::push_history
 /// [`push_volatile`]: PromptBuilder::push_volatile
-/// [`SegmentRole`]: crate::model::SegmentRole
+/// [`SegmentRole`]: tinyinference::model::SegmentRole
 #[derive(Clone, Debug, Default)]
 pub struct PromptBuilder {
     /// Accumulated segments, in push order.

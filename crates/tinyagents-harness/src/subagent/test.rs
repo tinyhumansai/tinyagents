@@ -17,14 +17,14 @@ use crate::context::{RunConfig, RunContext};
 use crate::error::TinyAgentsError;
 use crate::events::{AgentEvent, EventSink, RecordingListener};
 use crate::limits::RunLimits;
-use crate::message::{AssistantMessage, ContentBlock, Message};
-use crate::model::ModelResponse;
-use crate::providers::MockModel;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::ModelResponse;
+use tinyinference::providers::MockModel;
 use crate::runtime::{AgentHarness, RunPolicy};
 use crate::subagent::{SubAgent, SubAgentSession, SubAgentTool};
 use crate::testkit::ScriptedModel;
 use crate::tool::{Tool, ToolCall, ToolExecutionContext, ToolResult, ToolSchema};
-use crate::usage::Usage;
+use tinyinference::usage::Usage;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

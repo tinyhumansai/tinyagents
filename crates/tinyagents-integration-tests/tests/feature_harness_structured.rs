@@ -21,15 +21,15 @@ use serde::Deserialize;
 use serde_json::json;
 
 use tinyagents_harness::TinyAgentsError;
-use tinyagents_harness::message::{AssistantMessage, ContentBlock, Message};
-use tinyagents_harness::model::{ModelProfile, ModelResponse, ResponseFormat};
-use tinyagents_harness::providers::MockModel;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::{ModelProfile, ModelResponse, ResponseFormat};
+use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::structured::{
     StructuredExtractor, StructuredStrategy, response_format_for_strategy,
 };
 use tinyagents_harness::tool::ToolCall;
-use tinyagents_harness::usage::Usage;
+use tinyinference::usage::Usage;
 
 /// A typed target used to prove `StructuredOutput::parse::<T>()` round-trips.
 #[derive(Debug, Deserialize, PartialEq)]

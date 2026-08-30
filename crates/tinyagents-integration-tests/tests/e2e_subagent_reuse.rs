@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use tinyagents_graph::*;
-use tinyagents_harness::message::Message;
+use tinyinference::message::Message;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, ScriptedModel, Trajectory};
 use tinyagents_harness::*;

@@ -2,7 +2,7 @@
 //! OpenAI embeddings endpoint (`POST {base_url}/embeddings`).
 //!
 //! Split out of `embeddings/mod.rs`; mirrors the transport pattern of
-//! [`crate::providers::openai::OpenAiModel`].
+//! [`tinyinference::providers::openai::OpenAiModel`].
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -26,11 +26,11 @@ const DEFAULT_DIMENSIONS: usize = 1536;
 /// reusable [`reqwest::Client`] so repeated calls share a connection pool.
 ///
 /// This adapter intentionally mirrors the transport pattern of
-/// [`OpenAiModel`](crate::providers::openai::OpenAiModel).
+/// [`OpenAiModel`](tinyinference::providers::openai::OpenAiModel).
 ///
 /// # Example
 /// ```no_run
-/// use tinyagents_harness::embeddings::OpenAiEmbeddingModel;
+/// use tinyinference::embeddings::OpenAiEmbeddingModel;
 ///
 /// # fn main() -> tinyagents_harness::Result<()> {
 /// let model = OpenAiEmbeddingModel::from_env()?;

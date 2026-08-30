@@ -15,8 +15,8 @@ use serde_json::json;
 use tinyagents_harness::TinyAgentsError;
 use tinyagents_harness::context::RunConfig;
 use tinyagents_harness::limits::{LimitBehavior, RunLimits};
-use tinyagents_harness::message::Message;
-use tinyagents_harness::providers::MockModel;
+use tinyinference::message::Message;
+use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::FakeTool;
 

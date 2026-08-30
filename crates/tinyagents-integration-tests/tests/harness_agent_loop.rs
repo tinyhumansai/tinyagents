@@ -18,17 +18,17 @@ use tinyagents_harness::TinyAgentsError;
 use tinyagents_harness::context::RunContext;
 use tinyagents_harness::events::RecordingListener;
 use tinyagents_harness::limits::RunLimits;
-use tinyagents_harness::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyagents_harness::middleware::Middleware;
-use tinyagents_harness::model::{
+use tinyinference::model::{
     CapabilitySet, ChatModel, ModelHint, ModelProfile, ModelRequest, ModelResolutionSource,
     ModelResponse,
 };
-use tinyagents_harness::providers::MockModel;
+use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::{FakeTool, Trajectory};
 use tinyagents_harness::tool::ToolCall;
-use tinyagents_harness::usage::Usage;
+use tinyinference::usage::Usage;
 
 /// Middleware that subscribes a shared [`RecordingListener`] to the run's event
 /// sink so the test can reconstruct a [`Trajectory`] afterwards.

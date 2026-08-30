@@ -26,10 +26,10 @@ use crate::cache::CacheLayoutEvent;
 use crate::context::RunContext;
 use crate::error::{Result, TinyAgentsError};
 use crate::ids::RunId;
-use crate::model::{ModelDelta, ModelRequest, ModelResponse};
+use tinyinference::model::{ModelDelta, ModelRequest, ModelResponse};
 use crate::summarization::{SummarizationPolicy, Summarizer, SummaryRecord, TrimStrategy};
 use crate::tool::{ToolCall, ToolDelta, ToolResult};
-use crate::usage::UsageTotals;
+use tinyinference::usage::UsageTotals;
 
 // ── AgentRun ────────────────────────────────────────────────────────────────
 
@@ -54,7 +54,7 @@ use crate::usage::UsageTotals;
 #[derive(Clone, Debug, Default)]
 pub struct AgentRun {
     /// The full conversation transcript produced by the run, in order.
-    pub messages: Vec<crate::message::Message>,
+    pub messages: Vec<tinyinference::message::Message>,
     /// The final model response, when the run produced one.
     pub final_response: Option<ModelResponse>,
     /// Parsed structured output, when the run requested a structured format.

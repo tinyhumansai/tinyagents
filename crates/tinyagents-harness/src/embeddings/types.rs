@@ -90,7 +90,7 @@ pub fn format_embedding_signature(name: &str, model_id: &str, dimensions: usize)
 ///
 /// # Example
 /// ```
-/// use tinyagents_harness::embeddings::{EmbeddingModel, MockEmbeddingModel};
+/// use tinyinference::embeddings::{EmbeddingModel, MockEmbeddingModel};
 ///
 /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
 /// let model = MockEmbeddingModel::new(16);
@@ -252,7 +252,7 @@ pub(crate) struct VectorStoreInner {
 ///
 /// # Example
 /// ```
-/// use tinyagents_harness::embeddings::{InMemoryVectorStore, VectorStore};
+/// use tinyinference::embeddings::{InMemoryVectorStore, VectorStore};
 /// use serde_json::json;
 ///
 /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -281,7 +281,7 @@ pub struct InMemoryVectorStore {
 /// # Example
 /// ```
 /// use std::sync::Arc;
-/// use tinyagents_harness::embeddings::{InMemoryVectorStore, MockEmbeddingModel, Retriever};
+/// use tinyinference::embeddings::{InMemoryVectorStore, MockEmbeddingModel, Retriever};
 /// use serde_json::json;
 ///
 /// # tokio::runtime::Runtime::new().unwrap().block_on(async {

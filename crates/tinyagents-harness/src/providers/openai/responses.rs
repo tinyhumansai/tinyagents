@@ -36,9 +36,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::message::{AssistantMessage, ContentBlock, Message};
-use crate::model::ModelResponse;
-use crate::usage::Usage;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::ModelResponse;
+use tinyinference::usage::Usage;
 
 /// The `/v1/responses` request body.
 ///
@@ -93,7 +93,7 @@ pub(super) struct ResponsesRequest {
     /// `reasoning: { effort, summary }`, lowered from the provider-neutral
     /// [`ReasoningConfig`][rc].
     ///
-    /// [rc]: crate::model::ReasoningConfig
+    /// [rc]: tinyinference::model::ReasoningConfig
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) reasoning: Option<Value>,
     /// Which extra payloads to return.
@@ -123,8 +123,8 @@ pub(super) const INCLUDE_ENCRYPTED_REASONING: &str = "reasoning.encrypted_conten
 /// deliberately — it is Anthropic's knob, and inventing an OpenAI field for it
 /// would be worse than ignoring it.
 ///
-/// [rc]: crate::model::ReasoningConfig
-pub(super) fn translate_reasoning(config: &crate::model::ReasoningConfig) -> Option<Value> {
+/// [rc]: tinyinference::model::ReasoningConfig
+pub(super) fn translate_reasoning(config: &tinyinference::model::ReasoningConfig) -> Option<Value> {
     if config.is_empty() {
         return None;
     }
@@ -151,12 +151,12 @@ pub(super) fn translate_tool(schema: &crate::tool::ToolSchema) -> Value {
 /// Translates a [`ResponseFormat`][rf] onto the Responses API's `text.format`
 /// nesting (Chat Completions' `response_format` has no counterpart here).
 ///
-/// [rf]: crate::model::ResponseFormat
+/// [rf]: tinyinference::model::ResponseFormat
 pub(super) fn translate_text_format(
-    format: &crate::model::ResponseFormat,
+    format: &tinyinference::model::ResponseFormat,
     strict: bool,
 ) -> Option<Value> {
-    use crate::model::ResponseFormat;
+    use tinyinference::model::ResponseFormat;
     let inner = match format {
         ResponseFormat::Text => return None,
         ResponseFormat::JsonObject => serde_json::json!({ "type": "json_object" }),
@@ -486,7 +486,7 @@ pub(super) fn parse_responses_response(value: Value) -> ModelResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::Message;
+    use tinyinference::message::Message;
     use serde_json::json;
 
     #[test]

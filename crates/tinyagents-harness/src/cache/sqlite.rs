@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::types::{CacheStats, ResponseCache};
-use crate::model::ModelResponse;
+use tinyinference::model::ModelResponse;
 use crate::{Result, TinyAgentsError};
 
 /// Table + index DDL. `(ns, key)` is the primary key so a namespaced population

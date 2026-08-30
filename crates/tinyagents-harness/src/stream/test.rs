@@ -6,7 +6,7 @@
 
 use serde_json::json;
 
-use crate::message::MessageDelta;
+use tinyinference::message::MessageDelta;
 use crate::stream::{StreamChunk, StreamMode, StreamSink, stream};
 
 #[test]
@@ -174,7 +174,7 @@ fn stream_chunk_null_values_does_not_corrupt_to_empty_object() {
 mod project {
     use crate::events::AgentEvent;
     use crate::ids::{CallId, RunId};
-    use crate::message::MessageDelta;
+    use tinyinference::message::MessageDelta;
     use crate::stream::{
         StreamChunk, StreamMode, StreamSink, project_event, project_event_for_modes, projected_mode,
     };

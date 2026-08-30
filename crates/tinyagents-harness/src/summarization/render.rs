@@ -23,7 +23,7 @@
 //! JSON content — in a compact tagged form. LangChain solves the same problem
 //! with `get_buffer_string(..., format="xml")`.
 
-use crate::message::{ContentBlock, Message};
+use tinyinference::message::{ContentBlock, Message};
 
 /// Maximum characters rendered for a single tool-call argument blob or tool
 /// result body before it is elided.

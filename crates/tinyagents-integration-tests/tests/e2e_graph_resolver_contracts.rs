@@ -6,7 +6,7 @@ use tinyagents_graph::export::{
 };
 use tinyagents_graph::{Command, GraphBuilder, GraphDefaults, NodeResult, Route, START};
 use tinyagents_harness::ids::GraphId;
-use tinyagents_harness::providers::MockModel;
+use tinyinference::providers::MockModel;
 use tinyagents_harness::testkit::FakeTool;
 use tinyagents_language::capability_resolver::CapabilityResolver;
 use tinyagents_language::resolver::{Resolver, resolve_source};

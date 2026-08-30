@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::tool::ToolCall;
-use crate::usage::Usage;
+use tinyinference::usage::Usage;
 use serde_json::json;
 
 #[test]

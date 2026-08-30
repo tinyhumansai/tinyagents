@@ -1,6 +1,6 @@
 //! The transcript vocabulary a [`ToolDialect`](super::ToolDialect) speaks.
 //!
-//! # Why this is not [`crate::message::Message`]
+//! # Why this is not [`tinyinference::message::Message`]
 //!
 //! The harness's own message model is richer than what a dialect needs, and
 //! richer than what most hosts persist. A host that has been storing agent
@@ -8,7 +8,7 @@
 //! content string, some passthrough metadata — and the exact bytes it puts on
 //! the provider wire are part of its contract with those providers. Lifting
 //! that host's dialect logic into this crate through
-//! [`Message`](crate::message::Message) would mean a lossy round-trip
+//! [`Message`](tinyinference::message::Message) would mean a lossy round-trip
 //! through a model built for a different purpose, and the loss would land
 //! precisely on the fields providers reject requests over: `reasoning_content`,
 //! per-call `extra_content`, the tool-call/tool-result pairing.
@@ -20,7 +20,7 @@
 //!
 //! For hosts driving the crate's own agent loop, the equivalent surface is
 //! [`crate::tool::prompt`], which speaks
-//! [`Message`](crate::message::Message) instead. The two are parallel
+//! [`Message`](tinyinference::message::Message) instead. The two are parallel
 //! on purpose; see [the module docs](super) for which one to reach for.
 
 use serde::{Deserialize, Serialize};

@@ -61,12 +61,12 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use serde_json::json;
-use tinyagents_harness::message::Message;
-use tinyagents_harness::model::{
+use tinyinference::message::Message;
+use tinyinference::model::{
     ChatModel, ModelRequest, ModelStreamItem, StreamAccumulator, ToolChoice,
 };
-use tinyagents_harness::providers::openai::OpenAiModel;
-use tinyagents_harness::providers::{ProviderKind, ProviderSpec};
+use tinyinference::providers::openai::OpenAiModel;
+use tinyinference::providers::{ProviderKind, ProviderSpec};
 use tinyagents_harness::tool::ToolSchema;
 
 /// Prefix every matrix variable in `providers.env` carries.

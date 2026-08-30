@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::ModelResponse;
+use tinyinference::model::ModelResponse;
 
 // ---------------------------------------------------------------------------
 // Provider selection types
@@ -34,7 +34,7 @@ pub enum ProviderKind {
     /// LM Studio serves is whatever GGUF the user loaded, so there is no
     /// stable name to guess. Set one explicitly with
     /// [`ProviderSpec::with_model`], or discover it at runtime with
-    /// [`OpenAiModel::list_models`](crate::providers::openai::OpenAiModel::list_models).
+    /// [`OpenAiModel::list_models`](tinyinference::providers::openai::OpenAiModel::list_models).
     LmStudio,
     /// A local llama.cpp `llama-server` exposing `/v1/chat/completions`.
     ///
@@ -277,7 +277,7 @@ impl ProviderSpec {
 /// This is an internal type — callers interact with [`MockModel`]'s named
 /// constructors instead.
 pub(crate) enum MockBehavior {
-    /// Echoes the text of the last [`Message::User`][crate::message::Message]
+    /// Echoes the text of the last [`Message::User`][tinyinference::message::Message]
     /// in the request back as the assistant reply.
     Echo,
 
@@ -303,9 +303,9 @@ pub(crate) enum MockBehavior {
     /// streamed, so tests exercise truly incremental streaming (fine-grained
     /// text/reasoning/tool-call deltas). See [`MockModel::streaming_script`].
     /// `invoke` folds the same items through a
-    /// [`StreamAccumulator`][crate::model::StreamAccumulator] to
+    /// [`StreamAccumulator`][tinyinference::model::StreamAccumulator] to
     /// produce the equivalent unary response.
-    StreamScript(Vec<crate::model::ModelStreamItem>),
+    StreamScript(Vec<tinyinference::model::ModelStreamItem>),
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +315,7 @@ pub(crate) enum MockBehavior {
 /// Mutable runtime state for [`MockModel`], protected by a `Mutex`.
 #[derive(Default)]
 pub(crate) struct MockInner {
-    /// Total number of [`ChatModel::invoke`][crate::model::ChatModel]
+    /// Total number of [`ChatModel::invoke`][tinyinference::model::ChatModel]
     /// calls made so far (not counting `stream` calls that delegate to invoke).
     pub(crate) call_count: u64,
     /// Next index into the scripted response list (used by [`MockBehavior::Scripted`]).
@@ -328,7 +328,7 @@ pub(crate) struct MockInner {
 
 /// A deterministic, in-process chat model for tests and harness development.
 ///
-/// `MockModel` implements [`ChatModel<State>`][crate::model::ChatModel]
+/// `MockModel` implements [`ChatModel<State>`][tinyinference::model::ChatModel]
 /// generically for *any* `State: Send + Sync`.  It never makes network calls
 /// and has no external dependencies.
 ///
@@ -343,13 +343,13 @@ pub(crate) struct MockInner {
 ///
 /// # Streaming
 ///
-/// The [`ChatModel::stream`][crate::model::ChatModel] override
+/// The [`ChatModel::stream`][tinyinference::model::ChatModel] override
 /// internally calls [`ChatModel::invoke`] and replays the response as a real
-/// [`ModelStream`][crate::model::ModelStream]: a
-/// [`Started`][crate::model::ModelStreamItem::Started] item, one or two
-/// [`MessageDelta`][crate::model::ModelStreamItem::MessageDelta] items
+/// [`ModelStream`][tinyinference::model::ModelStream]: a
+/// [`Started`][tinyinference::model::ModelStreamItem::Started] item, one or two
+/// [`MessageDelta`][tinyinference::model::ModelStreamItem::MessageDelta] items
 /// (text split into two equal-sized halves by Unicode scalar value), and a
-/// terminal [`Completed`][crate::model::ModelStreamItem::Completed]
+/// terminal [`Completed`][tinyinference::model::ModelStreamItem::Completed]
 /// item carrying the full response. This lets downstream streaming consumers be
 /// exercised without any real streaming infrastructure. When the response
 /// contains no text (e.g. a tool-call response), a single empty text delta is
@@ -357,7 +357,7 @@ pub(crate) struct MockInner {
 ///
 /// # Usage estimates
 ///
-/// Every response carries a deterministic [`Usage`][crate::usage::Usage]
+/// Every response carries a deterministic [`Usage`][tinyinference::usage::Usage]
 /// derived from character counts:
 /// - `input_tokens` ≈ total characters in all request messages ÷ 4
 /// - `output_tokens` ≈ total characters in the response text ÷ 4 (minimum 1)
@@ -377,7 +377,7 @@ pub(crate) struct MockInner {
 /// ```
 ///
 /// Add the feature flag to `Cargo.toml` and implement
-/// [`ChatModel`][crate::model::ChatModel] in the corresponding module.
+/// [`ChatModel`][tinyinference::model::ChatModel] in the corresponding module.
 /// No changes to `mod.rs` or `harness/mod.rs` are needed beyond enabling the
 /// `pub mod` declaration.
 pub struct MockModel {

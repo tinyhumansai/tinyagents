@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::tool::ToolCall;
-use crate::usage::Usage;
+use tinyinference::usage::Usage;
 
 /// A typed unit of message content.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -31,7 +31,7 @@ pub enum ContentBlock {
     /// `None`) but preserved on the message so providers that require verbatim
     /// replay of the thinking turn preceding tool results (Anthropic) can round-
     /// trip it. Providers that reject thinking blocks (the OpenAI-compatible
-    /// path, which serializes via [`crate::message::Message::text`])
+    /// path, which serializes via [`tinyinference::message::Message::text`])
     /// drop it naturally.
     Thinking {
         /// The reasoning text.

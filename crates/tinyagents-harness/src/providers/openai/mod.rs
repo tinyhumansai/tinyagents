@@ -38,7 +38,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use tinyagents_harness::providers::openai::OpenAiModel;
+//! use tinyinference::providers::openai::OpenAiModel;
 //!
 //! # fn main() -> tinyagents_harness::Result<()> {
 //! // Reads OPENAI_API_KEY (and optional OPENAI_MODEL / OPENAI_BASE_URL).
@@ -61,13 +61,13 @@ use futures::{Stream, StreamExt};
 use serde_json::{Map, Value, json};
 
 use crate::error::{Result, TinyAgentsError};
-use crate::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
-use crate::model::{
+use tinyinference::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
+use tinyinference::model::{
     ChatModel, Modalities, ModelProfile, ModelRequest, ModelResponse, ModelStatus, ModelStream,
     ModelStreamItem, ProviderError, ResponseFormat, ToolChoice,
 };
 use crate::tool::{ToolCall, ToolDelta};
-use crate::usage::Usage;
+use tinyinference::usage::Usage;
 
 use super::ProviderSpec;
 

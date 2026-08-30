@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use crate::component::{ComponentKind, ComponentMetadata};
 use tinyagents_harness::error::{Result, TinyAgentsError};
-use tinyagents_harness::model::{ChatModel, ModelRegistry};
+use tinyinference::model::{ChatModel, ModelRegistry};
 use tinyagents_harness::tool::{Tool, ToolRegistry};
 use tinyagents_language::Blueprint;
 use tinyagents_language::capability_resolver::CapabilityResolver;

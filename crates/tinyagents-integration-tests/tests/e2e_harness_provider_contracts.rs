@@ -4,20 +4,20 @@ use futures::stream;
 use serde::Deserialize;
 use serde_json::json;
 use tinyagents_harness::cost::{CostTotals, estimate_cost};
-use tinyagents_harness::message::{Message, MessageDelta};
-use tinyagents_harness::model::{
+use tinyinference::message::{Message, MessageDelta};
+use tinyinference::model::{
     CapabilitySet, ChatModel, ModelHint, ModelProfile, ModelRegistry, ModelRequest,
     ModelResolutionSource, ModelResponse, ModelSelection, ModelStreamItem, PromptSegment,
     ProviderError, ResponseFormat, SegmentRole, StreamAccumulator, ToolChoice,
     collect_model_stream,
 };
-use tinyagents_harness::providers::{MockModel, ProviderKind, ProviderSpec};
+use tinyinference::providers::{MockModel, ProviderKind, ProviderSpec};
 use tinyagents_harness::stream::{StreamChunk, StreamMode, StreamSink, stream as filter_stream};
 use tinyagents_harness::structured::{
     StructuredExtractor, StructuredStrategy, response_format_for_strategy,
 };
 use tinyagents_harness::tool::{ToolCall, ToolDelta, ToolFormat, ToolSchema};
-use tinyagents_harness::usage::{Usage, UsageTotals};
+use tinyinference::usage::{Usage, UsageTotals};
 use tinyagents_registry::catalog::{
     ModelCapabilities, ModelCatalog, ModelCatalogEntry, ModelCatalogSnapshot, ModelCatalogSource,
     ModelPricing,
@@ -169,7 +169,7 @@ async fn model_request_response_registry_and_stream_contracts_are_stable() {
     assert_eq!(request.provider_options["reasoning"], "low");
     assert_eq!(request.provider_options["seed_control"], true);
 
-    let resolved = tinyagents_harness::model::ResolvedModel {
+    let resolved = tinyinference::model::ResolvedModel {
         name: "direct".into(),
         requested: Some("direct".into()),
         source: ModelResolutionSource::RequestOverride,
@@ -440,7 +440,7 @@ fn structured_output_supports_provider_schema_and_tool_fallbacks() {
     );
 
     let tool_response = ModelResponse {
-        message: tinyagents_harness::message::AssistantMessage {
+        message: tinyinference::message::AssistantMessage {
             id: None,
             content: Vec::new(),
             tool_calls: vec![ToolCall {

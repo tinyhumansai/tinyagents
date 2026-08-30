@@ -17,15 +17,15 @@ use serde_json::json;
 use tinyagents_graph::*;
 use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::events::AgentEvent;
-use tinyagents_harness::message::{AssistantMessage, ContentBlock, Message};
-use tinyagents_harness::model::ModelResponse;
-use tinyagents_harness::providers::MockModel;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::ModelResponse;
+use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool};
 use tinyagents_harness::tool::{
     SandboxMode, Tool, ToolCall, ToolExecutionContext, ToolResult, ToolSchema,
 };
-use tinyagents_harness::usage::Usage;
+use tinyinference::usage::Usage;
 use tinyagents_harness::workspace::{cleanup_workspace, enforce_workspace_path, prepare_workspace};
 use tinyagents_harness::*;
 use tinyagents_language::Blueprint;

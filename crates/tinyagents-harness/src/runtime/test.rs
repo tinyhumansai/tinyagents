@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::Result;
 use crate::limits::RunLimits;
 use crate::middleware::LoggingMiddleware;
-use crate::providers::MockModel;
+use tinyinference::providers::MockModel;
 use crate::retry::{FallbackPolicy, RetryPolicy};
 use crate::runtime::{AgentHarness, RunPolicy};
 use crate::tool::{Tool, ToolCall, ToolResult, ToolSchema};

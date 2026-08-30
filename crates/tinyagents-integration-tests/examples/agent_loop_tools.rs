@@ -16,12 +16,12 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use tinyagents_harness::Result;
-use tinyagents_harness::message::{AssistantMessage, ContentBlock, Message};
-use tinyagents_harness::model::ModelResponse;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::ModelResponse;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::ScriptedModel;
 use tinyagents_harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
-use tinyagents_harness::usage::Usage;
+use tinyinference::usage::Usage;
 
 /// A tiny calculator tool that adds two numbers from its JSON arguments.
 struct CalculatorTool;

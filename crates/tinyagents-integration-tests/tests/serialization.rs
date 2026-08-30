@@ -1,6 +1,6 @@
 //! Serialization behavior for the harness [`Message`] model.
 
-use tinyagents_harness::message::{ContentBlock, Message, UserMessage};
+use tinyinference::message::{ContentBlock, Message, UserMessage};
 
 #[test]
 fn serializes_messages_with_role_tags() {

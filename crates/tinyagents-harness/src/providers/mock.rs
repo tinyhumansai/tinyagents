@@ -99,7 +99,7 @@ impl MockModel {
     ///
     /// [`ChatModel::stream`] emits the items as-is; [`ChatModel::invoke`] folds
     /// them through a
-    /// [`StreamAccumulator`][crate::model::StreamAccumulator] to
+    /// [`StreamAccumulator`][tinyinference::model::StreamAccumulator] to
     /// produce the equivalent unary [`ModelResponse`]. Items may end with a
     /// terminal [`ModelStreamItem::Completed`], or be delta-only (the
     /// accumulator reconstructs the response from the deltas).
@@ -127,7 +127,7 @@ impl MockModel {
 
 /// Returns the shared permissive [`ModelProfile`] advertised by [`MockModel`].
 ///
-/// `MockModel` can satisfy any reasonable [`CapabilitySet`][crate::model::CapabilitySet]
+/// `MockModel` can satisfy any reasonable [`CapabilitySet`][tinyinference::model::CapabilitySet]
 /// and supports every structured-output strategy, so its profile enables all
 /// capabilities.
 fn mock_profile() -> &'static ModelProfile {
@@ -235,7 +235,7 @@ impl<State: Send + Sync> ChatModel<State> for MockModel {
             MockBehavior::StreamScript(items) => {
                 // Fold the scripted stream items into the equivalent unary
                 // response so `invoke` and `stream` agree.
-                let mut accumulator = crate::model::StreamAccumulator::new();
+                let mut accumulator = tinyinference::model::StreamAccumulator::new();
                 for item in items {
                     accumulator.push(item);
                 }

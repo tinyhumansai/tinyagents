@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, RwLock};
 
-use crate::model::StreamAccumulator;
+use tinyinference::model::StreamAccumulator;
 
 /// How the provider expects the API credential to be sent on each request.
 ///
@@ -282,7 +282,7 @@ fn content_text(content: &[ContentBlock]) -> String {
 /// preserved. When there is no user message, the system text is promoted to a
 /// user turn. Pure, so the transform is unit-testable.
 pub(super) fn merge_system_into_user(messages: &[Message]) -> Vec<Message> {
-    use crate::message::UserMessage;
+    use tinyinference::message::UserMessage;
 
     let system_text = messages
         .iter()
@@ -374,7 +374,7 @@ pub(super) fn is_gpt5_family(lower: &str) -> bool {
 /// advertise native structured output and (for the o-series) reasoning output.
 ///
 /// The context window is populated from the provider-neutral
-/// [`context_window_for_model_id`][crate::model::context_window_for_model_id]
+/// [`context_window_for_model_id`][tinyinference::model::context_window_for_model_id]
 /// hint table when the id is recognized (`None` otherwise), so downstream
 /// context-window-aware trimming/compaction
 /// ([`SummarizationPolicy::from_profile`][crate::summarization::SummarizationPolicy::from_profile])
@@ -425,7 +425,7 @@ pub(super) fn derive_profile_for(provider: &str, model: &str, local: bool) -> Mo
         max_input_tokens: if local {
             None
         } else {
-            crate::model::context_window_for_model_id(model)
+            tinyinference::model::context_window_for_model_id(model)
         },
         ..ModelProfile::default()
     }
@@ -725,7 +725,7 @@ impl OpenAiModel {
     /// force it on — including for the hosted base URL — and customize the tag
     /// name, separator, or DeepSeek-R1 template mode via
     /// [`ReasoningTagExtraction`]. Extracted reasoning surfaces as a leading
-    /// [`ContentBlock::Thinking`](crate::message::ContentBlock::Thinking)
+    /// [`ContentBlock::Thinking`](tinyinference::message::ContentBlock::Thinking)
     /// block on both the unary and streamed paths, consistent with the
     /// side-channel normalization.
     pub fn with_reasoning_tag_extraction(mut self, config: Option<ReasoningTagExtraction>) -> Self {
@@ -857,7 +857,7 @@ impl OpenAiModel {
     /// on `tools`; otherwise leave it alone — a 400 implicating `tools` flips it
     /// automatically and latches, so the discovery is paid once per process.
     ///
-    /// [cs]: crate::model::CapabilitySet
+    /// [cs]: tinyinference::model::CapabilitySet
     pub fn with_native_tools_on_wire(self, enabled: bool) -> Self {
         self.native_tools_on_wire.store(enabled, Ordering::Relaxed);
         self
@@ -1200,7 +1200,7 @@ impl OpenAiModel {
     /// common startup shape:
     ///
     /// ```no_run
-    /// # use tinyagents_harness::providers::openai::OpenAiModel;
+    /// # use tinyinference::providers::openai::OpenAiModel;
     /// # async fn f() -> tinyagents_harness::Result<()> {
     /// let model = OpenAiModel::ollama().with_model("llama3.2:3b").probed().await?;
     /// # Ok(()) }
@@ -2255,9 +2255,9 @@ pub(super) fn parse_retry_after_header_ms(raw: &str) -> Option<u64> {
 /// — `requires_api_key: true`, Bearer auth, a full hosted profile, no `/v1`
 /// normalisation, and no degrade knobs.
 pub(super) fn local_runtime_kind(
-    kind: &crate::providers::ProviderKind,
+    kind: &tinyinference::providers::ProviderKind,
 ) -> Option<LocalRuntimeKind> {
-    use crate::providers::ProviderKind;
+    use tinyinference::providers::ProviderKind;
     match kind {
         ProviderKind::Ollama => Some(LocalRuntimeKind::Ollama),
         ProviderKind::LmStudio => Some(LocalRuntimeKind::LmStudio),
@@ -2763,7 +2763,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
         // Responses SSE is a follow-up.
         if self.responses_api_primary {
             let response = self.invoke_responses(&request).await?;
-            let delta = crate::message::MessageDelta {
+            let delta = tinyinference::message::MessageDelta {
                 text: response.text(),
                 reasoning: String::new(),
                 tool_call: None,
@@ -2808,7 +2808,7 @@ impl<State: Send + Sync> ChatModel<State> for OpenAiModel {
             ) {
                 parsed = crate::tool::apply_prompt_tool_calls(parsed);
             }
-            let delta = crate::message::MessageDelta {
+            let delta = tinyinference::message::MessageDelta {
                 text: parsed.text(),
                 reasoning: String::new(),
                 tool_call: None,
@@ -2904,7 +2904,7 @@ pub(super) fn clean_stream_item(
             let tail = scrubber.flush();
             if !tail.is_empty() {
                 out.push(ModelStreamItem::MessageDelta(
-                    crate::message::MessageDelta::text(tail),
+                    tinyinference::message::MessageDelta::text(tail),
                 ));
             }
             let recovered =

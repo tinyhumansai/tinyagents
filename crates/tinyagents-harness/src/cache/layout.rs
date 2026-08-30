@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::hash::fnv1a_hex;
 use super::types::{CacheLayoutEvent, CachePolicy, PromptCacheLayout};
-use crate::model::ModelRequest;
+use tinyinference::model::ModelRequest;
 
 impl PromptCacheLayout {
     /// Builds a [`PromptCacheLayout`] from `request`.

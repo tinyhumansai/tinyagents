@@ -15,9 +15,9 @@
 async fn live_openai_streams_deltas_and_final_text() {
     use futures::StreamExt;
 
-    use tinyagents_harness::message::Message;
-    use tinyagents_harness::model::{ChatModel, ModelRequest, ModelStreamItem, StreamAccumulator};
-    use tinyagents_harness::providers::openai::OpenAiModel;
+    use tinyinference::message::Message;
+    use tinyinference::model::{ChatModel, ModelRequest, ModelStreamItem, StreamAccumulator};
+    use tinyinference::providers::openai::OpenAiModel;
 
     // Load .env so `cargo test` picks up local credentials.
     let _ = dotenvy::dotenv();

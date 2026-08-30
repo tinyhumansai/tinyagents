@@ -21,9 +21,9 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use crate::Result;
-use crate::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use crate::tool::{ToolCall, ToolSchema};
-use crate::usage::Usage;
+use tinyinference::usage::Usage;
 
 pub use types::*;
 

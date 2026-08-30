@@ -10,9 +10,9 @@ use super::*;
 use crate::context::{RunConfig, RunContext};
 use crate::error::{Result, TinyAgentsError};
 use crate::events::{AgentEvent, EventRecord, RecordingListener};
-use crate::message::Message;
+use tinyinference::message::Message;
 use crate::middleware::{BoxModelFuture, MiddlewareStack, ModelBaseCall};
-use crate::model::{ModelRequest, ModelResponse, ResponseFormat};
+use tinyinference::model::{ModelRequest, ModelResponse, ResponseFormat};
 use crate::retry::{RateLimiter, RetryPolicy};
 use crate::tool::{ToolCall, ToolResult, ToolSchema};
 
@@ -548,8 +548,8 @@ async fn contextual_selection_varies_by_depth() {
 // ── BudgetMiddleware ────────────────────────────────────────────────────────
 
 fn response_with_usage(model: &str, input: u64, output: u64) -> ModelResponse {
-    use crate::model::{ModelResolutionSource, ResolvedModel};
-    use crate::usage::Usage;
+    use tinyinference::model::{ModelResolutionSource, ResolvedModel};
+    use tinyinference::usage::Usage;
     let mut response = ModelResponse::assistant("ok");
     response.usage = Some(Usage::new(input, output));
     response.resolved_model = Some(ResolvedModel {
@@ -655,7 +655,7 @@ async fn budget_prices_usage_and_enforces_cost() {
 
 #[tokio::test]
 async fn budget_enforces_cached_input_token_limit() {
-    use crate::usage::Usage;
+    use tinyinference::usage::Usage;
     let (mut ctx, _recorder) = ctx_with_recorder();
     let mw = BudgetMiddleware::new(BudgetLimits {
         max_cached_input_tokens: Some(10),
@@ -830,8 +830,8 @@ async fn concurrent_runs_on_one_middleware_release_their_own_reservations() {
         .unwrap();
     // Expected from the crate's shared estimator (which charges every content
     // block, tool call, and the role label) rather than a hand-copied number.
-    let expected = crate::message::count_tokens_approximately(&[Message::user("x".repeat(40))])
-        + crate::message::count_tokens_approximately(&[Message::user("y".repeat(400))]);
+    let expected = tinyinference::message::count_tokens_approximately(&[Message::user("x".repeat(40))])
+        + tinyinference::message::count_tokens_approximately(&[Message::user("y".repeat(400))]);
     let reserved = tracker.snapshot().reserved_input_total;
     assert_eq!(
         reserved, expected,
@@ -861,7 +861,7 @@ fn poisoned_tracker_stays_fail_closed() {
     // (fail-open). Recovering the poisoned guard must keep the previously
     // accumulated spend intact.
     use crate::cost::CostTotals;
-    use crate::usage::Usage;
+    use tinyinference::usage::Usage;
 
     let tracker = BudgetTracker::new();
     tracker.record(Usage::new(100, 100), CostTotals::default());
@@ -902,7 +902,7 @@ async fn shared_tracker_reservation_is_atomic_under_concurrency() {
     // Derived from the shared estimator so the test tracks it instead of
     // pinning a stale hand-computed constant.
     let per_call_tokens =
-        crate::message::count_tokens_approximately(&[Message::user("x".repeat(40))]);
+        tinyinference::message::count_tokens_approximately(&[Message::user("x".repeat(40))]);
     let concurrent_capacity = 4u64;
     let attempts = 10usize;
     let limits = BudgetLimits {

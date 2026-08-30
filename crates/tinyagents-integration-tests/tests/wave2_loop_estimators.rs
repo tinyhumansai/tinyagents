@@ -9,9 +9,9 @@
 use serde_json::json;
 
 use tinyagents_harness::context::{RunConfig, RunContext};
-use tinyagents_harness::message::{ContentBlock, Message, ToolMessage};
+use tinyinference::message::{ContentBlock, Message, ToolMessage};
 use tinyagents_harness::middleware::{MicrocompactMiddleware, Middleware};
-use tinyagents_harness::model::ModelRequest;
+use tinyinference::model::ModelRequest;
 
 const PLACEHOLDER: &str = "[elided]";
 
@@ -52,7 +52,7 @@ fn the_shared_estimator_charges_non_textual_payloads() {
         .iter()
         .map(|m| tinyagents_harness::summarization::estimate_tokens(&m.text()))
         .sum();
-    let counted = tinyagents_harness::message::count_tokens_approximately(&messages);
+    let counted = tinyinference::message::count_tokens_approximately(&messages);
 
     assert_eq!(
         text_only, 0,

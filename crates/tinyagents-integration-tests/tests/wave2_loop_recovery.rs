@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::json;
 
-use tinyagents_harness::message::Message;
-use tinyagents_harness::model::{ChatModel, ModelRequest, ModelResponse};
+use tinyinference::message::Message;
+use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyagents_harness::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy, UnknownToolPolicy};
 use tinyagents_harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
 

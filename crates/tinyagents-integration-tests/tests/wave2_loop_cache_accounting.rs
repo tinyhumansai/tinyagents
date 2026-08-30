@@ -9,11 +9,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use tinyagents_harness::message::Message;
+use tinyinference::message::Message;
 use tinyagents_harness::middleware::{BudgetLimits, BudgetMiddleware};
-use tinyagents_harness::model::{ChatModel, ModelRequest, ModelResponse};
+use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyagents_harness::runtime::AgentHarness;
-use tinyagents_harness::usage::Usage;
+use tinyinference::usage::Usage;
 
 /// A model that answers with a fixed response, optionally flagged as a replay.
 struct FlaggedModel {
@@ -33,7 +33,7 @@ impl ChatModel<()> for FlaggedModel {
     }
 }
 
-async fn run_usage(served_from_cache: bool) -> tinyagents_harness::usage::UsageTotals {
+async fn run_usage(served_from_cache: bool) -> tinyinference::usage::UsageTotals {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model("m", Arc::new(FlaggedModel { served_from_cache }));
     harness

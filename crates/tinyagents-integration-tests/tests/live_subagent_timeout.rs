@@ -17,7 +17,7 @@ async fn live_openai_subagent_times_out_on_tiny_budget() {
     use tinyagents_harness::SubAgent;
     use tinyagents_harness::error::TinyAgentsError;
     use tinyagents_harness::limits::RunLimits;
-    use tinyagents_harness::providers::openai::OpenAiModel;
+    use tinyinference::providers::openai::OpenAiModel;
     use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 
     let _ = dotenvy::dotenv();

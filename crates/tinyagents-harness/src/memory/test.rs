@@ -1,7 +1,7 @@
 //! Unit tests for the harness memory module.
 
 use super::*;
-use crate::message::Message;
+use tinyinference::message::Message;
 use crate::store::InMemoryStore;
 
 #[tokio::test]

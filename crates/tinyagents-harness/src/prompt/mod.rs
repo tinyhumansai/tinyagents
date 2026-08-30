@@ -39,8 +39,8 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Result, TinyAgentsError};
-use crate::message::Message;
-use crate::model::{ModelRequest, PromptSegment, ResponseFormat, SegmentRole};
+use tinyinference::message::Message;
+use tinyinference::model::{ModelRequest, PromptSegment, ResponseFormat, SegmentRole};
 use crate::tool::ToolSchema;
 
 // ---------------------------------------------------------------------------

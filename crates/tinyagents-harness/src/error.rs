@@ -86,15 +86,15 @@ pub enum TinyAgentsError {
     ///
     /// Real provider adapters (for example the OpenAI unary and streaming
     /// paths) raise this instead of [`TinyAgentsError::Model`] whenever they
-    /// have a [`crate::model::ProviderError`] in hand, so
+    /// have a [`tinyinference::model::ProviderError`] in hand, so
     /// [`crate::retry::is_retryable`] can classify retryability from
-    /// [`crate::model::ProviderError::retryable`] (a 429 is
+    /// [`tinyinference::model::ProviderError::retryable`] (a 429 is
     /// retryable; a 401 is not) rather than retrying every provider failure
     /// indiscriminately. Boxed so this one variant's larger payload does not
     /// inflate every `Result<T, TinyAgentsError>` in the crate
     /// (`clippy::result_large_err`).
     #[error("model error: {0}")]
-    Provider(Box<crate::model::ProviderError>),
+    Provider(Box<tinyinference::model::ProviderError>),
 
     /// The request did not fit in the model's context window.
     ///
@@ -109,11 +109,11 @@ pub enum TinyAgentsError {
     /// # Detection is best-effort, and asymmetric
     ///
     /// Hosted providers raise an explicit 400 for this, which
-    /// [`crate::providers::openai::CONTEXT_OVERFLOW_CODE`] classifies.
+    /// [`tinyinference::providers::openai::CONTEXT_OVERFLOW_CODE`] classifies.
     /// **Local servers usually truncate the front of the prompt silently
     /// instead**, so the absence of this error is not evidence that the prompt
     /// fitted — pair it with a probed real context window
-    /// ([`crate::providers::openai::LocalProbe`]) rather than relying
+    /// ([`tinyinference::providers::openai::LocalProbe`]) rather than relying
     /// on it alone.
     #[error("context overflow: {message}")]
     ContextOverflow {
@@ -276,10 +276,10 @@ impl TinyAgentsError {
     /// correct for everything else, and is what this returns when the code is
     /// absent or unrecognised.
     ///
-    /// [code]: crate::providers::openai::CONTEXT_OVERFLOW_CODE
-    /// [pc]: crate::model::ProviderError::code
-    pub fn from_provider_error(error: crate::model::ProviderError) -> Self {
-        if error.code.as_deref() == Some(crate::providers::openai::CONTEXT_OVERFLOW_CODE) {
+    /// [code]: tinyinference::providers::openai::CONTEXT_OVERFLOW_CODE
+    /// [pc]: tinyinference::model::ProviderError::code
+    pub fn from_provider_error(error: tinyinference::model::ProviderError) -> Self {
+        if error.code.as_deref() == Some(tinyinference::providers::openai::CONTEXT_OVERFLOW_CODE) {
             tinyagents_tracing::debug!(
                 "[error] promoting provider `{}` context-overflow code to a typed error",
                 error.provider
@@ -306,7 +306,7 @@ impl TinyAgentsError {
         match self {
             Self::ContextOverflow { .. } => true,
             Self::Provider(error) => {
-                error.code.as_deref() == Some(crate::providers::openai::CONTEXT_OVERFLOW_CODE)
+                error.code.as_deref() == Some(tinyinference::providers::openai::CONTEXT_OVERFLOW_CODE)
             }
             _ => false,
         }

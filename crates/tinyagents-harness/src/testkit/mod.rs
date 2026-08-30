@@ -34,8 +34,8 @@ use serde_json::json;
 
 use crate::error::{Result, TinyAgentsError};
 use crate::events::{AgentEvent, EventSink, RecordingListener};
-use crate::message::MessageDelta;
-use crate::model::{
+use tinyinference::message::MessageDelta;
+use tinyinference::model::{
     ChatModel, ModelRequest, ModelResponse, ModelStream, ModelStreamItem, StreamAccumulator,
 };
 use crate::tool::{Tool, ToolCall, ToolResult, ToolSchema};

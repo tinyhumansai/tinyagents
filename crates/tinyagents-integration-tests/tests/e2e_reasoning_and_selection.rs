@@ -20,16 +20,16 @@ use futures::StreamExt;
 
 use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::events::AgentEvent;
-use tinyagents_harness::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
+use tinyinference::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
 use tinyagents_harness::middleware::{ContextualToolSelectionMiddleware, ToolSelectionContext};
-use tinyagents_harness::model::{
+use tinyinference::model::{
     ChatModel, ModelProfile, ModelRegistry, ModelRequest, ModelResolutionSource, ModelResponse,
     ModelSelection, ModelStatus, ModelStreamItem, StreamAccumulator,
 };
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, ScriptedModel, StreamingMock};
 use tinyagents_harness::tool::ToolSchema;
-use tinyagents_harness::usage::Usage;
+use tinyinference::usage::Usage;
 
 /// Builds a plain-text [`ModelResponse`] so a [`ScriptedModel`] can answer a run
 /// in a single model call (no tool execution needed).

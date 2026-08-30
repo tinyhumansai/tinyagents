@@ -21,9 +21,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cache::CachePolicy;
-use crate::message::{AssistantMessage, Message, MessageDelta};
+use tinyinference::message::{AssistantMessage, Message, MessageDelta};
 use crate::tool::{ToolDelta, ToolSchema};
-use crate::usage::Usage;
+use tinyinference::usage::Usage;
 
 /// Policy controlling whether and how the model may call tools.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -437,7 +437,7 @@ pub struct ModelSelection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_capabilities: Option<CapabilitySet>,
     /// When `false` (the default), resolution skips models whose profile
-    /// reports [`ModelStatus::Retired`][crate::model::ModelStatus],
+    /// reports [`ModelStatus::Retired`][tinyinference::model::ModelStatus],
     /// so a provider-retired model is never selected via override, reuse,
     /// hint, or default. Set `true` to opt back into retired models (e.g. for
     /// replaying historical runs). Deprecated models are still selectable.

@@ -13,7 +13,7 @@ mod types;
 
 use std::ops::{Add, AddAssign};
 
-use crate::usage::Usage;
+use tinyinference::usage::Usage;
 pub use types::*;
 
 impl CostTotals {

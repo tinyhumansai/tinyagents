@@ -22,10 +22,10 @@ async fn live_openai_orchestrator_designs_subagents_via_registry() {
     use serde_json::{Value, json};
 
     use tinyagents_graph::*;
-    use tinyagents_harness::message::Message;
+    use tinyinference::message::Message;
     use tinyagents_harness::middleware::AgentRun;
-    use tinyagents_harness::model::{ChatModel, ResponseFormat};
-    use tinyagents_harness::providers::openai::OpenAiModel;
+    use tinyinference::model::{ChatModel, ResponseFormat};
+    use tinyinference::providers::openai::OpenAiModel;
     use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
     use tinyagents_harness::tool::ToolCall;
     use tinyagents_harness::*;

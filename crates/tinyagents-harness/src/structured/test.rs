@@ -6,7 +6,7 @@
 //! [`StructuredOutput::parse`] deserialisation.
 
 use super::*;
-use crate::model::{ModelProfile, ModelResponse, ResponseFormat};
+use tinyinference::model::{ModelProfile, ModelResponse, ResponseFormat};
 use crate::tool::ToolCall;
 use serde_json::json;
 

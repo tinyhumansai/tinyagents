@@ -104,13 +104,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// Streaming counterpart of [`AgentHarness::invoke`].
     ///
     /// Behaves exactly like [`AgentHarness::invoke`] except each model call is
-    /// driven through [`crate::model::ChatModel::stream`] rather than
-    /// [`crate::model::ChatModel::invoke`]: incremental message deltas
+    /// driven through [`tinyinference::model::ChatModel::stream`] rather than
+    /// [`tinyinference::model::ChatModel::invoke`]: incremental message deltas
     /// are emitted as [`AgentEvent::ModelDelta`] events and threaded through
     /// every middleware's
     /// [`on_model_delta`][crate::middleware::Middleware::on_model_delta]
     /// hook before the chunks are merged back into the final
-    /// [`crate::model::ModelResponse`]. Tool execution, limits, retry,
+    /// [`tinyinference::model::ModelResponse`]. Tool execution, limits, retry,
     /// fallback, structured output, and all other lifecycle behavior are
     /// identical to the non-streaming path.
     pub async fn invoke_streaming(
@@ -165,9 +165,9 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// bookkeeping (status transitions plus `RunFailed`/`on_error` on error).
     ///
     /// `streaming` selects whether each model call is driven through
-    /// [`crate::model::ChatModel::stream`] (firing `on_model_delta`
+    /// [`tinyinference::model::ChatModel::stream`] (firing `on_model_delta`
     /// middleware per delta) or the unary
-    /// [`crate::model::ChatModel::invoke`] path.
+    /// [`tinyinference::model::ChatModel::invoke`] path.
     /// Runs the loop and returns the accumulated run **and** any error, instead
     /// of discarding the run when the loop fails.
     ///

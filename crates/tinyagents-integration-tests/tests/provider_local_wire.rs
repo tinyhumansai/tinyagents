@@ -23,11 +23,11 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use tinyagents_harness::message::Message;
-use tinyagents_harness::model::{
+use tinyinference::message::Message;
+use tinyinference::model::{
     ChatModel, ModelRequest, ReasoningEffort, ResponseFormat, ToolChoice,
 };
-use tinyagents_harness::providers::openai::OpenAiModel;
+use tinyinference::providers::openai::OpenAiModel;
 use tinyagents_harness::tool::ToolSchema;
 
 // ---------------------------------------------------------------------------
@@ -917,7 +917,7 @@ async fn the_responses_path_reads_reasoning_and_cache_usage() {
         .content
         .iter()
         .find_map(|block| match block {
-            tinyagents_harness::message::ContentBlock::Thinking { text, signature } => {
+            tinyinference::message::ContentBlock::Thinking { text, signature } => {
                 Some((text.clone(), signature.clone()))
             }
             _ => None,

@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use tinyagents_harness::providers::MockModel;
+use tinyinference::providers::MockModel;
 use tinyagents_harness::testkit::FakeTool;
 use tinyagents_registry::{AliasBinding, CapabilityRegistry, ComponentKind, DiagnosticSeverity};
 

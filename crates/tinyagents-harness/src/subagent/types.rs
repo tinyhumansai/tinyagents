@@ -15,7 +15,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::events::EventSink;
-use crate::message::Message;
+use tinyinference::message::Message;
 use crate::runtime::AgentHarness;
 
 /// The argument key a [`SubAgentTool`] reads the child input from.

@@ -57,7 +57,7 @@ pub struct ChatCompletionRequest {
     /// is provider-shaped by definition; it stays available as the escape hatch
     /// and **wins** over this typed field on a key conflict.
     ///
-    /// [rc]: crate::model::ReasoningConfig
+    /// [rc]: tinyinference::model::ReasoningConfig
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     /// Request Server-Sent-Events streaming. Omitted (false) for unary calls.
@@ -430,7 +430,7 @@ pub struct PromptTokensDetailsWire {
     /// priced by the cost feature but written by **no** provider in the crate,
     /// so cache writes were billed as ordinary input everywhere.
     ///
-    /// [ucc]: crate::usage::Usage::cache_creation_tokens
+    /// [ucc]: tinyinference::usage::Usage::cache_creation_tokens
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub cache_write_tokens: u64,
     /// Alternate spelling of [`Self::cache_write_tokens`]; see its docs.

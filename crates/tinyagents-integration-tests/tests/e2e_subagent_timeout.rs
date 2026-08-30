@@ -16,7 +16,7 @@ use std::time::Duration;
 use tinyagents_harness::SubAgent;
 use tinyagents_harness::error::TinyAgentsError;
 use tinyagents_harness::limits::RunLimits;
-use tinyagents_harness::providers::MockModel;
+use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::SlowModel;
 
@@ -24,7 +24,7 @@ use tinyagents_harness::testkit::SlowModel;
 /// whose registered model is `model`.
 fn capped_child_harness<M>(model: M, timeout_ms: u64) -> AgentHarness<()>
 where
-    M: tinyagents_harness::model::ChatModel<()> + 'static,
+    M: tinyinference::model::ChatModel<()> + 'static,
 {
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model("model", Arc::new(model));

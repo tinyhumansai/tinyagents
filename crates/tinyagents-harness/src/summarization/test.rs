@@ -8,7 +8,7 @@
 
 #[cfg(test)]
 mod smoke {
-    use crate::message::Message;
+    use tinyinference::message::Message;
     use crate::summarization::{
         ConcatSummarizer, SummarizationPolicy, Summarizer, TokenTrimPolicy, TrimStrategy,
         estimate_tokens, trim_messages, trim_messages_to_token_budget_with,
@@ -340,7 +340,7 @@ mod smoke {
 
     #[test]
     fn policy_from_profile_reads_max_input_tokens() {
-        use crate::model::ModelProfile;
+        use tinyinference::model::ModelProfile;
 
         let profile = ModelProfile {
             max_input_tokens: Some(1000),
@@ -382,7 +382,7 @@ mod smoke {
 /// at a blind index and produced exactly those shapes.
 #[cfg(test)]
 mod pairing {
-    use crate::message::{AssistantMessage, ContentBlock, Message};
+    use tinyinference::message::{AssistantMessage, ContentBlock, Message};
     use crate::summarization::{
         MessageRole, SummarizationPolicy, TrimOptions, TrimStrategy, tool_pairing_is_intact,
         trim_messages, trim_messages_with,
@@ -603,7 +603,7 @@ mod pairing {
 
     #[test]
     fn a_tool_result_id_is_counted() {
-        let bare = Message::Tool(crate::message::ToolMessage {
+        let bare = Message::Tool(tinyinference::message::ToolMessage {
             tool_call_id: "call_abcdefghijklmnop".into(),
             content: Vec::new(),
             trusted_verbatim: false,
@@ -628,7 +628,7 @@ mod pairing {
 /// it.
 #[cfg(test)]
 mod rendering {
-    use crate::message::{AssistantMessage, Message};
+    use tinyinference::message::{AssistantMessage, Message};
     use crate::summarization::{ConcatSummarizer, Summarizer, render_message_for_summary};
     use crate::tool::ToolCall;
     use serde_json::json;
@@ -662,8 +662,8 @@ mod rendering {
         let msg = Message::Assistant(AssistantMessage {
             id: None,
             content: vec![
-                crate::message::ContentBlock::thinking("weighing options"),
-                crate::message::ContentBlock::Json(json!({"k": "v"})),
+                tinyinference::message::ContentBlock::thinking("weighing options"),
+                tinyinference::message::ContentBlock::Json(json!({"k": "v"})),
             ],
             tool_calls: Vec::new(),
             usage: None,

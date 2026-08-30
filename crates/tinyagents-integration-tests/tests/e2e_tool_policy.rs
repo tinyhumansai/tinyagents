@@ -21,9 +21,9 @@ use serde_json::json;
 
 use tinyagents_graph::*;
 use tinyagents_harness::context::{RunConfig, RunContext};
-use tinyagents_harness::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyagents_harness::middleware::ToolPolicyMiddleware;
-use tinyagents_harness::model::ModelResponse;
+use tinyinference::model::ModelResponse;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::ScriptedModel;
 use tinyagents_harness::tool::ToolCall as TC;
@@ -31,7 +31,7 @@ use tinyagents_harness::tool::{
     SandboxMode, Tool, ToolAccess, ToolCall, ToolPolicy, ToolResult, ToolRuntime, ToolSchema,
     ToolSideEffects,
 };
-use tinyagents_harness::usage::Usage;
+use tinyinference::usage::Usage;
 use tinyagents_harness::workspace::WorkspaceDescriptor;
 use tinyagents_harness::*;
 use tinyagents_language::*;

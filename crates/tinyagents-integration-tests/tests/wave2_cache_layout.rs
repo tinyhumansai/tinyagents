@@ -8,8 +8,8 @@ use tinyagents_harness::cache::{
     CacheLayoutEvent, CachePolicy, PROMPT_CACHE_KEY_OPTION, PromptCacheLayout,
     apply_prompt_cache_breakpoints, prompt_cache_key,
 };
-use tinyagents_harness::message::Message;
-use tinyagents_harness::model::{ModelRequest, PromptSegment, SegmentRole};
+use tinyinference::message::Message;
+use tinyinference::model::{ModelRequest, PromptSegment, SegmentRole};
 use tinyagents_harness::prompt::PromptBuilder;
 use tinyagents_harness::tool::{ToolFormat, ToolSchema};
 

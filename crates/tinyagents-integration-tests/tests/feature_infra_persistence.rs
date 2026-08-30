@@ -15,7 +15,7 @@ use serde_json::json;
 use tinyagents_harness::memory::{
     ChatHistory, InMemoryChatHistory, ShortTermMemory, StoreChatHistory,
 };
-use tinyagents_harness::message::Message;
+use tinyinference::message::Message;
 use tinyagents_harness::store::{
     AppendStore, FileStore, InMemoryAppendStore, InMemoryStore, JsonlAppendStore, Store,
     StoreRegistry,

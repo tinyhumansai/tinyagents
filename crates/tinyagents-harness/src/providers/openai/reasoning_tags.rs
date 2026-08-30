@@ -9,7 +9,7 @@
 //! chain-of-thought leaks straight into the visible assistant text.
 //!
 //! This module moves the tagged text onto the reasoning channel
-//! ([`ContentBlock::Thinking`](crate::message::ContentBlock::Thinking))
+//! ([`ContentBlock::Thinking`](tinyinference::message::ContentBlock::Thinking))
 //! and strips the tags from the visible text. It provides two entry points that
 //! share the same tag-matching logic so the streamed deltas and the final
 //! response agree on what is reasoning and what is visible:

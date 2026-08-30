@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::model::ModelResponse;
+use tinyinference::model::ModelResponse;
 
 // ── CacheStats ────────────────────────────────────────────────────────────────
 
@@ -89,7 +89,7 @@ impl CacheSkipReason {
 /// Local response cache that lets the harness skip provider calls entirely.
 ///
 /// Keys should be produced by [`super::cache_key`] (folded with the resolved
-/// model's [`cache_identity`][crate::model::ChatModel::cache_identity]
+/// model's [`cache_identity`][tinyinference::model::ChatModel::cache_identity]
 /// via [`super::scoped_cache_key`]) for consistency. Callers are responsible for
 /// deciding when caching is safe (e.g., not caching side-effecting tool calls).
 ///
@@ -221,7 +221,7 @@ pub(crate) struct LruResponseMap {
 /// * [`Self::prefix_ids`] — the ordered ids of cacheable segments,
 /// * [`Self::fingerprint`] — an FNV-1a digest over each cacheable segment's
 ///   `(id, role)` pair *and* the request's
-///   [`prompt_fingerprint`][crate::model::ModelRequest::prompt_fingerprint]
+///   [`prompt_fingerprint`][tinyinference::model::ModelRequest::prompt_fingerprint]
 ///   and tool schemas, and
 /// * a per-message digest chain, so "did the prompt only grow at the tail?"
 ///   — the provider's actual KV-prefix rule — is answerable.

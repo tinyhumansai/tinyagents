@@ -10,8 +10,8 @@
 //! [`recover_tool_arguments`][rta] over
 //! [`relaxed_json`][rj]. Structured output got none of it.
 //!
-//! [rta]: crate::providers::openai
-//! [rj]: crate::providers::openai::relaxed_json
+//! [rta]: tinyinference::providers::openai
+//! [rj]: tinyinference::providers::openai::relaxed_json
 //!
 //! # The ladder
 //!
@@ -114,7 +114,7 @@ pub fn parse_lenient(raw: &str) -> Option<(Value, JsonRepair)> {
     // Reuses the crate's existing relaxed-JSON repairs rather than a second,
     // divergent implementation. It only yields objects, which is the shape a
     // JSON-Schema structured output almost always declares.
-    if let Some(value) = crate::providers::openai::relaxed_json::recover_relaxed_object(unfenced) {
+    if let Some(value) = tinyinference::providers::openai::relaxed_json::recover_relaxed_object(unfenced) {
         tinyagents_tracing::debug!(
             "[structured::repair] recovered JSON through the relaxed-JSON repairs"
         );

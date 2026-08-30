@@ -233,7 +233,7 @@ impl Message {
     /// `repr(tool_calls)` for AI messages and the `tool_call_id` for tool
     /// messages. The role label and per-message overhead are *not* added here;
     /// they belong to the message-level counters in
-    /// [`crate::message::count_tokens_approximately`].
+    /// [`tinyinference::message::count_tokens_approximately`].
     ///
     /// The [`ToolMessage::artifact`] payload is deliberately **not** counted: it
     /// never reaches the provider, so it occupies no context window.

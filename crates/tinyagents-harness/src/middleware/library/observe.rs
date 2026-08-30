@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::*;
 use crate::middleware::{AgentRun, HookCounts, LoggingMiddleware, UsageAccountingMiddleware};
-use crate::usage::UsageTotals;
+use tinyinference::usage::UsageTotals;
 
 // ── StructuredOutputValidatorMiddleware ───────────────────────────────────────
 

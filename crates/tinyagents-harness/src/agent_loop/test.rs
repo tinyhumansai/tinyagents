@@ -17,20 +17,20 @@ use crate::context::{RunConfig, RunContext};
 use crate::error::{Result, TinyAgentsError};
 use crate::events::{AgentEvent, EventSink};
 use crate::limits::RunLimits;
-use crate::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
+use tinyinference::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
 use crate::middleware::{
     AgentRun, Middleware, MiddlewareModelOutcome, MiddlewareToolOutcome, ModelHandler,
     ModelMiddleware, ToolHandler, ToolMiddleware,
 };
-use crate::model::{
+use tinyinference::model::{
     CapabilitySet, ChatModel, ModelProfile, ModelRequest, ModelResponse, ModelStreamItem,
     ResponseFormat, ToolChoice,
 };
-use crate::providers::MockModel;
+use tinyinference::providers::MockModel;
 use crate::retry::{FallbackPolicy, RetryPolicy};
 use crate::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy, UnknownToolPolicy};
 use crate::tool::{Tool, ToolCall, ToolResult, ToolSchema, ToolTimeout, ToolTimeoutSettings};
-use crate::usage::Usage;
+use tinyinference::usage::Usage;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -528,13 +528,13 @@ impl ChatModel<()> for ProviderFailingModel {
     async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
         *self.attempts.lock().unwrap() += 1;
         Err(TinyAgentsError::Provider(Box::new(
-            crate::model::ProviderError {
+            tinyinference::model::ProviderError {
                 provider: "test-provider".to_string(),
                 status: Some(self.status),
                 retryable: self.retryable,
                 retry_after_ms: None,
                 message: "boom".to_string(),
-                ..crate::model::ProviderError::default()
+                ..tinyinference::model::ProviderError::default()
             },
         )))
     }
@@ -2098,7 +2098,7 @@ impl Middleware<(), ()> for DeltaRecorder {
         &self,
         _ctx: &mut RunContext<()>,
         _state: &(),
-        delta: &mut crate::model::ModelDelta,
+        delta: &mut tinyinference::model::ModelDelta,
     ) -> Result<()> {
         *self.count.lock().unwrap() += 1;
         self.texts.lock().unwrap().push(delta.content.clone());

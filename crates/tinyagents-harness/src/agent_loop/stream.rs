@@ -1,7 +1,7 @@
 //! Caller-consumable streaming entry point ([`AgentHarness::invoke_stream`]).
 //!
 //! [`AgentHarness::invoke_streaming`] drives each model call through
-//! [`ChatModel::stream`][crate::model::ChatModel::stream] but only
+//! [`ChatModel::stream`][tinyinference::model::ChatModel::stream] but only
 //! returns the fully-accumulated [`AgentRun`] once the run is over — a caller
 //! that wants to *watch* the run unfold has to attach an
 //! [`EventListener`][crate::events::EventListener] or middleware.
@@ -31,7 +31,7 @@ use std::sync::Arc;
 use crate::context::{RunConfig, RunContext};
 use crate::error::Result;
 use crate::events::{EventListener, EventRecord, EventSink};
-use crate::message::Message;
+use tinyinference::message::Message;
 use crate::middleware::AgentRun;
 use crate::runtime::AgentHarness;
 
@@ -123,7 +123,7 @@ impl<State: Send + Sync, Ctx: Send + Sync + 'static> AgentHarness<State, Ctx> {
     /// This is the streaming counterpart of
     /// [`AgentHarness::invoke_streaming`]; the run itself is identical (each
     /// model call is driven through
-    /// [`ChatModel::stream`][crate::model::ChatModel::stream]).
+    /// [`ChatModel::stream`][tinyinference::model::ChatModel::stream]).
     pub fn invoke_stream<'a>(
         &'a self,
         state: &'a State,

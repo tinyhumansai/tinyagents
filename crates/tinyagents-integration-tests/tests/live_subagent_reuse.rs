@@ -15,8 +15,8 @@ async fn live_openai_subagent_reused_with_carried_context() {
     use std::sync::Arc;
 
     use tinyagents_graph::*;
-    use tinyagents_harness::message::Message;
-    use tinyagents_harness::providers::openai::OpenAiModel;
+    use tinyinference::message::Message;
+    use tinyinference::providers::openai::OpenAiModel;
     use tinyagents_harness::runtime::AgentHarness;
     use tinyagents_harness::testkit::{EventRecorder, Trajectory};
     use tinyagents_harness::*;

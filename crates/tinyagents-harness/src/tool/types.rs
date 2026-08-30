@@ -128,7 +128,7 @@ impl ToolResult {
     /// and is wrong.
     ///
     /// Advisory: the crate carries the flag to [`super::super::message::ToolMessage`]
-    /// via [`crate::message::Message::tool_from_result`]; honouring it
+    /// via [`tinyinference::message::Message::tool_from_result`]; honouring it
     /// is the host's job.
     /// # Returns
     ///

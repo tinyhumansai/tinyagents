@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use tinyagents_graph::END;
 use tinyagents_graph::*;
-use tinyagents_harness::message::Message;
-use tinyagents_harness::providers::openai::OpenAiModel;
+use tinyinference::message::Message;
+use tinyinference::providers::openai::OpenAiModel;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::*;
 use tinyagents_language::*;

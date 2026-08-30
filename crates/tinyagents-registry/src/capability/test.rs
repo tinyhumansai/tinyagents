@@ -11,7 +11,7 @@ use serde_json::json;
 use super::*;
 use crate::Result;
 use crate::component::ComponentKind;
-use tinyagents_harness::model::{ChatModel, ModelRequest, ModelResponse};
+use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyagents_harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
 use tinyagents_language::Blueprint;
 

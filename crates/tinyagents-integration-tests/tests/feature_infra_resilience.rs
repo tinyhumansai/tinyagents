@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use tinyagents_harness::error::TinyAgentsError;
 use tinyagents_harness::limits::{LimitTracker, RunLimits};
-use tinyagents_harness::model::ProviderError;
+use tinyinference::model::ProviderError;
 use tinyagents_harness::retry::{
     FallbackPolicy, ProviderFailureClass, RateLimiter, RetryPolicy, classify_provider_error,
     classify_provider_failure, is_retryable, parse_retry_after_ms, provider_error_is_retryable,

@@ -86,7 +86,7 @@ pub struct TokenCountOptions {
     /// Calibrate the character heuristic against real provider usage.
     ///
     /// When enabled, the newest assistant message carrying a non-zero
-    /// [`Usage::total_tokens`][crate::usage::Usage::total_tokens] is
+    /// [`Usage::total_tokens`][tinyinference::usage::Usage::total_tokens] is
     /// compared against the heuristic's running estimate at that point, and the
     /// whole count is scaled by that ratio — clamped to
     /// `[USAGE_SCALE_MIN, USAGE_SCALE_MAX]` so one bad report cannot blow the

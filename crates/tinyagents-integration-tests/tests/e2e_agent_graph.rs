@@ -21,13 +21,13 @@ use serde_json::json;
 
 use tinyagents_graph::*;
 use tinyagents_harness::context::{RunConfig, RunContext};
-use tinyagents_harness::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyagents_harness::middleware::UsageAccountingMiddleware;
-use tinyagents_harness::model::ModelResponse;
+use tinyinference::model::ModelResponse;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, ScriptedModel, Trajectory};
 use tinyagents_harness::tool::ToolCall;
-use tinyagents_harness::usage::Usage;
+use tinyinference::usage::Usage;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;

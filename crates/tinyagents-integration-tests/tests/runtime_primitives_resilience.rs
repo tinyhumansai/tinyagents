@@ -26,7 +26,7 @@ use tinyagents_harness::events::{
 };
 use tinyagents_harness::ids::{CallId, RunId};
 use tinyagents_harness::limits::{LimitBehavior, LimitOutcome, LimitTracker, RunLimits};
-use tinyagents_harness::message::{Message, MessageDelta};
+use tinyinference::message::{Message, MessageDelta};
 use tinyagents_harness::no_progress::fingerprint_arguments;
 use tinyagents_harness::retry::{RetryPolicy, is_retryable, retry_after_hint};
 use tinyagents_harness::steering::{

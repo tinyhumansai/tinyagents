@@ -20,7 +20,7 @@
 //!   output from `Message::text()`, which renders tool calls and tool results as
 //!   the empty string.
 
-use tinyagents_harness::message::{AssistantMessage, Message};
+use tinyinference::message::{AssistantMessage, Message};
 use tinyagents_harness::summarization::{
     ConcatSummarizer, SummarizationPolicy, Summarizer, TrimStrategy, trim_messages,
 };
@@ -127,7 +127,7 @@ fn max_tokens_never_orphans_a_tool_result() {
     // front-dropping token trim can orphan one.
     let narrating_call = Message::Assistant(AssistantMessage {
         id: None,
-        content: vec![tinyagents_harness::message::ContentBlock::Text(
+        content: vec![tinyinference::message::ContentBlock::Text(
             "Let me look that up. ".repeat(20),
         )],
         tool_calls: vec![ToolCall::new(

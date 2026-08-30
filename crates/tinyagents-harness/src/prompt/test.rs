@@ -198,7 +198,7 @@ fn fingerprint_changes_with_tool_schema_not_just_name() {
 
 #[test]
 fn fingerprint_changes_with_image_content_and_message_role() {
-    use crate::message::{ContentBlock, ImageRef, UserMessage};
+    use tinyinference::message::{ContentBlock, ImageRef, UserMessage};
 
     // Same (empty) text, different image URL.
     let image = |url: &str| {

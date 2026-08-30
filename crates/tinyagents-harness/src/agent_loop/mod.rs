@@ -102,9 +102,9 @@ use crate::context::{MiddlewareControl, RunConfig, RunContext};
 use crate::error::{Result, TinyAgentsError};
 use crate::events::{AgentEvent, HarnessRunStatus, LimitKind};
 use crate::ids::{CallId, ComponentId, HarnessPhase};
-use crate::message::{Message, MessageDelta};
+use tinyinference::message::{Message, MessageDelta};
 use crate::middleware::{AgentRun, BoxModelFuture, BoxToolFuture, ModelBaseCall, ToolBaseCall};
-use crate::model::{
+use tinyinference::model::{
     ChatModel, ModelDelta, ModelRequest, ModelResolutionSource, ModelResponse, ModelStreamItem,
     ResolvedModel, ResolvedModelBinding, ResponseFormat, StreamAccumulator, ToolChoice,
     model_eligible,

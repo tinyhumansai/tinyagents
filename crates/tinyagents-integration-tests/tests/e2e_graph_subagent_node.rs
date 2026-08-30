@@ -10,14 +10,14 @@ use tinyagents_graph::{
     HarnessSubAgent, SubAgentBudget, SubAgentInput, SubAgentNode, SubAgentOutput, SubAgentPolicy,
     subagent_node,
 };
-use tinyagents_harness::message::{AssistantMessage, Message};
-use tinyagents_harness::model::ModelResponse;
-use tinyagents_harness::providers::MockModel;
+use tinyinference::message::{AssistantMessage, Message};
+use tinyinference::model::ModelResponse;
+use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::subagent::SubAgent;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, ScriptedModel};
 use tinyagents_harness::tool::ToolCall;
-use tinyagents_harness::usage::Usage;
+use tinyinference::usage::Usage;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;

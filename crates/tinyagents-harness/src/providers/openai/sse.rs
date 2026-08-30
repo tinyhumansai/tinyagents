@@ -19,7 +19,7 @@ pub(super) struct ToolCallBuild {
 
 /// Provider-side accumulator that rebuilds the authoritative [`ModelResponse`]
 /// from streamed chunks. Distinct from the generic
-/// [`StreamAccumulator`][crate::model::StreamAccumulator]: it tracks
+/// [`StreamAccumulator`][tinyinference::model::StreamAccumulator]: it tracks
 /// tool-call names and ids (which the neutral deltas omit) so the terminal
 /// [`ModelStreamItem::Completed`] carries a faithful response.
 #[derive(Clone, Debug, Default)]

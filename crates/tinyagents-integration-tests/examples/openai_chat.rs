@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use tinyagents_harness::Result;
-use tinyagents_harness::message::Message;
-use tinyagents_harness::providers::openai::OpenAiModel;
+use tinyinference::message::Message;
+use tinyinference::providers::openai::OpenAiModel;
 use tinyagents_harness::runtime::AgentHarness;
 
 #[tokio::main]

@@ -12,7 +12,7 @@ use crate::error::{Result, TinyAgentsError};
 use crate::events::AgentEvent;
 use crate::ids::now_ms;
 use crate::observability::AgentObservation;
-use crate::usage::Usage;
+use tinyinference::usage::Usage;
 
 mod types;
 

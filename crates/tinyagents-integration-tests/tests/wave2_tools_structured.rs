@@ -15,7 +15,7 @@
 use serde_json::json;
 
 use tinyagents_harness::TinyAgentsError;
-use tinyagents_harness::model::{ModelProfile, ModelResponse};
+use tinyinference::model::{ModelProfile, ModelResponse};
 use tinyagents_harness::structured::{StructuredExtractor, StructuredStrategy};
 
 fn score_schema() -> serde_json::Value {
@@ -191,8 +191,8 @@ fn a_provider_error_carrying_the_overflow_code_classifies_the_same() {
     // Providers construct `TinyAgentsError::Provider` directly today, so
     // classification must recognise the code as well as the typed variant —
     // otherwise the two paths disagree about the same failure.
-    use tinyagents_harness::model::ProviderError;
-    use tinyagents_harness::providers::openai::CONTEXT_OVERFLOW_CODE;
+    use tinyinference::model::ProviderError;
+    use tinyinference::providers::openai::CONTEXT_OVERFLOW_CODE;
 
     let provider_error = ProviderError {
         provider: "openai".to_string(),
@@ -209,7 +209,7 @@ fn a_provider_error_carrying_the_overflow_code_classifies_the_same() {
 
 #[test]
 fn an_unrelated_provider_error_is_not_a_context_overflow() {
-    use tinyagents_harness::model::ProviderError;
+    use tinyinference::model::ProviderError;
 
     let error = TinyAgentsError::from_provider_error(ProviderError {
         provider: "openai".to_string(),

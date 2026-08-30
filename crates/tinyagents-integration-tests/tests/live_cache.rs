@@ -24,11 +24,11 @@ use async_trait::async_trait;
 use tinyagents_harness::Result;
 use tinyagents_harness::cache::InMemoryResponseCache;
 use tinyagents_harness::context::{RunConfig, RunContext};
-use tinyagents_harness::message::Message;
-use tinyagents_harness::model::{
+use tinyinference::message::Message;
+use tinyinference::model::{
     ChatModel, ModelProfile, ModelRequest, ModelResponse, ModelStream,
 };
-use tinyagents_harness::providers::openai::OpenAiModel;
+use tinyinference::providers::openai::OpenAiModel;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::EventRecorder;
 

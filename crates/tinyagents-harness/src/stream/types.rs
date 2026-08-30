@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::message::MessageDelta;
+use tinyinference::message::MessageDelta;
 
 // ---------------------------------------------------------------------------
 // StreamMode
@@ -123,7 +123,7 @@ impl StreamChunk {
 ///
 /// ```
 /// use tinyagents_harness::stream::{StreamChunk, StreamMode, StreamSink};
-/// use tinyagents_harness::message::MessageDelta;
+/// use tinyinference::message::MessageDelta;
 ///
 /// let sink = StreamSink::new(vec![StreamMode::Messages]);
 /// sink.push(StreamChunk::Message(MessageDelta::text("hello")));

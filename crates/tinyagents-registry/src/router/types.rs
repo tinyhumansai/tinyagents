@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use tinyagents_harness::model::CapabilitySet;
+use tinyinference::model::CapabilitySet;
 
 /// One declarative **workload route**: a stable alias (e.g. `reasoning-v1`) that
 /// resolves to a concrete registered model, plus the capability gate a request

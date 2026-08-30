@@ -5,8 +5,8 @@
 //! items (deltas, usage, terminal `Completed`/`Failed`) into a response.
 
 use super::*;
-use crate::message::Message;
-use crate::usage::Usage;
+use tinyinference::message::Message;
+use tinyinference::usage::Usage;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::json;
@@ -79,7 +79,7 @@ fn tool_choice_defaults_to_auto() {
 
 #[test]
 fn lifecycle_helpers_gate_retired_and_deprecated_models() {
-    use crate::model::ModelStatus;
+    use tinyinference::model::ModelStatus;
 
     let stable = ModelProfile::default();
     assert!(stable.is_usable());
@@ -343,7 +343,7 @@ async fn registry_register_get_default_and_stream() {
         .collect();
     assert_eq!(text, "hello");
 
-    let merged = crate::model::collect_model_stream(
+    let merged = tinyinference::model::collect_model_stream(
         model.stream(&(), ModelRequest::default()).await.unwrap(),
     )
     .await
@@ -633,7 +633,7 @@ async fn registry_skips_retired_models_across_every_resolution_path() {
 
 #[test]
 fn stream_accumulator_collects_reasoning_side_channel() {
-    use crate::message::MessageDelta;
+    use tinyinference::message::MessageDelta;
 
     let mut acc = StreamAccumulator::new();
     acc.push(&ModelStreamItem::Started);
@@ -833,7 +833,7 @@ fn roundtrip_stream_item(item: ModelStreamItem) {
 fn model_stream_item_roundtrips_every_variant() {
     roundtrip_stream_item(ModelStreamItem::Started);
     roundtrip_stream_item(ModelStreamItem::MessageDelta(
-        crate::message::MessageDelta::text("hi"),
+        tinyinference::message::MessageDelta::text("hi"),
     ));
     roundtrip_stream_item(ModelStreamItem::ToolCallDelta(crate::tool::ToolDelta {
         call_id: "call-1".into(),
@@ -862,7 +862,7 @@ fn model_stream_item_failed_serializes_without_panicking() {
 
 #[test]
 fn stream_accumulator_reconstruct_preserves_reasoning_as_thinking_block() {
-    use crate::message::{ContentBlock, MessageDelta};
+    use tinyinference::message::{ContentBlock, MessageDelta};
 
     // No `Completed` item: `finish` reconstructs the message from deltas. The
     // accumulated reasoning must survive as a leading `Thinking` block rather
@@ -892,7 +892,7 @@ fn stream_accumulator_reconstruct_preserves_reasoning_as_thinking_block() {
 
 #[test]
 fn stream_accumulator_reconstruct_without_reasoning_has_no_thinking_block() {
-    use crate::message::{ContentBlock, MessageDelta};
+    use tinyinference::message::{ContentBlock, MessageDelta};
 
     let mut acc = StreamAccumulator::new();
     acc.push(&ModelStreamItem::MessageDelta(MessageDelta::text("hi")));

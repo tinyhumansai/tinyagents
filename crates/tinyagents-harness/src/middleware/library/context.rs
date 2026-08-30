@@ -46,15 +46,15 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for MessageTri
 /// Estimate the total tokens of a message slice.
 ///
 /// Uses the crate's shared
-/// [`count_tokens_approximately`][crate::message::count_tokens_approximately]
+/// [`count_tokens_approximately`][tinyinference::message::count_tokens_approximately]
 /// estimator rather than summing `estimate_tokens(&m.text())`. `text()` returns
 /// only the *textual* content blocks, so a transcript of large JSON tool
 /// results or image blocks estimated to nearly zero and the micro-compaction
 /// budget gate never tripped on exactly the transcripts it exists to shrink.
 /// The shared estimator charges every content block, tool call, and tool-call
 /// id, and calibrates against reported usage metadata when it is present.
-fn total_message_tokens(messages: &[crate::message::Message]) -> u64 {
-    crate::message::count_tokens_approximately(messages)
+fn total_message_tokens(messages: &[tinyinference::message::Message]) -> u64 {
+    tinyinference::message::count_tokens_approximately(messages)
 }
 
 impl ContextCompressionMiddleware {
@@ -192,7 +192,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for ContextCom
         // recent turns, in chronological position.
         let system_prefix = to_keep
             .iter()
-            .take_while(|m| matches!(m, crate::message::Message::System(_)))
+            .take_while(|m| matches!(m, tinyinference::message::Message::System(_)))
             .count();
         let recent = to_keep.split_off(system_prefix);
         let mut new_messages = Vec::with_capacity(to_keep.len() + recent.len() + 1);

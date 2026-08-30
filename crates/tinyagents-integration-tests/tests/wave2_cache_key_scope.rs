@@ -15,8 +15,8 @@ use tinyagents_harness::cache::{
     CachePolicy, InMemoryResponseCache, cache_key, credential_fingerprint, model_cache_identity,
     scoped_cache_key,
 };
-use tinyagents_harness::message::Message;
-use tinyagents_harness::model::{ChatModel, ModelRequest, ModelResponse};
+use tinyinference::message::Message;
+use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyagents_harness::runtime::AgentHarness;
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────

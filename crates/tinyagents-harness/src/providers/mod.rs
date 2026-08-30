@@ -51,12 +51,12 @@ use serde_json::Value;
 
 use crate::Result;
 use crate::error::TinyAgentsError;
-use crate::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
-use crate::model::{
+use tinyinference::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
+use tinyinference::model::{
     ChatModel, ModelProfile, ModelRequest, ModelResponse, ModelStream, ModelStreamItem,
 };
 use crate::tool::ToolCall;
-use crate::usage::Usage;
+use tinyinference::usage::Usage;
 
 mod mock;
 

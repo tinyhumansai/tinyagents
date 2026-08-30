@@ -8,12 +8,12 @@
 use serde_json::json;
 
 use super::*;
-use crate::message::Message;
-use crate::model::{
+use tinyinference::message::Message;
+use tinyinference::model::{
     ChatModel, ModelRequest, ModelStreamItem, ProviderError, ResponseFormat, StreamAccumulator,
     ToolChoice,
 };
-use crate::providers::{ProviderKind, ProviderSpec};
+use tinyinference::providers::{ProviderKind, ProviderSpec};
 use crate::tool::ToolSchema;
 
 /// Builds a model with a fixed key/model so translation output is deterministic.
@@ -1223,7 +1223,7 @@ async fn sse_stream_preserves_reasoning_content_as_side_channel() {
     // The merged response leads with the preserved (unsigned) thinking block.
     assert_eq!(
         response.message.content.first(),
-        Some(&crate::message::ContentBlock::Thinking {
+        Some(&tinyinference::message::ContentBlock::Thinking {
             text: "think carefully".into(),
             signature: None,
         })
@@ -1391,7 +1391,7 @@ async fn sse_stream_extracts_inline_think_tags() {
     assert_eq!(response_reasoning(&response), "reasoning here");
     assert_eq!(
         response.message.content.first(),
-        Some(&crate::message::ContentBlock::Thinking {
+        Some(&tinyinference::message::ContentBlock::Thinking {
             text: "reasoning here".into(),
             signature: None,
         })
@@ -1799,7 +1799,7 @@ async fn sse_stream_indexless_fallback_ids_match_between_delta_and_final() {
 
 #[test]
 fn user_image_blocks_render_as_content_parts() {
-    use crate::message::{ContentBlock, ImageRef, UserMessage};
+    use tinyinference::message::{ContentBlock, ImageRef, UserMessage};
 
     let request = ModelRequest::new(vec![Message::User(UserMessage {
         content: vec![
@@ -1835,7 +1835,7 @@ fn text_only_user_message_stays_a_plain_string() {
 
 #[test]
 fn provider_extension_block_fails_closed_instead_of_dropping() {
-    use crate::message::{ContentBlock, UserMessage};
+    use tinyinference::message::{ContentBlock, UserMessage};
 
     let request = ModelRequest::new(vec![Message::User(UserMessage {
         content: vec![ContentBlock::ProviderExtension(json!({ "opaque": true }))],
@@ -2178,7 +2178,7 @@ fn merge_system_promotes_to_user_when_no_user_message() {
 
 #[test]
 fn merge_system_preserves_user_image_blocks() {
-    use crate::message::{ImageRef, UserMessage};
+    use tinyinference::message::{ImageRef, UserMessage};
     let user_with_image = Message::User(UserMessage {
         content: vec![
             ContentBlock::Text("caption".to_string()),
@@ -2383,7 +2383,7 @@ async fn sse_stream_recovers_tool_args_with_leaked_template_marker() {
 }
 // `ChatModel::profile` is generic over `State`; pin `State = ()` so the concrete
 // `OpenAiModel` handle disambiguates without a turbofish at every call site.
-fn profile_of(model: &OpenAiModel) -> &crate::model::ModelProfile {
+fn profile_of(model: &OpenAiModel) -> &tinyinference::model::ModelProfile {
     ChatModel::<()>::profile(model).expect("openai models expose a profile")
 }
 
@@ -2859,8 +2859,8 @@ fn shape_degrade_latch_survives_through_a_shared_handle() {
 
 #[test]
 fn stream_cleanup_scrubs_leaked_markup_from_live_deltas() {
-    use crate::message::{AssistantMessage, ContentBlock, MessageDelta};
-    use crate::model::ModelResponse;
+    use tinyinference::message::{AssistantMessage, ContentBlock, MessageDelta};
+    use tinyinference::model::ModelResponse;
     use crate::tool::ToolCallStreamScrubber;
 
     // A native model (tools offered) that leaked its call as `<tool_call>` text,

@@ -402,7 +402,7 @@ pub(super) fn missing_model_remediation(
 /// `src/error.rs` — outside this module's ownership. Promoting the code to a
 /// typed variant is a follow-up.
 ///
-/// [pe]: crate::model::ProviderError::code
+/// [pe]: tinyinference::model::ProviderError::code
 pub(super) fn is_context_overflow(status: u16, message: &str) -> bool {
     if !matches!(status, 400 | 413 | 422 | 500) {
         return false;
@@ -422,7 +422,7 @@ pub(super) fn is_context_overflow(status: u16, message: &str) -> bool {
 
 /// The [`ProviderError::code`][pe] stamped on a recognised context overflow.
 ///
-/// [pe]: crate::model::ProviderError::code
+/// [pe]: tinyinference::model::ProviderError::code
 pub const CONTEXT_OVERFLOW_CODE: &str = "context_overflow";
 
 /// Recognises "this endpoint rejects the `tools` parameter" from a 400 body.

@@ -14,8 +14,8 @@ use std::fmt::Write as _;
 
 use serde_json::{Map, Value};
 
-use crate::message::{ContentBlock, Message};
-use crate::model::ModelResponse;
+use tinyinference::message::{ContentBlock, Message};
+use tinyinference::model::ModelResponse;
 use crate::tool::{ToolCall, ToolSchema};
 
 /// Opening / closing delimiters for a text-mode tool call.
@@ -599,7 +599,7 @@ fn parse_relaxed_object(raw: &str) -> Option<Value> {
         // A non-object parsed strictly is not a tool call; do not try to
         // "repair" it into one.
         Ok(_) => None,
-        Err(_) => crate::providers::openai::relaxed_json::recover_relaxed_object(raw),
+        Err(_) => tinyinference::providers::openai::relaxed_json::recover_relaxed_object(raw),
     }
 }
 
