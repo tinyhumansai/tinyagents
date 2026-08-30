@@ -176,11 +176,11 @@ fn detect_verbs(prompt: &str) -> HashSet<ToolVerb> {
     found
 }
 
-/// Whether `word` (already uppercased) is one of the recognised verb
-/// prefixes, tolerating a trailing plural `S` (`"CREATES"` -> `"CREATE"`).
-fn word_is_verb_prefix(word_upper: &str) -> bool {
+/// Classifies `word` (already uppercased) as a recognised verb prefix,
+/// tolerating a trailing plural `S` (`"CREATES"` -> `"CREATE"`).
+fn word_as_verb_prefix(word_upper: &str) -> Option<ToolVerb> {
     let trimmed = word_upper.strip_suffix('S').unwrap_or(word_upper);
-    ALL_VERBS.iter().any(|&v| {
+    ALL_VERBS.into_iter().find(|&v| {
         tool_verb_prefixes(v)
             .iter()
             .any(|&prefix| word_upper == prefix || trimmed == prefix)
@@ -203,7 +203,7 @@ fn word_is_verb_prefix(word_upper: &str) -> bool {
 /// position; unconditionally stripping it discarded the only verb present.
 fn tool_verb(name: &str) -> Option<ToolVerb> {
     let first_segment = name.split('_').next().unwrap_or(name);
-    let first_is_verb = word_is_verb_prefix(&first_segment.to_ascii_uppercase());
+    let first_is_verb = word_as_verb_prefix(&first_segment.to_ascii_uppercase()).is_some();
 
     // Strip an assumed vendor prefix (everything up to and including the
     // first `_`) unless the first segment is itself the verb.
@@ -217,20 +217,10 @@ fn tool_verb(name: &str) -> Option<ToolVerb> {
     };
 
     // Check the first two words.
-    for word in stripped.split('_').take(2) {
-        let word_upper = word.to_ascii_uppercase();
-        if word_is_verb_prefix(&word_upper) {
-            let trimmed = word_upper.strip_suffix('S').unwrap_or(&word_upper);
-            for &v in &ALL_VERBS {
-                for &prefix in tool_verb_prefixes(v) {
-                    if word_upper == prefix || trimmed == prefix {
-                        return Some(v);
-                    }
-                }
-            }
-        }
-    }
-    None
+    stripped
+        .split('_')
+        .take(2)
+        .find_map(|word| word_as_verb_prefix(&word.to_ascii_uppercase()))
 }
 
 // ─────────────────────────────────────────────────────────────────────────
