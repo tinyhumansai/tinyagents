@@ -123,7 +123,7 @@ impl ChatModel<()> for FlakyModel {
             *calls
         };
         if n <= self.fail_first {
-            return Err(TinyAgentsError::Model(format!(
+            return Err(tinyinference::Error::Model(format!(
                 "flaky transient failure #{n}"
             )));
         }

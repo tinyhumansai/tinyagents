@@ -82,7 +82,7 @@ impl ChatModel<()> for AlwaysFailing {
         _request: ModelRequest,
     ) -> tinyinference::Result<ModelResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Err(TinyAgentsError::Model(
+        Err(tinyinference::Error::Model(
             "openai returned HTTP 503: service unavailable".to_string(),
         ))
     }
