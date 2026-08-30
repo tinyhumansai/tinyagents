@@ -1,3 +1,19 @@
+//! Types threaded through the delegation graph.
+//!
+//! [`DelegationState`] is the durable one: it is what a [`Checkpointer`]
+//! persists, so its serde representation is an on-disk format. See the
+//! `schema_version` field and the module README before changing any field name,
+//! `#[serde(...)]` attribute, or default.
+
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::CancellationToken;
+use crate::graph::checkpoint::Checkpointer;
+use crate::graph::stream::GraphEventSink;
+
 /// Which stage a delegation node is asking the injected worker to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DelegationStage {
