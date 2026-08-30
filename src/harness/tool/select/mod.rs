@@ -199,7 +199,19 @@ fn detect_verbs(prompt: &str) -> HashSet<ToolVerb> {
     // — which ranks SLACK_CREATE_CHANNEL above SLACK_SEND_MESSAGE and drops
     // SLACK_SEND_MESSAGE out of the top 15 entirely. Pinned by the host's
     // pre-extraction ranking snapshot.
-    if !found.contains(&ToolVerb::Send) {
+    // A noun does not override a verb that CONFLICTS with sending ("read
+    // email", "delete a message" are Read/Delete, not Send). It does apply
+    // alongside `Create`, because "post/write/draft a message" is a send
+    // intent expressed with a creation verb — and suppressing it there is
+    // what dropped SLACK_SEND_MESSAGE out of the top 15 for "Post a message
+    // to #general". Pinned by the host's pre-extraction ranking snapshot.
+    let conflicts_with_send = found.iter().any(|v| {
+        matches!(
+            v,
+            ToolVerb::Read | ToolVerb::List | ToolVerb::Update | ToolVerb::Delete | ToolVerb::Merge
+        )
+    });
+    if !found.contains(&ToolVerb::Send) && !conflicts_with_send {
         for alias in SEND_NOUN_ALIASES {
             if contains_whole_word(&lowered, alias) {
                 found.insert(ToolVerb::Send);
