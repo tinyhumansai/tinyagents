@@ -824,6 +824,62 @@ async fn cancelled_checkpoint_still_scheduling_finalize_is_resumed_not_terminal(
     assert!(outcome.state.cancelled);
 }
 
+#[tokio::test]
+async fn resume_delegation_rejects_a_schema_mismatched_checkpoint() {
+    // `resume_delegation` is a public entry point a host calls directly with
+    // an approver's decision — it bypasses `run_or_resume_delegation`'s
+    // match arms entirely, so `CompiledGraph::resume` would otherwise apply
+    // the decision to a schema-mismatched checkpoint with no check at all.
+    // During a rollback/mixed-version deployment, serde can decode a newer
+    // additive checkpoint by ignoring unknown fields, letting an older
+    // binary consume the approval under outdated semantics.
+    let dir = tempfile::tempdir().unwrap();
+    let seed: crate::graph::checkpoint::FileCheckpointer<DelegationState> =
+        crate::graph::checkpoint::FileCheckpointer::new(dir.path());
+    let checkpoint = Checkpoint {
+        thread_id: "resume-future-schema".to_string(),
+        checkpoint_id: "cp-future".to_string(),
+        run_id: None,
+        parent_checkpoint_id: None,
+        namespace: vec![],
+        state: DelegationState {
+            plan: Some("PLAN".to_string()),
+            schema_version: CURRENT_SCHEMA_VERSION + 1,
+            ..Default::default()
+        },
+        next_nodes: vec![crate::harness::ids::NodeId::from("approval")],
+        completed_tasks: vec![],
+        pending_writes: vec![],
+        interrupts: vec![Interrupt {
+            id: "int-1".to_string(),
+            node: crate::harness::ids::NodeId::from("approval"),
+            payload: json!({}),
+        }],
+        pending_activations: None,
+        barrier_arrivals: vec![],
+        metadata: json!({}),
+    };
+    seed.put(checkpoint)
+        .await
+        .expect("seed future-schema checkpoint parked on approval");
+
+    let cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::<DelegationState>::new(dir.path()));
+    let config = DelegationConfig {
+        require_review_approval: true,
+        checkpointer: Some(cp),
+        thread_id: Some("resume-future-schema".to_string()),
+        ..DelegationConfig::default()
+    };
+    let err = resume_delegation(config, json!("approve_once"), flow_runner(0))
+        .await
+        .expect_err("must refuse to resume a schema-mismatched checkpoint");
+    assert!(
+        err.contains("schema_version"),
+        "error should name the mismatch: {err}"
+    );
+}
+
 #[test]
 fn incompatible_checkpoint_error_matches_schema_not_corrupt_or_operational() {
     use crate::TinyAgentsError;
