@@ -10,8 +10,8 @@
 use std::time::Duration;
 
 use tinyagents_harness::TinyAgentsError;
-use tinyinference::model::ProviderError;
 use tinyagents_harness::retry::{RetryPolicy, retry_after_hint};
+use tinyinference::model::ProviderError;
 
 fn provider_error(message: &str, retry_after_ms: Option<u64>) -> TinyAgentsError {
     TinyAgentsError::Provider(Box::new(ProviderError {

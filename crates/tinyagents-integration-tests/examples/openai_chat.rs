@@ -13,9 +13,9 @@
 use std::sync::Arc;
 
 use tinyagents_harness::Result;
+use tinyagents_harness::runtime::AgentHarness;
 use tinyinference::message::Message;
 use tinyinference::providers::openai::OpenAiModel;
-use tinyagents_harness::runtime::AgentHarness;
 
 #[tokio::main]
 async fn main() -> Result<()> {

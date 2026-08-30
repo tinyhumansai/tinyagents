@@ -6,8 +6,8 @@ use std::sync::Arc;
 use tinyagents_graph::checkpoint::{Checkpoint, Checkpointer, FileCheckpointer};
 use tinyagents_harness::ids::NodeId;
 use tinyagents_harness::memory::{ChatHistory, StoreChatHistory};
-use tinyinference::message::Message;
 use tinyagents_harness::store::{AppendStore, FileStore, JsonlAppendStore};
+use tinyinference::message::Message;
 
 fn checkpoint(thread: &str, id: &str) -> Checkpoint<i32> {
     Checkpoint {

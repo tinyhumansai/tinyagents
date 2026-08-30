@@ -14,10 +14,10 @@
 
 use tinyagents_graph::END;
 use tinyagents_graph::*;
-use tinyinference::message::Message;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::Message;
 
 #[derive(Clone, Debug)]
 struct AgentState {

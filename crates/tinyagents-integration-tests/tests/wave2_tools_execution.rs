@@ -25,13 +25,13 @@ use tinyagents_harness::TinyAgentsError;
 use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::events::AgentEvent;
 use tinyagents_harness::limits::RunLimits;
-use tinyinference::message::Message;
 use tinyagents_harness::middleware::Middleware;
-use tinyinference::model::ModelResponse;
-use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy, UnknownToolPolicy};
 use tinyagents_harness::testkit::EventRecorder;
 use tinyagents_harness::tool::{Tool, ToolCall, ToolErrorPolicy, ToolResult, ToolSchema};
+use tinyinference::message::Message;
+use tinyinference::model::ModelResponse;
+use tinyinference::providers::MockModel;
 
 // ── Scripted model helpers ────────────────────────────────────────────────────
 

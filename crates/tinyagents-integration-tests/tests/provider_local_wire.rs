@@ -23,12 +23,10 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use tinyinference::message::Message;
-use tinyinference::model::{
-    ChatModel, ModelRequest, ReasoningEffort, ResponseFormat, ToolChoice,
-};
-use tinyinference::providers::openai::OpenAiModel;
 use tinyagents_harness::tool::ToolSchema;
+use tinyinference::message::Message;
+use tinyinference::model::{ChatModel, ModelRequest, ReasoningEffort, ResponseFormat, ToolChoice};
+use tinyinference::providers::openai::OpenAiModel;
 
 // ---------------------------------------------------------------------------
 // Minimal recording HTTP server

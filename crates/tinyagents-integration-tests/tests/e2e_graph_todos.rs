@@ -9,16 +9,16 @@ use serde_json::json;
 
 use tinyagents_graph::*;
 use tinyagents_harness::context::RunConfig;
-use tinyinference::message::{AssistantMessage, ContentBlock, Message};
-use tinyinference::model::ModelResponse;
-use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::store::{InMemoryStore, Store};
 use tinyagents_harness::tool::ToolCall;
-use tinyinference::usage::Usage;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::ModelResponse;
+use tinyinference::providers::MockModel;
+use tinyinference::usage::Usage;
 
 fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> ModelResponse {
     ModelResponse {

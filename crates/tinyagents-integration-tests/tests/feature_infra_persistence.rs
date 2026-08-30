@@ -15,11 +15,11 @@ use serde_json::json;
 use tinyagents_harness::memory::{
     ChatHistory, InMemoryChatHistory, ShortTermMemory, StoreChatHistory,
 };
-use tinyinference::message::Message;
 use tinyagents_harness::store::{
     AppendStore, FileStore, InMemoryAppendStore, InMemoryStore, JsonlAppendStore, Store,
     StoreRegistry,
 };
+use tinyinference::message::Message;
 
 /// A process-unique temp directory for file-backed cases.
 fn temp_dir(tag: &str) -> PathBuf {

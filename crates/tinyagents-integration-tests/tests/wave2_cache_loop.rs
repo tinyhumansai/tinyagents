@@ -14,16 +14,16 @@ use async_trait::async_trait;
 use tinyagents_graph::*;
 use tinyagents_harness::cache::{InMemoryResponseCache, ResponseCache};
 use tinyagents_harness::context::{RunConfig, RunContext};
-use tinyinference::message::Message;
 use tinyagents_harness::middleware::ModelFallbackMiddleware;
-use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyagents_harness::retry::{FallbackPolicy, RetryPolicy};
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::EventRecorder;
-use tinyinference::usage::Usage;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::Message;
+use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
+use tinyinference::usage::Usage;
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -52,7 +52,11 @@ impl ChatModel<()> for FixedModel {
         Some(self.identity.to_string())
     }
 
-    async fn invoke(&self, _state: &(), _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let mut response = ModelResponse::assistant(self.answer);
         response.usage = self.usage;
@@ -72,7 +76,11 @@ impl ChatModel<()> for AlwaysFailing {
         Some(self.identity.to_string())
     }
 
-    async fn invoke(&self, _state: &(), _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(TinyAgentsError::Model(
             "openai returned HTTP 503: service unavailable".to_string(),

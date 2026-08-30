@@ -13,12 +13,12 @@
 use tinyagents_harness::cache::{
     CacheLayoutEvent, InMemoryResponseCache, PromptCacheLayout, ResponseCache, cache_key,
 };
-use tinyinference::cache::CachePolicy;
-use tinyinference::message::Message;
-use tinyinference::model::{ModelRequest, ModelResponse, PromptSegment, SegmentRole};
 use tinyagents_harness::summarization::{
     ConcatSummarizer, SummarizationPolicy, Summarizer, TrimStrategy, estimate_tokens, trim_messages,
 };
+use tinyinference::cache::CachePolicy;
+use tinyinference::message::Message;
+use tinyinference::model::{ModelRequest, ModelResponse, PromptSegment, SegmentRole};
 
 // ── Summarization: token estimation + trimming ──────────────────────────────
 

@@ -20,8 +20,8 @@ use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::types::{CacheStats, ResponseCache};
-use tinyinference::model::ModelResponse;
 use crate::{Result, TinyAgentsError};
+use tinyinference::model::ModelResponse;
 
 /// Table + index DDL. `(ns, key)` is the primary key so a namespaced population
 /// can be dropped wholesale, and `expiry` is indexed so the periodic purge does

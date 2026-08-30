@@ -6,12 +6,12 @@ use tinyagents_graph::export::{
 };
 use tinyagents_graph::{Command, GraphBuilder, GraphDefaults, NodeResult, Route, START};
 use tinyagents_harness::ids::GraphId;
-use tinyinference::providers::MockModel;
 use tinyagents_harness::testkit::FakeTool;
 use tinyagents_language::capability_resolver::CapabilityResolver;
 use tinyagents_language::resolver::{Resolver, resolve_source};
 use tinyagents_language::{Blueprint, ChannelSpec, EdgeSpec, Literal, NodeSpec, Routing, parser};
 use tinyagents_registry::{CapabilityRegistry, ComponentKind};
+use tinyinference::providers::MockModel;
 
 #[tokio::test]
 async fn graph_builder_validates_topology_and_exports_metadata() {

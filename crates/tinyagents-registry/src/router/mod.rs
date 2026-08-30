@@ -65,8 +65,8 @@ mod test;
 pub use types::WorkloadRoute;
 
 use tinyagents_harness::error::{Result, TinyAgentsError};
-use tinyinference::model::CapabilitySet;
 use tinyagents_harness::retry::FallbackPolicy;
+use tinyinference::model::CapabilitySet;
 
 /// A declarative, name-addressable router over registered models: it maps named
 /// workload tiers to concrete registered model names and owns the per-tier

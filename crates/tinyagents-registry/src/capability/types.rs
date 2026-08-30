@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::component::{ComponentKind, ComponentMetadata};
-use tinyinference::model::ChatModel;
 use tinyagents_harness::tool::Tool;
 use tinyagents_language::Blueprint;
+use tinyinference::model::ChatModel;
 
 /// A name-addressable catalog of registered capabilities.
 ///

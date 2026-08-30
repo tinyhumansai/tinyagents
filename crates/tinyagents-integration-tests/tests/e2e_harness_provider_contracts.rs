@@ -4,24 +4,24 @@ use futures::stream;
 use serde::Deserialize;
 use serde_json::json;
 use tinyagents_harness::cost::{CostTotals, estimate_cost};
+use tinyagents_harness::model_registry::{ModelRegistry, ModelSelection};
+use tinyagents_harness::stream::{StreamChunk, StreamMode, StreamSink, stream as filter_stream};
+use tinyagents_harness::structured::{
+    StructuredExtractor, StructuredStrategy, response_format_for_strategy,
+};
+use tinyagents_harness::tool::{ToolCall, ToolDelta, ToolFormat, ToolSchema};
+use tinyagents_registry::catalog::{
+    ModelCapabilities, ModelCatalog, ModelCatalogEntry, ModelCatalogSnapshot, ModelCatalogSource,
+    ModelPricing,
+};
 use tinyinference::message::{Message, MessageDelta};
 use tinyinference::model::{
     CapabilitySet, ChatModel, ModelHint, ModelProfile, ModelRequest, ModelResolutionSource,
     ModelResponse, ModelStreamItem, PromptSegment, ProviderError, ResponseFormat, SegmentRole,
     StreamAccumulator, ToolChoice, collect_model_stream,
 };
-use tinyagents_harness::model_registry::{ModelRegistry, ModelSelection};
 use tinyinference::providers::{MockModel, ProviderKind, ProviderSpec};
-use tinyagents_harness::stream::{StreamChunk, StreamMode, StreamSink, stream as filter_stream};
-use tinyagents_harness::structured::{
-    StructuredExtractor, StructuredStrategy, response_format_for_strategy,
-};
-use tinyagents_harness::tool::{ToolCall, ToolDelta, ToolFormat, ToolSchema};
 use tinyinference::usage::{Usage, UsageTotals};
-use tinyagents_registry::catalog::{
-    ModelCapabilities, ModelCatalog, ModelCatalogEntry, ModelCatalogSnapshot, ModelCatalogSource,
-    ModelPricing,
-};
 
 #[tokio::test]
 async fn mock_provider_invokes_streams_and_reports_usage() {

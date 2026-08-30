@@ -10,9 +10,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::tool::ToolSchema;
 use tinyinference::message::Message;
 use tinyinference::model::{PromptSegment, ResponseFormat};
-use crate::tool::ToolSchema;
 
 /// The role a rendered message will take in the conversation.
 ///

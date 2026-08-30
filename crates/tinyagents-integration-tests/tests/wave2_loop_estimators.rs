@@ -9,8 +9,8 @@
 use serde_json::json;
 
 use tinyagents_harness::context::{RunConfig, RunContext};
-use tinyinference::message::{ContentBlock, Message, ToolMessage};
 use tinyagents_harness::middleware::{MicrocompactMiddleware, Middleware};
+use tinyinference::message::{ContentBlock, Message, ToolMessage};
 use tinyinference::model::ModelRequest;
 
 const PLACEHOLDER: &str = "[elided]";

@@ -8,11 +8,11 @@ use tinyagents_harness::cache::{
     CacheLayoutEvent, PROMPT_CACHE_KEY_OPTION, PromptCacheLayout, apply_prompt_cache_breakpoints,
     prompt_cache_key,
 };
+use tinyagents_harness::prompt::PromptBuilder;
+use tinyagents_harness::tool::{ToolFormat, ToolSchema};
 use tinyinference::cache::CachePolicy;
 use tinyinference::message::Message;
 use tinyinference::model::{ModelRequest, PromptSegment, SegmentRole};
-use tinyagents_harness::prompt::PromptBuilder;
-use tinyagents_harness::tool::{ToolFormat, ToolSchema};
 
 fn segment(id: &str, role: SegmentRole, cacheable: bool) -> PromptSegment {
     PromptSegment {

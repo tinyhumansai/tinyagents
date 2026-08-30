@@ -14,11 +14,11 @@ use serde_json::json;
 
 use tinyagents_harness::Result;
 use tinyagents_harness::error::TinyAgentsError;
-use tinyinference::message::Message;
 use tinyagents_harness::tool::{
     SchemaPreparation, Tool, ToolCall, ToolErrorPolicy, ToolRegistry, ToolResult, ToolSchema,
     parse_prompt_tool_calls_from_text, prepare_tool_schemas, strip_injected_arguments,
 };
+use tinyinference::message::Message;
 
 // ---------------------------------------------------------------------------
 // TOOL-2 — synthetic call ids

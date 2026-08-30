@@ -20,14 +20,14 @@ use serde_json::json;
 use tinyagents_graph::*;
 use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::error::TinyAgentsError;
-use tinyinference::message::Message;
-use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, Trajectory};
 use tinyagents_harness::tool::{Tool, ToolCall};
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::Message;
+use tinyinference::providers::MockModel;
 
 /// Builds a child harness whose model always asks for the `broken` tool, which
 /// fails with `Err(TinyAgentsError::Tool("boom"))`.

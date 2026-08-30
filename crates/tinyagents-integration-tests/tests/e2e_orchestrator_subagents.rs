@@ -28,15 +28,15 @@ use serde_json::{Value, json};
 use tinyagents_graph::*;
 use tinyagents_harness::events::{AgentEvent, EventSink};
 use tinyagents_harness::ids::{CallId, RunId};
-use tinyinference::message::Message;
 use tinyagents_harness::middleware::AgentRun;
-use tinyinference::model::ResponseFormat;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::{EventRecorder, ScriptedModel, Trajectory};
 use tinyagents_harness::tool::ToolCall;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::Message;
+use tinyinference::model::ResponseFormat;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 

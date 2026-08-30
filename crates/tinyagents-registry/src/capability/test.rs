@@ -11,15 +11,19 @@ use serde_json::json;
 use super::*;
 use crate::Result;
 use crate::component::ComponentKind;
-use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyagents_harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
 use tinyagents_language::Blueprint;
+use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 
 struct FakeModel(&'static str);
 
 #[async_trait]
 impl ChatModel<()> for FakeModel {
-    async fn invoke(&self, _state: &(), _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         Ok(ModelResponse::assistant(self.0))
     }
 }

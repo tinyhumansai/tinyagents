@@ -481,8 +481,8 @@ async fn sleep_backoff_waits_unless_explicitly_disabled() {
 
 #[test]
 fn retry_after_hint_is_read_from_every_error_shape_that_can_carry_one() {
-    use tinyinference::model::ProviderError;
     use crate::retry::retry_after_hint;
+    use tinyinference::model::ProviderError;
 
     assert_eq!(
         retry_after_hint(&TinyAgentsError::Model(

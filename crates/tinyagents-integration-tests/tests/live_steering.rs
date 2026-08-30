@@ -11,12 +11,12 @@ use std::sync::Arc;
 
 use tinyagents_graph::*;
 use tinyagents_harness::context::{RunConfig, RunContext};
-use tinyinference::message::Message;
-use tinyinference::providers::openai::OpenAiModel;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::Message;
+use tinyinference::providers::openai::OpenAiModel;
 
 #[tokio::test]
 async fn orchestrator_steers_a_real_openai_run() {

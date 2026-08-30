@@ -6,8 +6,8 @@
 
 use serde_json::json;
 
-use tinyinference::message::MessageDelta;
 use crate::stream::{StreamChunk, StreamMode, StreamSink, stream};
+use tinyinference::message::MessageDelta;
 
 #[test]
 fn smoke_sink_filters_by_mode() {
@@ -174,10 +174,10 @@ fn stream_chunk_null_values_does_not_corrupt_to_empty_object() {
 mod project {
     use crate::events::AgentEvent;
     use crate::ids::{CallId, RunId};
-    use tinyinference::message::MessageDelta;
     use crate::stream::{
         StreamChunk, StreamMode, StreamSink, project_event, project_event_for_modes, projected_mode,
     };
+    use tinyinference::message::MessageDelta;
 
     fn delta_event() -> AgentEvent {
         AgentEvent::ModelDelta {

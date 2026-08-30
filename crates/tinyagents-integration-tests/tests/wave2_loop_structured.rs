@@ -14,11 +14,11 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use tinyagents_harness::TinyAgentsError;
-use tinyinference::message::Message;
-use tinyinference::model::{ChatModel, ModelProfile, ModelRequest, ModelResponse, ToolChoice};
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::FakeTool;
 use tinyagents_harness::tool::ToolCall;
+use tinyinference::message::Message;
+use tinyinference::model::{ChatModel, ModelProfile, ModelRequest, ModelResponse, ToolChoice};
 
 /// The schema the tests ask the model to fill in.
 fn schema() -> serde_json::Value {

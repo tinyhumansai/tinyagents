@@ -12,10 +12,10 @@ use tinyagents_graph::testkit::{
 };
 use tinyagents_graph::*;
 use tinyagents_harness::ids::ExecutionStatus;
-use tinyinference::usage::UsageTotals;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::usage::UsageTotals;
 
 fn temp_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(

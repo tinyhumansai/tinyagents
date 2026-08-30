@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::events::{AgentEvent, EventSink, RecordingListener};
-use tinyinference::model::{ModelRequest, ModelResponse, ModelStreamItem};
 use crate::tool::ToolCall;
+use tinyinference::model::{ModelRequest, ModelResponse, ModelStreamItem};
 
 // ---------------------------------------------------------------------------
 // StreamingMock

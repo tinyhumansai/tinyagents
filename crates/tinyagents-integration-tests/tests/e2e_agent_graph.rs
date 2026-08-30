@@ -21,16 +21,16 @@ use serde_json::json;
 
 use tinyagents_graph::*;
 use tinyagents_harness::context::{RunConfig, RunContext};
-use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyagents_harness::middleware::UsageAccountingMiddleware;
-use tinyinference::model::ModelResponse;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, ScriptedModel, Trajectory};
 use tinyagents_harness::tool::ToolCall;
-use tinyinference::usage::Usage;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::ModelResponse;
+use tinyinference::usage::Usage;
 
 /// State threaded through the graph: the question to answer and the agent's
 /// final text once the `agent` node has run.

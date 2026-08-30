@@ -12,12 +12,13 @@ use async_trait::async_trait;
 
 use tinyagents_harness::Result;
 use tinyagents_harness::cache::{
-    InMemoryResponseCache, cache_key, credential_fingerprint, model_cache_identity, scoped_cache_key,
+    InMemoryResponseCache, cache_key, credential_fingerprint, model_cache_identity,
+    scoped_cache_key,
 };
+use tinyagents_harness::runtime::AgentHarness;
 use tinyinference::cache::CachePolicy;
 use tinyinference::message::Message;
 use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
-use tinyagents_harness::runtime::AgentHarness;
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -34,7 +35,11 @@ impl ChatModel<()> for IdentifiedModel {
         Some(self.identity.clone())
     }
 
-    async fn invoke(&self, _state: &(), _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(ModelResponse::assistant(self.answer.clone()))
     }

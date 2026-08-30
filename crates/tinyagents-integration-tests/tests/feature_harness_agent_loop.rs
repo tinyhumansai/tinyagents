@@ -22,12 +22,12 @@ use tinyagents_harness::TinyAgentsError;
 use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::ids::ExecutionStatus;
 use tinyagents_harness::limits::RunLimits;
-use tinyinference::message::{AssistantMessage, ContentBlock, Message};
-use tinyinference::model::ModelResponse;
-use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, Trajectory};
 use tinyagents_harness::tool::ToolCall;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::ModelResponse;
+use tinyinference::providers::MockModel;
 use tinyinference::usage::Usage;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

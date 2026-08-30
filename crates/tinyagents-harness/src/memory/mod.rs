@@ -40,8 +40,8 @@ pub use types::*;
 use async_trait::async_trait;
 
 use crate::error::{Result, TinyAgentsError};
-use tinyinference::message::Message;
 use crate::store::Store;
+use tinyinference::message::Message;
 
 // ── InMemoryChatHistory ───────────────────────────────────────────────────────
 

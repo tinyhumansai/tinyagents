@@ -25,9 +25,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::context::RunConfig;
-use tinyinference::model::ResponseFormat;
 use crate::retry::RateLimiter;
 use crate::tool::{ToolCall, ToolSchema};
+use tinyinference::model::ResponseFormat;
 
 // ── RetryMiddleware ───────────────────────────────────────────────────────────
 

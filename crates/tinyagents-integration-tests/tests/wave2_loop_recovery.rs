@@ -11,10 +11,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::json;
 
-use tinyinference::message::Message;
-use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyagents_harness::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy, UnknownToolPolicy};
 use tinyagents_harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
+use tinyinference::message::Message;
+use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 
 /// The defaults are the whole point of this file, so pin them directly too.
 #[test]

@@ -33,9 +33,9 @@ use std::sync::Arc;
 
 use crate::cache::ResponseCache;
 use crate::middleware::{Middleware, MiddlewareStack, ModelMiddleware, ToolMiddleware};
-use tinyinference::model::ChatModel;
 use crate::model_registry::ModelRegistry;
 use crate::tool::{Tool, ToolRegistry, ToolTimeoutSettings};
+use tinyinference::model::ChatModel;
 
 impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// Creates an empty harness with default policy and no models, tools, or

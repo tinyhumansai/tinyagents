@@ -20,13 +20,13 @@
 use std::sync::Arc;
 
 use crate::cache::ResponseCache;
-use tinyinference::cache::CachePolicy;
 use crate::limits::RunLimits;
 use crate::middleware::MiddlewareStack;
-use tinyinference::model::ResponseFormat;
 use crate::model_registry::ModelRegistry;
 use crate::retry::{FallbackPolicy, RetryPolicy};
 use crate::tool::{ToolRegistry, ToolTimeoutSettings};
+use tinyinference::cache::CachePolicy;
+use tinyinference::model::ResponseFormat;
 
 /// Declarative, run-scoped policy shared by every invocation of an
 /// [`AgentHarness`].

@@ -18,16 +18,16 @@ use tinyagents_harness::TinyAgentsError;
 use tinyagents_harness::context::RunContext;
 use tinyagents_harness::events::RecordingListener;
 use tinyagents_harness::limits::RunLimits;
-use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyagents_harness::middleware::Middleware;
+use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
+use tinyagents_harness::testkit::{FakeTool, Trajectory};
+use tinyagents_harness::tool::ToolCall;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyinference::model::{
     CapabilitySet, ChatModel, ModelHint, ModelProfile, ModelRequest, ModelResolutionSource,
     ModelResponse,
 };
 use tinyinference::providers::MockModel;
-use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
-use tinyagents_harness::testkit::{FakeTool, Trajectory};
-use tinyagents_harness::tool::ToolCall;
 use tinyinference::usage::Usage;
 
 /// Middleware that subscribes a shared [`RecordingListener`] to the run's event

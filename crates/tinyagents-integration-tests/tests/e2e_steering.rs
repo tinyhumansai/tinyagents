@@ -9,12 +9,12 @@ use std::sync::Arc;
 
 use tinyagents_graph::*;
 use tinyagents_harness::context::{RunConfig, RunContext};
-use tinyinference::message::Message;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, ScriptedModel, Trajectory};
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::Message;
 
 /// Builds a harness whose only model is a `ScriptedModel`; returns both the
 /// harness and the shared model handle so the test can inspect the requests the

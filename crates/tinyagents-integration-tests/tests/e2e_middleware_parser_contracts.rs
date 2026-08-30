@@ -7,7 +7,6 @@ use serde_json::json;
 use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::error::{Result, TinyAgentsError};
 use tinyagents_harness::events::{AgentEvent, RecordingListener};
-use tinyinference::message::Message;
 use tinyagents_harness::middleware::{
     AgentRun, DynamicPromptMiddleware, DynamicToolSelectionMiddleware, HumanApprovalMiddleware,
     LoggingMiddleware, Middleware, MiddlewareModelOutcome, MiddlewareStack, MiddlewareToolOutcome,
@@ -15,9 +14,10 @@ use tinyagents_harness::middleware::{
     StructuredOutputValidatorMiddleware, TimeoutMiddleware, ToolAllowlistMiddleware, ToolBaseCall,
     ToolHandler, ToolMiddleware, TracingMiddleware,
 };
-use tinyinference::model::{ModelDelta, ModelRequest, ModelResponse, ResponseFormat};
 use tinyagents_harness::tool::{ToolCall, ToolDelta, ToolResult, ToolSchema};
 use tinyagents_language::{lexer, parser};
+use tinyinference::message::Message;
+use tinyinference::model::{ModelDelta, ModelRequest, ModelResponse, ResponseFormat};
 
 struct ModelBase {
     seen_models: Mutex<Vec<Option<String>>>,

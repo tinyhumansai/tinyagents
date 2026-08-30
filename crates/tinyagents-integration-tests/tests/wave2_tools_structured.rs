@@ -15,8 +15,8 @@
 use serde_json::json;
 
 use tinyagents_harness::TinyAgentsError;
-use tinyinference::model::{ModelProfile, ModelResponse};
 use tinyagents_harness::structured::{StructuredExtractor, StructuredStrategy};
+use tinyinference::model::{ModelProfile, ModelResponse};
 
 fn score_schema() -> serde_json::Value {
     json!({

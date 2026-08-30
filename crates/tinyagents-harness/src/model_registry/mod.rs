@@ -8,8 +8,7 @@ mod types;
 use std::sync::Arc;
 
 use tinyinference::model::{
-    CapabilitySet, ChatModel, ModelProfile, ModelRequest, ModelResolutionSource,
-    ResolvedModel,
+    CapabilitySet, ChatModel, ModelProfile, ModelRequest, ModelResolutionSource, ResolvedModel,
 };
 
 pub use types::*;

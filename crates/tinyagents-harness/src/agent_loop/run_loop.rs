@@ -332,7 +332,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // surface that fall-through as a diagnostic event instead of
             // silently substituting a different model.
             if let Some(requested) = &request.model
-                && binding.resolved.source != tinyinference::model::ModelResolutionSource::RequestOverride
+                && binding.resolved.source
+                    != tinyinference::model::ModelResolutionSource::RequestOverride
             {
                 ctx.emit(AgentEvent::ModelOverrideSkipped {
                     requested: requested.clone(),

@@ -15,10 +15,10 @@ use serde_json::json;
 use tinyagents_harness::TinyAgentsError;
 use tinyagents_harness::context::RunConfig;
 use tinyagents_harness::limits::{LimitBehavior, RunLimits};
-use tinyinference::message::Message;
-use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::FakeTool;
+use tinyinference::message::Message;
+use tinyinference::providers::MockModel;
 
 /// A harness whose model always asks for the same tool, so the loop only ever
 /// stops because a cap stops it.

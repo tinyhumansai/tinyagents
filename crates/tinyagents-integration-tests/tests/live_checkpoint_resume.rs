@@ -26,12 +26,12 @@ async fn live_durable_graph_checkpoints_then_resumes_across_model_call() {
     use serde_json::json;
 
     use tinyagents_graph::*;
-    use tinyinference::message::Message;
-    use tinyinference::providers::openai::OpenAiModel;
     use tinyagents_harness::runtime::AgentHarness;
     use tinyagents_harness::*;
     use tinyagents_language::*;
     use tinyagents_registry::*;
+    use tinyinference::message::Message;
+    use tinyinference::providers::openai::OpenAiModel;
 
     // Load .env so `cargo test` picks up local credentials.
     let _ = dotenvy::dotenv();

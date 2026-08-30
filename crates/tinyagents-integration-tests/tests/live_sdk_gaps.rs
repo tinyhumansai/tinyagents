@@ -23,11 +23,11 @@ async fn live_budget_blocks_second_call() {
 
     use tinyagents_harness::TinyAgentsError;
     use tinyagents_harness::cost::CostTotals;
-    use tinyinference::message::Message;
     use tinyagents_harness::middleware::{BudgetLimits, BudgetMiddleware, BudgetTracker};
+    use tinyagents_harness::runtime::AgentHarness;
+    use tinyinference::message::Message;
     use tinyinference::model::ChatModel;
     use tinyinference::providers::openai::OpenAiModel;
-    use tinyagents_harness::runtime::AgentHarness;
     use tinyinference::usage::Usage;
 
     let _ = dotenvy::dotenv();
@@ -141,11 +141,11 @@ async fn live_tool_policy_exposes_classified_tool() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use tinyinference::message::Message;
     use tinyagents_harness::middleware::ToolPolicyMiddleware;
+    use tinyagents_harness::runtime::AgentHarness;
+    use tinyinference::message::Message;
     use tinyinference::model::ChatModel;
     use tinyinference::providers::openai::OpenAiModel;
-    use tinyagents_harness::runtime::AgentHarness;
 
     let _ = dotenvy::dotenv();
     if std::env::var("OPENAI_API_KEY").is_err() {

@@ -14,9 +14,9 @@ use std::fmt::Write as _;
 
 use serde_json::{Map, Value};
 
+use crate::tool::{ToolCall, ToolSchema};
 use tinyinference::message::{ContentBlock, Message};
 use tinyinference::model::ModelResponse;
-use crate::tool::{ToolCall, ToolSchema};
 
 /// Opening / closing delimiters for a text-mode tool call.
 const OPEN_TAG: &str = "<tool_call>";

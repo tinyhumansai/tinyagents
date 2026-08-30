@@ -10,11 +10,11 @@ use super::*;
 use crate::context::{RunConfig, RunContext};
 use crate::error::{Result, TinyAgentsError};
 use crate::events::{AgentEvent, EventRecord, RecordingListener};
-use tinyinference::message::Message;
 use crate::middleware::{BoxModelFuture, MiddlewareStack, ModelBaseCall};
-use tinyinference::model::{ModelRequest, ModelResponse, ResponseFormat};
 use crate::retry::{RateLimiter, RetryPolicy};
 use crate::tool::{ToolCall, ToolResult, ToolSchema};
+use tinyinference::message::Message;
+use tinyinference::model::{ModelRequest, ModelResponse, ResponseFormat};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -830,8 +830,11 @@ async fn concurrent_runs_on_one_middleware_release_their_own_reservations() {
         .unwrap();
     // Expected from the crate's shared estimator (which charges every content
     // block, tool call, and the role label) rather than a hand-copied number.
-    let expected = crate::token_estimation::count_tokens_approximately(&[Message::user("x".repeat(40))])
-        + crate::token_estimation::count_tokens_approximately(&[Message::user("y".repeat(400))]);
+    let expected =
+        crate::token_estimation::count_tokens_approximately(&[Message::user("x".repeat(40))])
+            + crate::token_estimation::count_tokens_approximately(&[Message::user(
+                "y".repeat(400),
+            )]);
     let reserved = tracker.snapshot().reserved_input_total;
     assert_eq!(
         reserved, expected,

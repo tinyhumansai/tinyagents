@@ -21,14 +21,14 @@ use serde::Deserialize;
 use serde_json::json;
 
 use tinyagents_harness::TinyAgentsError;
-use tinyinference::message::{AssistantMessage, ContentBlock, Message};
-use tinyinference::model::{ModelProfile, ModelResponse, ResponseFormat};
-use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::structured::{
     StructuredExtractor, StructuredStrategy, response_format_for_strategy,
 };
 use tinyagents_harness::tool::ToolCall;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::{ModelProfile, ModelResponse, ResponseFormat};
+use tinyinference::providers::MockModel;
 use tinyinference::usage::Usage;
 
 /// A typed target used to prove `StructuredOutput::parse::<T>()` round-trips.

@@ -8,11 +8,11 @@
 
 #[cfg(test)]
 mod smoke {
-    use tinyinference::message::Message;
     use crate::summarization::{
         ConcatSummarizer, SummarizationPolicy, Summarizer, TokenTrimPolicy, TrimStrategy,
         estimate_tokens, trim_messages, trim_messages_to_token_budget_with,
     };
+    use tinyinference::message::Message;
 
     /// Verify that `estimate_tokens` produces a non-zero value for a non-empty
     /// string and zero for an empty string.
@@ -382,13 +382,13 @@ mod smoke {
 /// at a blind index and produced exactly those shapes.
 #[cfg(test)]
 mod pairing {
-    use tinyinference::message::{AssistantMessage, ContentBlock, Message};
     use crate::summarization::{
         MessageRole, SummarizationPolicy, TrimOptions, TrimStrategy, tool_pairing_is_intact,
         trim_messages, trim_messages_with,
     };
     use crate::tool::ToolCall;
     use serde_json::json;
+    use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 
     /// An assistant turn that only calls tools: no visible text at all, which
     /// is precisely the shape that used to estimate to zero tokens and to be
@@ -628,10 +628,10 @@ mod pairing {
 /// it.
 #[cfg(test)]
 mod rendering {
-    use tinyinference::message::{AssistantMessage, Message};
     use crate::summarization::{ConcatSummarizer, Summarizer, render_message_for_summary};
     use crate::tool::ToolCall;
     use serde_json::json;
+    use tinyinference::message::{AssistantMessage, Message};
 
     #[tokio::test]
     async fn default_summarizer_keeps_tool_history() {

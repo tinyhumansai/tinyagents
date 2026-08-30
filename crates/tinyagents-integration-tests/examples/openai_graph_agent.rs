@@ -16,12 +16,12 @@ use std::sync::Arc;
 
 use tinyagents_graph::END;
 use tinyagents_graph::*;
-use tinyinference::message::Message;
-use tinyinference::providers::openai::OpenAiModel;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::Message;
+use tinyinference::providers::openai::OpenAiModel;
 
 /// State threaded through the graph: the question to ask and the answer the
 /// agent node fills in.

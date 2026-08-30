@@ -267,7 +267,11 @@ mod tests {
 
     #[async_trait]
     impl<State: Send + Sync> ChatModel<State> for EchoModel {
-        async fn invoke(&self, _state: &State, _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+        async fn invoke(
+            &self,
+            _state: &State,
+            _request: ModelRequest,
+        ) -> tinyinference::Result<ModelResponse> {
             Ok(ModelResponse::assistant(self.0))
         }
     }

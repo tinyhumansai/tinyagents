@@ -318,7 +318,8 @@ impl TinyAgentsError {
         match self {
             Self::ContextOverflow { .. } => true,
             Self::Provider(error) => {
-                error.code.as_deref() == Some(tinyinference::providers::openai::CONTEXT_OVERFLOW_CODE)
+                error.code.as_deref()
+                    == Some(tinyinference::providers::openai::CONTEXT_OVERFLOW_CODE)
             }
             _ => false,
         }

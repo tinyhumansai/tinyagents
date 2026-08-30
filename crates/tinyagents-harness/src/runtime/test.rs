@@ -5,10 +5,10 @@ use std::sync::Arc;
 use crate::Result;
 use crate::limits::RunLimits;
 use crate::middleware::LoggingMiddleware;
-use tinyinference::providers::MockModel;
 use crate::retry::{FallbackPolicy, RetryPolicy};
 use crate::runtime::{AgentHarness, RunPolicy};
 use crate::tool::{Tool, ToolCall, ToolResult, ToolSchema};
+use tinyinference::providers::MockModel;
 
 use async_trait::async_trait;
 use serde_json::json;

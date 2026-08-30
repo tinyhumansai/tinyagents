@@ -33,9 +33,9 @@ pub use trim::{trim_messages, trim_messages_to_token_budget_with, trim_messages_
 pub use types::*;
 
 use crate::error::{Result, TinyAgentsError};
-use tinyinference::message::Message;
 use crate::token_estimation::estimate_slice_tokens;
 use async_trait::async_trait;
+use tinyinference::message::Message;
 use trim::partition_system;
 
 // ---------------------------------------------------------------------------

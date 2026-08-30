@@ -9,8 +9,8 @@
 //! Deterministic and fully offline — no provider calls.
 
 use tinyagents_harness::cost::{CostTotals, estimate_cost};
-use tinyinference::usage::{Usage, UsageTotals};
 use tinyagents_registry::catalog::ModelPricing;
+use tinyinference::usage::{Usage, UsageTotals};
 
 // ── Usage accumulation ─────────────────────────────────────────────────────
 

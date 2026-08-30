@@ -24,11 +24,11 @@ use std::sync::Arc;
 
 use crate::component::{ComponentKind, ComponentMetadata};
 use tinyagents_harness::error::{Result, TinyAgentsError};
-use tinyinference::model::ChatModel;
 use tinyagents_harness::model_registry::ModelRegistry;
 use tinyagents_harness::tool::{Tool, ToolRegistry};
 use tinyagents_language::Blueprint;
 use tinyagents_language::capability_resolver::CapabilityResolver;
+use tinyinference::model::ChatModel;
 
 pub use types::*;
 

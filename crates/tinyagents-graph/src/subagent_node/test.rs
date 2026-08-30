@@ -16,13 +16,13 @@ use std::sync::Arc;
 
 use super::*;
 use crate::builder::GraphBuilder;
-use tinyinference::message::AssistantMessage;
-use tinyinference::model::ModelResponse;
-use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::subagent::SubAgent;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, ScriptedModel};
 use tinyagents_harness::tool::ToolCall;
+use tinyinference::message::AssistantMessage;
+use tinyinference::model::ModelResponse;
+use tinyinference::providers::MockModel;
 use tinyinference::usage::Usage;
 
 #[derive(Default)]

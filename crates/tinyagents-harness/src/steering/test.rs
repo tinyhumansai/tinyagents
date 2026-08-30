@@ -14,15 +14,15 @@ use serde_json::json;
 use crate::context::{RunConfig, RunContext};
 use crate::error::{Result, TinyAgentsError};
 use crate::events::AgentEvent;
-use tinyinference::message::Message;
-use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
-use tinyinference::providers::MockModel;
 use crate::runtime::AgentHarness;
 use crate::steering::{
     SteeringCommand, SteeringCommandKind, SteeringHandle, SteeringOutcome, SteeringPolicy,
     apply_pending_steering,
 };
 use crate::testkit::{EventRecorder, Trajectory};
+use tinyinference::message::Message;
+use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
+use tinyinference::providers::MockModel;
 use tinyinference::usage::Usage;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -58,7 +58,11 @@ struct RecordingModel {
 
 #[async_trait]
 impl ChatModel<()> for RecordingModel {
-    async fn invoke(&self, _state: &(), request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         self.requests.lock().unwrap().push(request);
         let mut calls = self.calls.lock().unwrap();
         *calls += 1;

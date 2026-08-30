@@ -17,19 +17,19 @@ use crate::context::{RunConfig, RunContext};
 use crate::error::{Result, TinyAgentsError};
 use crate::events::{AgentEvent, EventSink};
 use crate::limits::RunLimits;
-use tinyinference::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
 use crate::middleware::{
     AgentRun, Middleware, MiddlewareModelOutcome, MiddlewareToolOutcome, ModelHandler,
     ModelMiddleware, ToolHandler, ToolMiddleware,
 };
+use crate::retry::{FallbackPolicy, RetryPolicy};
+use crate::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy, UnknownToolPolicy};
+use crate::tool::{Tool, ToolCall, ToolResult, ToolSchema, ToolTimeout, ToolTimeoutSettings};
+use tinyinference::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
 use tinyinference::model::{
     CapabilitySet, ChatModel, ModelProfile, ModelRequest, ModelResponse, ModelStreamItem,
     ResponseFormat, ToolChoice,
 };
 use tinyinference::providers::MockModel;
-use crate::retry::{FallbackPolicy, RetryPolicy};
-use crate::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy, UnknownToolPolicy};
-use crate::tool::{Tool, ToolCall, ToolResult, ToolSchema, ToolTimeout, ToolTimeoutSettings};
 use tinyinference::usage::Usage;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -464,7 +464,11 @@ impl ChatModel<()> for ToolStructuredModel {
     fn profile(&self) -> Option<&ModelProfile> {
         Some(&self.profile)
     }
-    async fn invoke(&self, _state: &(), request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         // The loop appends an artificial structured tool and forces the choice
         // to it; the tool name is the schema name.
         assert_eq!(request.tool_choice, ToolChoice::Tool("answer".to_string()));
@@ -488,7 +492,11 @@ struct FailingModel {
 
 #[async_trait]
 impl ChatModel<()> for FailingModel {
-    async fn invoke(&self, _state: &(), _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         *self.attempts.lock().unwrap() += 1;
         Err(tinyinference::Error::Model("transient boom".to_string()))
     }
@@ -504,7 +512,11 @@ struct TimestampingFailingModel {
 
 #[async_trait]
 impl ChatModel<()> for TimestampingFailingModel {
-    async fn invoke(&self, _state: &(), _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         self.timestamps
             .lock()
             .unwrap()
@@ -525,7 +537,11 @@ struct ProviderFailingModel {
 
 #[async_trait]
 impl ChatModel<()> for ProviderFailingModel {
-    async fn invoke(&self, _state: &(), _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         *self.attempts.lock().unwrap() += 1;
         Err(tinyinference::Error::Provider(Box::new(
             tinyinference::model::ProviderError {
@@ -1921,7 +1937,11 @@ impl ChatModel<()> for ProfiledFailingModel {
     fn profile(&self) -> Option<&ModelProfile> {
         Some(&self.profile)
     }
-    async fn invoke(&self, _state: &(), _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         *self.attempts.lock().unwrap() += 1;
         Err(tinyinference::Error::Model("transient boom".to_string()))
     }
@@ -1941,7 +1961,11 @@ impl ChatModel<()> for ProfiledTextModel {
     fn profile(&self) -> Option<&ModelProfile> {
         Some(&self.profile)
     }
-    async fn invoke(&self, _state: &(), _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         *self.attempts.lock().unwrap() += 1;
         Ok(ModelResponse::assistant(self.text))
     }
@@ -2262,7 +2286,11 @@ struct CountingToolModel {
 
 #[async_trait]
 impl ChatModel<()> for CountingToolModel {
-    async fn invoke(&self, _state: &(), _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         *self.invocations.lock().unwrap() += 1;
         Ok(tool_call_response("call-1", self.name, json!({})))
     }
@@ -2357,7 +2385,11 @@ struct BlockForeverModel {
 
 #[async_trait]
 impl ChatModel<()> for BlockForeverModel {
-    async fn invoke(&self, _state: &(), _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         self.started.notify_one();
         // Simulate a long buffered (non-streamed) provider call that only ends
         // when the caller drops this future. Without the loop racing
@@ -3068,7 +3100,11 @@ struct ToolCapturingModel {
 
 #[async_trait]
 impl ChatModel<()> for ToolCapturingModel {
-    async fn invoke(&self, _state: &(), request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         self.seen_tools.lock().unwrap().push(request.tools.clone());
         let next = self.responses.lock().unwrap().pop_front();
         next.ok_or_else(|| tinyinference::Error::Validation("no scripted response left".into()))

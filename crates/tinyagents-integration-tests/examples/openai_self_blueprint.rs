@@ -28,8 +28,6 @@ use tinyagents_graph::language::{BoxedNode, NodeFactory, build_graph};
 use tinyagents_graph::*;
 use tinyagents_graph::{CompiledGraph, END, NodeFuture};
 use tinyagents_harness::Result;
-use tinyinference::message::Message;
-use tinyinference::providers::openai::OpenAiModel;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::*;
 use tinyagents_language::capability_resolver::{CapabilityResolver, bind_capabilities};
@@ -38,6 +36,8 @@ use tinyagents_language::parser::parse_str;
 use tinyagents_language::types::{NodeSpec, Routing};
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::Message;
+use tinyinference::providers::openai::OpenAiModel;
 
 /// Grammar + worked example handed to the model so it emits valid `.rag`.
 const SYSTEM_PROMPT: &str = r#"

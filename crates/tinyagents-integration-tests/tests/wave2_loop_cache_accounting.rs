@@ -9,10 +9,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use tinyinference::message::Message;
 use tinyagents_harness::middleware::{BudgetLimits, BudgetMiddleware};
-use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyagents_harness::runtime::AgentHarness;
+use tinyinference::message::Message;
+use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyinference::usage::Usage;
 
 /// A model that answers with a fixed response, optionally flagged as a replay.

@@ -16,12 +16,12 @@
 use futures::StreamExt;
 use serde_json::json;
 
+use tinyagents_harness::tool::{ToolCall, ToolSchema};
 use tinyinference::message::{AssistantMessage, Message};
 use tinyinference::model::{
     ChatModel, ModelRequest, ModelResponse, ModelStreamItem, ResponseFormat, ToolChoice,
 };
 use tinyinference::providers::openai::OpenAiModel;
-use tinyagents_harness::tool::{ToolCall, ToolSchema};
 
 fn weather_tool() -> ToolSchema {
     ToolSchema::new(

@@ -276,4 +276,3 @@ pub struct CacheLayoutEvent {
     /// The ordered cacheable prefix ids after the middleware pass.
     pub segment_ids_after: Vec<String>,
 }
-

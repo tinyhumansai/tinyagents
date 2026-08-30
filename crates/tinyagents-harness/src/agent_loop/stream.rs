@@ -31,9 +31,9 @@ use std::sync::Arc;
 use crate::context::{RunConfig, RunContext};
 use crate::error::Result;
 use crate::events::{EventListener, EventRecord, EventSink};
-use tinyinference::message::Message;
 use crate::middleware::AgentRun;
 use crate::runtime::AgentHarness;
+use tinyinference::message::Message;
 
 use super::AgentLoopResult;
 

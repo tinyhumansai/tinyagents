@@ -25,16 +25,16 @@ use tinyagents_graph::*;
 use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::events::{AgentEvent, RecordingListener};
 use tinyagents_harness::ids::{ExecutionStatus, RunId};
-use tinyinference::message::{AssistantMessage, ContentBlock, Message};
-use tinyinference::model::ModelResponse;
-use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::{AgentHarness, PayloadCapture, RunPolicy};
 use tinyagents_harness::testkit::FakeTool;
 use tinyagents_harness::tool::ToolCall;
-use tinyinference::usage::Usage;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::ModelResponse;
+use tinyinference::providers::MockModel;
+use tinyinference::usage::Usage;
 
 // The secret is embedded in the *registered model name* so it appears verbatim
 // in the `model` field of every `AgentEvent::ModelStarted` the loop emits.

@@ -20,11 +20,11 @@
 //!   output from `Message::text()`, which renders tool calls and tool results as
 //!   the empty string.
 
-use tinyinference::message::{AssistantMessage, Message};
 use tinyagents_harness::summarization::{
     ConcatSummarizer, SummarizationPolicy, Summarizer, TrimStrategy, trim_messages,
 };
 use tinyagents_harness::tool::ToolCall;
+use tinyinference::message::{AssistantMessage, Message};
 
 /// The provider invariant, checked locally so this file depends on no new
 /// crate surface: every `tool` message must be preceded by an assistant turn

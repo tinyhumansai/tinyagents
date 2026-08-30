@@ -17,20 +17,20 @@ use serde_json::json;
 use tinyagents_graph::*;
 use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::events::AgentEvent;
-use tinyinference::message::{AssistantMessage, ContentBlock, Message};
-use tinyinference::model::ModelResponse;
-use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool};
 use tinyagents_harness::tool::{
     SandboxMode, Tool, ToolCall, ToolExecutionContext, ToolResult, ToolSchema,
 };
-use tinyinference::usage::Usage;
 use tinyagents_harness::workspace::{cleanup_workspace, enforce_workspace_path, prepare_workspace};
 use tinyagents_harness::*;
 use tinyagents_language::Blueprint;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::ModelResponse;
+use tinyinference::providers::MockModel;
+use tinyinference::usage::Usage;
 
 // ---------------------------------------------------------------------------
 // Part A — workspace isolation

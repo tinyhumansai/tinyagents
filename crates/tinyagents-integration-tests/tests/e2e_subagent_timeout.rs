@@ -16,9 +16,9 @@ use std::time::Duration;
 use tinyagents_harness::SubAgent;
 use tinyagents_harness::error::TinyAgentsError;
 use tinyagents_harness::limits::RunLimits;
-use tinyinference::providers::MockModel;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::SlowModel;
+use tinyinference::providers::MockModel;
 
 /// Builds a child harness whose policy caps wall-clock time at `timeout_ms` and
 /// whose registered model is `model`.
