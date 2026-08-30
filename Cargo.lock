@@ -1301,6 +1301,24 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "tinyinference",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "tinyinference"
+version = "0.2.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
  "tokio",
  "tracing",
 ]
