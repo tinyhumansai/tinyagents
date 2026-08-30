@@ -557,17 +557,29 @@ async fn checkpoint_below_current_schema_version_expires_to_fresh_run() {
 }
 
 #[test]
-fn incompatible_checkpoint_error_matches_decode_not_operational() {
+fn incompatible_checkpoint_error_matches_schema_not_corrupt_or_operational() {
     use crate::TinyAgentsError;
-    // Decode / shape-incompatibility → safe to expire.
+    // Positively identified schema mismatch → safe to expire.
     assert!(is_incompatible_checkpoint_error(
         &TinyAgentsError::Checkpoint(
-            "sqlite checkpointer: decode record: invalid type: string".to_string()
+            "sqlite checkpointer: decode [schema] record: invalid type: string".to_string()
         )
     ));
-    assert!(is_incompatible_checkpoint_error(
-        &TinyAgentsError::Checkpoint("sqlite checkpointer: decode next_nodes: eof".to_string())
+    assert!(is_incompatible_checkpoint_error(&TinyAgentsError::Checkpoint(
+        "sqlite checkpointer: decode [schema] next_nodes: missing field `foo`".to_string()
+    )));
+    // Ambiguous/likely corruption must NOT be treated as a safe-to-expire
+    // schema mismatch — deleting it would discard the only evidence of the
+    // corruption and silently restart the delegation from `plan`, potentially
+    // repeating already-completed execute-stage side effects.
+    assert!(!is_incompatible_checkpoint_error(
+        &TinyAgentsError::Checkpoint(
+            "sqlite checkpointer: decode [corrupt] record: EOF while parsing a value".to_string()
+        )
     ));
+    assert!(!is_incompatible_checkpoint_error(&TinyAgentsError::Checkpoint(
+        "file checkpointer: decode [corrupt] record: expected `,` or `}`".to_string()
+    )));
     // Operational failures must NOT be treated as incompatible (they must
     // propagate, not silently restart durable work).
     assert!(!is_incompatible_checkpoint_error(
@@ -581,6 +593,41 @@ fn incompatible_checkpoint_error_matches_decode_not_operational() {
     assert!(!is_incompatible_checkpoint_error(&TinyAgentsError::Resume(
         "no checkpoint".to_string()
     )));
+}
+
+#[test]
+fn decode_json_err_classifies_data_errors_as_schema_and_others_as_corrupt() {
+    use crate::graph::checkpoint::decode_json_err;
+
+    // `Category::Data`: syntactically valid JSON that doesn't match the
+    // target type — the shape a legacy or newer schema produces.
+    let data_err = serde_json::from_str::<u32>("\"not a number\"").unwrap_err();
+    assert_eq!(data_err.classify(), serde_json::error::Category::Data);
+    let wrapped = decode_json_err("sqlite checkpointer", "record", data_err);
+    assert!(
+        format!("{wrapped}").contains("decode [schema] record"),
+        "data-category decode errors must be tagged [schema]: {wrapped}"
+    );
+
+    // `Category::Eof`: the bytes were truncated — real corruption, not a
+    // schema difference.
+    let eof_err = serde_json::from_str::<serde_json::Value>("{\"a\":").unwrap_err();
+    assert_eq!(eof_err.classify(), serde_json::error::Category::Eof);
+    let wrapped = decode_json_err("file checkpointer", "record", eof_err);
+    assert!(
+        format!("{wrapped}").contains("decode [corrupt] record"),
+        "eof-category decode errors must be tagged [corrupt]: {wrapped}"
+    );
+
+    // `Category::Syntax`: malformed bytes — also corruption, not a schema
+    // difference.
+    let syntax_err = serde_json::from_str::<serde_json::Value>("{not json}").unwrap_err();
+    assert_eq!(syntax_err.classify(), serde_json::error::Category::Syntax);
+    let wrapped = decode_json_err("sqlite checkpointer", "record", syntax_err);
+    assert!(
+        format!("{wrapped}").contains("decode [corrupt] record"),
+        "syntax-category decode errors must be tagged [corrupt]: {wrapped}"
+    );
 }
 
 #[tokio::test]
