@@ -23,11 +23,12 @@ pub(super) fn model_query_impl<State: Send + Sync + 'static>(
     let call_id = new_call_id();
     emit_call_started(ctx, &call_id, ReplCallKind::Model, &model_name);
     let start = Instant::now();
-    let response = bridge_block_on(
-        ctx.buffers.deadline(),
-        &ctx.cancel,
-        model.invoke(&ctx.state, request),
-    )
+    let response = bridge_block_on(ctx.buffers.deadline(), &ctx.cancel, async {
+        model
+            .invoke(&ctx.state, request)
+            .await
+            .map_err(TinyAgentsError::from)
+    })
     .map_err(|err| raise(ctx, err))?;
     let elapsed = start.elapsed();
     let finish_reason = response.finish_reason.clone();
