@@ -34,7 +34,7 @@ use serde::de::DeserializeOwned;
 
 use super::{
     Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSource, CheckpointTuple,
-    Checkpointer, PendingWrite, merge_writes,
+    Checkpointer, PendingWrite, decode_json_err, merge_writes,
 };
 use crate::harness::ids::{CheckpointId, NodeId};
 use crate::{Result, TinyAgentsError};
