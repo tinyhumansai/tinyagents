@@ -13,7 +13,8 @@
 //! interrupts ([`command`]), a builder/compile contract ([`builder`]), a
 //! superstep executor ([`compiled`]), checkpointing ([`checkpoint`]),
 //! streaming/events ([`stream`]), run-status snapshots ([`status`]), graph
-//! export/visualization ([`export`]), subgraph embedding ([`subgraph`]), and
+//! export/visualization ([`export`]), dependency-DAG validation ([`dag`]),
+//! subgraph embedding ([`subgraph`]), and
 //! per-thread productivity primitives — a durable goal ([`goals`]) and a kanban
 //! task board ([`todos`], with its claim/heartbeat run log and dispatch policy)
 //! — exposed as harness tools.
@@ -26,6 +27,7 @@ pub mod channel;
 pub mod checkpoint;
 pub mod command;
 pub mod compiled;
+pub mod dag;
 pub mod delegation;
 pub mod export;
 pub mod goals;
@@ -60,6 +62,7 @@ pub use checkpoint::{
 };
 pub use command::{Command, Interrupt, NodeResult, RouteTarget, Send};
 pub use compiled::{CompiledGraph, GraphExecution, GraphInput, ResumeTarget, StateSnapshot};
+pub use dag::{DagIssue, DagNode, has_cycle, validate_dag};
 pub use delegation::{
     CURRENT_SCHEMA_VERSION as DELEGATION_SCHEMA_VERSION, DelegationConfig, DelegationOutcome,
     DelegationStage, DelegationStageOutput, DelegationState, PendingApproval, StepRecord,
