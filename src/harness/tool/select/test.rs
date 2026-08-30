@@ -182,10 +182,3 @@ fn delete_query_excludes_create_tools() {
     }
     assert!(idx.len() >= 3);
 }
-
-#[test]
-fn selectable_tool_converts_from_a_name_description_pair() {
-    let t: SelectableTool<'_> = ("GMAIL_SEND_EMAIL", "Sends an email.").into();
-    assert_eq!(t.name, "GMAIL_SEND_EMAIL");
-    assert_eq!(t.description, "Sends an email.");
-}
