@@ -12,8 +12,8 @@ use serde_json::json;
 use super::run::is_incompatible_checkpoint_error;
 use super::*;
 use crate::CancellationToken;
-use crate::graph::checkpoint::{Checkpoint, Checkpointer};
 use crate::graph::Interrupt;
+use crate::graph::checkpoint::{Checkpoint, Checkpointer};
 
 /// A reviewer that rejects the first `reject_first` executions, then approves,
 /// driving the execute⇄review revision loop.
@@ -22,12 +22,11 @@ fn flow_runner(
 ) -> impl Fn(
     DelegationStage,
     DelegationState,
-) -> std::pin::Pin<
-    Box<dyn Future<Output = Result<DelegationStageOutput, String>> + Send>,
-> + Clone
-       + Send
-       + Sync
-       + 'static {
+) -> std::pin::Pin<Box<dyn Future<Output = Result<DelegationStageOutput, String>> + Send>>
++ Clone
++ Send
++ Sync
++ 'static {
     let reviews = Arc::new(AtomicUsize::new(0));
     move |stage, _state| {
         let reviews = reviews.clone();
@@ -121,9 +120,8 @@ async fn cancellation_short_circuits_to_finalize() {
 #[tokio::test]
 async fn human_gated_run_parks_on_interrupt_then_resume_approves() {
     let dir = tempfile::tempdir().unwrap();
-    let cp: Arc<dyn Checkpointer<DelegationState>> = Arc::new(
-        crate::graph::checkpoint::FileCheckpointer::new(dir.path()),
-    );
+    let cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::new(dir.path()));
     let make_config = || DelegationConfig {
         require_review_approval: true,
         checkpointer: Some(cp.clone()),
@@ -161,9 +159,8 @@ async fn human_gated_run_parks_on_interrupt_then_resume_approves() {
 #[tokio::test]
 async fn ttl_expiry_resume_with_deny_blocks_the_result() {
     let dir = tempfile::tempdir().unwrap();
-    let cp: Arc<dyn Checkpointer<DelegationState>> = Arc::new(
-        crate::graph::checkpoint::FileCheckpointer::new(dir.path()),
-    );
+    let cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::new(dir.path()));
     let make_config = || DelegationConfig {
         require_review_approval: true,
         checkpointer: Some(cp.clone()),
@@ -186,20 +183,21 @@ async fn ttl_expiry_resume_with_deny_blocks_the_result() {
         !resumed.state.approved,
         "human deny overrides the reviewer's in-graph approval"
     );
-    assert!(resumed
-        .state
-        .final_output
-        .as_deref()
-        .unwrap_or_default()
-        .contains("denied"));
+    assert!(
+        resumed
+            .state
+            .final_output
+            .as_deref()
+            .unwrap_or_default()
+            .contains("denied")
+    );
 }
 
 #[tokio::test]
 async fn durable_checkpointer_persists_thread_state() {
     let dir = tempfile::tempdir().unwrap();
-    let cp: Arc<dyn Checkpointer<DelegationState>> = Arc::new(
-        crate::graph::checkpoint::FileCheckpointer::new(dir.path()),
-    );
+    let cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::new(dir.path()));
     let config = DelegationConfig {
         checkpointer: Some(cp.clone()),
         thread_id: Some("run-1".to_string()),
@@ -289,9 +287,8 @@ fn schema_version_defaults_to_zero_and_step_records_round_trip() {
 #[tokio::test]
 async fn run_or_resume_starts_fresh_without_a_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
-    let cp: Arc<dyn Checkpointer<DelegationState>> = Arc::new(
-        crate::graph::checkpoint::FileCheckpointer::new(dir.path()),
-    );
+    let cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::new(dir.path()));
     let config = DelegationConfig {
         checkpointer: Some(cp),
         thread_id: Some("fresh-1".to_string()),
@@ -308,9 +305,8 @@ async fn run_or_resume_starts_fresh_without_a_checkpoint() {
 #[tokio::test]
 async fn run_or_resume_continues_from_last_boundary_after_a_crash() {
     let dir = tempfile::tempdir().unwrap();
-    let cp: Arc<dyn Checkpointer<DelegationState>> = Arc::new(
-        crate::graph::checkpoint::FileCheckpointer::new(dir.path()),
-    );
+    let cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::new(dir.path()));
     // Count stage invocations across BOTH the crashed run and the resume, to
     // prove plan/execute are NOT re-run on resume.
     let plan_runs = Arc::new(AtomicUsize::new(0));
@@ -397,9 +393,8 @@ async fn run_or_resume_continues_from_last_boundary_after_a_crash() {
 #[tokio::test]
 async fn run_or_resume_is_idempotent_on_a_finalized_thread() {
     let dir = tempfile::tempdir().unwrap();
-    let cp: Arc<dyn Checkpointer<DelegationState>> = Arc::new(
-        crate::graph::checkpoint::FileCheckpointer::new(dir.path()),
-    );
+    let cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::new(dir.path()));
     let stage_runs = Arc::new(AtomicUsize::new(0));
     let make_runner = || {
         let stage_runs = stage_runs.clone();
@@ -491,9 +486,7 @@ async fn incompatible_checkpoint_expires_to_a_fresh_run() {
     // Reopen the SAME store as the current state type and resume: the
     // undecodable record is expired and a fresh run completes.
     let cp: Arc<dyn Checkpointer<DelegationState>> =
-        Arc::new(crate::graph::checkpoint::FileCheckpointer::<
-            DelegationState,
-        >::new(dir.path()));
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::<DelegationState>::new(dir.path()));
     let config = DelegationConfig {
         checkpointer: Some(cp),
         thread_id: Some("legacy-1".to_string()),
@@ -542,9 +535,7 @@ async fn checkpoint_below_current_schema_version_expires_to_fresh_run() {
         .expect("seed old-schema checkpoint");
 
     let cp: Arc<dyn Checkpointer<DelegationState>> =
-        Arc::new(crate::graph::checkpoint::FileCheckpointer::<
-            DelegationState,
-        >::new(dir.path()));
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::<DelegationState>::new(dir.path()));
     let config = DelegationConfig {
         checkpointer: Some(cp),
         thread_id: Some("old-schema".to_string()),
@@ -585,9 +576,7 @@ fn incompatible_checkpoint_error_matches_decode_not_operational() {
         )
     ));
     assert!(!is_incompatible_checkpoint_error(
-        &TinyAgentsError::Checkpoint(
-            "sqlite checkpointer: connection lock poisoned".to_string()
-        )
+        &TinyAgentsError::Checkpoint("sqlite checkpointer: connection lock poisoned".to_string())
     ));
     assert!(!is_incompatible_checkpoint_error(&TinyAgentsError::Resume(
         "no checkpoint".to_string()
@@ -626,9 +615,7 @@ async fn terminal_checkpoint_with_a_pending_interrupt_surfaces_it() {
     seed.put(checkpoint).await.expect("seed terminal+interrupt");
 
     let cp: Arc<dyn Checkpointer<DelegationState>> =
-        Arc::new(crate::graph::checkpoint::FileCheckpointer::<
-            DelegationState,
-        >::new(dir.path()));
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::<DelegationState>::new(dir.path()));
     let config = DelegationConfig {
         checkpointer: Some(cp),
         thread_id: Some("terminal-interrupt".to_string()),
@@ -717,7 +704,10 @@ fn serialized_state_shape_is_pinned() {
 fn pre_versioned_state_decodes_with_documented_defaults() {
     let legacy = r#"{"plan":"PLAN","executions":[],"reviews":[],"revisions":0,"approved":false,"final_output":null,"cancelled":false}"#;
     let state: DelegationState = serde_json::from_str(legacy).expect("decodes");
-    assert_eq!(state.schema_version, 0, "defaults below CURRENT, so it expires");
+    assert_eq!(
+        state.schema_version, 0,
+        "defaults below CURRENT, so it expires"
+    );
     assert_eq!(state.human_approved, None);
     assert!(!state.denied);
     assert!(state.schema_version < CURRENT_SCHEMA_VERSION);
