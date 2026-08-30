@@ -6,20 +6,34 @@ fn tool<'a>(name: &'a str, desc: &'a str) -> SelectableTool<'a> {
 
 fn github_sample() -> Vec<SelectableTool<'static>> {
     vec![
-        tool("GITHUB_CREATE_A_PULL_REQUEST",
-             "Creates a pull request in a GitHub repository, requiring existing base and head branches."),
-        tool("GITHUB_CREATE_A_REVIEW_FOR_A_PULL_REQUEST",
-             "Creates a pull request review, allowing approval, change requests, or comments."),
-        tool("GITHUB_CREATE_A_DEPLOYMENT_BRANCH_POLICY",
-             "Creates a deployment branch or tag policy for an existing environment in a repository."),
-        tool("GITHUB_DELETE_A_REVIEW_COMMENT_FOR_A_PULL_REQUEST",
-             "Deletes a review comment on a pull request."),
-        tool("GITHUB_FIND_PULL_REQUESTS",
-             "Primary tool to find and search pull requests."),
-        tool("GITHUB_GET_A_PULL_REQUEST",
-             "Retrieves a specific pull request by number."),
-        tool("GITHUB_LIST_ASSIGNEES",
-             "Lists users who can be assigned to issues in a repository."),
+        tool(
+            "GITHUB_CREATE_A_PULL_REQUEST",
+            "Creates a pull request in a GitHub repository, requiring existing base and head branches.",
+        ),
+        tool(
+            "GITHUB_CREATE_A_REVIEW_FOR_A_PULL_REQUEST",
+            "Creates a pull request review, allowing approval, change requests, or comments.",
+        ),
+        tool(
+            "GITHUB_CREATE_A_DEPLOYMENT_BRANCH_POLICY",
+            "Creates a deployment branch or tag policy for an existing environment in a repository.",
+        ),
+        tool(
+            "GITHUB_DELETE_A_REVIEW_COMMENT_FOR_A_PULL_REQUEST",
+            "Deletes a review comment on a pull request.",
+        ),
+        tool(
+            "GITHUB_FIND_PULL_REQUESTS",
+            "Primary tool to find and search pull requests.",
+        ),
+        tool(
+            "GITHUB_GET_A_PULL_REQUEST",
+            "Retrieves a specific pull request by number.",
+        ),
+        tool(
+            "GITHUB_LIST_ASSIGNEES",
+            "Lists users who can be assigned to issues in a repository.",
+        ),
     ]
 }
 
