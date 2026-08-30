@@ -2,7 +2,6 @@
 //! checkpoint classification that decides between the two.
 
 use std::future::Future;
-use std::sync::Arc;
 
 use serde_json::{Value, json};
 

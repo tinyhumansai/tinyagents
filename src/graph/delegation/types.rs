@@ -117,7 +117,7 @@ pub struct DelegationState {
 impl DelegationState {
     /// A fresh run's initial state, stamped with the current schema version so
     /// its checkpoints are self-identifying.
-    fn new_run() -> Self {
+    pub(super) fn new_run() -> Self {
         Self {
             schema_version: CURRENT_SCHEMA_VERSION,
             ..Self::default()
