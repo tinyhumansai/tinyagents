@@ -189,14 +189,8 @@ fn tool_verb_classifies_an_unprefixed_action_slug() {
     // A name with no vendor prefix carries its verb in the first segment;
     // unconditionally stripping the first segment as an assumed vendor
     // prefix discarded the only verb present.
-    assert_eq!(
-        tool_verb("create_a_pull_request"),
-        Some(ToolVerb::Create)
-    );
-    assert_eq!(
-        tool_verb("CREATE_A_PULL_REQUEST"),
-        Some(ToolVerb::Create)
-    );
+    assert_eq!(tool_verb("create_a_pull_request"), Some(ToolVerb::Create));
+    assert_eq!(tool_verb("CREATE_A_PULL_REQUEST"), Some(ToolVerb::Create));
     assert_eq!(tool_verb("delete_message"), Some(ToolVerb::Delete));
 }
 
