@@ -114,7 +114,7 @@ impl ChatModel<()> for FlakyModel {
         &self,
         state: &(),
         request: ModelRequest,
-    ) -> tinyagents_harness::Result<ModelResponse> {
+    ) -> tinyinference::Result<ModelResponse> {
         let n = {
             // Scope the guard so it is dropped before the `.await` below
             // (a `MutexGuard` is not `Send`).

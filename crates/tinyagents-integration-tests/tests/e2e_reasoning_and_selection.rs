@@ -323,7 +323,7 @@ impl ChatModel<()> for ProfiledModel {
         &self,
         _state: &(),
         _request: ModelRequest,
-    ) -> tinyagents_harness::Result<ModelResponse> {
+    ) -> tinyinference::Result<ModelResponse> {
         Ok(text_response("ok"))
     }
 }

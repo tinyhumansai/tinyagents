@@ -26,7 +26,7 @@ impl ChatModel<()> for FlaggedModel {
         &self,
         _state: &(),
         _request: ModelRequest,
-    ) -> tinyagents_harness::Result<ModelResponse> {
+    ) -> tinyinference::Result<ModelResponse> {
         let mut response = ModelResponse::assistant("done").with_usage(Usage::new(100, 50));
         response.served_from_cache = self.served_from_cache;
         Ok(response)

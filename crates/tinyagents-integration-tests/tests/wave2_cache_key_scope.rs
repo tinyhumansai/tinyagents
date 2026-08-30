@@ -34,7 +34,7 @@ impl ChatModel<()> for IdentifiedModel {
         Some(self.identity.clone())
     }
 
-    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(ModelResponse::assistant(self.answer.clone()))
     }

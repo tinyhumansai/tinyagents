@@ -72,7 +72,7 @@ impl ChatModel<()> for RecordingModel {
         &self,
         _state: &(),
         request: ModelRequest,
-    ) -> tinyagents_harness::Result<ModelResponse> {
+    ) -> tinyinference::Result<ModelResponse> {
         self.seen.lock().expect("poisoned").push(request);
         let mut script = self.script.lock().expect("poisoned");
         if script.len() > 1 {

@@ -107,7 +107,7 @@ impl ChatModel<()> for ProfiledIntegrationModel {
         &self,
         _state: &(),
         _request: ModelRequest,
-    ) -> tinyagents_harness::Result<ModelResponse> {
+    ) -> tinyinference::Result<ModelResponse> {
         Ok(ModelResponse::assistant(self.text))
     }
 }

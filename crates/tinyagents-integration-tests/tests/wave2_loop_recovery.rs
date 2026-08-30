@@ -56,7 +56,7 @@ impl ChatModel<()> for TwoTurnModel {
         &self,
         _state: &(),
         _request: ModelRequest,
-    ) -> tinyagents_harness::Result<ModelResponse> {
+    ) -> tinyinference::Result<ModelResponse> {
         match self.call.lock().expect("poisoned").take() {
             Some(call) => {
                 let mut response = ModelResponse::assistant("");
