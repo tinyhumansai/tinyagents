@@ -27,12 +27,6 @@ impl<'a> SelectableTool<'a> {
     }
 }
 
-impl<'a> From<(&'a str, &'a str)> for SelectableTool<'a> {
-    fn from((name, description): (&'a str, &'a str)) -> Self {
-        Self::new(name, description)
-    }
-}
-
 /// Detected query intent. A small, stable set — expanding it risks
 /// over-matching (e.g. "open" is deliberately excluded because it appears in
 /// both "open a PR" and "open PRs").
