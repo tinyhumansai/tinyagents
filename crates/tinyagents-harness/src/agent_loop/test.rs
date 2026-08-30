@@ -490,7 +490,7 @@ struct FailingModel {
 impl ChatModel<()> for FailingModel {
     async fn invoke(&self, _state: &(), _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
         *self.attempts.lock().unwrap() += 1;
-        Err(TinyAgentsError::Model("transient boom".to_string()))
+        Err(tinyinference::Error::Model("transient boom".to_string()))
     }
 }
 
@@ -509,7 +509,7 @@ impl ChatModel<()> for TimestampingFailingModel {
             .lock()
             .unwrap()
             .push(tokio::time::Instant::now());
-        Err(TinyAgentsError::Model("transient boom".to_string()))
+        Err(tinyinference::Error::Model("transient boom".to_string()))
     }
 }
 
@@ -527,7 +527,7 @@ struct ProviderFailingModel {
 impl ChatModel<()> for ProviderFailingModel {
     async fn invoke(&self, _state: &(), _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
         *self.attempts.lock().unwrap() += 1;
-        Err(TinyAgentsError::Provider(Box::new(
+        Err(tinyinference::Error::Provider(Box::new(
             tinyinference::model::ProviderError {
                 provider: "test-provider".to_string(),
                 status: Some(self.status),
@@ -1923,7 +1923,7 @@ impl ChatModel<()> for ProfiledFailingModel {
     }
     async fn invoke(&self, _state: &(), _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
         *self.attempts.lock().unwrap() += 1;
-        Err(TinyAgentsError::Model("transient boom".to_string()))
+        Err(tinyinference::Error::Model("transient boom".to_string()))
     }
 }
 
@@ -3071,7 +3071,7 @@ impl ChatModel<()> for ToolCapturingModel {
     async fn invoke(&self, _state: &(), request: ModelRequest) -> tinyinference::Result<ModelResponse> {
         self.seen_tools.lock().unwrap().push(request.tools.clone());
         let next = self.responses.lock().unwrap().pop_front();
-        next.ok_or_else(|| TinyAgentsError::Validation("no scripted response left".into()))
+        next.ok_or_else(|| tinyinference::Error::Validation("no scripted response left".into()))
     }
 }
 
