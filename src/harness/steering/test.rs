@@ -58,7 +58,11 @@ struct RecordingModel {
 
 #[async_trait]
 impl ChatModel<()> for RecordingModel {
-    async fn invoke(&self, _state: &(), request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         self.requests.lock().unwrap().push(request);
         let mut calls = self.calls.lock().unwrap();
         *calls += 1;

@@ -102,7 +102,11 @@ impl StreamingMock {
 #[async_trait]
 impl<State: Send + Sync> ChatModel<State> for StreamingMock {
     /// Returns the merged response the scripted stream folds into.
-    async fn invoke(&self, _state: &State, _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &State,
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         *self
             .calls
             .lock()
@@ -111,7 +115,11 @@ impl<State: Send + Sync> ChatModel<State> for StreamingMock {
     }
 
     /// Replays the scripted items as a real [`ModelStream`].
-    async fn stream(&self, _state: &State, _request: ModelRequest) -> tinyinference::Result<ModelStream> {
+    async fn stream(
+        &self,
+        _state: &State,
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelStream> {
         *self
             .calls
             .lock()
@@ -144,7 +152,11 @@ impl SlowModel {
 #[async_trait]
 impl<State: Send + Sync> ChatModel<State> for SlowModel {
     /// Sleeps for the configured delay, then returns the fixed reply.
-    async fn invoke(&self, _state: &State, _request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &State,
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         {
             // Bump the counter in its own scope so the guard is dropped before
             // the `.await` (a `MutexGuard` is not `Send`).
@@ -203,7 +215,11 @@ impl<State: Send + Sync> ChatModel<State> for ScriptedModel {
     ///
     /// Returns [`TinyAgentsError::Model`] when the queue is exhausted so the
     /// test gets a clear message rather than a thread panic.
-    async fn invoke(&self, _state: &State, request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &State,
+        request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         self.received
             .lock()
             .expect("ScriptedModel received lock poisoned")

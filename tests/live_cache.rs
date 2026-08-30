@@ -44,12 +44,20 @@ impl<State: Send + Sync> ChatModel<State> for CountingModel<State> {
         self.inner.profile()
     }
 
-    async fn invoke(&self, state: &State, request: ModelRequest) -> tinyinference::Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        state: &State,
+        request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.inner.invoke(state, request).await
     }
 
-    async fn stream(&self, state: &State, request: ModelRequest) -> tinyinference::Result<ModelStream> {
+    async fn stream(
+        &self,
+        state: &State,
+        request: ModelRequest,
+    ) -> tinyinference::Result<ModelStream> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.inner.stream(state, request).await
     }

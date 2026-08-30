@@ -103,9 +103,7 @@ impl ModelCatalog {
     }
 }
 
-fn model_profile_from_entry(
-    entry: &ModelCatalogEntry,
-) -> crate::harness::model::ModelProfile {
+fn model_profile_from_entry(entry: &ModelCatalogEntry) -> crate::harness::model::ModelProfile {
     let capabilities = &entry.capabilities;
     crate::harness::model::ModelProfile {
         provider: Some(entry.provider.clone()),
