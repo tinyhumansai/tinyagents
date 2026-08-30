@@ -168,18 +168,27 @@ where
     };
 
     match cp.get(tid.as_str(), None).await {
-        // A checkpoint written under an older state schema (e.g. a pre-#3884
-        // record whose `executions` happened to be empty and so still decoded
-        // into `Vec<StepRecord>`) is expired rather than resumed/returned — its
-        // semantics may not match the current graph. This is what makes
-        // `schema_version` an actual guard, not just documentation, and closes
-        // the empty-`executions` gap that a decode failure alone cannot catch.
-        Ok(Some(checkpoint)) if checkpoint.state.schema_version < CURRENT_SCHEMA_VERSION => {
+        // A checkpoint written under a schema version other than the current
+        // one is expired rather than resumed/returned — its semantics may not
+        // match this binary's graph. This is what makes `schema_version` an
+        // actual guard, not just documentation, and closes the empty-
+        // `executions` gap that a decode failure alone cannot catch (e.g. a
+        // pre-#3884 record whose `executions` happened to be empty and so
+        // still decoded into `Vec<StepRecord>`).
+        //
+        // A version *greater* than `CURRENT_SCHEMA_VERSION` is rejected here
+        // too, not only a lesser one: during a rollback or a mixed-version
+        // deployment, serde can decode a checkpoint written by a newer binary
+        // by silently ignoring its added fields, and this older binary would
+        // then resume or return that state under outdated semantics. The
+        // guard must treat any version it does not explicitly recognize as
+        // incompatible, not merely an older one.
+        Ok(Some(checkpoint)) if checkpoint.state.schema_version != CURRENT_SCHEMA_VERSION => {
             tracing::warn!(
                 thread_id = %tid,
                 schema_version = checkpoint.state.schema_version,
                 current = CURRENT_SCHEMA_VERSION,
-                "[delegation] checkpoint predates the current state schema; pruning and starting fresh"
+                "[delegation] checkpoint schema version does not match the current binary; pruning and starting fresh"
             );
             prune_thread(cp.as_ref(), &tid).await;
             run_delegation_durable(config, run_stage).await
