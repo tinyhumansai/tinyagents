@@ -350,10 +350,19 @@ impl JsonlAppendStore {
             file.seek(SeekFrom::Start(start)).map_err(|e| {
                 TinyAgentsError::Validation(format!("append store seek error: {e}"))
             })?;
-            let mut buf = String::new();
-            file.read_to_string(&mut buf).map_err(|e| {
+            let mut raw = Vec::new();
+            file.read_to_end(&mut raw).map_err(|e| {
                 TinyAgentsError::Validation(format!("append store read error: {e}"))
             })?;
+            // The window starts at an arbitrary byte offset, so it can begin in
+            // the middle of a multi-byte character. `read_to_string` rejects
+            // that outright ("stream did not contain valid UTF-8"), which fails
+            // the whole append and drops the journal record silently — and
+            // permanently, because the file then stops growing, so every later
+            // append reads the same broken window. Lossy decoding is safe here:
+            // the damaged bytes are by definition in the first line, which is
+            // discarded below anyway (`complete_from`).
+            let buf = String::from_utf8_lossy(&raw);
             // Only lines that are certainly complete: when the window did not
             // reach the start of the file, its first line may be cut in half.
             let complete_from = usize::from(start > 0);

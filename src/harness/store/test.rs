@@ -425,3 +425,47 @@ async fn jsonl_rejects_unsafe_stream_names() {
     // Allowed characters round-trip.
     assert_eq!(store.append("runs-1.events_v2", json!(1)).await.unwrap(), 0);
 }
+
+#[tokio::test]
+async fn jsonl_append_survives_a_tail_window_that_starts_mid_character() {
+    // `next_offset` seeks to `len - 4096` and reads from there. That offset is
+    // an arbitrary byte, so on a file full of non-ASCII text (é, €, —) the
+    // window can begin halfway through a multi-byte character. Decoding it as
+    // UTF-8 then fails, which failed the whole append and dropped the record —
+    // permanently, because the file never grows again and every later append
+    // reads the same broken window.
+    let dir = TempDir::new("jsonl-utf8-window");
+    let path = dir.0.join("evts.jsonl");
+
+    // Pad the first record until byte `len - 4096` is a UTF-8 continuation byte
+    // (`10xxxxxx`), i.e. until the window provably starts inside a character.
+    let second = serde_json::to_string(&StoreRecord {
+        offset: 1,
+        value: json!({"n": 1}),
+        created_at_ms: 0,
+    })
+    .unwrap();
+    let mut pad = 0usize;
+    let first = loop {
+        let first = serde_json::to_string(&StoreRecord {
+            offset: 0,
+            value: json!({"tekst": format!("{}{}", "x".repeat(pad), "—".repeat(2000))}),
+            created_at_ms: 0,
+        })
+        .unwrap();
+        let len = first.len() + 1 + second.len() + 1;
+        if first.as_bytes()[len - 4096] & 0b1100_0000 == 0b1000_0000 {
+            break first;
+        }
+        pad += 1;
+    };
+    std::fs::write(&path, format!("{first}\n{second}\n")).unwrap();
+
+    let store = JsonlAppendStore::new(&dir.0);
+    assert_eq!(
+        store.append("evts", json!({"n": 2})).await.unwrap(),
+        2,
+        "an append must not be lost because the tail window starts mid-character"
+    );
+    assert_eq!(store.len("evts").await.unwrap(), 3);
+}
