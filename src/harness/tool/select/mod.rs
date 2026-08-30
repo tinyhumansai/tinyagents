@@ -259,16 +259,18 @@ fn detect_verbs(prompt: &str) -> HashSet<ToolVerb> {
     // merely deprioritizing it, since the verb gate filters out (not just
     // down-ranks) a tool whose verb isn't in the query's detected verb set.
     //
-    // Proximity is the fix: a conflicting verb only suppresses the noun when
-    // it appears within `CONFLICT_PROXIMITY_WINDOW` words of THAT specific
-    // noun occurrence — i.e. when the noun reads as the verb's direct object
-    // ("read email", "delete a message") rather than a separate clause
-    // joined by "and" naming an unrelated intent. `Create` is deliberately
-    // never in `SEND_CONFLICTING_VERBS` at any distance: "post/write/draft a
-    // message" is a send intent expressed with a creation verb, which is
-    // what dropped SLACK_SEND_MESSAGE out of the top 15 when this was
-    // (wrongly) gated on `found.is_empty()` instead. Both are pinned by the
-    // host's pre-extraction ranking snapshot and real-data suite.
+    // Same-clause is the fix: a conflicting verb only suppresses the noun
+    // when no clause boundary ("and", "then", ...) separates them — i.e.
+    // when the noun reads as the verb's direct object ("read email",
+    // "delete that old email") rather than a second, independent instruction
+    // ("find Alice AND email her the report"). Distance alone cannot
+    // distinguish these: both examples have exactly two words between the
+    // verb and the noun. `Create` is deliberately never in
+    // `SEND_CONFLICTING_VERBS` at any distance: "post/write/draft a message"
+    // is a send intent expressed with a creation verb, which is what dropped
+    // SLACK_SEND_MESSAGE out of the top 15 when this was (wrongly) gated on
+    // `found.is_empty()` instead. Both are pinned by the host's
+    // pre-extraction ranking snapshot and real-data suite.
     let words = ordered_words(&lowered);
     let conflicting_aliases: Vec<&'static str> = SEND_CONFLICTING_VERBS
         .iter()
@@ -276,16 +278,14 @@ fn detect_verbs(prompt: &str) -> HashSet<ToolVerb> {
         .collect();
 
     'nouns: for alias in SEND_NOUN_ALIASES {
-        for (i, word) in words.iter().enumerate() {
+        for (noun_idx, word) in words.iter().enumerate() {
             if word != alias {
                 continue;
             }
-            let lo = i.saturating_sub(CONFLICT_PROXIMITY_WINDOW);
-            let hi = (i + CONFLICT_PROXIMITY_WINDOW).min(words.len().saturating_sub(1));
-            let conflict_nearby = (lo..=hi)
-                .filter(|&j| j != i)
-                .any(|j| conflicting_aliases.contains(&words[j].as_str()));
-            if !conflict_nearby {
+            let conflict_in_clause = words.iter().enumerate().any(|(verb_idx, w)| {
+                conflicting_aliases.contains(&w.as_str()) && same_clause(&words, verb_idx, noun_idx)
+            });
+            if !conflict_in_clause {
                 found.insert(ToolVerb::Send);
                 break 'nouns;
             }
