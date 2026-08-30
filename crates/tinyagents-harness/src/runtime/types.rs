@@ -22,7 +22,8 @@ use std::sync::Arc;
 use crate::cache::{CachePolicy, ResponseCache};
 use crate::limits::RunLimits;
 use crate::middleware::MiddlewareStack;
-use tinyinference::model::{ModelRegistry, ResponseFormat};
+use tinyinference::model::ResponseFormat;
+use crate::model_registry::ModelRegistry;
 use crate::retry::{FallbackPolicy, RetryPolicy};
 use crate::tool::{ToolRegistry, ToolTimeoutSettings};
 

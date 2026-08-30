@@ -3,7 +3,7 @@
 //! sub-capabilities it didn't hardcode.
 //!
 //! This layer is deliberately distinct from the harness'
-//! [`tinyinference::model::ModelRegistry`] and
+//! [`tinyagents_harness::model_registry::ModelRegistry`] and
 //! [`tinyagents_harness::tool::ToolRegistry`], which are per-run executable stores.
 //! The [`CapabilityRegistry`] is a *capability catalog*: it owns named models,
 //! tools, graph blueprints, routers, and reducers so declarative `.rag`
