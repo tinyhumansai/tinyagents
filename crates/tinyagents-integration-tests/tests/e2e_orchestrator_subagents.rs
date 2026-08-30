@@ -31,12 +31,12 @@ use tinyagents_harness::ids::{CallId, RunId};
 use tinyagents_harness::middleware::AgentRun;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::{EventRecorder, ScriptedModel, Trajectory};
-use tinyinference::tool::ToolCall;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
 use tinyinference::message::Message;
 use tinyinference::model::ResponseFormat;
+use tinyinference::tool::ToolCall;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 

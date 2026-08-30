@@ -9,10 +9,10 @@ use tinyagents_harness::cache::{
     prompt_cache_key,
 };
 use tinyagents_harness::prompt::PromptBuilder;
-use tinyinference::tool::{ToolFormat, ToolSchema};
 use tinyinference::cache::CachePolicy;
 use tinyinference::message::Message;
 use tinyinference::model::{ModelRequest, PromptSegment, SegmentRole};
+use tinyinference::tool::{ToolFormat, ToolSchema};
 
 fn segment(id: &str, role: SegmentRole, cacheable: bool) -> PromptSegment {
     PromptSegment {

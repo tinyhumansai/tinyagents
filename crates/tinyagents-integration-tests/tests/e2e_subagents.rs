@@ -25,14 +25,14 @@ use tinyagents_harness::limits::RunLimits;
 use tinyagents_harness::middleware::{Middleware, PromptCacheGuardMiddleware};
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::{EventRecorder, Trajectory};
-use tinyagents_harness::tool::{Tool};
-use tinyinference::tool::{ToolCall};
+use tinyagents_harness::tool::Tool;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
 use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyinference::model::{ModelRequest, ModelResponse, PromptSegment, SegmentRole};
 use tinyinference::providers::MockModel;
+use tinyinference::tool::ToolCall;
 use tinyinference::usage::Usage;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

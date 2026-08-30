@@ -30,14 +30,14 @@ use tinyagents_harness::middleware::Middleware;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::steering::{SteeringCommand, SteeringHandle};
 use tinyagents_harness::testkit::{EventRecorder, FakeTool};
-use tinyagents_harness::tool::{Tool};
-use tinyinference::tool::{ToolCall};
+use tinyagents_harness::tool::Tool;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
 use tinyinference::message::Message;
 use tinyinference::model::ModelResponse;
 use tinyinference::providers::MockModel;
+use tinyinference::tool::ToolCall;
 
 // ── Part A: MiddlewareControl ────────────────────────────────────────────────
 

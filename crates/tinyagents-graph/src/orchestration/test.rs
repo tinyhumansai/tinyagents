@@ -7,7 +7,7 @@ use tinyagents_harness::cancel::CancellationToken;
 use tinyagents_harness::ids::TaskId;
 use tinyagents_harness::steering::SteeringHandle;
 use tinyagents_harness::tool::{Tool, ToolRegistry};
-use tinyinference::tool::{ToolCall};
+use tinyinference::tool::ToolCall;
 
 fn graph_spec(id: &str) -> OrchestrationTaskSpec {
     OrchestrationTaskSpec::new(

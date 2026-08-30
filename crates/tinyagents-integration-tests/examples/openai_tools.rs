@@ -20,9 +20,9 @@ use serde_json::json;
 use tinyagents_harness::Result;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::tool::{Tool, ToolResult};
-use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyinference::message::Message;
 use tinyinference::providers::openai::OpenAiModel;
+use tinyinference::tool::{ToolCall, ToolSchema};
 
 /// A tiny canned weather tool. In a real app this would call a weather API; for
 /// the example it returns a deterministic string so the loop is reproducible.

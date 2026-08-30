@@ -19,9 +19,9 @@ use tinyagents_harness::Result;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::ScriptedModel;
 use tinyagents_harness::tool::{Tool, ToolResult};
-use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyinference::model::ModelResponse;
+use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyinference::usage::Usage;
 
 /// A tiny calculator tool that adds two numbers from its JSON arguments.

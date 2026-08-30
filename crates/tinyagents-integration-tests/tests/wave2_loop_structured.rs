@@ -16,9 +16,9 @@ use serde_json::json;
 use tinyagents_harness::TinyAgentsError;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::FakeTool;
-use tinyinference::tool::ToolCall;
 use tinyinference::message::Message;
 use tinyinference::model::{ChatModel, ModelProfile, ModelRequest, ModelResponse, ToolChoice};
+use tinyinference::tool::ToolCall;
 
 /// The schema the tests ask the model to fill in.
 fn schema() -> serde_json::Value {

@@ -29,10 +29,10 @@ use tinyagents_harness::middleware::Middleware;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy, UnknownToolPolicy};
 use tinyagents_harness::testkit::EventRecorder;
 use tinyagents_harness::tool::{Tool, ToolErrorPolicy, ToolResult};
-use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyinference::message::Message;
 use tinyinference::model::ModelResponse;
 use tinyinference::providers::MockModel;
+use tinyinference::tool::{ToolCall, ToolSchema};
 
 // ── Scripted model helpers ────────────────────────────────────────────────────
 

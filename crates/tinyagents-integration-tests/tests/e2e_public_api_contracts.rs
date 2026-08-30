@@ -31,9 +31,9 @@ use tinyagents_harness::store::{
 use tinyagents_harness::summarization::{
     ConcatSummarizer, SummarizationPolicy, Summarizer, TrimStrategy, estimate_tokens, trim_messages,
 };
-use tinyinference::tool::ToolSchema;
 use tinyinference::message::Message;
 use tinyinference::model::{ModelRequest, ModelResponse, ResponseFormat};
+use tinyinference::tool::ToolSchema;
 
 #[tokio::test]
 async fn cache_and_prompt_contracts_produce_stable_behavior_keys() {

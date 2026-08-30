@@ -13,13 +13,13 @@ use tinyagents_graph::{
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::subagent::SubAgent;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, ScriptedModel};
-use tinyinference::tool::ToolCall;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
 use tinyinference::message::{AssistantMessage, Message};
 use tinyinference::model::ModelResponse;
 use tinyinference::providers::MockModel;
+use tinyinference::tool::ToolCall;
 use tinyinference::usage::Usage;
 
 fn tool_call_response(id: &str, name: &str) -> ModelResponse {

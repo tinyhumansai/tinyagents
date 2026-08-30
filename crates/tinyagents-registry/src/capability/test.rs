@@ -12,9 +12,9 @@ use super::*;
 use crate::Result;
 use crate::component::ComponentKind;
 use tinyagents_harness::tool::{Tool, ToolResult};
-use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyagents_language::Blueprint;
 use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
+use tinyinference::tool::{ToolCall, ToolSchema};
 
 struct FakeModel(&'static str);
 

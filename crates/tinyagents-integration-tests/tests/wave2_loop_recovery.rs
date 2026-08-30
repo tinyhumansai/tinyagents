@@ -13,9 +13,9 @@ use serde_json::json;
 
 use tinyagents_harness::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy, UnknownToolPolicy};
 use tinyagents_harness::tool::{Tool, ToolResult};
-use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyinference::message::Message;
 use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
+use tinyinference::tool::{ToolCall, ToolSchema};
 
 /// The defaults are the whole point of this file, so pin them directly too.
 #[test]

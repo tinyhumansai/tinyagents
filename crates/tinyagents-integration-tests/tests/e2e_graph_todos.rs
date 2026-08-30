@@ -11,13 +11,13 @@ use tinyagents_graph::*;
 use tinyagents_harness::context::RunConfig;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::store::{InMemoryStore, Store};
-use tinyinference::tool::ToolCall;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
 use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyinference::model::ModelResponse;
 use tinyinference::providers::MockModel;
+use tinyinference::tool::ToolCall;
 use tinyinference::usage::Usage;
 
 fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> ModelResponse {

@@ -21,13 +21,13 @@ use tinyagents_harness::limits::RunLimits;
 use tinyagents_harness::middleware::Middleware;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::{FakeTool, Trajectory};
-use tinyinference::tool::ToolCall;
 use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyinference::model::{
     CapabilitySet, ChatModel, ModelHint, ModelProfile, ModelRequest, ModelResolutionSource,
     ModelResponse,
 };
 use tinyinference::providers::MockModel;
+use tinyinference::tool::ToolCall;
 use tinyinference::usage::Usage;
 
 /// Middleware that subscribes a shared [`RecordingListener`] to the run's event

@@ -20,7 +20,7 @@ use tinyagents_harness::ids::{
 };
 use tinyagents_harness::limits::{LimitTracker, RunLimits};
 use tinyagents_harness::store::{AppendStore, InMemoryAppendStore};
-use tinyagents_harness::tool::{ToolResult};
+use tinyagents_harness::tool::ToolResult;
 use tinyinference::tool::{ToolCall, ToolFormat, ToolSchema};
 
 #[tokio::test]

@@ -18,10 +18,10 @@ use tinyagents_harness::events::AgentEvent;
 use tinyagents_harness::limits::RunLimits;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy, UnknownToolPolicy};
 use tinyagents_harness::testkit::{EventRecorder, FakeTool};
-use tinyinference::tool::ToolCall;
 use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyinference::model::ModelResponse;
 use tinyinference::providers::MockModel;
+use tinyinference::tool::ToolCall;
 use tinyinference::usage::Usage;
 
 // ── Scripted response helpers ─────────────────────────────────────────────────

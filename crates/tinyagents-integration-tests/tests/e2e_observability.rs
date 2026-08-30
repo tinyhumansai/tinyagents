@@ -27,13 +27,13 @@ use tinyagents_harness::events::{AgentEvent, RecordingListener};
 use tinyagents_harness::ids::{ExecutionStatus, RunId};
 use tinyagents_harness::runtime::{AgentHarness, PayloadCapture, RunPolicy};
 use tinyagents_harness::testkit::FakeTool;
-use tinyinference::tool::ToolCall;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
 use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyinference::model::ModelResponse;
 use tinyinference::providers::MockModel;
+use tinyinference::tool::ToolCall;
 use tinyinference::usage::Usage;
 
 // The secret is embedded in the *registered model name* so it appears verbatim

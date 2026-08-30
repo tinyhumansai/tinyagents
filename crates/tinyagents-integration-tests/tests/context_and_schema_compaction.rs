@@ -23,8 +23,8 @@
 use tinyagents_harness::summarization::{
     ConcatSummarizer, SummarizationPolicy, Summarizer, TrimStrategy, trim_messages,
 };
-use tinyinference::tool::ToolCall;
 use tinyinference::message::{AssistantMessage, Message};
+use tinyinference::tool::ToolCall;
 
 /// The provider invariant, checked locally so this file depends on no new
 /// crate surface: every `tool` message must be preceded by an assistant turn

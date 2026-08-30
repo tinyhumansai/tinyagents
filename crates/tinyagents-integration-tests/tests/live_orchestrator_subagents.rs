@@ -24,13 +24,13 @@ async fn live_openai_orchestrator_designs_subagents_via_registry() {
     use tinyagents_graph::*;
     use tinyagents_harness::middleware::AgentRun;
     use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
-    use tinyinference::tool::ToolCall;
     use tinyagents_harness::*;
     use tinyagents_language::*;
     use tinyagents_registry::*;
     use tinyinference::message::Message;
     use tinyinference::model::{ChatModel, ResponseFormat};
     use tinyinference::providers::openai::OpenAiModel;
+    use tinyinference::tool::ToolCall;
 
     let _ = dotenvy::dotenv();
     if std::env::var("OPENAI_API_KEY").is_err() {

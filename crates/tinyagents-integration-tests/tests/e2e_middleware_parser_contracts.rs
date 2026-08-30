@@ -14,11 +14,11 @@ use tinyagents_harness::middleware::{
     StructuredOutputValidatorMiddleware, TimeoutMiddleware, ToolAllowlistMiddleware, ToolBaseCall,
     ToolHandler, ToolMiddleware, TracingMiddleware,
 };
-use tinyagents_harness::tool::{ToolResult};
-use tinyinference::tool::{ToolCall, ToolDelta, ToolSchema};
+use tinyagents_harness::tool::ToolResult;
 use tinyagents_language::{lexer, parser};
 use tinyinference::message::Message;
 use tinyinference::model::{ModelDelta, ModelRequest, ModelResponse, ResponseFormat};
+use tinyinference::tool::{ToolCall, ToolDelta, ToolSchema};
 
 struct ModelBase {
     seen_models: Mutex<Vec<Option<String>>>,

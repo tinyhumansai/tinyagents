@@ -16,9 +16,9 @@ use tinyagents_harness::observability::{
 };
 use tinyagents_harness::store::{AppendStore, InMemoryAppendStore, JsonlAppendStore};
 use tinyagents_harness::testkit::{FakeTool, Trajectory};
-use tinyinference::tool::ToolCall;
 use tinyagents_registry::{CapabilityRegistry, ComponentId, ComponentKind, ComponentMetadata};
 use tinyinference::providers::MockModel;
+use tinyinference::tool::ToolCall;
 
 #[tokio::test]
 async fn capability_registry_resolves_aliases_and_hands_off_runtime_registries() {

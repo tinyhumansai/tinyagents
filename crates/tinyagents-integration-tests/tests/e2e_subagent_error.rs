@@ -22,13 +22,13 @@ use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::error::TinyAgentsError;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, Trajectory};
-use tinyagents_harness::tool::{Tool};
-use tinyinference::tool::{ToolCall};
+use tinyagents_harness::tool::Tool;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
 use tinyinference::message::Message;
 use tinyinference::providers::MockModel;
+use tinyinference::tool::ToolCall;
 
 /// Builds a child harness whose model always asks for the `broken` tool, which
 /// fails with `Err(TinyAgentsError::Tool("boom"))`.

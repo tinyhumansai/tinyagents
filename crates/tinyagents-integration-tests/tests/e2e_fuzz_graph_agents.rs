@@ -19,12 +19,12 @@ use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::events::EventSink;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, ScriptedModel, Trajectory};
-use tinyinference::tool::ToolCall;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
 use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyinference::model::ModelResponse;
+use tinyinference::tool::ToolCall;
 use tinyinference::usage::Usage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
