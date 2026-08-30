@@ -157,6 +157,64 @@ async fn human_gated_run_parks_on_interrupt_then_resume_approves() {
 }
 
 #[tokio::test]
+async fn concurrent_calls_for_the_same_thread_never_overlap() {
+    // Two concurrent `run_or_resume_delegation` calls for the SAME stable
+    // thread_id must not both read the checkpoint and dispatch independently:
+    // without a per-thread lock held across classification and the selected
+    // run/resume operation, both can observe the same starting point and run
+    // the same pending stage concurrently, duplicating execute-stage
+    // external side effects and producing competing checkpoint histories.
+    let concurrent = Arc::new(AtomicUsize::new(0));
+    let max_concurrent = Arc::new(AtomicUsize::new(0));
+
+    let make_runner = || {
+        let concurrent = concurrent.clone();
+        let max_concurrent = max_concurrent.clone();
+        move |stage: DelegationStage, _s: DelegationState| {
+            let concurrent = concurrent.clone();
+            let max_concurrent = max_concurrent.clone();
+            Box::pin(async move {
+                let now = concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+                max_concurrent.fetch_max(now, Ordering::SeqCst);
+                // Widen the race window: without the per-thread lock, the
+                // second call's stages would start executing while the
+                // first call is still mid-flight.
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                concurrent.fetch_sub(1, Ordering::SeqCst);
+                let text = match stage {
+                    DelegationStage::Review => "approve".to_string(),
+                    _ => "ok".to_string(),
+                };
+                Ok::<_, String>(DelegationStageOutput::done(text))
+            }) as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
+        }
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::new(dir.path()));
+    let make_config = || DelegationConfig {
+        checkpointer: Some(cp.clone()),
+        thread_id: Some("racing-thread".to_string()),
+        ..DelegationConfig::default()
+    };
+
+    let (r1, r2) = tokio::join!(
+        run_or_resume_delegation(make_config(), make_runner()),
+        run_or_resume_delegation(make_config(), make_runner()),
+    );
+    r1.expect("first call runs");
+    r2.expect("second call runs");
+
+    assert_eq!(
+        max_concurrent.load(Ordering::SeqCst),
+        1,
+        "the per-thread lock must serialize the two calls' stage execution; \
+         observed overlapping stage invocations"
+    );
+}
+
+#[tokio::test]
 async fn run_delegation_rejects_require_review_approval() {
     // `run_delegation` documents itself as the non-gated convenience wrapper
     // that always returns a terminal state. With the gate on, a legitimately
