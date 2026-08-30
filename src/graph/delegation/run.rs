@@ -110,8 +110,10 @@ where
         approved,
         "[interrupt] resuming durable delegation graph with approval decision"
     );
-    let mut command = Command::default();
-    command.resume = Some(decision);
+    let command = Command {
+        resume: Some(decision),
+        ..Command::default()
+    };
     resume_graph(config, command, run_stage).await
 }
 
