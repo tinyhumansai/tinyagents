@@ -220,6 +220,18 @@ pub use graph::{
     register_orchestration_tools,
 };
 
+// --- Graph: multi-stage sub-agent delegation (plan → execute ⇄ review → finalize) ---
+// The per-stage worker is injected, so the host supplies how a stage runs while
+// this crate owns the routing, revision budget, checkpoint/resume classification
+// and the durable human-approval interrupt. `DelegationState` is an on-disk
+// format — see `graph::delegation`'s README before changing its shape.
+pub use graph::delegation::{
+    CURRENT_SCHEMA_VERSION as DELEGATION_SCHEMA_VERSION, DelegationConfig, DelegationOutcome,
+    DelegationStage, DelegationStageOutput, DelegationState, PendingApproval, StepRecord,
+    delegation_graph_topology, deny_decision, resume_delegation, run_delegation,
+    run_delegation_durable, run_or_resume_delegation,
+};
+
 // --- Graph: per-thread goal (durable objective + graph-native continuation) ---
 // `goal_store` is the programmatic CRUD surface (get/set/complete/account_usage);
 // the tools and continuation helpers are re-exported flat for discoverability.
