@@ -825,6 +825,58 @@ async fn cancelled_checkpoint_still_scheduling_finalize_is_resumed_not_terminal(
 }
 
 #[tokio::test]
+async fn cancellation_at_the_approval_node_routes_to_finalize() {
+    // Cancellation arriving while a gated run is parked at the approval
+    // interrupt (or during the preceding review worker) must be honoured at
+    // that boundary exactly like every other node. Without the check, a
+    // decisionless retry interrupts again indefinitely, and an approving
+    // resume finalizes successfully despite the cancellation.
+    let cancel = CancellationToken::new();
+    let dir = tempfile::tempdir().unwrap();
+    let cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::new(dir.path()));
+    let config = DelegationConfig {
+        require_review_approval: true,
+        checkpointer: Some(cp.clone()),
+        thread_id: Some("cancel-at-approval".to_string()),
+        cancel: cancel.clone(),
+        ..DelegationConfig::default()
+    };
+    let outcome = run_delegation_durable(config, flow_runner(0))
+        .await
+        .expect("parks on approval");
+    outcome.pending.expect("parked on the approval interrupt");
+    assert!(
+        outcome.state.final_output.is_none(),
+        "not finalized yet — still awaiting approval"
+    );
+
+    // Cancel while parked, then resume with an approval decision: the
+    // cancellation must win, not the approval.
+    cancel.cancel();
+    let resumed_config = DelegationConfig {
+        require_review_approval: true,
+        checkpointer: Some(cp),
+        thread_id: Some("cancel-at-approval".to_string()),
+        cancel,
+        ..DelegationConfig::default()
+    };
+    let resumed = resume_delegation(resumed_config, json!("approve_once"), flow_runner(0))
+        .await
+        .expect("resumes");
+    assert!(resumed.pending.is_none(), "resume clears the pause");
+    assert!(
+        resumed.state.cancelled,
+        "cancellation must be honoured at the approval boundary, not silently \
+         overridden by an approving resume"
+    );
+    assert!(
+        resumed.state.final_output.is_some(),
+        "cancellation routes to finalize, producing a cancellation summary"
+    );
+}
+
+#[tokio::test]
 async fn concurrent_resume_delegation_calls_for_the_same_thread_never_overlap() {
     // `resume_delegation` is a public entry point that bypasses
     // `run_or_resume_delegation` entirely, so it needs its OWN per-thread
