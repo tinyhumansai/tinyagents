@@ -11,6 +11,10 @@ categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
 async-trait = "0.1"
+# Provider-neutral model, streaming, provider, and embedding APIs are owned by
+# the vendored TinyInference module and re-exported through `harness` for
+# source compatibility.
+tinyinference = { path = "vendor/tinyinference/crates/tinyinference" }
 # Cheap, reference-counted byte buffers. Used only on the *internal* SSE
 # byte-stream seam (`harness::providers::openai::sse::SseState`) so each
 # network chunk from `reqwest::Response::bytes_stream` is forwarded without a
