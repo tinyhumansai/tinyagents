@@ -23,8 +23,6 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::error::{Result, TinyAgentsError};
-
 pub use error_policy::{ToolErrorPolicy, is_control_flow_error};
 // Rendering a tool call for a human is not harness-specific, and two copies of
 // the prefix list is how one of them silently stops stripping a prefix the
