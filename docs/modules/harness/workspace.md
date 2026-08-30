@@ -139,7 +139,7 @@ assert!(err.to_string().contains("outside the allowed workspace"));
 | --- | --- |
 | `WorkspacePrepared { policy_id, root }` | `prepare_workspace` succeeds |
 | `WorkspaceCleanup { policy_id, error }` | `cleanup_workspace` runs (`error` set on failure) |
-| `WorkspaceViolation { path }` | `enforce` blocks an out-of-root path |
+| `WorkspaceViolation { path }` | `enforce_workspace_path` blocks an out-of-root path |
 
 The descriptor is fully `Serialize`/`Deserialize` for registry introspection and
 audit journaling.
