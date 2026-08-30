@@ -135,7 +135,7 @@ jobs:
           git tag -a "${RELEASE_TAG}" -m "Release ${RELEASE_TAG}"
 
       - name: Package crate
-        run: cargo package --locked
+        run: cargo package --locked -p "$CRATE_NAME"
 
       - name: Push release commit and tag
         env:
