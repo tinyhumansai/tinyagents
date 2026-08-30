@@ -230,8 +230,13 @@ where
             let final_text = if s.cancelled {
                 format!("cancelled after {} execution(s)", s.executions.len())
             } else if s.denied {
+                // `s.denied` is set only by `DelegationUpdate::HumanDecision`
+                // (the durable human-approval gate) — the in-graph reviewer
+                // never sets it: a not-approved review routes back to
+                // `execute` and only increments `revisions`. Attribute the
+                // denial to the actor that can actually produce it.
                 format!(
-                    "denied by reviewer after {} execution(s)",
+                    "denied by approver after {} execution(s)",
                     s.executions.len()
                 )
             } else {
