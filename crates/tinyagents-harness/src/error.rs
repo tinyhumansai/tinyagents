@@ -264,6 +264,18 @@ pub enum TinyAgentsError {
     Storage(String),
 }
 
+impl From<tinyinference::Error> for TinyAgentsError {
+    fn from(error: tinyinference::Error) -> Self {
+        match error {
+            tinyinference::Error::Model(message) => Self::Model(message),
+            tinyinference::Error::Provider(error) => Self::from_provider_error(*error),
+            tinyinference::Error::Validation(message) => Self::Validation(message),
+            tinyinference::Error::Serialization(error) => Self::Serialization(error),
+            tinyinference::Error::Embedding(message) => Self::Embedding(message),
+        }
+    }
+}
+
 impl TinyAgentsError {
     /// Builds the right error for a structured provider failure, promoting a
     /// recognised context overflow to [`TinyAgentsError::ContextOverflow`].
