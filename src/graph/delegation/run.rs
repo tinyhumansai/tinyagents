@@ -447,7 +447,12 @@ pub(super) fn decision_is_approve(decision: &Value) -> bool {
     /// beginning with "approve" (e.g. an attacker- or bug-supplied
     /// `"approve_not_authorized"`) as approval, releasing the durable
     /// human-approval gate for a decision value nothing actually approved.
-    const APPROVE_STRINGS: &[&str] = &["approve_once", "approve_always_for_tool", "approve", "approved"];
+    const APPROVE_STRINGS: &[&str] = &[
+        "approve_once",
+        "approve_always_for_tool",
+        "approve",
+        "approved",
+    ];
 
     match decision {
         Value::Bool(b) => *b,

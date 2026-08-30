@@ -749,8 +749,12 @@ fn decision_is_approve_rejects_unrecognized_string_prefixes() {
     // unvalidated JSON value like `{"decision":"approve_not_authorized"}`
     // must not release the durable human-approval gate just because it
     // begins with "approve".
-    assert!(!decision_is_approve(&json!({"decision": "approve_not_authorized"})));
-    assert!(!decision_is_approve(&json!({"decision": "approved_by_nobody"})));
+    assert!(!decision_is_approve(
+        &json!({"decision": "approve_not_authorized"})
+    ));
+    assert!(!decision_is_approve(
+        &json!({"decision": "approved_by_nobody"})
+    ));
     assert!(!decision_is_approve(&json!("approve_not_authorized")));
 
     // The real allowlisted spellings still approve, in both shapes.
