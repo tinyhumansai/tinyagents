@@ -63,8 +63,12 @@ pub use types::{DagIssue, DagNode};
 /// Reports whether the dependency edges contain a cycle.
 ///
 /// Edges naming an id that is not a declared node are ignored (see the module
-/// docs). Duplicate ids are collapsed to one node, so they cannot produce a
-/// false positive.
+/// docs). Duplicate ids are collapsed to one node (first declaration wins),
+/// so they cannot produce a false positive — but a caller that wants to add
+/// edges to a node id that already exists must merge them into that one
+/// declaration; a second `DagNode` with the same id has its edges silently
+/// dropped instead of contributing to the cycle check (see the comment at
+/// the dedupe below).
 pub fn has_cycle(nodes: &[DagNode<'_>]) -> bool {
     let ids: HashSet<&str> = nodes.iter().map(|n| n.id).collect();
     let mut indegree: HashMap<&str, usize> = ids.iter().map(|&id| (id, 0)).collect();
