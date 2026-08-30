@@ -16,10 +16,10 @@ use crate::harness::model::StreamAccumulator;
 /// How the provider expects the API credential to be sent on each request.
 ///
 /// OpenAI-compatible endpoints diverge on auth: hosted OpenAI and most gateways
-/// use `Bearer`, some providers use a bare `x-api-key`, Anthropic's compat
-/// endpoint pairs `x-api-key` with an `anthropic-version` header, and a few need
-/// an arbitrary custom header carrying the raw credential. Defaults to
-/// [`AuthStyle::Bearer`].
+/// use `Bearer`, Inworld uses HTTP Basic credentials, some providers use a bare
+/// `x-api-key`, Anthropic's compat endpoint pairs `x-api-key` with an
+/// `anthropic-version` header, and a few need an arbitrary custom header
+/// carrying the raw credential. Defaults to [`AuthStyle::Bearer`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum AuthStyle {
     /// No authentication header (e.g. a local Ollama server).
@@ -27,6 +27,8 @@ pub enum AuthStyle {
     /// `Authorization: Bearer <key>` — hosted OpenAI and most gateways.
     #[default]
     Bearer,
+    /// `Authorization: Basic <credential>` — used by Inworld and compatible APIs.
+    Basic,
     /// `x-api-key: <key>` — used by some OpenAI-compatible providers.
     XApiKey,
     /// `x-api-key: <key>` + `anthropic-version: 2023-06-01` (Anthropic compat).
@@ -199,6 +201,8 @@ pub(super) fn auth_headers(auth: &AuthStyle, api_key: &str) -> Vec<(String, Stri
     match auth {
         AuthStyle::None => Vec::new(),
         AuthStyle::Bearer => vec![("Authorization".to_string(), format!("Bearer {api_key}"))],
+        AuthStyle::Basic if api_key.is_empty() => Vec::new(),
+        AuthStyle::Basic => vec![("Authorization".to_string(), format!("Basic {api_key}"))],
         AuthStyle::XApiKey => vec![("x-api-key".to_string(), api_key.to_string())],
         AuthStyle::Anthropic => vec![
             ("x-api-key".to_string(), api_key.to_string()),

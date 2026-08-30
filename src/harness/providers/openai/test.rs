@@ -2008,6 +2008,23 @@ fn auth_headers_bearer_is_the_default() {
 }
 
 #[test]
+fn auth_headers_basic_prefixes_the_credential() {
+    let headers = auth_headers(&AuthStyle::Basic, "base64-credential");
+    assert_eq!(
+        headers,
+        vec![(
+            "Authorization".to_string(),
+            "Basic base64-credential".to_string()
+        )]
+    );
+}
+
+#[test]
+fn auth_headers_basic_omits_an_empty_credential() {
+    assert!(auth_headers(&AuthStyle::Basic, "").is_empty());
+}
+
+#[test]
 fn auth_headers_x_api_key_sends_bare_key_without_authorization() {
     let headers = auth_headers(&AuthStyle::XApiKey, "secret");
     assert_eq!(
