@@ -21,73 +21,7 @@ use crate::harness::events::EventSink;
 use crate::harness::ids::{RunId, ThreadId};
 use crate::harness::tool::{context_detail_from_args, humanize_tool_name};
 
-/// The model-visible syntax a tool declaration prefers.
-///
-/// Tool execution remains provider-neutral: after parsing, the harness invokes
-/// tools with [`ToolCall::arguments`] as JSON so local schema validation,
-/// middleware, tracing, and replay use one stable representation. This format
-/// tells prompt renderers and provider adapters how a tool should be exposed to
-/// a model when the provider does not force a native tool-calling shape.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
-pub enum ToolFormat {
-    /// Native JSON/function-call style. This is the default and maps directly to
-    /// providers such as OpenAI Chat Completions.
-    #[default]
-    Json,
-    /// XML tag style, for example
-    /// `<search><query>rust</query></search>`.
-    Xml,
-    /// Parametric p-type style: a compact ordered-parameter call syntax such as
-    /// `search("rust", 5)`.
-    PType {
-        /// Ordered parameter names used by compact renderers. The names should
-        /// correspond to fields in [`ToolSchema::parameters`].
-        parameters: Vec<String>,
-    },
-}
-
-/// A model-visible declaration of a tool: its name, description,
-/// JSON-schema-compatible parameter shape, and preferred tool-call format.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ToolSchema {
-    /// Canonical tool name (ASCII `snake_case` by convention).
-    pub name: String,
-    /// Human/model readable description of what the tool does.
-    pub description: String,
-    /// JSON Schema describing the model-visible input arguments.
-    pub parameters: Value,
-    /// Preferred model-visible tool-call format.
-    #[serde(default, skip_serializing_if = "ToolFormat::is_json")]
-    pub format: ToolFormat,
-}
-
-/// A request from the model to invoke a tool.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ToolCall {
-    /// Provider-assigned call id, required for result correlation.
-    pub id: String,
-    /// Name of the tool to invoke.
-    pub name: String,
-    /// Arguments supplied by the model, as raw JSON.
-    ///
-    /// When [`Self::invalid`] is set, this preserves the raw (unparseable)
-    /// arguments string the model emitted (as a JSON string value) instead of a
-    /// parsed object.
-    #[serde(default)]
-    pub arguments: Value,
-    /// Set when the model emitted arguments that could not be parsed as JSON.
-    ///
-    /// Small local models (Ollama, LM Studio, llama.cpp, vLLM) occasionally emit
-    /// malformed argument JSON. Rather than fail the whole model call, the
-    /// provider surfaces the call with this error message and the raw arguments
-    /// preserved in [`Self::arguments`]; the agent loop feeds the message back to
-    /// the model as an error tool result so it can retry (mirroring LangChain's
-    /// `invalid_tool_calls` and the AI SDK's invalid dynamic tool parts). `None`
-    /// on a well-formed call.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invalid: Option<String>,
-}
+pub use tinyinference::tool::{ToolCall, ToolDelta, ToolFormat, ToolSchema};
 
 /// The outcome of executing a [`ToolCall`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -317,23 +251,6 @@ pub struct ToolPolicy {
     /// Human-facing presentation metadata.
     #[serde(default, skip_serializing_if = "ToolDisplay::is_empty")]
     pub display: ToolDisplay,
-}
-
-/// An incremental progress update emitted while a tool runs (streaming).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ToolDelta {
-    /// Id of the [`ToolCall`] this delta belongs to.
-    pub call_id: String,
-    /// Incremental content fragment.
-    pub content: String,
-    /// The tool's name, when known. Providers that surface it on the first
-    /// (call-opening) delta populate this so consumers can label a tool call as
-    /// soon as it begins — before its arguments have streamed. Subsequent
-    /// argument fragments leave it `None`; [`StreamAccumulator`] remembers the
-    /// first non-empty name per `call_id` and stamps it onto the reconstructed
-    /// [`ToolCall`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
 }
 
 /// A tool the harness can invoke during an agent loop.
