@@ -192,9 +192,8 @@ struct MetaRow {
 /// Reconstructs a [`CheckpointMetadata`] from the projected listing columns,
 /// without touching the full serialized record.
 fn row_metadata(row: MetaRow) -> Result<CheckpointMetadata> {
-    let namespace: Vec<String> =
-        serde_json::from_str(&row.namespace_json)
-            .map_err(|e| decode_json_err("sqlite checkpointer", "namespace", e))?;
+    let namespace: Vec<String> = serde_json::from_str(&row.namespace_json)
+        .map_err(|e| decode_json_err("sqlite checkpointer", "namespace", e))?;
     let next_nodes: Vec<NodeId> = serde_json::from_str(&row.next_nodes_json)
         .map_err(|e| decode_json_err("sqlite checkpointer", "next_nodes", e))?;
     Ok(CheckpointMetadata {
@@ -292,9 +291,11 @@ where
                 .map_err(|e| sqlite_err("query latest checkpoint", e))?,
         };
         match record {
-            Some(json) => Ok(Some(
-                serde_json::from_str(&json).map_err(|e| decode_json_err("sqlite checkpointer", "record", e))?,
-            )),
+            Some(json) => {
+                Ok(Some(serde_json::from_str(&json).map_err(|e| {
+                    decode_json_err("sqlite checkpointer", "record", e)
+                })?))
+            }
             None => Ok(None),
         }
     }
@@ -334,9 +335,11 @@ where
                 .map_err(|e| sqlite_err("query latest scoped checkpoint", e))?,
         };
         match record {
-            Some(json) => Ok(Some(
-                serde_json::from_str(&json).map_err(|e| decode_json_err("sqlite checkpointer", "record", e))?,
-            )),
+            Some(json) => {
+                Ok(Some(serde_json::from_str(&json).map_err(|e| {
+                    decode_json_err("sqlite checkpointer", "record", e)
+                })?))
+            }
             None => Ok(None),
         }
     }
@@ -368,8 +371,10 @@ where
             let mut records: Vec<Checkpoint<State>> = Vec::new();
             for row in rows {
                 let json = row.map_err(|e| sqlite_err("read record row", e))?;
-                records
-                    .push(serde_json::from_str(&json).map_err(|e| decode_json_err("sqlite checkpointer", "record", e))?);
+                records.push(
+                    serde_json::from_str(&json)
+                        .map_err(|e| decode_json_err("sqlite checkpointer", "record", e))?,
+                );
             }
             let writes = read_writes_by_checkpoint(&conn, thread_id, &namespace_json)?;
             (records, writes)
@@ -474,7 +479,10 @@ where
         let mut out = Vec::new();
         for row in rows {
             let json = row.map_err(|e| sqlite_err("read record row", e))?;
-            out.push(serde_json::from_str(&json).map_err(|e| decode_json_err("sqlite checkpointer", "record", e))?);
+            out.push(
+                serde_json::from_str(&json)
+                    .map_err(|e| decode_json_err("sqlite checkpointer", "record", e))?,
+            );
         }
         Ok(out)
     }

@@ -427,8 +427,8 @@ where
             match checkpoint_id {
                 Some(id) => {
                     // Decode only the id header to test the match, not `State`.
-                    let header: CheckpointIdHeader =
-                        serde_json::from_str(&line).map_err(|e| decode_json_err("file checkpointer", "header", e))?;
+                    let header: CheckpointIdHeader = serde_json::from_str(&line)
+                        .map_err(|e| decode_json_err("file checkpointer", "header", e))?;
                     if header.checkpoint_id == id {
                         target = Some(line);
                     }
@@ -437,9 +437,11 @@ where
             }
         }
         match target {
-            Some(line) => Ok(Some(
-                serde_json::from_str(&line).map_err(|e| decode_json_err("file checkpointer", "record", e))?,
-            )),
+            Some(line) => {
+                Ok(Some(serde_json::from_str(&line).map_err(|e| {
+                    decode_json_err("file checkpointer", "record", e)
+                })?))
+            }
             None => Ok(None),
         }
     }

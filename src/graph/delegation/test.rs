@@ -666,9 +666,11 @@ fn incompatible_checkpoint_error_matches_schema_not_corrupt_or_operational() {
             "sqlite checkpointer: decode [schema] record: invalid type: string".to_string()
         )
     ));
-    assert!(is_incompatible_checkpoint_error(&TinyAgentsError::Checkpoint(
-        "sqlite checkpointer: decode [schema] next_nodes: missing field `foo`".to_string()
-    )));
+    assert!(is_incompatible_checkpoint_error(
+        &TinyAgentsError::Checkpoint(
+            "sqlite checkpointer: decode [schema] next_nodes: missing field `foo`".to_string()
+        )
+    ));
     // Ambiguous/likely corruption must NOT be treated as a safe-to-expire
     // schema mismatch — deleting it would discard the only evidence of the
     // corruption and silently restart the delegation from `plan`, potentially
@@ -678,9 +680,11 @@ fn incompatible_checkpoint_error_matches_schema_not_corrupt_or_operational() {
             "sqlite checkpointer: decode [corrupt] record: EOF while parsing a value".to_string()
         )
     ));
-    assert!(!is_incompatible_checkpoint_error(&TinyAgentsError::Checkpoint(
-        "file checkpointer: decode [corrupt] record: expected `,` or `}`".to_string()
-    )));
+    assert!(!is_incompatible_checkpoint_error(
+        &TinyAgentsError::Checkpoint(
+            "file checkpointer: decode [corrupt] record: expected `,` or `}`".to_string()
+        )
+    ));
     // Operational failures must NOT be treated as incompatible (they must
     // propagate, not silently restart durable work).
     assert!(!is_incompatible_checkpoint_error(

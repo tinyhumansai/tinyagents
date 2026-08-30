@@ -56,7 +56,11 @@ use crate::{Result, TinyAgentsError};
 /// prefix; `what` names the field being decoded (e.g. `"record"`,
 /// `"next_nodes"`) with no leading `"decode "` — this function supplies that
 /// wording once, alongside the tag.
-pub(super) fn decode_json_err(backend: &str, what: &str, err: serde_json::Error) -> TinyAgentsError {
+pub(super) fn decode_json_err(
+    backend: &str,
+    what: &str,
+    err: serde_json::Error,
+) -> TinyAgentsError {
     let tag = match err.classify() {
         serde_json::error::Category::Data => "schema",
         serde_json::error::Category::Syntax

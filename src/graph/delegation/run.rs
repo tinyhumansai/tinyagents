@@ -58,7 +58,8 @@ where
     // "delegation resume requires a thread_id"/"a checkpointer" — the pause
     // can never be released and the delegated work is stranded. Reject the
     // misconfiguration up front instead.
-    if config.require_review_approval && (config.checkpointer.is_none() || config.thread_id.is_none())
+    if config.require_review_approval
+        && (config.checkpointer.is_none() || config.thread_id.is_none())
     {
         return Err(
             "delegation human-approval gate (require_review_approval) requires both a \
