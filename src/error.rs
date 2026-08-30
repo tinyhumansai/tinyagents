@@ -222,3 +222,17 @@ pub enum TinyAgentsError {
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 }
+
+impl From<tinyinference::Error> for TinyAgentsError {
+    fn from(error: tinyinference::Error) -> Self {
+        match error {
+            tinyinference::Error::Model(message) => Self::Model(message),
+            tinyinference::Error::Provider(error) => Self::Provider(error),
+            tinyinference::Error::Validation(message) => Self::Validation(message),
+            tinyinference::Error::Serialization(message) => {
+                Self::Model(format!("inference serialization error: {message}"))
+            }
+            tinyinference::Error::Embedding(message) => Self::Embedding(message),
+        }
+    }
+}

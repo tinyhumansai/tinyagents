@@ -99,8 +99,41 @@ impl ModelCatalog {
         provider: &str,
         model_id: &str,
     ) -> Option<crate::harness::model::ModelProfile> {
-        self.get(provider, model_id)
-            .map(crate::harness::model::ModelProfile::from_catalog_entry)
+        self.get(provider, model_id).map(model_profile_from_entry)
+    }
+}
+
+fn model_profile_from_entry(
+    entry: &ModelCatalogEntry,
+) -> crate::harness::model::ModelProfile {
+    let capabilities = &entry.capabilities;
+    crate::harness::model::ModelProfile {
+        provider: Some(entry.provider.clone()),
+        model: Some(entry.model_id.clone()),
+        display_name: None,
+        status: if entry.deprecation_date.is_some() {
+            crate::harness::model::ModelStatus::Deprecated
+        } else {
+            crate::harness::model::ModelStatus::Stable
+        },
+        release_date: None,
+        modalities: crate::harness::model::Modalities {
+            text_in: true,
+            text_out: true,
+            image_in: capabilities.vision,
+            image_out: false,
+            audio_in: capabilities.audio_input,
+            audio_out: capabilities.audio_output,
+        },
+        tool_calling: capabilities.tool_calling,
+        parallel_tool_calls: capabilities.parallel_tool_calling,
+        streaming: capabilities.streaming,
+        streaming_tool_chunks: capabilities.streaming && capabilities.tool_calling,
+        native_structured_output: capabilities.json_schema,
+        json_schema: capabilities.json_schema,
+        reasoning: capabilities.reasoning,
+        max_input_tokens: entry.max_input_tokens,
+        max_output_tokens: entry.max_output_tokens,
     }
 }
 
@@ -281,7 +314,7 @@ mod tests {
         let catalog = ModelCatalog::seed().unwrap();
         let entry = catalog.get("openai", "gpt-4.1").unwrap();
 
-        let profile = crate::harness::model::ModelProfile::from_catalog_entry(entry);
+        let profile = model_profile_from_entry(entry);
         assert_eq!(profile.provider.as_deref(), Some("openai"));
         assert_eq!(profile.model.as_deref(), Some("gpt-4.1"));
         // The catalog's advertised capability flags carry across the bridge.
