@@ -176,10 +176,6 @@ src/harness/
   usage/        # TinyInference compatibility re-export
 ```
 
-The current crate already has top-level `chat.rs`, `model.rs`, and `tool.rs`.
-Those can either stay as public re-exports or move under `harness/` once the API
-settles.
-
 Feature ownership:
 
 - `agent_loop`: default model-tool-model loop.

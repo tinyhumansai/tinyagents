@@ -81,12 +81,16 @@ Provider clients and core retrieval types are split under:
 ```text
 vendor/tinyinference/crates/tinyinference/src/embeddings/
   mod.rs
-  embedding.rs
-  vector_store.rs
-  retriever.rs
-  indexing.rs
-  sparse.rs
-  testkit.rs
+  types.rs
+  openai.rs
+  cohere.rs
+  ollama.rs
+  voyage.rs
+  cloud.rs
+  noop.rs
+  rate_limit.rs
+  retry_after.rs
+  test.rs
 ```
 
 ## Core Types
