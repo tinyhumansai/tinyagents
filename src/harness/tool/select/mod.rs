@@ -204,15 +204,29 @@ const SEND_CONFLICTING_VERBS: &[ToolVerb] = &[
     ToolVerb::Merge,
 ];
 
-/// How many words on either side of a Send-resource-noun still count as "this
-/// conflicting verb's direct object" rather than an unrelated clause. Covers
-/// "read email" (distance 1) and "delete a message" (distance 2, one
-/// determiner between) without reaching across a conjunction into a second,
-/// independent clause: "find Alice and email her the report" is distance 3
-/// from "find" to "email" (find, alice, and, email), outside this window, so
-/// the compound task's Send intent is preserved instead of being suppressed
-/// by an unrelated verb earlier in the sentence.
-const CONFLICT_PROXIMITY_WINDOW: usize = 2;
+/// Words that join two independent clauses/intents in a short imperative task
+/// description ("find Alice AND email her the report"). A conflicting verb
+/// separated from a Send-resource-noun by one of these reads as a second,
+/// independent instruction rather than that verb's direct object — distance
+/// alone cannot tell the two apart: "delete THAT OLD email" and "find Alice
+/// AND email her" both have exactly two words between the verb and the noun,
+/// and only the second is a compound task.
+const CLAUSE_BOUNDARY_WORDS: &[&str] = &["and", "then", "also", "plus", "next"];
+
+/// Whether a conflicting verb at `verb_idx` and a Send-resource-noun at
+/// `noun_idx` are in the same clause — i.e. no [`CLAUSE_BOUNDARY_WORDS`] word
+/// appears strictly between them. Order-agnostic (`verb_idx` may be before or
+/// after `noun_idx`).
+fn same_clause(words: &[String], verb_idx: usize, noun_idx: usize) -> bool {
+    let (lo, hi) = if verb_idx < noun_idx {
+        (verb_idx, noun_idx)
+    } else {
+        (noun_idx, verb_idx)
+    };
+    !words[lo + 1..hi]
+        .iter()
+        .any(|w| CLAUSE_BOUNDARY_WORDS.contains(&w.as_str()))
+}
 
 fn detect_verbs(prompt: &str) -> HashSet<ToolVerb> {
     let lowered = prompt.to_ascii_lowercase();
