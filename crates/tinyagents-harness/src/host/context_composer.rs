@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::ids::ThreadId;
-use crate::message::Message;
+use tinyinference::message::Message;
 
 // ── TurnContextRequest ────────────────────────────────────────────────────────
 

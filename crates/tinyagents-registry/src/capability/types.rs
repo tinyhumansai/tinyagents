@@ -3,7 +3,7 @@
 //! sub-capabilities it didn't hardcode.
 //!
 //! This layer is deliberately distinct from the harness'
-//! [`tinyagents_harness::model::ModelRegistry`] and
+//! [`tinyagents_harness::model_registry::ModelRegistry`] and
 //! [`tinyagents_harness::tool::ToolRegistry`], which are per-run executable stores.
 //! The [`CapabilityRegistry`] is a *capability catalog*: it owns named models,
 //! tools, graph blueprints, routers, and reducers so declarative `.rag`
@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::component::{ComponentKind, ComponentMetadata};
-use tinyagents_harness::model::ChatModel;
 use tinyagents_harness::tool::Tool;
 use tinyagents_language::Blueprint;
+use tinyinference::model::ChatModel;
 
 /// A name-addressable catalog of registered capabilities.
 ///

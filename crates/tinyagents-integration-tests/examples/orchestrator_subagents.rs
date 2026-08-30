@@ -35,15 +35,15 @@ use futures::future::join_all;
 use serde_json::{Value, json};
 
 use tinyagents_graph::*;
-use tinyagents_harness::message::Message;
 use tinyagents_harness::middleware::AgentRun;
-use tinyagents_harness::model::{ChatModel, ResponseFormat};
-use tinyagents_harness::providers::openai::OpenAiModel;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
-use tinyagents_harness::tool::ToolCall;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::Message;
+use tinyinference::model::{ChatModel, ResponseFormat};
+use tinyinference::providers::openai::OpenAiModel;
+use tinyinference::tool::ToolCall;
 
 /// A specialized sub-agent's static identity.
 struct AgentSpec {

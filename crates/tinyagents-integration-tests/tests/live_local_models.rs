@@ -54,15 +54,16 @@ use serde_json::{Value, json};
 
 use tinyagents_harness::Result;
 use tinyagents_harness::context::{RunConfig, RunContext};
-use tinyagents_harness::message::Message;
-use tinyagents_harness::model::{
-    ChatModel, ModelRequest, ModelStreamItem, ResponseFormat, StreamAccumulator, ToolChoice,
-};
-use tinyagents_harness::providers::openai::OpenAiModel;
-use tinyagents_harness::providers::{ProviderKind, ProviderSpec};
 use tinyagents_harness::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy};
 use tinyagents_harness::testkit::{EventRecorder, Trajectory};
-use tinyagents_harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
+use tinyagents_harness::tool::{Tool, ToolResult};
+use tinyinference::message::Message;
+use tinyinference::model::{
+    ChatModel, ModelRequest, ModelStreamItem, ResponseFormat, StreamAccumulator, ToolChoice,
+};
+use tinyinference::providers::openai::OpenAiModel;
+use tinyinference::providers::{ProviderKind, ProviderSpec};
+use tinyinference::tool::{ToolCall, ToolSchema};
 
 /// Per-call ceiling. A cold local model has to load several GB off disk before
 /// it emits its first token, so this is deliberately generous.

@@ -102,18 +102,18 @@ use crate::context::{MiddlewareControl, RunConfig, RunContext};
 use crate::error::{Result, TinyAgentsError};
 use crate::events::{AgentEvent, HarnessRunStatus, LimitKind};
 use crate::ids::{CallId, ComponentId, HarnessPhase};
-use crate::message::{Message, MessageDelta};
 use crate::middleware::{AgentRun, BoxModelFuture, BoxToolFuture, ModelBaseCall, ToolBaseCall};
-use crate::model::{
-    ChatModel, ModelDelta, ModelRequest, ModelResolutionSource, ModelResponse, ModelStreamItem,
-    ResolvedModel, ResolvedModelBinding, ResponseFormat, StreamAccumulator, ToolChoice,
-    model_eligible,
-};
+use crate::model_registry::{ResolvedModelBinding, model_eligible};
 use crate::runtime::{AgentHarness, InvalidArgsPolicy, UnknownToolPolicy};
 use crate::structured::{StructuredExtractor, StructuredStrategy};
 use crate::tool::{Tool, ToolCall, ToolSchema};
 use futures::StreamExt;
 use serde_json::Value;
+use tinyinference::message::{Message, MessageDelta};
+use tinyinference::model::{
+    ChatModel, ModelDelta, ModelRequest, ModelResolutionSource, ModelResponse, ModelStreamItem,
+    ResolvedModel, ResponseFormat, StreamAccumulator, ToolChoice,
+};
 
 mod entry;
 mod model_call;

@@ -17,15 +17,15 @@ use tinyagents_graph::ClosureStateReducer;
 use tinyagents_graph::*;
 use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::events::EventSink;
-use tinyagents_harness::message::{AssistantMessage, ContentBlock, Message};
-use tinyagents_harness::model::ModelResponse;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, ScriptedModel, Trajectory};
-use tinyagents_harness::tool::ToolCall;
-use tinyagents_harness::usage::Usage;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::ModelResponse;
+use tinyinference::tool::ToolCall;
+use tinyinference::usage::Usage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GraphShape {

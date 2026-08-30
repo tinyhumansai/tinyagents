@@ -1,7 +1,7 @@
 //! Unit tests for [`ModelRouter`](super::ModelRouter) / [`WorkloadRoute`].
 
 use super::{ModelRouter, WorkloadRoute};
-use tinyagents_harness::model::CapabilitySet;
+use tinyinference::model::CapabilitySet;
 
 /// Mirrors OpenHuman's workload tiers so the tests exercise the exact projection
 /// the host router needs: fast/chat siblings, heavy reasoning siblings, and a

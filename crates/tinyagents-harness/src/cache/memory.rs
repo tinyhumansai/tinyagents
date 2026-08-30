@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 use super::types::{CacheEntry, CacheStats, InMemoryResponseCache, LruResponseMap, ResponseCache};
 use crate::error::{Result, TinyAgentsError};
-use crate::model::ModelResponse;
+use tinyinference::model::ModelResponse;
 
 impl InMemoryResponseCache {
     /// Default LRU capacity, in entries, when constructed via

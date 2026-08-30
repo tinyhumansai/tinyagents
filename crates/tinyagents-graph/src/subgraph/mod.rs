@@ -181,7 +181,7 @@ impl ChildRunRecorder {
                 graph_id: execution.graph_id.clone(),
                 run_id: execution.run_id.clone(),
                 root_run_id: execution.root_run_id.clone(),
-                usage: tinyagents_harness::usage::UsageTotals::default(),
+                usage: tinyinference::usage::UsageTotals::default(),
             });
         }
     }

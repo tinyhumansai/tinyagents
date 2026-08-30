@@ -8,13 +8,15 @@ use futures::StreamExt;
 
 use crate::events::AgentEvent;
 use crate::ids::{CallId, RunId};
-use crate::model::{ChatModel, ModelRequest, ModelResponse, ModelStreamItem, collect_model_stream};
 use crate::testkit::{
     DeterministicClock, DeterministicIds, EventRecorder, FakeTool, ScriptedModel, StreamingMock,
     Trajectory,
 };
 use crate::tool::{Tool, ToolCall};
-use crate::usage::Usage;
+use tinyinference::model::{
+    ChatModel, ModelRequest, ModelResponse, ModelStreamItem, collect_model_stream,
+};
+use tinyinference::usage::Usage;
 
 // ---------------------------------------------------------------------------
 // StreamingMock
@@ -95,8 +97,8 @@ async fn scripted_model_records_received_requests() {
     let model = ScriptedModel::replies(vec!["a", "b"]);
     let state = ();
 
-    let req1 = ModelRequest::new(vec![crate::message::Message::user("hello")]);
-    let req2 = ModelRequest::new(vec![crate::message::Message::user("world")]);
+    let req1 = ModelRequest::new(vec![tinyinference::message::Message::user("hello")]);
+    let req2 = ModelRequest::new(vec![tinyinference::message::Message::user("world")]);
 
     model.invoke(&state, req1).await.unwrap();
     model.invoke(&state, req2).await.unwrap();

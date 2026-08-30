@@ -22,9 +22,8 @@
 //! [`prepare_tool_schemas`] instead of reading `Tool::schema()` directly:
 //!
 //! ```
-//! use tinyagents_harness::tool::{
-//!     CleaningStrategy, SchemaPreparation, ToolSchema, prepare_tool_schemas,
-//! };
+//! use tinyagents_harness::tool::{CleaningStrategy, SchemaPreparation, prepare_tool_schemas};
+//! use tinyinference::tool::ToolSchema;
 //! use serde_json::json;
 //!
 //! let declared = vec![ToolSchema::new(

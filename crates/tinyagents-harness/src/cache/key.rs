@@ -11,7 +11,7 @@
 //! `llm_string` serializes the whole model object (class path, model name,
 //! params). This module mirrors that: [`cache_key`] hashes the request, and
 //! [`scoped_cache_key`] folds in the *resolved* model's
-//! [`cache_identity`][crate::model::ChatModel::cache_identity] plus the
+//! [`cache_identity`][tinyinference::model::ChatModel::cache_identity] plus the
 //! streaming mode and the policy namespace. The composition is deliberate — the
 //! request half can be computed before model resolution and reused, while the
 //! identity half is only knowable after it.
@@ -20,7 +20,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::hash::{fold_bytes, fold_canonical, hex_digest};
-use crate::model::ModelRequest;
+use tinyinference::model::ModelRequest;
 
 /// Produces a stable, deterministic **request-half** cache key for `request`.
 ///
@@ -168,7 +168,7 @@ fn cache_key_envelope(request: &ModelRequest) -> Value {
 /// policy namespace into a request-half key from [`cache_key`].
 ///
 /// `identity` is the value returned by
-/// [`ChatModel::cache_identity`][crate::model::ChatModel::cache_identity]
+/// [`ChatModel::cache_identity`][tinyinference::model::ChatModel::cache_identity]
 /// on the model that is actually about to be (or was) called. `None` means the
 /// model declines to identify itself; the key then folds a fixed
 /// `"anonymous-model"` marker so a mixed registry of identifying and
@@ -215,7 +215,7 @@ pub fn credential_fingerprint(secret: &str) -> String {
 }
 
 /// Builds the canonical
-/// [`cache_identity`][crate::model::ChatModel::cache_identity] string
+/// [`cache_identity`][tinyinference::model::ChatModel::cache_identity] string
 /// for a provider-backed model.
 ///
 /// The identity names everything that can make two models answer the same

@@ -98,7 +98,7 @@ pub struct RunConfig {
     /// Maximum output tokens requested for each model turn in this run.
     ///
     /// When set, the agent loop applies this as an upper bound to
-    /// [`crate::model::ModelRequest::max_tokens`] before dispatching a
+    /// [`tinyinference::model::ModelRequest::max_tokens`] before dispatching a
     /// model call. Child sub-agent runs inherit the same cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turn_output_tokens: Option<u32>,

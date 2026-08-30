@@ -17,11 +17,11 @@ use async_trait::async_trait;
 use tinyagents_harness::TinyAgentsError;
 use tinyagents_harness::cancel::CancellationToken;
 use tinyagents_harness::context::{RunConfig, RunContext};
-use tinyagents_harness::message::Message;
 use tinyagents_harness::middleware::Middleware;
-use tinyagents_harness::model::ModelDelta;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, StreamingMock};
+use tinyinference::message::Message;
+use tinyinference::model::ModelDelta;
 
 /// Middleware that records the text of every `on_model_delta` it observes.
 struct DeltaRecorder {

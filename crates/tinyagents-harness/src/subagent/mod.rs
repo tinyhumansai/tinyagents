@@ -82,10 +82,10 @@ use crate::context::{RunConfig, RunContext};
 use crate::error::{Result, TinyAgentsError};
 use crate::events::{AgentEvent, EventSink};
 use crate::ids::{ThreadId, next_seq};
-use crate::message::Message;
 use crate::middleware::AgentRun;
 use crate::runtime::AgentHarness;
 use crate::tool::{Tool, ToolCall, ToolExecutionContext, ToolResult, ToolSchema};
+use tinyinference::message::Message;
 
 impl<State: Send + Sync, Ctx: Send + Sync> SubAgent<State, Ctx> {
     /// Creates a sub-agent wrapping `harness` with a stable `name` and

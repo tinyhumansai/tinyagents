@@ -357,7 +357,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // Apply the run's `InvalidArgsPolicy` instead of unconditionally
             // aborting the turn (mirrors the unknown-tool recovery above).
             if matches!(self.policy.invalid_args, InvalidArgsPolicy::Fail) {
-                return Err(err);
+                return Err(err.into());
             }
             // `ReturnToolError`: inject a tool-error result carrying the
             // validation detail and the tool's expected parameter schema, then
@@ -528,7 +528,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // `tool_from_result`, not `tool`: a result that asked to reach the model
         // byte-for-byte must carry that request into the transcript, or the host
         // has no way to tell it apart from output it may freely reshape.
-        messages.push(Message::tool_from_result(&result));
+        messages.push(crate::tool::message_from_result(&result));
         Ok(())
     }
 

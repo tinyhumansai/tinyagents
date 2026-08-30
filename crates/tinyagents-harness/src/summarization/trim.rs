@@ -20,7 +20,8 @@ use super::pairing::{
     advance_past_orphan_tools, find_safe_cutoff_point, retract_orphan_tool_calls,
 };
 use super::types::{MessageRole, TokenTrimPolicy, TrimOptions, TrimStrategy};
-use crate::message::{Message, estimate_message_tokens};
+use crate::token_estimation::estimate_message_tokens;
+use tinyinference::message::Message;
 
 /// Partition `messages` into system and non-system messages, preserving order.
 ///

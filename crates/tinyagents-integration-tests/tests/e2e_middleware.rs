@@ -29,16 +29,17 @@ use serde_json::json;
 use tinyagents_harness::TinyAgentsError;
 use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::events::AgentEvent;
-use tinyagents_harness::message::{AssistantMessage, ContentBlock, Message};
 use tinyagents_harness::middleware::{
     RedactionMiddleware, RetryMiddleware, ToolAllowlistMiddleware, TracingMiddleware,
 };
-use tinyagents_harness::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyagents_harness::retry::RetryPolicy;
 use tinyagents_harness::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy};
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, ScriptedModel, Trajectory};
-use tinyagents_harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
-use tinyagents_harness::usage::Usage;
+use tinyagents_harness::tool::{Tool, ToolResult};
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
+use tinyinference::tool::{ToolCall, ToolSchema};
+use tinyinference::usage::Usage;
 
 // ── Test doubles ──────────────────────────────────────────────────────────────
 
@@ -114,7 +115,7 @@ impl ChatModel<()> for FlakyModel {
         &self,
         state: &(),
         request: ModelRequest,
-    ) -> tinyagents_harness::Result<ModelResponse> {
+    ) -> tinyinference::Result<ModelResponse> {
         let n = {
             // Scope the guard so it is dropped before the `.await` below
             // (a `MutexGuard` is not `Send`).
@@ -123,7 +124,7 @@ impl ChatModel<()> for FlakyModel {
             *calls
         };
         if n <= self.fail_first {
-            return Err(TinyAgentsError::Model(format!(
+            return Err(tinyinference::Error::Model(format!(
                 "flaky transient failure #{n}"
             )));
         }

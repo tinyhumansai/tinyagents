@@ -17,9 +17,8 @@ pub(super) const RUN_BOUND_LABEL: &str = "remaining wall-clock budget";
 pub(super) const PER_CALL_BOUND_LABEL: &str = "per-model-call ceiling";
 
 use super::*;
-use crate::cache::{
-    CachePolicy, CacheSkipReason, apply_prompt_cache_breakpoints, scoped_cache_key,
-};
+use crate::cache::{CacheSkipReason, apply_prompt_cache_breakpoints, scoped_cache_key};
+use tinyinference::cache::CachePolicy;
 
 impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// Invokes a model, consulting the local response cache around the
@@ -38,7 +37,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// The key is **not** the request hash alone. [`Self::response_cache_decision`]
     /// produces the request half ([`cache_key`]); this method folds in the
     /// *resolved* model's
-    /// [`cache_identity`][crate::model::ChatModel::cache_identity], the
+    /// [`cache_identity`][tinyinference::model::ChatModel::cache_identity], the
     /// `streaming` flag, and the policy namespace via
     /// [`scoped_cache_key`][crate::cache::scoped_cache_key]. All three
     /// were previously absent from the key:
@@ -366,7 +365,12 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     // cancel-safe, and the pre-call `is_cancelled()` check above
                     // still short-circuits before the request is ever issued.
                     let cancellation = ctx.cancellation.clone();
-                    let fut = model.invoke(state, request.clone());
+                    let fut = async {
+                        model
+                            .invoke(state, request.clone())
+                            .await
+                            .map_err(TinyAgentsError::from)
+                    };
                     let budgeted = Self::with_call_budget(
                         remaining,
                         run_id.as_str(),
@@ -619,13 +623,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
 
     /// Drives one streaming model call to completion.
     ///
-    /// Consumes [`crate::model::ChatModel::stream`], emitting an
+    /// Consumes [`tinyinference::model::ChatModel::stream`], emitting an
     /// [`AgentEvent::ModelDelta`] and running every middleware's
     /// [`on_model_delta`][crate::middleware::Middleware::on_model_delta]
     /// hook for each [`ModelStreamItem::MessageDelta`] (and standalone
     /// [`ModelStreamItem::ToolCallDelta`]), then folds the items into the final
     /// [`ModelResponse`] via [`StreamAccumulator`]. The merged response is
-    /// equivalent to what the unary [`crate::model::ChatModel::invoke`]
+    /// equivalent to what the unary [`tinyinference::model::ChatModel::invoke`]
     /// path would have produced, so the rest of the loop is unaffected.
     ///
     /// `deltas_emitted` is incremented for every delta actually handed to
@@ -700,7 +704,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             accumulator.push(&item);
         }
 
-        accumulator.finish()
+        Ok(accumulator.finish()?)
     }
 }
 /// The innermost model call wrapped by the model-wrap onion.

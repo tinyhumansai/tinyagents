@@ -34,11 +34,11 @@ use serde_json::json;
 
 use crate::error::{Result, TinyAgentsError};
 use crate::events::{AgentEvent, EventSink, RecordingListener};
-use crate::message::MessageDelta;
-use crate::model::{
+use crate::tool::{Tool, ToolCall, ToolResult, ToolSchema};
+use tinyinference::message::MessageDelta;
+use tinyinference::model::{
     ChatModel, ModelRequest, ModelResponse, ModelStream, ModelStreamItem, StreamAccumulator,
 };
-use crate::tool::{Tool, ToolCall, ToolResult, ToolSchema};
 
 pub use types::*;
 
@@ -90,7 +90,7 @@ impl StreamingMock {
     }
 
     /// Folds the scripted items into the response they merge to.
-    fn merged_response(&self) -> Result<ModelResponse> {
+    fn merged_response(&self) -> tinyinference::Result<ModelResponse> {
         let mut accumulator = StreamAccumulator::new();
         for item in &self.items {
             accumulator.push(item);
@@ -102,7 +102,11 @@ impl StreamingMock {
 #[async_trait]
 impl<State: Send + Sync> ChatModel<State> for StreamingMock {
     /// Returns the merged response the scripted stream folds into.
-    async fn invoke(&self, _state: &State, _request: ModelRequest) -> Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &State,
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         *self
             .calls
             .lock()
@@ -111,7 +115,11 @@ impl<State: Send + Sync> ChatModel<State> for StreamingMock {
     }
 
     /// Replays the scripted items as a real [`ModelStream`].
-    async fn stream(&self, _state: &State, _request: ModelRequest) -> Result<ModelStream> {
+    async fn stream(
+        &self,
+        _state: &State,
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelStream> {
         *self
             .calls
             .lock()
@@ -144,7 +152,11 @@ impl SlowModel {
 #[async_trait]
 impl<State: Send + Sync> ChatModel<State> for SlowModel {
     /// Sleeps for the configured delay, then returns the fixed reply.
-    async fn invoke(&self, _state: &State, _request: ModelRequest) -> Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &State,
+        _request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         {
             // Bump the counter in its own scope so the guard is dropped before
             // the `.await` (a `MutexGuard` is not `Send`).
@@ -203,7 +215,11 @@ impl<State: Send + Sync> ChatModel<State> for ScriptedModel {
     ///
     /// Returns [`TinyAgentsError::Model`] when the queue is exhausted so the
     /// test gets a clear message rather than a thread panic.
-    async fn invoke(&self, _state: &State, request: ModelRequest) -> Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &State,
+        request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         self.received
             .lock()
             .expect("ScriptedModel received lock poisoned")
@@ -214,7 +230,7 @@ impl<State: Send + Sync> ChatModel<State> for ScriptedModel {
             .expect("ScriptedModel queue lock poisoned")
             .pop_front()
             .ok_or_else(|| {
-                TinyAgentsError::Model(
+                tinyinference::Error::Model(
                     "ScriptedModel: response queue is exhausted; no more scripted responses"
                         .to_string(),
                 )

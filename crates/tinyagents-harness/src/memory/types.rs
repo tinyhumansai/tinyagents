@@ -22,8 +22,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::message::Message;
 use crate::store::Store;
+use tinyinference::message::Message;
 
 /// Distinguishes the two conceptual layers of harness memory.
 ///

@@ -91,7 +91,7 @@ impl ModelCatalog {
     }
 
     /// Hydrates a runtime
-    /// [`ModelProfile`][tinyagents_harness::model::ModelProfile] from the catalog
+    /// [`ModelProfile`][tinyinference::model::ModelProfile] from the catalog
     /// entry for `provider`/`model_id`, bridging offline catalog facts into the
     /// capability profile resolution and fallback consume. Returns `None` when
     /// no entry matches.
@@ -99,7 +99,7 @@ impl ModelCatalog {
         &self,
         provider: &str,
         model_id: &str,
-    ) -> Option<tinyagents_harness::model::ModelProfile> {
+    ) -> Option<tinyinference::model::ModelProfile> {
         self.get(provider, model_id).map(profile_from_entry)
     }
 }
@@ -223,8 +223,8 @@ pub struct ModelCapabilities {
     pub reasoning: bool,
 }
 
-fn profile_from_entry(entry: &ModelCatalogEntry) -> tinyagents_harness::model::ModelProfile {
-    use tinyagents_harness::model::{Modalities, ModelProfile, ModelStatus};
+fn profile_from_entry(entry: &ModelCatalogEntry) -> tinyinference::model::ModelProfile {
+    use tinyinference::model::{Modalities, ModelProfile, ModelStatus};
 
     let caps = &entry.capabilities;
     ModelProfile {

@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::Result;
 use tinyagents_harness::events::EventSink;
 use tinyagents_harness::retry::RetryPolicy;
-use tinyagents_harness::usage::UsageTotals;
+use tinyinference::usage::UsageTotals;
 
 /// A harness agent invocable by name from a graph node.
 ///

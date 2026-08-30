@@ -21,10 +21,6 @@ mod types;
 
 use std::sync::Arc;
 
-use serde_json::Value;
-
-use crate::error::{Result, TinyAgentsError};
-
 pub use error_policy::{ToolErrorPolicy, is_control_flow_error};
 // Rendering a tool call for a human is not harness-specific, and two copies of
 // the prefix list is how one of them silently stops stripping a prefix the
@@ -42,51 +38,16 @@ pub use tinytools::{
 };
 pub use types::*;
 
-impl ToolSchema {
-    /// Creates a tool schema.
-    pub fn new(name: impl Into<String>, description: impl Into<String>, parameters: Value) -> Self {
-        Self {
-            name: name.into(),
-            description: description.into(),
-            parameters,
-            format: ToolFormat::Json,
-        }
-    }
-
-    /// Sets the preferred model-visible tool-call format.
-    pub fn with_format(mut self, format: ToolFormat) -> Self {
-        self.format = format;
-        self
-    }
-
-    /// Validates a model-supplied tool call against this tool's schema.
-    ///
-    /// The harness supports the JSON Schema subset used for model-visible tool
-    /// declarations: `type`, object `properties`, `required`,
-    /// `additionalProperties: false`, array `items`, and `enum`. Unknown schema
-    /// keywords are ignored so providers can still receive richer schemas while
-    /// the local execution boundary fails closed for the structural constraints
-    /// it understands.
-    pub fn validate_call(&self, call: &ToolCall) -> Result<()> {
-        if call.name != self.name {
-            return Err(TinyAgentsError::Validation(format!(
-                "tool call `{}` does not match schema `{}`",
-                call.name, self.name
-            )));
-        }
-        validate_schema_value(
-            &self.parameters,
-            &call.arguments,
-            &format!("tool `{}` arguments", self.name),
-        )
-    }
-}
-
-impl ToolFormat {
-    /// Returns `true` for the default JSON/function-call format.
-    pub fn is_json(&self) -> bool {
-        matches!(self, ToolFormat::Json)
-    }
+/// Converts a runtime [`ToolResult`] into a provider-neutral tool message.
+pub fn message_from_result(result: &ToolResult) -> tinyinference::message::Message {
+    tinyinference::message::Message::Tool(tinyinference::message::ToolMessage {
+        tool_call_id: result.call_id.clone(),
+        content: vec![tinyinference::message::ContentBlock::Text(
+            result.content.clone(),
+        )],
+        trusted_verbatim: result.is_trusted_verbatim(),
+        artifact: result.raw.clone(),
+    })
 }
 
 impl ToolTimeout {
@@ -122,42 +83,6 @@ impl ToolDisplay {
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
-    }
-}
-
-impl ToolCall {
-    /// Creates a tool call with the given id, name, and arguments.
-    pub fn new(id: impl Into<String>, name: impl Into<String>, arguments: Value) -> Self {
-        Self {
-            id: id.into(),
-            name: name.into(),
-            arguments,
-            invalid: None,
-        }
-    }
-
-    /// Creates a tool call the provider could not parse: `raw` (the unparseable
-    /// arguments string) is preserved as the arguments value and `reason`
-    /// records why parsing failed. The agent loop feeds `reason` back to the
-    /// model as an error tool result instead of failing the run.
-    pub fn invalid(
-        id: impl Into<String>,
-        name: impl Into<String>,
-        raw: impl Into<String>,
-        reason: impl Into<String>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            name: name.into(),
-            arguments: Value::String(raw.into()),
-            invalid: Some(reason.into()),
-        }
-    }
-
-    /// Returns `true` when the model emitted unparseable arguments for this call
-    /// (see [`Self::invalid`]).
-    pub fn is_invalid(&self) -> bool {
-        self.invalid.is_some()
     }
 }
 
@@ -381,144 +306,6 @@ impl<State: Send + Sync> Default for ToolRegistry<State> {
     }
 }
 
-fn validate_schema_value(schema: &Value, value: &Value, path: &str) -> Result<()> {
-    if schema.is_null() || schema.as_object().is_some_and(|o| o.is_empty()) {
-        return Ok(());
-    }
-
-    if let Some(enum_values) = schema.get("enum").and_then(Value::as_array)
-        && !enum_values.iter().any(|allowed| allowed == value)
-    {
-        return Err(TinyAgentsError::Validation(format!(
-            "{path} must be one of the declared enum values"
-        )));
-    }
-
-    if let Some(type_spec) = schema.get("type") {
-        validate_type_spec(type_spec, value, path)?;
-    }
-
-    // Enforce `required` independently of `properties`. A schema may declare
-    // required fields without listing per-field property schemas; nesting this
-    // check under `properties` would let such schemas fail open, silently
-    // accepting calls that omit required arguments.
-    if let Some(required) = schema.get("required").and_then(Value::as_array) {
-        if let Some(object) = value.as_object() {
-            for field in required.iter().filter_map(Value::as_str) {
-                if !object.contains_key(field) {
-                    return Err(TinyAgentsError::Validation(format!(
-                        "{path}.{field} is required"
-                    )));
-                }
-            }
-        } else if schema.get("type").is_none() {
-            // Preserve the crate's required-only shorthand: without an
-            // explicit type, `required` declares an object schema. With a
-            // union type, JSON Schema object keywords apply only to object
-            // instances; a value accepted by another arm remains valid.
-            return Err(TinyAgentsError::Validation(format!(
-                "{path} must be an object with declared fields"
-            )));
-        }
-    }
-
-    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-        if let Some(object) = value.as_object() {
-            if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
-                for field in object.keys() {
-                    if !properties.contains_key(field) {
-                        return Err(TinyAgentsError::Validation(format!(
-                            "{path}.{field} is not allowed"
-                        )));
-                    }
-                }
-            }
-
-            for (field, field_schema) in properties {
-                if let Some(field_value) = object.get(field) {
-                    validate_schema_value(field_schema, field_value, &format!("{path}.{field}"))?;
-                }
-            }
-        } else if schema.get("type").is_none() {
-            return Err(TinyAgentsError::Validation(format!(
-                "{path} must be an object with declared fields"
-            )));
-        }
-    }
-
-    if let Some(items_schema) = schema.get("items")
-        && let Some(items) = value.as_array()
-    {
-        for (index, item) in items.iter().enumerate() {
-            validate_schema_value(items_schema, item, &format!("{path}[{index}]"))?;
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_type_spec(type_spec: &Value, value: &Value, path: &str) -> Result<()> {
-    if let Some(kind) = type_spec.as_str() {
-        if json_value_matches_type(value, kind) {
-            return Ok(());
-        }
-        return Err(TinyAgentsError::Validation(format!(
-            "{path} must be {kind}, got {}",
-            json_value_kind(value)
-        )));
-    }
-
-    if let Some(kinds) = type_spec.as_array() {
-        let allowed: Vec<&str> = kinds.iter().filter_map(Value::as_str).collect();
-        if allowed
-            .iter()
-            .any(|kind| json_value_matches_type(value, kind))
-        {
-            return Ok(());
-        }
-        return Err(TinyAgentsError::Validation(format!(
-            "{path} must be one of {}, got {}",
-            allowed.join(", "),
-            json_value_kind(value)
-        )));
-    }
-
-    Ok(())
-}
-
-fn json_value_matches_type(value: &Value, kind: &str) -> bool {
-    match kind {
-        "null" => value.is_null(),
-        "boolean" => value.is_boolean(),
-        "object" => value.is_object(),
-        "array" => value.is_array(),
-        "number" => value.is_number(),
-        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-        "string" => value.is_string(),
-        _ => true,
-    }
-}
-
-fn json_value_kind(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(n) if n.as_i64().is_some() || n.as_u64().is_some() => "integer",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
-
-#[cfg(test)]
-mod error_policy_test;
-#[cfg(test)]
-mod injected_test;
-#[cfg(test)]
-mod prompt_test;
-#[cfg(test)]
-mod schema_prepare_test;
 #[cfg(test)]
 mod schema_test;
 #[cfg(test)]

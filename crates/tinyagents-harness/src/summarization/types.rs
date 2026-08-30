@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::message::Message;
+use tinyinference::message::Message;
 
 // ---------------------------------------------------------------------------
 // Token estimation
@@ -312,12 +312,12 @@ pub struct ConcatSummarizer;
 /// the policy falls back to the raw [`trigger_tokens`][Self::trigger_tokens]
 /// threshold, preserving the original behaviour.
 ///
-/// [`ModelProfile::max_input_tokens`]: crate::model::ModelProfile::max_input_tokens
+/// [`ModelProfile::max_input_tokens`]: tinyinference::model::ModelProfile::max_input_tokens
 ///
 /// # Example
 ///
 /// ```
-/// use tinyagents_harness::message::Message;
+/// use tinyinference::message::Message;
 /// use tinyagents_harness::summarization::SummarizationPolicy;
 ///
 /// let policy = SummarizationPolicy {

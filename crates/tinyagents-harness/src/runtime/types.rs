@@ -19,12 +19,14 @@
 
 use std::sync::Arc;
 
-use crate::cache::{CachePolicy, ResponseCache};
+use crate::cache::ResponseCache;
 use crate::limits::RunLimits;
 use crate::middleware::MiddlewareStack;
-use crate::model::{ModelRegistry, ResponseFormat};
+use crate::model_registry::ModelRegistry;
 use crate::retry::{FallbackPolicy, RetryPolicy};
 use crate::tool::{ToolRegistry, ToolTimeoutSettings};
+use tinyinference::cache::CachePolicy;
+use tinyinference::model::ResponseFormat;
 
 /// Declarative, run-scoped policy shared by every invocation of an
 /// [`AgentHarness`].
@@ -37,7 +39,7 @@ use crate::tool::{ToolRegistry, ToolTimeoutSettings};
 /// - `retry`: exponential-backoff retry policy applied to each model call.
 /// - `fallback`: optional ordered chain of model names to try when the current
 ///   model exhausts its retries.
-/// - `default_response_format`: when set, attached to every [`crate::model::ModelRequest`]
+/// - `default_response_format`: when set, attached to every [`tinyinference::model::ModelRequest`]
 ///   the loop builds; a [`ResponseFormat::JsonSchema`] also drives structured
 ///   output extraction on the final response.
 ///
@@ -183,7 +185,7 @@ pub struct RunPolicy {
     ///
     /// The loop consults [`CachePolicy::response_cache_enabled`] only when a
     /// [`ResponseCache`] is attached to the harness *and* the per-call
-    /// [`crate::model::ModelRequest::cache_policy`] does not override
+    /// [`tinyinference::model::ModelRequest::cache_policy`] does not override
     /// it. A request-level `cache_policy` always wins over this default.
     pub cache: CachePolicy,
     /// When `true`, an empty provider completion in the finalization branch (no
@@ -260,7 +262,7 @@ impl Default for RunPolicy {
 ///
 /// ```
 /// use std::sync::Arc;
-/// use tinyagents_harness::providers::MockModel;
+/// use tinyinference::providers::MockModel;
 /// use tinyagents_harness::runtime::AgentHarness;
 ///
 /// let mut harness: AgentHarness<()> = AgentHarness::new();

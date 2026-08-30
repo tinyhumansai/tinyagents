@@ -44,8 +44,8 @@
 //!
 //! Nothing here is a real tokenizer. Treat every number as ±30%.
 
-use super::{AssistantMessage, Message};
-use crate::tool::ToolSchema;
+use tinyinference::message::{AssistantMessage, Message};
+use tinyinference::tool::ToolSchema;
 
 /// Default characters per token (~4 for English prose and code).
 pub const DEFAULT_CHARS_PER_TOKEN: f64 = 4.0;
@@ -86,7 +86,7 @@ pub struct TokenCountOptions {
     /// Calibrate the character heuristic against real provider usage.
     ///
     /// When enabled, the newest assistant message carrying a non-zero
-    /// [`Usage::total_tokens`][crate::usage::Usage::total_tokens] is
+    /// [`Usage::total_tokens`][tinyinference::usage::Usage::total_tokens] is
     /// compared against the heuristic's running estimate at that point, and the
     /// whole count is scaled by that ratio — clamped to
     /// `[USAGE_SCALE_MIN, USAGE_SCALE_MAX]` so one bad report cannot blow the

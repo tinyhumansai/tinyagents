@@ -1,6 +1,6 @@
 //! Host capability: choosing *which* model answers a turn.
 //!
-//! [`crate::model::ChatModel`] already covers *how* a model is called.
+//! [`tinyinference::model::ChatModel`] already covers *how* a model is called.
 //! What the runtime cannot supply is the decision of **which** model a given
 //! turn should use. That decision is product policy — route the lead agent to a
 //! frontier model and its subagents to a cheap one, send background/"thinking"
@@ -26,7 +26,7 @@
 //!
 //! # Naming hazard — read before "fixing" this
 //!
-//! The crate already has [`crate::model::ModelRequest`], and it is a
+//! The crate already has [`tinyinference::model::ModelRequest`], and it is a
 //! **different thing**: that type is the provider call payload (messages,
 //! tools, sampling parameters) handed to a model that has already been chosen.
 //! The type here, [`ModelResolveRequest`], is the *routing question* asked
@@ -40,7 +40,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::model::ChatModel;
+use tinyinference::model::ChatModel;
 
 // ── ModelResolveRequest ───────────────────────────────────────────────────────
 
@@ -259,7 +259,7 @@ impl<State: Send + Sync> ModelResolver<State> for FixedModelResolver<State> {
 mod tests {
     use super::*;
 
-    use crate::model::{ModelRequest, ModelResponse};
+    use tinyinference::model::{ModelRequest, ModelResponse};
 
     /// Minimal model double: replies with a fixed string so a resolved model can
     /// be identified by the text it produces as well as by pointer identity.
@@ -267,7 +267,11 @@ mod tests {
 
     #[async_trait]
     impl<State: Send + Sync> ChatModel<State> for EchoModel {
-        async fn invoke(&self, _state: &State, _request: ModelRequest) -> Result<ModelResponse> {
+        async fn invoke(
+            &self,
+            _state: &State,
+            _request: ModelRequest,
+        ) -> tinyinference::Result<ModelResponse> {
             Ok(ModelResponse::assistant(self.0))
         }
     }

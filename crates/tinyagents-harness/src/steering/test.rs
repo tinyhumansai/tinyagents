@@ -14,25 +14,25 @@ use serde_json::json;
 use crate::context::{RunConfig, RunContext};
 use crate::error::{Result, TinyAgentsError};
 use crate::events::AgentEvent;
-use crate::message::Message;
-use crate::model::{ChatModel, ModelRequest, ModelResponse};
-use crate::providers::MockModel;
 use crate::runtime::AgentHarness;
 use crate::steering::{
     SteeringCommand, SteeringCommandKind, SteeringHandle, SteeringOutcome, SteeringPolicy,
     apply_pending_steering,
 };
 use crate::testkit::{EventRecorder, Trajectory};
-use crate::usage::Usage;
+use tinyinference::message::Message;
+use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
+use tinyinference::providers::MockModel;
+use tinyinference::usage::Usage;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Builds a plain-text assistant response.
 fn text_response(text: &str) -> ModelResponse {
     ModelResponse {
-        message: crate::message::AssistantMessage {
+        message: tinyinference::message::AssistantMessage {
             id: None,
-            content: vec![crate::message::ContentBlock::Text(text.to_string())],
+            content: vec![tinyinference::message::ContentBlock::Text(text.to_string())],
             tool_calls: Vec::new(),
             usage: Some(Usage::new(1, 1)),
         },
@@ -58,7 +58,11 @@ struct RecordingModel {
 
 #[async_trait]
 impl ChatModel<()> for RecordingModel {
-    async fn invoke(&self, _state: &(), request: ModelRequest) -> Result<ModelResponse> {
+    async fn invoke(
+        &self,
+        _state: &(),
+        request: ModelRequest,
+    ) -> tinyinference::Result<ModelResponse> {
         self.requests.lock().unwrap().push(request);
         let mut calls = self.calls.lock().unwrap();
         *calls += 1;
@@ -72,7 +76,7 @@ impl ChatModel<()> for RecordingModel {
             // Ask for a tool so the loop runs another model call after the
             // steering checkpoint drains the queued command.
             Ok(ModelResponse {
-                message: crate::message::AssistantMessage {
+                message: tinyinference::message::AssistantMessage {
                     id: Some("m1".to_string()),
                     content: Vec::new(),
                     tool_calls: vec![crate::tool::ToolCall::new("c1", "noop", json!({}))],

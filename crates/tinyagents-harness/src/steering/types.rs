@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use crate::message::Message;
+use tinyinference::message::Message;
 
 /// A typed runtime control instruction delivered to a running agent loop.
 ///

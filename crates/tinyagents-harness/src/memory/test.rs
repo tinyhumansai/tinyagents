@@ -1,8 +1,8 @@
 //! Unit tests for the harness memory module.
 
 use super::*;
-use crate::message::Message;
 use crate::store::InMemoryStore;
+use tinyinference::message::Message;
 
 #[tokio::test]
 async fn in_memory_history_round_trips() {

@@ -498,7 +498,8 @@ mod tool_tests {
     use tinyagents_harness::events::EventSink;
     use tinyagents_harness::ids::{RunId, ThreadId};
     use tinyagents_harness::store::{InMemoryStore, Store};
-    use tinyagents_harness::tool::{Tool, ToolCall, ToolExecutionContext};
+    use tinyagents_harness::tool::{Tool, ToolExecutionContext};
+    use tinyinference::tool::ToolCall;
 
     fn store() -> Arc<dyn Store> {
         Arc::new(InMemoryStore::default())

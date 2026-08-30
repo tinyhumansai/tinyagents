@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::model::ModelResponse;
+use tinyinference::model::ModelResponse;
 
 // ── CacheStats ────────────────────────────────────────────────────────────────
 
@@ -89,7 +89,7 @@ impl CacheSkipReason {
 /// Local response cache that lets the harness skip provider calls entirely.
 ///
 /// Keys should be produced by [`super::cache_key`] (folded with the resolved
-/// model's [`cache_identity`][crate::model::ChatModel::cache_identity]
+/// model's [`cache_identity`][tinyinference::model::ChatModel::cache_identity]
 /// via [`super::scoped_cache_key`]) for consistency. Callers are responsible for
 /// deciding when caching is safe (e.g., not caching side-effecting tool calls).
 ///
@@ -221,7 +221,7 @@ pub(crate) struct LruResponseMap {
 /// * [`Self::prefix_ids`] — the ordered ids of cacheable segments,
 /// * [`Self::fingerprint`] — an FNV-1a digest over each cacheable segment's
 ///   `(id, role)` pair *and* the request's
-///   [`prompt_fingerprint`][crate::model::ModelRequest::prompt_fingerprint]
+///   [`prompt_fingerprint`][tinyinference::model::ModelRequest::prompt_fingerprint]
 ///   and tool schemas, and
 /// * a per-message digest chain, so "did the prompt only grow at the tail?"
 ///   — the provider's actual KV-prefix rule — is answerable.
@@ -275,70 +275,4 @@ pub struct CacheLayoutEvent {
     pub segment_ids_before: Vec<String>,
     /// The ordered cacheable prefix ids after the middleware pass.
     pub segment_ids_after: Vec<String>,
-}
-
-// ── CachePolicy ───────────────────────────────────────────────────────────────
-
-/// Policy knobs controlling both response caching and provider prompt-cache
-/// layout protection.
-///
-/// Both flags default to `false` (no caching / no protection) so the harness
-/// is safe-by-default and opts must be explicit.
-///
-/// **This type is deliberately excluded from [`super::cache_key`]**: it selects
-/// *whether* to cache, never *what the model answers*, so folding it into the
-/// key made flipping [`Self::protect_prompt_prefix`] silently invalidate every
-/// existing entry.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CachePolicy {
-    /// When `true`, the harness will look up (and write) local response cache
-    /// entries via [`ResponseCache`] before calling the provider.
-    pub response_cache_enabled: bool,
-    /// When `true`, middleware must preserve the order **and content** of
-    /// cacheable prefix segments. Violations are reported as
-    /// [`CacheLayoutEvent`]s with `violates_policy: true`, and the harness
-    /// additionally derives a provider `prompt_cache_key` breakpoint from the
-    /// stable prefix (see [`super::apply_prompt_cache_breakpoints`]) so one
-    /// logical thread routes to the same provider cache shard.
-    pub protect_prompt_prefix: bool,
-    /// Time-to-live for entries written under this policy, in milliseconds.
-    ///
-    /// `None` means "never expire", which is the historical behaviour. A TTL is
-    /// the only bound on a poisoned entry in a cache that is never cleared.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttl_ms: Option<u64>,
-    /// Optional key namespace, folded into the cache key.
-    ///
-    /// Lets one shared cache serve several logically separate populations
-    /// (per-tenant, per-experiment) without the risk of cross-serving, and lets
-    /// a caller invalidate one population by rotating the namespace.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
-}
-
-impl CachePolicy {
-    /// A policy with local response caching enabled and no expiry.
-    pub fn enabled() -> Self {
-        Self {
-            response_cache_enabled: true,
-            ..Self::default()
-        }
-    }
-
-    /// Returns this policy's TTL as a [`Duration`], when one is set.
-    pub fn ttl(&self) -> Option<Duration> {
-        self.ttl_ms.map(Duration::from_millis)
-    }
-
-    /// Sets the entry time-to-live.
-    pub fn with_ttl(mut self, ttl: Duration) -> Self {
-        self.ttl_ms = Some(ttl.as_millis() as u64);
-        self
-    }
-
-    /// Sets the key namespace.
-    pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
-        self.namespace = Some(namespace.into());
-        self
-    }
 }

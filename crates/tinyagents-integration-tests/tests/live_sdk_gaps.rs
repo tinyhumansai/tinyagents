@@ -23,12 +23,12 @@ async fn live_budget_blocks_second_call() {
 
     use tinyagents_harness::TinyAgentsError;
     use tinyagents_harness::cost::CostTotals;
-    use tinyagents_harness::message::Message;
     use tinyagents_harness::middleware::{BudgetLimits, BudgetMiddleware, BudgetTracker};
-    use tinyagents_harness::model::ChatModel;
-    use tinyagents_harness::providers::openai::OpenAiModel;
     use tinyagents_harness::runtime::AgentHarness;
-    use tinyagents_harness::usage::Usage;
+    use tinyinference::message::Message;
+    use tinyinference::model::ChatModel;
+    use tinyinference::providers::openai::OpenAiModel;
+    use tinyinference::usage::Usage;
 
     let _ = dotenvy::dotenv();
     if std::env::var("OPENAI_API_KEY").is_err() {
@@ -97,8 +97,8 @@ impl tinyagents_harness::tool::Tool<()> for AddTool {
         "Adds one to the provided number x and returns the result."
     }
 
-    fn schema(&self) -> tinyagents_harness::tool::ToolSchema {
-        tinyagents_harness::tool::ToolSchema::new(
+    fn schema(&self) -> tinyinference::tool::ToolSchema {
+        tinyinference::tool::ToolSchema::new(
             "add",
             "Adds one to the provided number x and returns the result.",
             serde_json::json!({
@@ -116,7 +116,7 @@ impl tinyagents_harness::tool::Tool<()> for AddTool {
     async fn call(
         &self,
         _state: &(),
-        call: tinyagents_harness::tool::ToolCall,
+        call: tinyinference::tool::ToolCall,
     ) -> tinyagents_harness::Result<tinyagents_harness::tool::ToolResult> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let x = call
@@ -141,11 +141,11 @@ async fn live_tool_policy_exposes_classified_tool() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use tinyagents_harness::message::Message;
     use tinyagents_harness::middleware::ToolPolicyMiddleware;
-    use tinyagents_harness::model::ChatModel;
-    use tinyagents_harness::providers::openai::OpenAiModel;
     use tinyagents_harness::runtime::AgentHarness;
+    use tinyinference::message::Message;
+    use tinyinference::model::ChatModel;
+    use tinyinference::providers::openai::OpenAiModel;
 
     let _ = dotenvy::dotenv();
     if std::env::var("OPENAI_API_KEY").is_err() {
@@ -197,9 +197,9 @@ async fn live_tool_policy_exposes_classified_tool() {
 async fn live_streaming_reasoning_channel_smoke() {
     use futures::StreamExt;
 
-    use tinyagents_harness::message::Message;
-    use tinyagents_harness::model::{ChatModel, ModelRequest, ModelStreamItem, StreamAccumulator};
-    use tinyagents_harness::providers::openai::OpenAiModel;
+    use tinyinference::message::Message;
+    use tinyinference::model::{ChatModel, ModelRequest, ModelStreamItem, StreamAccumulator};
+    use tinyinference::providers::openai::OpenAiModel;
 
     let _ = dotenvy::dotenv();
     if std::env::var("OPENAI_API_KEY").is_err() {
@@ -257,7 +257,7 @@ async fn live_streaming_reasoning_channel_smoke() {
 /// unset, so the default `cargo test` passes with no key configured.
 #[tokio::test]
 async fn live_list_models_returns_catalog() {
-    use tinyagents_harness::providers::openai::OpenAiModel;
+    use tinyinference::providers::openai::OpenAiModel;
 
     let _ = dotenvy::dotenv();
     if std::env::var("OPENAI_API_KEY").is_err() {

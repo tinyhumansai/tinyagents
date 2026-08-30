@@ -21,6 +21,7 @@ tinyagents-harness = { path = "../tinyagents-harness" }
 tinyagents-language = { path = "../tinyagents-language" }
 tinyagents-registry = { path = "../tinyagents-registry" }
 tinyagents-session = { path = "../tinyagents-session" }
+tinyinference = { path = "../../vendor/tinyinference/crates/tinyinference" }
 tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.1.0" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
 

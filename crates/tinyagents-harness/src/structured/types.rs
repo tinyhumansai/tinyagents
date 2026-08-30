@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::ModelResponse;
+use tinyinference::model::ModelResponse;
 
 // ---------------------------------------------------------------------------
 // Strategy
@@ -40,7 +40,7 @@ pub enum StructuredStrategy {
 /// Carries the parsed JSON [`Value`] and, when available, the raw assistant
 /// text that was parsed (useful for debugging or provider-native mode).
 ///
-/// [`ModelResponse`]: crate::model::ModelResponse
+/// [`ModelResponse`]: tinyinference::model::ModelResponse
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StructuredOutput {
     /// The extracted JSON value.
@@ -117,7 +117,7 @@ impl StructuredOutcome {
 ///
 /// ```rust
 /// use tinyagents_harness::structured::{StructuredExtractor, StructuredStrategy};
-/// use tinyagents_harness::model::ModelResponse;
+/// use tinyinference::model::ModelResponse;
 /// use serde_json::json;
 ///
 /// let extractor = StructuredExtractor::new(

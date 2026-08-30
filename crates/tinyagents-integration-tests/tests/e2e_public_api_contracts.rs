@@ -22,8 +22,6 @@ use tinyagents_harness::cache::{
 use tinyagents_harness::memory::{
     ChatHistory, InMemoryChatHistory, MemoryScope, ShortTermMemory, StoreChatHistory,
 };
-use tinyagents_harness::message::Message;
-use tinyagents_harness::model::{ModelRequest, ModelResponse, ResponseFormat};
 use tinyagents_harness::prompt::{MessagesTemplate, PromptBuilder, PromptTemplate, TemplateRole};
 use tinyagents_harness::retry::{FallbackPolicy, RateLimiter, RetryPolicy, is_retryable};
 use tinyagents_harness::store::{
@@ -33,7 +31,9 @@ use tinyagents_harness::store::{
 use tinyagents_harness::summarization::{
     ConcatSummarizer, SummarizationPolicy, Summarizer, TrimStrategy, estimate_tokens, trim_messages,
 };
-use tinyagents_harness::tool::ToolSchema;
+use tinyinference::message::Message;
+use tinyinference::model::{ModelRequest, ModelResponse, ResponseFormat};
+use tinyinference::tool::ToolSchema;
 
 #[tokio::test]
 async fn cache_and_prompt_contracts_produce_stable_behavior_keys() {

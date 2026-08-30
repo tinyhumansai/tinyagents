@@ -8,9 +8,10 @@ use serde_json::{Value, json};
 
 use crate::{Result, TinyAgentsError};
 use tinyagents_harness::ids::{GraphId, TaskId, new_call_id, next_seq};
-use tinyagents_harness::message::Message;
 use tinyagents_harness::steering::{SteeringCommand, SteeringHandle};
-use tinyagents_harness::tool::{Tool, ToolCall, ToolRegistry, ToolResult, ToolSchema};
+use tinyagents_harness::tool::{Tool, ToolRegistry, ToolResult};
+use tinyinference::message::Message;
+use tinyinference::tool::{ToolCall, ToolSchema};
 
 use super::store::{TaskStore, orchestration_not_found};
 use super::types::*;

@@ -14,11 +14,12 @@ use serde_json::json;
 
 use tinyagents_harness::Result;
 use tinyagents_harness::error::TinyAgentsError;
-use tinyagents_harness::message::Message;
 use tinyagents_harness::tool::{
-    SchemaPreparation, Tool, ToolCall, ToolErrorPolicy, ToolRegistry, ToolResult, ToolSchema,
+    SchemaPreparation, Tool, ToolErrorPolicy, ToolRegistry, ToolResult,
     parse_prompt_tool_calls_from_text, prepare_tool_schemas, strip_injected_arguments,
 };
+use tinyinference::message::Message;
+use tinyinference::tool::{ToolCall, ToolSchema};
 
 // ---------------------------------------------------------------------------
 // TOOL-2 — synthetic call ids
@@ -52,7 +53,7 @@ fn a_tool_result_artifact_survives_into_the_transcript() {
     let mut result = ToolResult::text("c1", "query_rows", "3 rows matched");
     result.raw = Some(json!({"rows": [{"id": 1}, {"id": 2}, {"id": 3}]}));
 
-    let message = Message::tool_from_result(&result);
+    let message = tinyagents_harness::tool::message_from_result(&result);
 
     assert_eq!(message.text(), "3 rows matched");
     assert_eq!(

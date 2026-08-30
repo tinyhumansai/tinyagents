@@ -22,17 +22,18 @@ use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::error::TinyAgentsError;
 use tinyagents_harness::events::AgentEvent;
 use tinyagents_harness::limits::RunLimits;
-use tinyagents_harness::message::{AssistantMessage, ContentBlock, Message};
 use tinyagents_harness::middleware::{Middleware, PromptCacheGuardMiddleware};
-use tinyagents_harness::model::{ModelRequest, ModelResponse, PromptSegment, SegmentRole};
-use tinyagents_harness::providers::MockModel;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy};
 use tinyagents_harness::testkit::{EventRecorder, Trajectory};
-use tinyagents_harness::tool::{Tool, ToolCall};
-use tinyagents_harness::usage::Usage;
+use tinyagents_harness::tool::Tool;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::{ModelRequest, ModelResponse, PromptSegment, SegmentRole};
+use tinyinference::providers::MockModel;
+use tinyinference::tool::ToolCall;
+use tinyinference::usage::Usage;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

@@ -200,7 +200,7 @@ pub struct ChildRun {
     /// folds the delegated harness agent's [`UsageTotals`] here so it is visible
     /// on the parent [`GraphExecution`](crate::GraphExecution) rollup.
     #[serde(default)]
-    pub usage: tinyagents_harness::usage::UsageTotals,
+    pub usage: tinyinference::usage::UsageTotals,
 }
 
 /// A thread-safe collector the executor hands to node contexts so that a

@@ -46,7 +46,7 @@
 
 use std::collections::HashSet;
 
-use crate::message::Message;
+use tinyinference::message::Message;
 
 /// Returns the tool-call ids declared by an assistant message, or an empty set
 /// for every other message kind.

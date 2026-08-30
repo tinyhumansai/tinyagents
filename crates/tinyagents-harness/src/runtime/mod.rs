@@ -33,8 +33,9 @@ use std::sync::Arc;
 
 use crate::cache::ResponseCache;
 use crate::middleware::{Middleware, MiddlewareStack, ModelMiddleware, ToolMiddleware};
-use crate::model::{ChatModel, ModelRegistry};
+use crate::model_registry::ModelRegistry;
 use crate::tool::{Tool, ToolRegistry, ToolTimeoutSettings};
+use tinyinference::model::ChatModel;
 
 impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// Creates an empty harness with default policy and no models, tools, or
@@ -131,11 +132,11 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// [`cache_key`][crate::cache::cache_key] for each model request
     /// and consults the cache before calling the provider. On a hit the
     /// provider is **not** invoked and the cached
-    /// [`crate::model::ModelResponse`] is reused; on a miss the
+    /// [`tinyinference::model::ModelResponse`] is reused; on a miss the
     /// provider is called and the successful response is stored back. Whether
     /// caching is active for a given call is governed by the effective
     /// [`CachePolicy`][crate::cache::CachePolicy] (the per-request
-    /// [`crate::model::ModelRequest::cache_policy`] overriding
+    /// [`tinyinference::model::ModelRequest::cache_policy`] overriding
     /// [`RunPolicy::cache`]).
     ///
     /// Because the cache lives on the harness rather than a single run, two

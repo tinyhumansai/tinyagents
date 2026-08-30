@@ -16,13 +16,13 @@ use tinyagents_harness::TinyAgentsError;
 use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::events::AgentEvent;
 use tinyagents_harness::limits::RunLimits;
-use tinyagents_harness::message::{AssistantMessage, ContentBlock, Message};
-use tinyagents_harness::model::ModelResponse;
-use tinyagents_harness::providers::MockModel;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy, UnknownToolPolicy};
 use tinyagents_harness::testkit::{EventRecorder, FakeTool};
-use tinyagents_harness::tool::ToolCall;
-use tinyagents_harness::usage::Usage;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::ModelResponse;
+use tinyinference::providers::MockModel;
+use tinyinference::tool::ToolCall;
+use tinyinference::usage::Usage;
 
 // ── Scripted response helpers ─────────────────────────────────────────────────
 

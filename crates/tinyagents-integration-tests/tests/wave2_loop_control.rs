@@ -16,13 +16,13 @@ use serde_json::json;
 use tinyagents_harness::TinyAgentsError;
 use tinyagents_harness::context::{MiddlewareControl, RunConfig, RunContext};
 use tinyagents_harness::ids::ExecutionStatus;
-use tinyagents_harness::message::Message;
 use tinyagents_harness::middleware::Middleware;
-use tinyagents_harness::providers::MockModel;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::steering::{SteeringCommand, SteeringHandle, SteeringPolicy};
 use tinyagents_harness::testkit::FakeTool;
 use tinyagents_harness::tool::ToolResult;
+use tinyinference::message::Message;
+use tinyinference::providers::MockModel;
 
 /// Requests a control outcome from `after_tool` — the natural place for a
 /// post-hoc guardrail or a budget stop that only knows once the result is in.

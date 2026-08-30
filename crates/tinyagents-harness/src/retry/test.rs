@@ -203,7 +203,7 @@ fn is_retryable_classification() {
 
 #[test]
 fn provider_error_retryability_is_read_from_the_structured_flag_not_assumed() {
-    use crate::model::ProviderError;
+    use tinyinference::model::ProviderError;
 
     // Regression test: the unary/streaming provider path used to flatten a
     // structured `ProviderError` into a plain `Model(String)`, so retry could
@@ -340,7 +340,7 @@ fn provider_failure_class_controls_retryability_and_reason_labels() {
 
 #[test]
 fn classify_provider_error_reads_structured_error_fields() {
-    use crate::model::ProviderError;
+    use tinyinference::model::ProviderError;
 
     let provider_error = ProviderError {
         provider: "openai".to_string(),
@@ -481,8 +481,8 @@ async fn sleep_backoff_waits_unless_explicitly_disabled() {
 
 #[test]
 fn retry_after_hint_is_read_from_every_error_shape_that_can_carry_one() {
-    use crate::model::ProviderError;
     use crate::retry::retry_after_hint;
+    use tinyinference::model::ProviderError;
 
     assert_eq!(
         retry_after_hint(&TinyAgentsError::Model(

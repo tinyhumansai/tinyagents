@@ -9,7 +9,7 @@
 //! decisions, and every one of them is asked here rather than assumed.
 //!
 //! This is the same extension-trait pattern the crate already uses for
-//! [`ChatModel`](crate::model::ChatModel),
+//! [`ChatModel`](tinyinference::model::ChatModel),
 //! [`Tool`](crate::tool::Tool),
 //! [`ChatHistory`](crate::memory::ChatHistory) and a dozen others —
 //! not a new architecture. See `docs/spec/host-capability-traits-rfc.md`.
@@ -74,7 +74,7 @@ use std::sync::Arc;
 /// discoverable only by reading builder code.
 ///
 /// Generic over `State` solely because [`ModelResolver`] is — it hands back a
-/// [`ChatModel<State>`](crate::model::ChatModel), and that generic
+/// [`ChatModel<State>`](tinyinference::model::ChatModel), and that generic
 /// parameter has to thread through.
 pub struct HostCapabilities<State: Send + Sync> {
     /// Builds the system prompt and any turn preamble.

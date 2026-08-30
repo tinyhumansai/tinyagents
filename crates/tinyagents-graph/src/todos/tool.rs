@@ -18,9 +18,9 @@ use super::types::{CardPatch, TaskApprovalMode, TaskBoardCard, parse_status};
 use tinyagents_harness::error::Result;
 use tinyagents_harness::store::Store;
 use tinyagents_harness::tool::{
-    Tool, ToolCall, ToolExecutionContext, ToolPolicy, ToolRegistry, ToolResult, ToolSchema,
-    ToolSideEffects,
+    Tool, ToolExecutionContext, ToolPolicy, ToolRegistry, ToolResult, ToolSideEffects,
 };
+use tinyinference::tool::{ToolCall, ToolSchema};
 
 const TODO_TOOL_NAME: &str = "todo";
 

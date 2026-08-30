@@ -17,13 +17,13 @@ use tinyagents_graph::*;
 use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::events::HarnessRunStatus;
 use tinyagents_harness::ids::{ComponentId, EventId, HarnessPhase, RunId, ThreadId};
-use tinyagents_harness::message::Message;
-use tinyagents_harness::providers::MockModel;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::EventRecorder;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::Message;
+use tinyinference::providers::MockModel;
 
 // ---------------------------------------------------------------------------
 // Helpers

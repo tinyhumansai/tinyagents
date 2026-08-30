@@ -39,7 +39,7 @@ use std::time::SystemTime;
 
 use crate::cost::CostTotals;
 use crate::ids::{ComponentId, ExecutionStatus, HarnessPhase, RunId, ThreadId};
-use crate::usage::UsageTotals;
+use tinyinference::usage::UsageTotals;
 
 // ---------------------------------------------------------------------------
 // Lock helpers

@@ -26,17 +26,18 @@ use tinyagents_graph::*;
 use tinyagents_harness::context::{MiddlewareControl, RunConfig, RunContext};
 use tinyagents_harness::events::AgentEvent;
 use tinyagents_harness::ids::TaskId;
-use tinyagents_harness::message::Message;
 use tinyagents_harness::middleware::Middleware;
-use tinyagents_harness::model::ModelResponse;
-use tinyagents_harness::providers::MockModel;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::steering::{SteeringCommand, SteeringHandle};
 use tinyagents_harness::testkit::{EventRecorder, FakeTool};
-use tinyagents_harness::tool::{Tool, ToolCall};
+use tinyagents_harness::tool::Tool;
 use tinyagents_harness::*;
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::message::Message;
+use tinyinference::model::ModelResponse;
+use tinyinference::providers::MockModel;
+use tinyinference::tool::ToolCall;
 
 // ── Part A: MiddlewareControl ────────────────────────────────────────────────
 

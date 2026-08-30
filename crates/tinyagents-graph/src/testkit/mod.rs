@@ -56,7 +56,7 @@ use crate::recursion::ChildRun;
 use crate::stream::{CollectingSink, GraphEvent, GraphEventSink};
 use crate::{Result, TinyAgentsError};
 use tinyagents_harness::ids::{GraphId, NodeId, RunId};
-use tinyagents_harness::usage::UsageTotals;
+use tinyinference::usage::UsageTotals;
 
 // ---------------------------------------------------------------------------
 // Node doubles

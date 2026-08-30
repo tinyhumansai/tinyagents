@@ -18,7 +18,7 @@
 //!
 //! * **Driving the crate's [`agent_loop`](crate::agent_loop)** —
 //!   use [`crate::tool::prompt`]. It speaks
-//!   [`Message`](crate::message::Message) and slots straight into the
+//!   [`Message`](tinyinference::message::Message) and slots straight into the
 //!   loop, which owns the iteration for you.
 //! * **Driving your own loop over your own durable transcript** — use this
 //!   module. It speaks [`TranscriptEntry`], a deliberately thin record shape a

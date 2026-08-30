@@ -11,10 +11,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::json;
 
-use tinyagents_harness::message::Message;
-use tinyagents_harness::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyagents_harness::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy, UnknownToolPolicy};
-use tinyagents_harness::tool::{Tool, ToolCall, ToolResult, ToolSchema};
+use tinyagents_harness::tool::{Tool, ToolResult};
+use tinyinference::message::Message;
+use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
+use tinyinference::tool::{ToolCall, ToolSchema};
 
 /// The defaults are the whole point of this file, so pin them directly too.
 #[test]
@@ -56,7 +57,7 @@ impl ChatModel<()> for TwoTurnModel {
         &self,
         _state: &(),
         _request: ModelRequest,
-    ) -> tinyagents_harness::Result<ModelResponse> {
+    ) -> tinyinference::Result<ModelResponse> {
         match self.call.lock().expect("poisoned").take() {
             Some(call) => {
                 let mut response = ModelResponse::assistant("");

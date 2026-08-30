@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use tinyagents_graph::END;
 use tinyagents_graph::*;
-use tinyagents_harness::providers::MockModel;
 use tinyagents_harness::testkit::FakeTool;
 use tinyagents_harness::*;
 use tinyagents_language::parser::parse_str;
 use tinyagents_language::types::{Origin, Routing, Token};
 use tinyagents_language::*;
 use tinyagents_registry::*;
+use tinyinference::providers::MockModel;
 
 const BASE: &str = r#"
 graph review_flow {

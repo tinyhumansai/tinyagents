@@ -12,6 +12,7 @@ serde_json = "1"
 tinyagents-graph = { path = "../tinyagents-graph", version = "2.1.1" }
 tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.1", default-features = false }
 tinyagents-language = { path = "../tinyagents-language", version = "2.1.1" }
+tinyinference = { path = "../../vendor/tinyinference/crates/tinyinference", version = "0.2.1" }
 
 [features]
 default = []

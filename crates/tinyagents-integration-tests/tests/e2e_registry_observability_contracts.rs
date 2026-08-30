@@ -14,11 +14,11 @@ use tinyagents_harness::observability::{
     AgentObservation, FanOutSink, HarnessEventJournal, HarnessStatusStore, InMemoryEventJournal,
     InMemoryStatusStore, JournalSink, JsonlSink, RedactingSink, StoreEventJournal,
 };
-use tinyagents_harness::providers::MockModel;
 use tinyagents_harness::store::{AppendStore, InMemoryAppendStore, JsonlAppendStore};
 use tinyagents_harness::testkit::{FakeTool, Trajectory};
-use tinyagents_harness::tool::ToolCall;
 use tinyagents_registry::{CapabilityRegistry, ComponentId, ComponentKind, ComponentMetadata};
+use tinyinference::providers::MockModel;
+use tinyinference::tool::ToolCall;
 
 #[tokio::test]
 async fn capability_registry_resolves_aliases_and_hands_off_runtime_registries() {
@@ -234,7 +234,7 @@ fn component_metadata_and_event_kinds_are_stable_serializable_contracts() {
             route: "done".into(),
         },
         AgentEvent::UsageRecorded {
-            usage: tinyagents_harness::usage::Usage::new(1, 2),
+            usage: tinyinference::usage::Usage::new(1, 2),
         },
         AgentEvent::CostRecorded {
             cost: tinyagents_harness::cost::CostTotals::new(),

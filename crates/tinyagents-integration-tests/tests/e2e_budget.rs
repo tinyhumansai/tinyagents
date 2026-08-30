@@ -29,19 +29,17 @@ use serde_json::json;
 use tinyagents_harness::TinyAgentsError;
 use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::events::AgentEvent;
-use tinyagents_harness::message::{AssistantMessage, ContentBlock, Message};
 use tinyagents_harness::middleware::{
     BudgetLimits, BudgetMiddleware, BudgetTracker, MiddlewareStack,
 };
-use tinyagents_harness::model::{
-    ModelRequest, ModelResolutionSource, ModelResponse, ResolvedModel,
-};
-use tinyagents_harness::providers::MockModel;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool};
-use tinyagents_harness::tool::ToolCall;
-use tinyagents_harness::usage::Usage;
 use tinyagents_registry::catalog::ModelPricing;
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::{ModelRequest, ModelResolutionSource, ModelResponse, ResolvedModel};
+use tinyinference::providers::MockModel;
+use tinyinference::tool::ToolCall;
+use tinyinference::usage::Usage;
 
 // ── Helpers (copied verbatim per the task brief) ──────────────────────────────
 

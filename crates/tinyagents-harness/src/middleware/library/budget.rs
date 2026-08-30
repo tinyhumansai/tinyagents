@@ -34,7 +34,7 @@ impl BudgetTracker {
     }
 
     /// Folds a model call's usage and estimated cost into the tracker.
-    pub fn record(&self, usage: crate::usage::Usage, cost: crate::cost::CostTotals) {
+    pub fn record(&self, usage: tinyinference::usage::Usage, cost: crate::cost::CostTotals) {
         let mut guard = self.lock_recovering();
         guard.usage += usage;
         guard.cost += cost;
@@ -126,13 +126,13 @@ impl BudgetLimits {
 /// reservation.
 ///
 /// Uses the crate's shared
-/// [`count_tokens_approximately`][crate::message::count_tokens_approximately]
+/// [`count_tokens_approximately`][crate::token_estimation::count_tokens_approximately]
 /// estimator. Summing `estimate_tokens(&m.text())` counted only textual content
 /// blocks, so a request dominated by large JSON tool results or image blocks
 /// preflighted at close to zero tokens and sailed past a token budget it in
 /// fact blew through.
 fn estimated_input_tokens(request: &ModelRequest) -> u64 {
-    crate::message::count_tokens_approximately(&request.messages)
+    crate::token_estimation::count_tokens_approximately(&request.messages)
 }
 
 impl BudgetMiddleware {

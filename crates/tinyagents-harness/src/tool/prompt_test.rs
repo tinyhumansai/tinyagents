@@ -1,8 +1,8 @@
 //! Tests for the prompt-guided tool-call protocol.
 
 use super::*;
-use crate::message::{ContentBlock, ImageRef, Message};
-use crate::model::ModelResponse;
+use tinyinference::message::{ContentBlock, ImageRef, Message};
+use tinyinference::model::ModelResponse;
 
 fn schema(name: &str) -> ToolSchema {
     ToolSchema {
@@ -353,7 +353,7 @@ fn prompt_parser_does_not_misparse_prose_open_tag_without_close() {
 fn apply_prompt_tool_calls_recovers_attribute_markup() {
     // A native model emitted the call as text with EMPTY structured tool_calls:
     // recovery yields a structured call and the raw markup does NOT survive.
-    let resp = crate::model::ModelResponse::assistant(
+    let resp = tinyinference::model::ModelResponse::assistant(
         r#"<tool_call id="call_0">{"name":"foo","arguments":{}}</tool_call>"#,
     );
     let out = apply_prompt_tool_calls(resp);
@@ -540,7 +540,7 @@ fn apply_prompt_tool_calls_preserves_a_leading_thinking_block() {
 fn apply_prompt_tool_calls_recovers_a_bare_object_with_relaxed_json() {
     // The exact capture: `parameters'` and `{'city'` use mismatched quotes, so
     // strict JSON rejects it outright.
-    let resp = crate::model::ModelResponse::assistant(
+    let resp = tinyinference::model::ModelResponse::assistant(
         r#"{"name":"get_weather","parameters':{'city':"Paris"}}"#,
     );
     let out = apply_prompt_tool_calls(resp);
@@ -561,7 +561,7 @@ fn apply_prompt_tool_calls_recovers_a_bare_object_with_relaxed_json() {
 
 #[test]
 fn apply_prompt_tool_calls_recovers_a_bare_object_inside_a_code_fence() {
-    let resp = crate::model::ModelResponse::assistant(
+    let resp = tinyinference::model::ModelResponse::assistant(
         "```json\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}\n```",
     );
     let out = apply_prompt_tool_calls(resp);
@@ -572,7 +572,7 @@ fn apply_prompt_tool_calls_recovers_a_bare_object_inside_a_code_fence() {
 
 #[test]
 fn a_tool_call_object_may_name_its_arguments_parameters() {
-    let resp = crate::model::ModelResponse::assistant(
+    let resp = tinyinference::model::ModelResponse::assistant(
         r#"<tool_call>{"name":"get_weather","parameters":{"city":"Paris"}}</tool_call>"#,
     );
     let out = apply_prompt_tool_calls(resp);
@@ -596,7 +596,7 @@ fn bare_object_recovery_never_swallows_a_genuine_text_answer() {
         r#""just a string""#,
         "[1, 2, 3]",
     ] {
-        let out = apply_prompt_tool_calls(crate::model::ModelResponse::assistant(text));
+        let out = apply_prompt_tool_calls(tinyinference::model::ModelResponse::assistant(text));
         assert!(
             out.message.tool_calls.is_empty(),
             "{text:?} must not be recovered as a tool call"

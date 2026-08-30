@@ -23,12 +23,10 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use tinyagents_harness::message::Message;
-use tinyagents_harness::model::{
-    ChatModel, ModelRequest, ReasoningEffort, ResponseFormat, ToolChoice,
-};
-use tinyagents_harness::providers::openai::OpenAiModel;
-use tinyagents_harness::tool::ToolSchema;
+use tinyinference::message::Message;
+use tinyinference::model::{ChatModel, ModelRequest, ReasoningEffort, ResponseFormat, ToolChoice};
+use tinyinference::providers::openai::OpenAiModel;
+use tinyinference::tool::ToolSchema;
 
 // ---------------------------------------------------------------------------
 // Minimal recording HTTP server
@@ -809,17 +807,13 @@ async fn a_context_overflow_is_classified_with_a_stable_code() {
     let error = ChatModel::<()>::invoke(&model, &(), user("hi"))
         .await
         .expect_err("a 400 fails the call");
-    let tinyagents_harness::TinyAgentsError::ContextOverflow {
-        provider,
-        model,
-        message,
-    } = error
-    else {
-        panic!("expected a typed context-overflow error");
+    let tinyinference::Error::Provider(error) = error else {
+        panic!("expected a typed provider error");
     };
-    assert_eq!(provider, "ollama");
-    assert_eq!(model.as_deref(), Some("llama3.2"));
-    assert!(message.contains("maximum context length"));
+    assert_eq!(error.provider, "ollama");
+    assert_eq!(error.model.as_deref(), Some("llama3.2"));
+    assert_eq!(error.code.as_deref(), Some("context_overflow"));
+    assert!(error.message.contains("maximum context length"));
 }
 
 // ---------------------------------------------------------------------------
@@ -917,7 +911,7 @@ async fn the_responses_path_reads_reasoning_and_cache_usage() {
         .content
         .iter()
         .find_map(|block| match block {
-            tinyagents_harness::message::ContentBlock::Thinking { text, signature } => {
+            tinyinference::message::ContentBlock::Thinking { text, signature } => {
                 Some((text.clone(), signature.clone()))
             }
             _ => None,
