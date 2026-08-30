@@ -134,7 +134,21 @@ jobs:
           git commit -m "Release ${RELEASE_TAG}"
           git tag -a "${RELEASE_TAG}" -m "Release ${RELEASE_TAG}"
 
+      - name: Check crates.io publishability
+        id: publishable
+        run: |
+          set -euo pipefail
+
+          publish="$(cargo metadata --no-deps --format-version 1 | jq -r --arg crate "$CRATE_NAME" '.packages[] | select(.name == $crate) | .publish')"
+          if [[ "$publish" == "[]" ]]; then
+            echo "publishable=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${CRATE_NAME} has publish = false; skipping crates.io package/publish steps."
+          else
+            echo "publishable=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Package crate
+        if: steps.publishable.outputs.publishable == 'true'
         run: cargo package --locked -p "$CRATE_NAME"
 
       - name: Push release commit and tag
@@ -145,6 +159,7 @@ jobs:
           git push origin "${RELEASE_TAG}"
 
       - name: Publish to crates.io
+        if: steps.publishable.outputs.publishable == 'true'
         run: cargo publish --locked -p "$CRATE_NAME"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
