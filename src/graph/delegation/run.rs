@@ -184,9 +184,7 @@ where
         .clone()
         .ok_or_else(|| "delegation resume requires a checkpointer".to_string())?;
 
-    let lock = thread_lock(&thread_id);
-    let _guard = lock.lock().await;
-
+    // TEMP: lock removed for verification
     if let Some(checkpoint) = cp
         .get(thread_id.as_str(), None)
         .await
