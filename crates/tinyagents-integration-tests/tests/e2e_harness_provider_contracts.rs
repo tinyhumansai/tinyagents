@@ -6,11 +6,11 @@ use serde_json::json;
 use tinyagents_harness::cost::{CostTotals, estimate_cost};
 use tinyinference::message::{Message, MessageDelta};
 use tinyinference::model::{
-    CapabilitySet, ChatModel, ModelHint, ModelProfile, ModelRegistry, ModelRequest,
-    ModelResolutionSource, ModelResponse, ModelSelection, ModelStreamItem, PromptSegment,
-    ProviderError, ResponseFormat, SegmentRole, StreamAccumulator, ToolChoice,
-    collect_model_stream,
+    CapabilitySet, ChatModel, ModelHint, ModelProfile, ModelRequest, ModelResolutionSource,
+    ModelResponse, ModelStreamItem, PromptSegment, ProviderError, ResponseFormat, SegmentRole,
+    StreamAccumulator, ToolChoice, collect_model_stream,
 };
+use tinyagents_harness::model_registry::{ModelRegistry, ModelSelection};
 use tinyinference::providers::{MockModel, ProviderKind, ProviderSpec};
 use tinyagents_harness::stream::{StreamChunk, StreamMode, StreamSink, stream as filter_stream};
 use tinyagents_harness::structured::{

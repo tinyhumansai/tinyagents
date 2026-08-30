@@ -23,9 +23,10 @@ use tinyagents_harness::events::AgentEvent;
 use tinyinference::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
 use tinyagents_harness::middleware::{ContextualToolSelectionMiddleware, ToolSelectionContext};
 use tinyinference::model::{
-    ChatModel, ModelProfile, ModelRegistry, ModelRequest, ModelResolutionSource, ModelResponse,
-    ModelSelection, ModelStatus, ModelStreamItem, StreamAccumulator,
+    ChatModel, ModelProfile, ModelRequest, ModelResolutionSource, ModelResponse, ModelStatus,
+    ModelStreamItem, StreamAccumulator,
 };
+use tinyagents_harness::model_registry::{ModelRegistry, ModelSelection};
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool, ScriptedModel, StreamingMock};
 use tinyagents_harness::tool::ToolSchema;
