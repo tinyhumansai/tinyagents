@@ -52,7 +52,7 @@ fn a_tool_result_artifact_survives_into_the_transcript() {
     let mut result = ToolResult::text("c1", "query_rows", "3 rows matched");
     result.raw = Some(json!({"rows": [{"id": 1}, {"id": 2}, {"id": 3}]}));
 
-    let message = Message::tool_from_result(&result);
+    let message = tinyagents_harness::tool::message_from_result(&result);
 
     assert_eq!(message.text(), "3 rows matched");
     assert_eq!(

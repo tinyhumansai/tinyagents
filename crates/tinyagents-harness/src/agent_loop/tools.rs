@@ -528,14 +528,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // `tool_from_result`, not `tool`: a result that asked to reach the model
         // byte-for-byte must carry that request into the transcript, or the host
         // has no way to tell it apart from output it may freely reshape.
-        messages.push(Message::Tool(tinyinference::message::ToolMessage {
-            tool_call_id: result.call_id.clone(),
-            content: vec![tinyinference::message::ContentBlock::Text(
-                result.content.clone(),
-            )],
-            trusted_verbatim: result.is_trusted_verbatim(),
-            artifact: result.raw.clone(),
-        }));
+        messages.push(crate::tool::message_from_result(&result));
         Ok(())
     }
 
