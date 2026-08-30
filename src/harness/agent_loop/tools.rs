@@ -229,7 +229,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // Apply the run's `InvalidArgsPolicy` instead of unconditionally
             // aborting the turn (mirrors the unknown-tool recovery above).
             if matches!(self.policy.invalid_args, InvalidArgsPolicy::Fail) {
-                return Err(err);
+                return Err(err.into());
             }
             // `ReturnToolError`: inject a tool-error result carrying the
             // validation detail and the tool's expected parameter schema, then

@@ -214,7 +214,7 @@ impl<State: Send + Sync> ChatModel<State> for ScriptedModel {
             .expect("ScriptedModel queue lock poisoned")
             .pop_front()
             .ok_or_else(|| {
-                TinyAgentsError::Model(
+                tinyinference::Error::Model(
                     "ScriptedModel: response queue is exhausted; no more scripted responses"
                         .to_string(),
                 )

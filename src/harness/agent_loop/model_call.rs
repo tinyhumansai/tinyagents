@@ -129,7 +129,12 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     // cancel-safe, and the pre-call `is_cancelled()` check above
                     // still short-circuits before the request is ever issued.
                     let cancellation = ctx.cancellation.clone();
-                    let fut = model.invoke(state, request.clone());
+                    let fut = async {
+                        model
+                            .invoke(state, request.clone())
+                            .await
+                            .map_err(TinyAgentsError::from)
+                    };
                     let budgeted =
                         Self::with_call_budget(remaining, run_id.as_str(), "model call", fut);
                     tokio::select! {
@@ -393,7 +398,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             accumulator.push(&item);
         }
 
-        accumulator.finish()
+        Ok(accumulator.finish()?)
     }
 }
 /// The innermost model call wrapped by the model-wrap onion.
