@@ -52,7 +52,7 @@ fn the_shared_estimator_charges_non_textual_payloads() {
         .iter()
         .map(|m| tinyagents_harness::summarization::estimate_tokens(&m.text()))
         .sum();
-    let counted = tinyinference::message::count_tokens_approximately(&messages);
+    let counted = tinyagents_harness::token_estimation::count_tokens_approximately(&messages);
 
     assert_eq!(
         text_only, 0,
