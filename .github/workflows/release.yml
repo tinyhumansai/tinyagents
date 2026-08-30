@@ -106,10 +106,22 @@ jobs:
 
       - name: Update crate version
         env:
+          CURRENT_VERSION: ${{ steps.version.outputs.current_version }}
           NEXT_VERSION: ${{ steps.version.outputs.next_version }}
         run: |
           perl -0pi -e 's/(\[workspace\.package\][\s\S]*?\nversion = ")[^"]+(")/$1$ENV{NEXT_VERSION}$2/' Cargo.toml
-          cargo update -p "$CRATE_NAME" --precise "$NEXT_VERSION"
+
+          # Intra-workspace path dependencies (e.g. `tinyagents-tracing =
+          # { path = "...", version = "2.1.1" }`) pin the workspace version
+          # as a caret requirement. On a major bump the old requirement no
+          # longer matches the new version, so keep them in lockstep with
+          # the workspace bump or `cargo update` fails to resolve.
+          perl -pi -e 's/(tinyagents-[\w-]+\s*=\s*\{[^}]*version\s*=\s*")\Q$ENV{CURRENT_VERSION}\E(")/$1$ENV{NEXT_VERSION}$2/g' crates/*/Cargo.toml
+
+          # Refresh every workspace member's Cargo.lock entry (not just
+          # $CRATE_NAME) so later `--locked` commands don't see a stale
+          # lockfile.
+          cargo update --workspace
 
       - name: Commit version bump and tag
         env:
