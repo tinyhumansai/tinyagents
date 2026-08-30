@@ -473,6 +473,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1343,6 +1349,7 @@ dependencies = [
  "tinyagents-harness",
  "tinyagents-language",
  "tinyagents-tracing",
+ "tinyinference",
  "tokio",
 ]
 
@@ -1366,6 +1373,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tinyagents-tracing",
+ "tinyinference",
  "tinytools",
  "tokio",
 ]
@@ -1388,6 +1396,7 @@ dependencies = [
  "tinyagents-language",
  "tinyagents-registry",
  "tinyagents-session",
+ "tinyinference",
  "tinytools",
  "tokio",
 ]
@@ -1411,6 +1420,7 @@ dependencies = [
  "tinyagents-graph",
  "tinyagents-harness",
  "tinyagents-language",
+ "tinyinference",
  "tokio",
 ]
 
@@ -1432,6 +1442,22 @@ name = "tinyagents-tracing"
 version = "2.1.1"
 dependencies = [
  "tracing",
+]
+
+[[package]]
+name = "tinyinference"
+version = "0.2.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "httpdate",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
