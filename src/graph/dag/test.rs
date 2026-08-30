@@ -111,7 +111,7 @@ fn all_issue_kinds_are_reported_together() {
 
 #[test]
 fn node_view_borrows_owned_dependency_ids() {
-    let deps = vec!["a".to_string(), "b".to_string()];
+    let deps = ["a".to_string(), "b".to_string()];
     let node = DagNode::new("c", deps.iter().map(String::as_str));
     assert_eq!(node.id, "c");
     assert_eq!(node.depends_on, vec!["a", "b"]);
