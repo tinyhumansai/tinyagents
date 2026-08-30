@@ -123,7 +123,7 @@ impl DelegationState {
 }
 
 /// Reducer updates emitted by the delegation nodes.
-enum DelegationUpdate {
+pub(crate) enum DelegationUpdate {
     Plan(String),
     Execution {
         prompt: String,

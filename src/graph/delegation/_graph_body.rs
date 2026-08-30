@@ -1,7 +1,7 @@
 /// Build (but do not run) the delegation `CompiledGraph`. Shared by
 /// [`run_delegation`] and [`delegation_graph_topology`] so the graph's structure
 /// has one definition.
-fn build_delegation_graph<F, Fut>(
+pub(super) fn build_delegation_graph<F, Fut>(
     max_revisions: usize,
     cancel: CancellationToken,
     require_review_approval: bool,

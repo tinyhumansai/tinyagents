@@ -41,10 +41,10 @@ where
         config.cancel.clone(),
         config.require_review_approval,
         run_stage,
-    )?
-    .with_event_sink(Arc::new(super::observability::GraphTracingSink::new(
-        "delegation:graph",
-    )));
+    )?;
+    if let Some(sink) = config.event_sink.clone() {
+        graph = graph.with_event_sink(sink);
+    }
 
     if let Some(cp) = config.checkpointer {
         graph = graph.with_checkpointer(cp);
@@ -240,7 +240,7 @@ async fn prune_thread(cp: &dyn Checkpointer<DelegationState>, thread_id: &str) {
 /// tags decode failures with a `"decode …"` context (`sqlite.rs`:
 /// `decode record` / `decode namespace` / `decode next_nodes`) — the only stable
 /// discriminator it exposes.
-fn is_incompatible_checkpoint_error(e: &crate::TinyAgentsError) -> bool {
+pub(super) fn is_incompatible_checkpoint_error(e: &crate::TinyAgentsError) -> bool {
     matches!(e, crate::TinyAgentsError::Checkpoint(msg) if msg.contains("decode"))
 }
 
@@ -276,16 +276,16 @@ where
         .clone()
         .ok_or_else(|| "delegation resume requires a checkpointer".to_string())?;
 
-    let graph = build_delegation_graph(
+    let mut graph = build_delegation_graph(
         config.max_revisions,
         config.cancel.clone(),
         config.require_review_approval,
         run_stage,
     )?
-    .with_event_sink(Arc::new(super::observability::GraphTracingSink::new(
-        "delegation:graph",
-    )))
     .with_checkpointer(cp);
+    if let Some(sink) = config.event_sink.clone() {
+        graph = graph.with_event_sink(sink);
+    }
 
     let execution = graph
         .resume(thread_id.clone(), command)
@@ -330,7 +330,7 @@ fn into_outcome(
 /// stable string forms (`approve_once`, `approve_always_for_tool`, `deny`), a
 /// bare bool, or an object carrying `approved`/`decision` — so the existing
 /// decision contract routes into `Command::resume` unchanged.
-fn decision_is_approve(decision: &Value) -> bool {
+pub(super) fn decision_is_approve(decision: &Value) -> bool {
     match decision {
         Value::Bool(b) => *b,
         Value::String(s) => matches!(
