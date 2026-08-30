@@ -23,7 +23,6 @@ pub mod cancel;
 pub mod config;
 pub mod context;
 pub mod cost;
-pub mod embeddings;
 pub mod error;
 pub mod events;
 pub mod handoff;
@@ -31,15 +30,13 @@ pub mod host;
 pub mod ids;
 pub mod limits;
 pub mod memory;
-pub mod message;
 pub mod middleware;
-pub mod model;
+pub mod model_registry;
 #[cfg(feature = "multimodal")]
 pub mod multimodal;
 pub mod no_progress;
 pub mod observability;
 pub mod prompt;
-pub mod providers;
 pub mod retry;
 pub mod run_queue;
 pub mod runtime;
@@ -50,27 +47,18 @@ pub mod structured;
 pub mod subagent;
 pub mod summarization;
 pub mod testkit;
+pub mod token_estimation;
 pub mod tool;
 pub mod tool_calling;
 #[cfg(feature = "tools")]
 pub mod tools;
-pub mod usage;
 pub mod workspace;
 
 pub use cancel::CancellationToken;
 pub use cost::CostTotals;
-pub use embeddings::{
-    EmbeddingModel, InMemoryVectorStore, MockEmbeddingModel, Retriever, ScoredDoc, VectorStore,
-    cosine_similarity,
-};
 pub use error::{Result, TinyAgentsError};
 pub use ids::*;
-pub use message::{ContentBlock, Message};
-pub use model::{
-    CapabilitySet, Modalities, ModelProfile, ModelRequest, ModelResponse, ModelStatus, ModelStream,
-    ModelStreamItem, ProviderError, ResponseFormat, StreamAccumulator, ToolChoice,
-    collect_model_stream, context_window_for_model_id,
-};
+pub use model_registry::{ModelRegistry, ModelSelection, ResolvedModelBinding};
 pub use no_progress::{
     DEFAULT_IDENTICAL_HALT_THRESHOLD, DEFAULT_REPEAT_CALL_THRESHOLD,
     DEFAULT_REPEAT_OUTPUT_THRESHOLD, NoProgress, NoProgressTracker, SuccessfulRepeat,
@@ -91,5 +79,4 @@ pub use tool::{
     Tool as HarnessTool, ToolCall as HarnessToolCall, ToolFormat, ToolRegistry,
     ToolResult as HarnessToolResult, ToolSchema,
 };
-pub use usage::Usage;
 pub use workspace::{SharedRootWorkspace, WorkspaceDescriptor, WorkspaceIsolation};
