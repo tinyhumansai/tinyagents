@@ -157,6 +157,33 @@ async fn human_gated_run_parks_on_interrupt_then_resume_approves() {
 }
 
 #[tokio::test]
+async fn run_delegation_rejects_require_review_approval() {
+    // `run_delegation` documents itself as the non-gated convenience wrapper
+    // that always returns a terminal state. With the gate on, a legitimately
+    // configured durable run can still return at the approval interrupt with
+    // `final_output` unset; discarding `DelegationOutcome::pending` (as
+    // `.state` alone does) would silently hand back an unfinished state with
+    // no signal that approval is pending. Reject the misuse instead of
+    // discarding it.
+    let dir = tempfile::tempdir().unwrap();
+    let cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::new(dir.path()));
+    let config = DelegationConfig {
+        require_review_approval: true,
+        checkpointer: Some(cp),
+        thread_id: Some("hg-wrong-wrapper".to_string()),
+        ..DelegationConfig::default()
+    };
+    let err = run_delegation(config, flow_runner(0))
+        .await
+        .expect_err("must reject require_review_approval=true");
+    assert!(
+        err.contains("require_review_approval"),
+        "error should name the misuse: {err}"
+    );
+}
+
+#[tokio::test]
 async fn human_gated_without_checkpointer_or_thread_id_is_rejected() {
     // `require_review_approval` documents that it needs both a checkpointer
     // and a thread_id (interrupts require durability). Without this guard the
