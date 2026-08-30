@@ -187,6 +187,18 @@ where
         return run_delegation_durable(config, run_stage).await;
     };
 
+    // Serialize checkpoint classification + the selected run/resume operation
+    // per thread. Without this, two concurrent callers for the same stable
+    // `thread_id` can both read the same checkpoint (or both observe none)
+    // before either starts executing — neither this wrapper nor the
+    // `CompiledGraph` run/resume entry points hold a per-thread lock across
+    // that gap on their own. Both would then run the same pending stage,
+    // duplicating execute-stage external side effects and producing
+    // competing checkpoint histories. The lock is held for the whole
+    // classify-then-dispatch critical section below, released on return.
+    let lock = thread_lock(&tid);
+    let _guard = lock.lock().await;
+
     match cp.get(tid.as_str(), None).await {
         // A checkpoint written under a schema version other than the current
         // one is expired rather than resumed/returned — its semantics may not
