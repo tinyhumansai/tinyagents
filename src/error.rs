@@ -229,9 +229,7 @@ impl From<tinyinference::Error> for TinyAgentsError {
             tinyinference::Error::Model(message) => Self::Model(message),
             tinyinference::Error::Provider(error) => Self::Provider(error),
             tinyinference::Error::Validation(message) => Self::Validation(message),
-            tinyinference::Error::Serialization(message) => {
-                Self::Model(format!("inference serialization error: {message}"))
-            }
+            tinyinference::Error::Serialization(error) => Self::Serialization(error),
             tinyinference::Error::Embedding(message) => Self::Embedding(message),
         }
     }
