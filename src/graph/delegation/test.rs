@@ -600,6 +600,63 @@ async fn checkpoint_below_current_schema_version_expires_to_fresh_run() {
     );
 }
 
+#[tokio::test]
+async fn checkpoint_above_current_schema_version_also_expires_to_fresh_run() {
+    // A checkpoint stamped with a schema version NEWER than this binary
+    // understands (e.g. written by a newer binary during a rollback, or in a
+    // mixed-version deployment) must be expired exactly like an older one, not
+    // resumed. Serde can decode a newer record just fine by ignoring fields it
+    // doesn't recognize, so an inequality check — not merely `<` — is what
+    // catches this: resuming it under this binary's older semantics would be
+    // silently wrong rather than loudly incompatible.
+    let dir = tempfile::tempdir().unwrap();
+    let seed: crate::graph::checkpoint::FileCheckpointer<DelegationState> =
+        crate::graph::checkpoint::FileCheckpointer::new(dir.path());
+    let checkpoint = Checkpoint {
+        thread_id: "future-schema".to_string(),
+        checkpoint_id: "cp-future".to_string(),
+        run_id: None,
+        parent_checkpoint_id: None,
+        namespace: vec![],
+        state: DelegationState {
+            plan: Some("from-the-future".to_string()),
+            schema_version: CURRENT_SCHEMA_VERSION + 1,
+            ..Default::default()
+        },
+        next_nodes: vec![],
+        completed_tasks: vec![],
+        pending_writes: vec![],
+        interrupts: vec![],
+        pending_activations: None,
+        barrier_arrivals: vec![],
+        metadata: json!({}),
+    };
+    seed.put(checkpoint)
+        .await
+        .expect("seed future-schema checkpoint");
+
+    let cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::<DelegationState>::new(dir.path()));
+    let config = DelegationConfig {
+        checkpointer: Some(cp),
+        thread_id: Some("future-schema".to_string()),
+        ..DelegationConfig::default()
+    };
+    let outcome = run_or_resume_delegation(config, flow_runner(0))
+        .await
+        .expect("expires + fresh");
+    assert!(outcome.state.final_output.is_some(), "fresh run completed");
+    assert_eq!(
+        outcome.state.schema_version, CURRENT_SCHEMA_VERSION,
+        "fresh run stamped the current version, not the future one"
+    );
+    assert_eq!(
+        outcome.state.plan.as_deref(),
+        Some("PLAN"),
+        "re-planned from scratch, not resumed with the future-schema plan"
+    );
+}
+
 #[test]
 fn incompatible_checkpoint_error_matches_schema_not_corrupt_or_operational() {
     use crate::TinyAgentsError;
