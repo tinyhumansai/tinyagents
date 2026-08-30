@@ -92,6 +92,28 @@ fn duplicate_ids_are_reported_without_a_false_cycle() {
 }
 
 #[test]
+fn conflicting_duplicate_declarations_do_not_fabricate_a_cycle() {
+    // `a` is declared twice with conflicting dependency lists ([] and [b]),
+    // and `b` depends on `a`. Merging both declarations of `a` would add an
+    // edge b -> a (from the second `a[b]`) alongside a -> b (from `b[a]`),
+    // fabricating a cycle that neither declaration of `a` alone produces:
+    // the first (`a[]`) yields a -> b only, and the second (`a[b]`) yields
+    // b -> a only. Only one declaration per id may contribute edges.
+    let nodes = vec![
+        DagNode::new("a", []),
+        DagNode::new("a", ["b"]),
+        DagNode::new("b", ["a"]),
+    ];
+    assert!(!has_cycle(&nodes));
+    assert_eq!(
+        validate_dag(&nodes),
+        vec![DagIssue::DuplicateNode {
+            id: "a".to_string()
+        }]
+    );
+}
+
+#[test]
 fn all_issue_kinds_are_reported_together() {
     let nodes = vec![
         DagNode::new("a", ["b"]),
