@@ -165,8 +165,10 @@ src/
 ```
 
 Provider implementations (OpenAI and the OpenAI-compatible endpoints for
-Anthropic, Ollama, DeepSeek, Groq, xAI, OpenRouter, Together, and Mistral)
-live inside `src/harness/providers/` and are compiled in unconditionally.
+Anthropic, Ollama, DeepSeek, Groq, xAI, OpenRouter, Together, and Mistral), the
+provider-neutral model/message/streaming API, caching, usage, and embeddings
+live in the vendored `vendor/tinyinference` crate. Compatibility modules under
+`src/harness/` re-export those exact types.
 Two Cargo features gate optional dependencies: `sqlite` (embedded SQLite
 checkpointer) and `repl` (embedded Rhai engine for `.ragsh` sessions).
 
@@ -211,8 +213,8 @@ Historical decisions that have since been settled, kept for context:
   orchestration uses the separate `.ragsh` extension).
 - State schemas remain Rust-owned; `.rag` binds to them by name through the
   registry rather than declaring schemas itself.
-- Provider crates live in this crate as always-compiled modules behind
-  `src/harness/providers/`, not separate crates or feature flags.
+- Provider code lives in the vendored TinyInference crate and remains
+  always-compiled through TinyAgents' compatibility re-exports.
 - Memory and embeddings are async, matching the rest of the harness surface.
 
 Remaining open question:

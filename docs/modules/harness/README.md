@@ -144,25 +144,26 @@ Each substantial harness feature gets its own module. This is not just file
 organization; it is an ownership rule. If a feature will need its own traits,
 errors, tests, middleware, or provider adapters, it belongs in its own submodule.
 
-Target layout:
+Runtime-owned layout (provider-facing compatibility modules re-export the
+vendored `tinyinference` crate):
 
 ```text
 src/harness/
   mod.rs
   agent_loop.rs
-  cache.rs
+  cache/        # TinyInference compatibility re-export
   context.rs
   cost.rs
-  embeddings.rs
+  embeddings/   # TinyInference compatibility re-export
   events.rs
   graph_runtime.rs
   limits.rs
   memory.rs
-  message.rs
+  message/      # TinyInference compatibility re-export
   middleware.rs
-  model.rs
+  model/        # TinyInference compatibility re-export
   prompt.rs
-  providers.rs
+  providers/    # TinyInference compatibility re-export
   retry.rs
   runtime.rs
   steering.rs
@@ -172,7 +173,7 @@ src/harness/
   store.rs
   testkit.rs
   tool.rs
-  usage.rs
+  usage/        # TinyInference compatibility re-export
 ```
 
 The current crate already has top-level `chat.rs`, `model.rs`, and `tool.rs`.
@@ -188,18 +189,20 @@ Feature ownership:
   (before each model and tool call) and in the streaming/retry paths.
 - `context`: `RunConfig`, `RunContext`, inherited metadata, runtime values.
 - `cost`: model pricing, budget policy, and cost rollups.
-- `embeddings`: embedding providers, vector stores, retrievers, indexing, and
-  retrieval-context records.
+- `embeddings`: TinyInference-owned embedding providers, vector stores,
+  retrievers, indexing, and retrieval-context records.
 - `events`: typed harness events, sinks, streams, redaction adapters.
 - `graph_runtime`: explicit state graphs, node commands, reducers,
   checkpointing, HITL, run records, and graph execution blueprints.
 - `limits`: model-call, tool-call, concurrency, timeout, and recursion policy.
 - `memory`: short-term thread memory and long-term stores.
-- `message`: structured messages, content blocks, tool call correlation.
+- `message`: TinyInference-owned structured messages, content blocks, and tool
+  call correlation.
 - `middleware`: before/after/wrap hooks and middleware stack ordering.
-- `model`: provider-neutral model traits, requests, responses, streams.
+- `model`: TinyInference-owned provider-neutral model traits, requests,
+  responses, and streams.
 - `prompt`: prompt templates, rendering, and dynamic prompt context.
-- `providers`: feature-gated provider adapters.
+- `providers`: TinyInference-owned hosted and local provider adapters.
 - `retry`: retry classification, backoff, attempt accounting.
 - `runtime`: high-level `AgentHarness` builder/facade.
 - `steering`: policy-checked parent/human steering of orchestrators,

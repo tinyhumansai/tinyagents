@@ -69,17 +69,17 @@ enters a model request.
 
 ## Package Shape
 
-Target layout:
+Implementation ownership moved to the vendored TinyInference crate. TinyAgents
+keeps `harness::embeddings` as a compatibility re-export:
 
 ```text
-src/harness/embeddings.rs
+vendor/tinyinference/crates/tinyinference/src/embeddings/
 ```
 
-The first implementation can keep the feature in one module. If it grows large,
-split it into:
+Provider clients and core retrieval types are split under:
 
 ```text
-src/harness/embeddings/
+vendor/tinyinference/crates/tinyinference/src/embeddings/
   mod.rs
   embedding.rs
   vector_store.rs

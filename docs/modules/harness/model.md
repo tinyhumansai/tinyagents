@@ -1,5 +1,11 @@
 # Harness Model And Provider Feature
 
+The provider-neutral model, message, streaming, usage, tool-call wire, and
+provider adapter implementation is owned by the vendored TinyInference crate.
+TinyAgents' `harness::model`, `harness::message`, and `harness::providers`
+modules are compatibility re-exports; the agent loop and middleware remain in
+TinyAgents.
+
 The model feature owns provider-neutral chat model traits, request/response
 shapes, streaming model chunks, provider capability profiles, provider-specific
 options, and adapter conformance requirements.

@@ -83,6 +83,9 @@ them.
 - **Durability & checkpoints** — resume long runs, replay history, and travel
   back in time across superstep boundaries.
 - **Provider-neutral** — one interface across hosted and local providers; swap
+  implementations through the vendored
+  [`tinyinference`](vendor/tinyinference/README.md) crate, which owns messages,
+  model requests/responses, streaming, providers, usage, caching, and embeddings.
   models without rewriting workflows.
 - **Observability** — normalized events, usage, and cost that roll up across
   recursive child runs.
