@@ -291,6 +291,41 @@ where
         self.cancel_where(|_| true)
     }
 
+    /// Cancels every executor while retaining its registry entry for a waiter.
+    ///
+    /// `publish_terminal` runs for each entry before its cooperative token and
+    /// hard-abort handle are triggered. Applications use it to publish their
+    /// own terminal cancellation payload through the registered status
+    /// channel. The now-terminal entry stays registered until [`Self::wait`]
+    /// observes and prunes it (or a later soft-cap sweep does), preventing a
+    /// waiter that already knows the task id from racing removal.
+    ///
+    /// The callback runs while the registry lock is held and must not call back
+    /// into this registry.
+    pub fn cancel_all_retaining(
+        &self,
+        mut publish_terminal: impl FnMut(&Metadata, &Status),
+    ) -> std::result::Result<Vec<DetachedTaskSnapshot<Metadata, Status>>, DetachedTaskRegistryError>
+    {
+        let mut cancelled = {
+            let guard = self.lock()?;
+            let mut cancelled = Vec::with_capacity(guard.len());
+            for (task_id, entry) in guard.iter() {
+                let current = entry.status.borrow().clone();
+                publish_terminal(&entry.metadata, &current);
+                entry.cancellation.cancel();
+                entry.abort.abort();
+                cancelled.push(Self::snapshot_entry(task_id, entry));
+            }
+            cancelled
+        };
+        cancelled.sort_by(|left, right| left.task_id.as_str().cmp(right.task_id.as_str()));
+        for entry in &cancelled {
+            self.steering.deregister(&entry.task_id);
+        }
+        Ok(cancelled)
+    }
+
     /// Prunes every entry whose latest watched status is terminal.
     pub fn sweep_terminal(&self) -> std::result::Result<usize, DetachedTaskRegistryError> {
         let removed = {

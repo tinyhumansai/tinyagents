@@ -41,11 +41,15 @@ fn in_memory_store_tracks_task_lifecycle() {
 enum RuntimeStatus {
     Running,
     Completed(String),
+    Cancelled,
 }
 
 fn runtime_registry() -> DetachedTaskRegistry<String, RuntimeStatus> {
     DetachedTaskRegistry::new(SteeringRegistry::new(), 2, |status| {
-        matches!(status, RuntimeStatus::Completed(_))
+        matches!(
+            status,
+            RuntimeStatus::Completed(_) | RuntimeStatus::Cancelled
+        )
     })
 }
 
@@ -155,10 +159,54 @@ async fn detached_registry_cancel_is_cooperative_then_aborts_and_returns_metadat
 }
 
 #[tokio::test]
+async fn detached_registry_can_cancel_executors_without_removing_waitable_status() {
+    let registry = runtime_registry();
+    let task_id = TaskId::new("detached-retained-cancel");
+    let (tx, rx, cancellation, join) = detached_handles();
+    registry
+        .register(
+            task_id.clone(),
+            "parent",
+            "worker-meta".to_string(),
+            rx,
+            cancellation.clone(),
+            join.abort_handle(),
+        )
+        .unwrap();
+
+    let cancelled = registry
+        .cancel_all_retaining(|metadata, status| {
+            assert_eq!(metadata, "worker-meta");
+            assert_eq!(status, &RuntimeStatus::Running);
+            tx.send(RuntimeStatus::Cancelled).unwrap();
+        })
+        .unwrap();
+
+    assert_eq!(cancelled.len(), 1);
+    assert_eq!(cancelled[0].task_id, task_id);
+    assert_eq!(cancelled[0].status, RuntimeStatus::Cancelled);
+    assert!(cancellation.is_cancelled());
+    assert!(join.await.unwrap_err().is_cancelled());
+    assert_eq!(registry.len().unwrap(), 1, "a waiter still needs the entry");
+
+    assert_eq!(
+        registry
+            .wait(&task_id, "parent", std::time::Duration::from_secs(1))
+            .await
+            .unwrap(),
+        DetachedTaskWaitOutcome::Terminal(RuntimeStatus::Cancelled)
+    );
+    assert!(registry.is_empty().unwrap());
+}
+
+#[tokio::test]
 async fn detached_registry_uses_shared_steering_and_sweeps_terminal_at_soft_cap() {
     let steering = SteeringRegistry::new();
     let registry = DetachedTaskRegistry::new(steering.clone(), 1, |status: &RuntimeStatus| {
-        matches!(status, RuntimeStatus::Completed(_))
+        matches!(
+            status,
+            RuntimeStatus::Completed(_) | RuntimeStatus::Cancelled
+        )
     });
     let first = TaskId::new("detached-first");
     let (first_tx, first_rx, first_cancel, first_join) = detached_handles();
@@ -215,7 +263,10 @@ impl Clone for PanickingMetadata {
 async fn detached_registry_reports_a_poisoned_lock() {
     let registry =
         DetachedTaskRegistry::new(SteeringRegistry::new(), 2, |status: &RuntimeStatus| {
-            matches!(status, RuntimeStatus::Completed(_))
+            matches!(
+                status,
+                RuntimeStatus::Completed(_) | RuntimeStatus::Cancelled
+            )
         });
     let task_id = TaskId::new("detached-poison");
     let (_tx, rx, cancellation, join) = detached_handles();
