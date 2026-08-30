@@ -250,15 +250,24 @@ async fn prune_thread(cp: &dyn Checkpointer<DelegationState>, thread_id: &str) {
     }
 }
 
-/// Whether a `Checkpointer::get` error is a decode / shape-incompatibility (safe
-/// to expire the checkpoint) rather than an operational failure (SQLite busy /
-/// I/O / poisoned lock — must not silently restart durable work). The vendored
-/// `SqliteCheckpointer` reports both as `TinyAgentsError::Checkpoint(String)` but
-/// tags decode failures with a `"decode …"` context (`sqlite.rs`:
-/// `decode record` / `decode namespace` / `decode next_nodes`) — the only stable
-/// discriminator it exposes.
+/// Whether a `Checkpointer::get` error is a *positively identified* schema
+/// mismatch (safe to expire the checkpoint) rather than an operational failure
+/// (SQLite busy / I/O / poisoned lock) or ambiguous/likely corruption — either
+/// of which must propagate rather than silently discard the record.
+///
+/// Both backends (`checkpoint::file`, `checkpoint::sqlite`) route every decode
+/// failure through `checkpoint::decode_json_err`, which classifies the
+/// underlying `serde_json::Error` and tags the message `"decode [schema] …"`
+/// when the JSON parsed but didn't match the target type (a missing field, a
+/// renamed variant — exactly what a legacy or newer schema produces), or
+/// `"decode [corrupt] …"` when the bytes themselves were malformed or
+/// truncated (a write torn by a crash, disk corruption). Only the former is
+/// pruned here: matching on a bare `"decode"` substring previously expired a
+/// corrupted record exactly as readily as an outdated one, deleting the only
+/// evidence of the corruption and restarting the delegation from `plan`,
+/// potentially repeating already-completed execute-stage side effects.
 pub(super) fn is_incompatible_checkpoint_error(e: &crate::TinyAgentsError) -> bool {
-    matches!(e, crate::TinyAgentsError::Checkpoint(msg) if msg.contains("decode"))
+    matches!(e, crate::TinyAgentsError::Checkpoint(msg) if msg.contains("decode [schema]"))
 }
 
 /// Whether a loaded checkpoint still has work to resume: a non-finalized,
