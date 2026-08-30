@@ -2,8 +2,10 @@
 //! checkpoint classification that decides between the two.
 
 use std::future::Future;
+use std::sync::{Arc, OnceLock};
 
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
 
 use super::graph::build_delegation_graph;
 use super::types::{
@@ -11,7 +13,20 @@ use super::types::{
     DelegationStageOutput, DelegationState, DelegationUpdate, PendingApproval,
 };
 use crate::graph::checkpoint::{Checkpoint, Checkpointer};
+use crate::graph::thread_locks::ThreadLockMap;
 use crate::graph::{Command, END};
+
+/// Serializes [`run_or_resume_delegation`]'s classify-then-dispatch critical
+/// section per thread (see the lock acquisition there for why). Same pattern
+/// as `graph::goals::store::thread_lock` / `graph::todos::store::thread_lock`
+/// — a weak-value map so an idle thread's mutex is reclaimed instead of
+/// leaking for the life of the process.
+fn thread_lock(thread_id: &str) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<ThreadLockMap> = OnceLock::new();
+    LOCKS
+        .get_or_init(|| ThreadLockMap::new("delegation run/resume lock map"))
+        .lock_for(thread_id)
+}
 
 /// Run the plan→execute⇄review→finalize delegation graph, invoking `run_stage`
 /// for each stage. Returns the final [`DelegationState`].
