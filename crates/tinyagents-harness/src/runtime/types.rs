@@ -19,7 +19,8 @@
 
 use std::sync::Arc;
 
-use crate::cache::{CachePolicy, ResponseCache};
+use crate::cache::ResponseCache;
+use tinyinference::cache::CachePolicy;
 use crate::limits::RunLimits;
 use crate::middleware::MiddlewareStack;
 use tinyinference::model::ResponseFormat;

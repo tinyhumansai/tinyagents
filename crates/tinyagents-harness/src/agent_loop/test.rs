@@ -2879,7 +2879,8 @@ async fn no_cache_attached_invokes_model_each_run() {
 
 #[tokio::test]
 async fn request_cache_policy_overrides_run_policy_to_disable_caching() {
-    use crate::cache::{CachePolicy, InMemoryResponseCache};
+    use crate::cache::InMemoryResponseCache;
+    use tinyinference::cache::CachePolicy;
 
     // A middleware that disables caching for the call via the request-level
     // cache policy, overriding the harness default (which is enabled).

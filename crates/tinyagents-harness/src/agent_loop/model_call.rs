@@ -18,8 +18,9 @@ pub(super) const PER_CALL_BOUND_LABEL: &str = "per-model-call ceiling";
 
 use super::*;
 use crate::cache::{
-    CachePolicy, CacheSkipReason, apply_prompt_cache_breakpoints, scoped_cache_key,
+    CacheSkipReason, apply_prompt_cache_breakpoints, scoped_cache_key,
 };
+use tinyinference::cache::CachePolicy;
 
 impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// Invokes a model, consulting the local response cache around the
