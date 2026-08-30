@@ -12,7 +12,8 @@ use serde_json::json;
 use super::run::is_incompatible_checkpoint_error;
 use super::*;
 use crate::CancellationToken;
-use crate::graph::checkpoint::Checkpointer;
+use crate::graph::checkpoint::{Checkpoint, Checkpointer};
+use crate::graph::{Interrupt, NodeContext};
 
 /// A reviewer that rejects the first `reject_first` executions, then approves,
 /// driving the execute⇄review revision loop.
