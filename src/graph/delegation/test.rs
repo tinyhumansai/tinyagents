@@ -681,6 +681,60 @@ fn decision_is_approve_rejects_unrecognized_string_prefixes() {
     assert!(!decision_is_approve(&json!(null)));
 }
 
+#[tokio::test]
+async fn cancelled_checkpoint_still_scheduling_finalize_is_resumed_not_terminal() {
+    // Every cancellation route goes through `goto finalize` (see
+    // `graph.rs`), so a checkpoint can be `cancelled == true` with
+    // `final_output == None` and `next_nodes == ["finalize"]` if the process
+    // stopped after the cancellation update was checkpointed but before
+    // `finalize` ran. Treating `cancelled` as its own terminal signal
+    // classified that live boundary as terminal and returned it unfinished,
+    // never producing the cancellation summary.
+    let dir = tempfile::tempdir().unwrap();
+    let seed: crate::graph::checkpoint::FileCheckpointer<DelegationState> =
+        crate::graph::checkpoint::FileCheckpointer::new(dir.path());
+    let checkpoint = Checkpoint {
+        thread_id: "cancelled-mid-flight".to_string(),
+        checkpoint_id: "cp-cancel".to_string(),
+        run_id: None,
+        parent_checkpoint_id: None,
+        namespace: vec![],
+        state: DelegationState {
+            plan: Some("PLAN".to_string()),
+            cancelled: true,
+            schema_version: CURRENT_SCHEMA_VERSION,
+            ..Default::default()
+        },
+        next_nodes: vec![crate::graph::NodeId::from("finalize")],
+        completed_tasks: vec![],
+        pending_writes: vec![],
+        interrupts: vec![],
+        pending_activations: None,
+        barrier_arrivals: vec![],
+        metadata: json!({}),
+    };
+    seed.put(checkpoint)
+        .await
+        .expect("seed cancelled-but-not-finalized checkpoint");
+
+    let cp: Arc<dyn Checkpointer<DelegationState>> =
+        Arc::new(crate::graph::checkpoint::FileCheckpointer::<DelegationState>::new(dir.path()));
+    let config = DelegationConfig {
+        checkpointer: Some(cp),
+        thread_id: Some("cancelled-mid-flight".to_string()),
+        ..DelegationConfig::default()
+    };
+    let outcome = run_or_resume_delegation(config, flow_runner(0))
+        .await
+        .expect("resumes to finalize");
+    assert!(
+        outcome.state.final_output.is_some(),
+        "must resume through finalize and produce a cancellation summary, not \
+         return the unfinished checkpoint verbatim"
+    );
+    assert!(outcome.state.cancelled);
+}
+
 #[test]
 fn incompatible_checkpoint_error_matches_schema_not_corrupt_or_operational() {
     use crate::TinyAgentsError;
