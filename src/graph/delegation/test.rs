@@ -1040,6 +1040,38 @@ fn incompatible_checkpoint_error_matches_schema_not_corrupt_or_operational() {
 }
 
 #[test]
+fn decode_json_err_only_tags_schema_for_the_record_context() {
+    use crate::graph::checkpoint::decode_json_err;
+
+    // `Category::Data` errors decoding checkpoint-internal metadata
+    // ("namespace", "next_nodes", "header", "write payload") must NEVER be
+    // tagged `[schema]` — those fields have no versioned shape of their own,
+    // so a Data-category failure there is corruption by construction, not a
+    // caller's schema evolution.
+    let data_err = serde_json::from_str::<u32>("\"not a number\"").unwrap_err();
+    assert_eq!(data_err.classify(), serde_json::error::Category::Data);
+    for what in ["namespace", "next_nodes", "header", "write payload"] {
+        let wrapped = decode_json_err("sqlite checkpointer", what, {
+            serde_json::from_str::<u32>("\"not a number\"").unwrap_err()
+        });
+        assert!(
+            format!("{wrapped}").contains(&format!("decode [corrupt] {what}")),
+            "non-record contexts must always tag [corrupt], even for a \
+             Data-category error: {wrapped}"
+        );
+    }
+    let _ = data_err;
+
+    // The "record" context is the only one eligible for [schema].
+    let wrapped = decode_json_err(
+        "sqlite checkpointer",
+        "record",
+        serde_json::from_str::<u32>("\"not a number\"").unwrap_err(),
+    );
+    assert!(format!("{wrapped}").contains("decode [schema] record"));
+}
+
+#[test]
 fn decode_json_err_classifies_data_errors_as_schema_and_others_as_corrupt() {
     use crate::graph::checkpoint::decode_json_err;
 
