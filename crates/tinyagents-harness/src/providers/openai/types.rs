@@ -1,0 +1,489 @@
+//! Wire types for the OpenAI Chat Completions API.
+//!
+//! These structs mirror the JSON shapes accepted and returned by
+//! `POST {base_url}/chat/completions`. They are deliberately kept separate from
+//! the provider-neutral harness types in [`crate::model`]: the mapping
+//! between the two lives in the sibling [`super`] module so the wire format
+//! never leaks into core harness code.
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+// ---------------------------------------------------------------------------
+// Request shapes (serialized and sent to OpenAI)
+// ---------------------------------------------------------------------------
+
+/// Top-level request body for `POST /chat/completions`.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatCompletionRequest {
+    /// Target model id (for example `gpt-4.1-mini`).
+    pub model: String,
+    /// Ordered conversation messages.
+    pub messages: Vec<ChatMessageWire>,
+    /// Tool (function) declarations exposed to the model. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolWire>,
+    /// Tool-choice policy. Omitted when no tools are declared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
+    /// Structured-output request. Omitted for free-form text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<Value>,
+    /// Sampling temperature. Omitted when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    /// Nucleus sampling probability mass. Omitted when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    /// Maximum number of output tokens. Omitted when unset. Used for classic
+    /// Chat Completions models; the o-series uses `max_completion_tokens`
+    /// instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// Maximum number of output tokens for reasoning (o-series) models, which
+    /// reject `max_tokens`. Omitted when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
+    /// Stop sequences that terminate generation. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stop: Vec<String>,
+    /// Deterministic generation seed. Omitted when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    /// `reasoning_effort` — the Chat Completions spelling of the
+    /// provider-neutral [`ReasoningConfig`][rc]. Omitted when unset.
+    ///
+    /// Before this field the only route to it was raw `provider_options`, which
+    /// is provider-shaped by definition; it stays available as the escape hatch
+    /// and **wins** over this typed field on a key conflict.
+    ///
+    /// [rc]: crate::model::ReasoningConfig
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Request Server-Sent-Events streaming. Omitted (false) for unary calls.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub stream: bool,
+    /// Streaming options (for example `{"include_usage": true}`). Omitted for
+    /// unary calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<Value>,
+    /// Provider-specific top-level request fields. Flattened after normalized
+    /// fields so OpenAI-compatible local providers can receive their own typed
+    /// controls without new wire structs.
+    #[serde(flatten, skip_serializing_if = "Map::is_empty")]
+    pub extra: Map<String, Value>,
+}
+
+// ---------------------------------------------------------------------------
+// Streaming response shapes (deserialized from SSE `data:` chunks)
+// ---------------------------------------------------------------------------
+
+/// One streamed chunk from `POST /chat/completions` with `stream: true`.
+///
+/// Each Server-Sent-Events `data:` line carries one of these JSON objects. The
+/// terminal `data: [DONE]` sentinel is handled by the transport, not parsed
+/// into this type.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ChatCompletionChunk {
+    /// Provider response/message id (repeated on every chunk).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Per-choice incremental deltas; the first choice is used.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub choices: Vec<ChunkChoiceWire>,
+    /// Cumulative usage, sent on the final chunk when `include_usage` is set.
+    #[serde(default)]
+    pub usage: Option<UsageWire>,
+}
+
+/// A single streamed choice carrying an incremental [`ChunkDeltaWire`].
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ChunkChoiceWire {
+    /// The incremental delta for this choice.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub delta: ChunkDeltaWire,
+    /// Finish reason, present only on the terminal content chunk.
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+}
+
+/// The incremental `delta` object inside a [`ChunkChoiceWire`].
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ChunkDeltaWire {
+    /// Incremental text fragment, when present.
+    #[serde(default)]
+    pub content: Option<String>,
+    /// Incremental reasoning/thinking fragment used by some OpenAI-compatible
+    /// providers (for example DeepSeek-compatible streams).
+    #[serde(default)]
+    pub reasoning_content: Option<Value>,
+    /// Alternate reasoning/thinking fragment key used by some gateways.
+    #[serde(default)]
+    pub reasoning: Option<Value>,
+    /// Incremental tool-call fragments, correlated by `index`.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub tool_calls: Vec<ToolCallChunkWire>,
+}
+
+/// One incremental tool-call fragment in a streamed delta.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ToolCallChunkWire {
+    /// Stable slot index used to correlate fragments across chunks.
+    ///
+    /// `None` when the provider omits `index` entirely (some OpenAI-compatible
+    /// backends do); fragments are then correlated by id/name instead of all
+    /// collapsing onto slot 0.
+    #[serde(default)]
+    pub index: Option<u32>,
+    /// Provider-assigned call id, sent on the first fragment for the slot.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Incremental function name/arguments fragment.
+    #[serde(default)]
+    pub function: Option<FunctionChunkWire>,
+}
+
+/// The incremental `function` payload of a [`ToolCallChunkWire`].
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct FunctionChunkWire {
+    /// Function name, sent on the first fragment for the slot.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Incremental stringified-JSON arguments fragment.
+    ///
+    /// OpenAI streams this as a string fragment, but some OpenAI-compatible
+    /// local servers emit the completed arguments as a JSON **object** in a
+    /// single delta. [`deserialize_optional_arguments`] normalizes either shape
+    /// to the stringified form the accumulator concatenates.
+    #[serde(default, deserialize_with = "deserialize_optional_arguments")]
+    pub arguments: Option<String>,
+}
+
+/// Accepts an explicit JSON `null` for any field that declares a default.
+///
+/// `#[serde(default)]` alone only covers an **absent** key — a key present with
+/// an explicit `null` still fails with `invalid type: null, expected a
+/// sequence` (or `… expected a string`, `… expected u64`), losing the *whole*
+/// response over one cosmetic field.
+///
+/// OpenAI-compatible providers do this routinely: Mistral returns
+/// `"tool_calls": null` on every plain (non-tool) chat completion, which broke
+/// unary chat against `mistral-small-latest` while its streaming and
+/// tool-calling paths worked. That is the same class of quirk as the DeepSeek
+/// and local-server shapes already normalized by [`deserialize_arguments`], so
+/// it is fixed the same way: one helper applied to **every** wire field that
+/// already declares a default, rather than a per-provider special case.
+///
+/// The rule this encodes: *a field that may be absent may equally be `null`*.
+/// Genuinely required fields (for example [`ChoiceWire::message`]) declare no
+/// default and stay strict, so a structurally broken response still errors.
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// Normalizes a tool-call `function.arguments` payload to the stringified-JSON
+/// form the provider expects.
+///
+/// OpenAI sends `arguments` as a JSON **string**, but OpenAI-compatible local
+/// servers (LM Studio, some vLLM/llama.cpp builds) send it as a JSON **object**
+/// instead, or omit it entirely. A single unexpected shape used to fail
+/// deserialization of the *whole* response, so the model appeared "broken".
+/// This accepts a string, an object/array (re-serialized to its JSON text), or
+/// a null/absent value (an empty string).
+fn deserialize_arguments<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text,
+        // An object/array (or any non-string scalar) is re-serialized to its
+        // canonical JSON text so downstream string parsing is uniform.
+        Some(other) => other.to_string(),
+    })
+}
+
+/// The streaming counterpart of [`deserialize_arguments`], preserving the
+/// `Option` wrapper used by incremental deltas (a fragment that carries no
+/// `arguments` key stays `None` rather than becoming an empty string).
+fn deserialize_optional_arguments<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => Some(text),
+        Some(other) => Some(other.to_string()),
+    })
+}
+
+/// The `content` of a [`ChatMessageWire`].
+///
+/// OpenAI accepts either a plain string (the common case) or an array of typed
+/// content parts (needed to attach images alongside text). Serialized untagged
+/// so a text-only message keeps its historical plain-string wire shape.
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub enum MessageContentWire {
+    /// Plain-string content.
+    Text(String),
+    /// Multi-part content (text and/or image parts).
+    Parts(Vec<ContentPartWire>),
+}
+
+/// One typed content part inside a multi-part [`MessageContentWire::Parts`].
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPartWire {
+    /// A text fragment.
+    Text {
+        /// The text content.
+        text: String,
+    },
+    /// An image reference, by URL or data URI.
+    ImageUrl {
+        /// The `image_url` object.
+        image_url: ImageUrlWire,
+    },
+}
+
+/// The `image_url` payload of a [`ContentPartWire::ImageUrl`].
+#[derive(Clone, Debug, Serialize)]
+pub struct ImageUrlWire {
+    /// URL or data URI of the image.
+    pub url: String,
+}
+
+/// A single message in the request `messages` array.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatMessageWire {
+    /// Role: `system`, `user`, `assistant`, or `tool`.
+    pub role: String,
+    /// Message content: a plain string or typed content parts. `None`
+    /// (serialized as absent) for assistant messages that only carry tool calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<MessageContentWire>,
+    /// Tool calls requested by an assistant message. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCallWire>,
+    /// For `tool` messages, the id of the call this message answers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+/// A function-tool declaration in the request `tools` array.
+#[derive(Clone, Debug, Serialize)]
+pub struct ToolWire {
+    /// Always `"function"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Function name, description, and JSON-schema parameters.
+    pub function: FunctionSchemaWire,
+}
+
+/// The `function` payload of a [`ToolWire`].
+#[derive(Clone, Debug, Serialize)]
+pub struct FunctionSchemaWire {
+    /// Function (tool) name.
+    pub name: String,
+    /// Human/model readable description.
+    pub description: String,
+    /// JSON Schema describing the function arguments.
+    pub parameters: Value,
+}
+
+// ---------------------------------------------------------------------------
+// Shared shapes (appear in both request and response)
+// ---------------------------------------------------------------------------
+
+/// A tool call: present in assistant request messages (echoing prior calls) and
+/// in response messages (newly requested calls).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallWire {
+    /// Provider-assigned call id.
+    ///
+    /// Defaulted because local servers violate the OpenAI contract: Ollama's
+    /// `/v1` endpoint omitted `id` entirely until v0.12.11. An empty string is
+    /// treated as absent by the translator, which synthesizes a stable
+    /// `tool-{index}` fallback so result correlation still works.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub id: String,
+    /// Always `"function"`.
+    ///
+    /// Defaulted because some OpenAI-compatible servers omit `type`; a single
+    /// missing field used to fail deserialization of the whole response.
+    #[serde(
+        rename = "type",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub kind: String,
+    /// The function name and stringified-JSON arguments.
+    pub function: FunctionCallWire,
+}
+
+/// The `function` payload of a [`ToolCallWire`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FunctionCallWire {
+    /// Function name.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub name: String,
+    /// Arguments encoded as a JSON **string** (OpenAI sends stringified JSON).
+    ///
+    /// Some OpenAI-compatible local servers send a JSON **object** instead of a
+    /// string, or omit the field; [`deserialize_arguments`] normalizes any of
+    /// those shapes to the stringified form so one non-conforming field can no
+    /// longer fail the whole response.
+    #[serde(default, deserialize_with = "deserialize_arguments")]
+    pub arguments: String,
+}
+
+// ---------------------------------------------------------------------------
+// Response shapes (deserialized from OpenAI)
+// ---------------------------------------------------------------------------
+
+/// Top-level response body from `POST /chat/completions`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ChatCompletionResponse {
+    /// Provider response/message id.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Candidate completions; the first is used.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub choices: Vec<ChoiceWire>,
+    /// Token usage, when reported.
+    #[serde(default)]
+    pub usage: Option<UsageWire>,
+}
+
+/// A single completion candidate.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ChoiceWire {
+    /// The assistant message produced for this choice.
+    pub message: ResponseMessageWire,
+    /// Why generation stopped (for example `stop`, `tool_calls`, `length`).
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+}
+
+/// The assistant message inside a [`ChoiceWire`].
+#[derive(Clone, Debug, Deserialize)]
+pub struct ResponseMessageWire {
+    /// Textual content, when present.
+    #[serde(default)]
+    pub content: Option<String>,
+    /// Reasoning/thinking content on non-streaming responses, when a compatible
+    /// provider exposes it. Kept off visible assistant text by the translator.
+    #[serde(default)]
+    pub reasoning_content: Option<Value>,
+    /// Alternate reasoning/thinking field used by some gateways.
+    #[serde(default)]
+    pub reasoning: Option<Value>,
+    /// Tool calls requested by the model.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub tool_calls: Vec<ToolCallWire>,
+}
+
+/// Token usage reported by OpenAI.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct UsageWire {
+    /// Prompt/input tokens.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub prompt_tokens: u64,
+    /// Completion/output tokens.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub completion_tokens: u64,
+    /// Total tokens reported by the provider.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub total_tokens: u64,
+    /// Optional input-token breakdown (carries cached tokens).
+    #[serde(default)]
+    pub prompt_tokens_details: Option<PromptTokensDetailsWire>,
+    /// Optional completion-token breakdown (carries reasoning tokens).
+    #[serde(default)]
+    pub completion_tokens_details: Option<CompletionTokensDetailsWire>,
+}
+
+/// The `prompt_tokens_details` breakdown of a [`UsageWire`].
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct PromptTokensDetailsWire {
+    /// Input tokens served from OpenAI's prompt cache.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub cached_tokens: u64,
+    /// Input tokens **written into** the prompt cache, as OpenAI-compatible
+    /// gateways report it. Two spellings are in the wild and neither is
+    /// universal, so both are accepted and reconciled by
+    /// [`Self::cache_creation_tokens`]:
+    ///
+    /// * `cache_write_tokens` — the spelling LangChain reads on the
+    ///   Chat Completions path.
+    /// * `cache_creation_tokens` — the spelling gateways that mirror
+    ///   Anthropic's `cache_creation_input_tokens` tend to use.
+    ///
+    /// Before this existed, [`Usage::cache_creation_tokens`][ucc] was summed and
+    /// priced by the cost feature but written by **no** provider in the crate,
+    /// so cache writes were billed as ordinary input everywhere.
+    ///
+    /// [ucc]: crate::usage::Usage::cache_creation_tokens
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub cache_write_tokens: u64,
+    /// Alternate spelling of [`Self::cache_write_tokens`]; see its docs.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub cache_creation_tokens: u64,
+}
+
+impl PromptTokensDetailsWire {
+    /// The cache-write token count, taking whichever of the two accepted
+    /// spellings the provider actually sent (they are never both non-zero in
+    /// practice; the larger wins so a zero-valued alias cannot mask the real
+    /// figure).
+    pub fn cache_creation_tokens(&self) -> u64 {
+        self.cache_write_tokens.max(self.cache_creation_tokens)
+    }
+}
+
+/// The `completion_tokens_details` breakdown of a [`UsageWire`].
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct CompletionTokensDetailsWire {
+    /// Output tokens spent on hidden reasoning/thinking.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub reasoning_tokens: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Model-listing shapes (`GET {base_url}/models`)
+// ---------------------------------------------------------------------------
+
+/// One model advertised by a provider's list-models endpoint
+/// (`GET {base_url}/models`).
+///
+/// Returned by [`OpenAiModel::list_models`][super::OpenAiModel::list_models].
+/// The same shape is served by every OpenAI-compatible provider (Ollama,
+/// Together, Groq, OpenRouter, …); fields other than `id` are best-effort and
+/// may be absent depending on the provider.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelListing {
+    /// The model id (usable as [`OpenAiModel::with_model`][super::OpenAiModel::with_model]).
+    pub id: String,
+    /// Unix-epoch creation time, when the provider reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<u64>,
+    /// Owning organization/account, when the provider reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_by: Option<String>,
+}
+
+/// The `{ "object": "list", "data": [...] }` envelope returned by the
+/// list-models endpoint.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ModelListWire {
+    /// The advertised models.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub data: Vec<ModelListing>,
+}

@@ -1334,7 +1334,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "tinyagents"
+name = "tinyagents-graph"
+version = "2.1.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tinyagents-harness",
+ "tinyagents-language",
+ "tinyagents-tracing",
+ "tokio",
+]
+
+[[package]]
+name = "tinyagents-harness"
 version = "2.1.1"
 dependencies = [
  "async-trait",
@@ -1342,7 +1361,6 @@ dependencies = [
  "bytes",
  "chrono",
  "chrono-tz",
- "dotenvy",
  "flate2",
  "futures",
  "regex",
@@ -1353,8 +1371,72 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "tinyagents-tracing",
  "tinytools",
  "tokio",
+]
+
+[[package]]
+name = "tinyagents-integration-tests"
+version = "2.1.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dotenvy",
+ "futures",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tinyagents-graph",
+ "tinyagents-harness",
+ "tinyagents-language",
+ "tinyagents-registry",
+ "tinyagents-session",
+ "tinytools",
+ "tokio",
+]
+
+[[package]]
+name = "tinyagents-language"
+version = "2.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tinyagents-harness",
+]
+
+[[package]]
+name = "tinyagents-registry"
+version = "2.1.1"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tinyagents-graph",
+ "tinyagents-harness",
+ "tinyagents-language",
+ "tokio",
+]
+
+[[package]]
+name = "tinyagents-session"
+version = "2.1.1"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tinyagents-harness",
+ "tinyagents-tracing",
+]
+
+[[package]]
+name = "tinyagents-tracing"
+version = "2.1.1"
+dependencies = [
  "tracing",
 ]
 

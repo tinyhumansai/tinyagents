@@ -1,0 +1,4067 @@
+//! Tests for the default agent loop.
+//!
+//! These exercise the loop end to end with [`MockModel`] and a local
+//! `FakeTool`: a single text response, a multi-step tool loop, limit
+//! enforcement, middleware request mutation, usage accumulation, the
+//! tool-not-found path, structured output extraction, and retry/fallback.
+
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use async_trait::async_trait;
+use futures::StreamExt;
+use serde_json::json;
+
+use super::AgentStreamItem;
+use crate::context::{RunConfig, RunContext};
+use crate::error::{Result, TinyAgentsError};
+use crate::events::{AgentEvent, EventSink};
+use crate::limits::RunLimits;
+use crate::message::{AssistantMessage, ContentBlock, Message, MessageDelta};
+use crate::middleware::{
+    AgentRun, Middleware, MiddlewareModelOutcome, MiddlewareToolOutcome, ModelHandler,
+    ModelMiddleware, ToolHandler, ToolMiddleware,
+};
+use crate::model::{
+    CapabilitySet, ChatModel, ModelProfile, ModelRequest, ModelResponse, ModelStreamItem,
+    ResponseFormat, ToolChoice,
+};
+use crate::providers::MockModel;
+use crate::retry::{FallbackPolicy, RetryPolicy};
+use crate::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy, UnknownToolPolicy};
+use crate::tool::{Tool, ToolCall, ToolResult, ToolSchema, ToolTimeout, ToolTimeoutSettings};
+use crate::usage::Usage;
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// A tool that records its invocations and returns a fixed reply.
+struct FakeTool {
+    name: &'static str,
+    reply: &'static str,
+    calls: Mutex<usize>,
+}
+
+impl FakeTool {
+    fn new(name: &'static str, reply: &'static str) -> Self {
+        Self {
+            name,
+            reply,
+            calls: Mutex::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool<()> for FakeTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        "fake tool"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(self.name, "fake tool", json!({"type": "object"}))
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(call.id, self.name, self.reply))
+    }
+}
+
+/// A tool that sleeps `delay` before returning a fixed reply, used to prove a
+/// hanging tool call is bounded by the run's remaining wall-clock budget the
+/// same way a hanging model call is.
+struct SlowTool {
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl Tool<()> for SlowTool {
+    fn name(&self) -> &str {
+        "slow"
+    }
+    fn description(&self) -> &str {
+        "slow tool"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new("slow", "slow tool", json!({"type": "object"}))
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        tokio::time::sleep(self.delay).await;
+        Ok(ToolResult::text(call.id, "slow", "too late"))
+    }
+}
+
+/// A slow tool with an explicit timeout policy, used to prove the runtime
+/// consumes the crate timeout vocabulary rather than only the run deadline.
+struct PolicySlowTool {
+    name: &'static str,
+    delay: std::time::Duration,
+    timeout: ToolTimeout,
+}
+
+#[async_trait]
+impl Tool<()> for PolicySlowTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        "policy-bounded slow tool"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            self.name,
+            "policy-bounded slow tool",
+            json!({"type": "object"}),
+        )
+    }
+    fn timeout_policy(&self, call: &ToolCall) -> ToolTimeout {
+        if call
+            .arguments
+            .get("unbounded")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            ToolTimeout::Unbounded
+        } else {
+            self.timeout
+        }
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        tokio::time::sleep(self.delay).await;
+        Ok(ToolResult::text(call.id, self.name, "too late"))
+    }
+}
+
+/// A strict tool used to prove harness-level schema validation runs before the
+/// tool implementation is invoked.
+struct StrictLookupTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+struct StringEchoTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+struct RequiredOnlyTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+struct ObjectEnumTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+struct ObjectArrayTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+struct OptionalStrictObjectTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl Tool<()> for StringEchoTool {
+    fn name(&self) -> &str {
+        "string_echo"
+    }
+
+    fn description(&self) -> &str {
+        "echo a string"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "string_echo",
+            "echo a string",
+            json!({
+                "type": ["object", "string"],
+                "properties": { "value": { "type": "string" } }
+            }),
+        )
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(
+            call.id,
+            self.name(),
+            call.arguments.to_string(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool<()> for RequiredOnlyTool {
+    fn name(&self) -> &str {
+        "required_only"
+    }
+
+    fn description(&self) -> &str {
+        "accepts an implicitly object-shaped schema"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "required_only",
+            self.description(),
+            json!({ "required": ["query"] }),
+        )
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(call.id, self.name(), "required-output"))
+    }
+}
+
+#[async_trait]
+impl Tool<()> for ObjectEnumTool {
+    fn name(&self) -> &str {
+        "object_enum"
+    }
+
+    fn description(&self) -> &str {
+        "accepts one enumerated object"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "object_enum",
+            self.description(),
+            json!({ "enum": [{ "query": "rust" }] }),
+        )
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(call.id, self.name(), "enum-output"))
+    }
+}
+
+#[async_trait]
+impl Tool<()> for ObjectArrayTool {
+    fn name(&self) -> &str {
+        "object_array"
+    }
+
+    fn description(&self) -> &str {
+        "accepts an object or array"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "object_array",
+            self.description(),
+            json!({
+                "type": ["object", "array"],
+                "properties": { "value": { "type": "string" } }
+            }),
+        )
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(
+            call.id,
+            self.name(),
+            call.arguments.to_string(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool<()> for OptionalStrictObjectTool {
+    fn name(&self) -> &str {
+        "optional_strict_object"
+    }
+
+    fn description(&self) -> &str {
+        "accepts only an optional query field"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "optional_strict_object",
+            self.description(),
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": { "query": { "type": "string" } }
+            }),
+        )
+    }
+
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(call.id, self.name(), "unexpected"))
+    }
+}
+
+#[async_trait]
+impl Tool<()> for StrictLookupTool {
+    fn name(&self) -> &str {
+        "strict_lookup"
+    }
+    fn description(&self) -> &str {
+        "strict lookup"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "strict_lookup",
+            "strict lookup",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "additionalProperties": false,
+                "properties": {
+                    "query": { "type": "string" },
+                    "filters": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "limit": { "type": "integer" }
+                        }
+                    }
+                }
+            }),
+        )
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(call.id, self.name(), "strict-output"))
+    }
+}
+
+/// Builds a tool-call assistant response (no text, one tool call).
+fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> ModelResponse {
+    ModelResponse {
+        message: AssistantMessage {
+            id: Some(format!("msg-{id}")),
+            content: Vec::new(),
+            tool_calls: vec![ToolCall::new(id, name, arguments)],
+            usage: Some(Usage::new(7, 3)),
+        },
+        usage: Some(Usage::new(7, 3)),
+        finish_reason: Some("tool_calls".to_string()),
+        raw: None,
+        resolved_model: None,
+        continue_turn: None,
+        served_from_cache: false,
+    }
+}
+
+/// Builds a tool-call response whose arguments the provider could not parse,
+/// mirroring what the OpenAI provider produces for a small local model that
+/// emitted malformed argument JSON: the raw string is preserved and the call is
+/// marked [`ToolCall::invalid`].
+fn invalid_tool_call_response(id: &str, name: &str, raw: &str) -> ModelResponse {
+    let reason = format!(
+        "openai response contained invalid JSON arguments for tool call `{id}` (`{name}`): \
+         EOF while parsing a value; raw arguments: {raw:?}"
+    );
+    ModelResponse {
+        message: AssistantMessage {
+            id: Some(format!("msg-{id}")),
+            content: Vec::new(),
+            tool_calls: vec![ToolCall::invalid(id, name, raw, reason)],
+            usage: Some(Usage::new(7, 3)),
+        },
+        usage: Some(Usage::new(7, 3)),
+        finish_reason: Some("tool_calls".to_string()),
+        raw: None,
+        resolved_model: None,
+        continue_turn: None,
+        served_from_cache: false,
+    }
+}
+
+/// Builds a plain-text assistant response with explicit usage.
+fn text_response(text: &str, input: u64, output: u64) -> ModelResponse {
+    ModelResponse {
+        message: AssistantMessage {
+            id: None,
+            content: vec![ContentBlock::Text(text.to_string())],
+            tool_calls: Vec::new(),
+            usage: Some(Usage::new(input, output)),
+        },
+        usage: Some(Usage::new(input, output)),
+        finish_reason: Some("stop".to_string()),
+        raw: None,
+        resolved_model: None,
+        continue_turn: None,
+        served_from_cache: false,
+    }
+}
+
+/// Builds a *truncated empty* completion: `finish_reason == "length"` with no
+/// text, no tool calls, and no structured output — the failure mode of a local
+/// reasoning model that burned its whole token budget on the hidden reasoning
+/// channel. `reasoning_tokens` is folded into `output_tokens` so the usage
+/// mirrors a real length-truncated response.
+fn truncated_empty_response(reasoning_tokens: u64) -> ModelResponse {
+    ModelResponse {
+        message: AssistantMessage {
+            id: None,
+            content: Vec::new(),
+            tool_calls: Vec::new(),
+            usage: Some(Usage::new(4, reasoning_tokens)),
+        },
+        usage: Some(Usage::new(4, reasoning_tokens)),
+        finish_reason: Some("length".to_string()),
+        raw: None,
+        resolved_model: None,
+        continue_turn: None,
+        served_from_cache: false,
+    }
+}
+
+/// Middleware that appends a user message to every model request.
+struct InjectMiddleware {
+    text: &'static str,
+}
+
+#[async_trait]
+impl Middleware<(), ()> for InjectMiddleware {
+    fn name(&self) -> &str {
+        "inject"
+    }
+    async fn before_model(
+        &self,
+        _ctx: &mut RunContext<()>,
+        _state: &(),
+        request: &mut ModelRequest,
+    ) -> Result<()> {
+        request.messages.push(Message::user(self.text));
+        // Also flip tool choice so we can assert mutation visibly.
+        request.tool_choice = ToolChoice::None;
+        Ok(())
+    }
+}
+
+/// A model whose profile lacks native structured output, so `Auto` should
+/// resolve to the tool-call strategy. It answers with a tool call named after
+/// the artificial structured tool the loop appends, carrying the structured
+/// arguments.
+struct ToolStructuredModel {
+    profile: ModelProfile,
+}
+
+impl ToolStructuredModel {
+    fn new() -> Self {
+        Self {
+            profile: ModelProfile {
+                tool_calling: true,
+                native_structured_output: false,
+                json_schema: false,
+                ..ModelProfile::default()
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl ChatModel<()> for ToolStructuredModel {
+    fn profile(&self) -> Option<&ModelProfile> {
+        Some(&self.profile)
+    }
+    async fn invoke(&self, _state: &(), request: ModelRequest) -> Result<ModelResponse> {
+        // The loop appends an artificial structured tool and forces the choice
+        // to it; the tool name is the schema name.
+        assert_eq!(request.tool_choice, ToolChoice::Tool("answer".to_string()));
+        let name = request
+            .tools
+            .last()
+            .map(|t| t.name.clone())
+            .unwrap_or_default();
+        Ok(tool_call_response(
+            "s1",
+            &name,
+            json!({"value":"viatool","score":7}),
+        ))
+    }
+}
+
+/// A model that always fails with a retryable error and counts attempts.
+struct FailingModel {
+    attempts: Mutex<usize>,
+}
+
+#[async_trait]
+impl ChatModel<()> for FailingModel {
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+        *self.attempts.lock().unwrap() += 1;
+        Err(TinyAgentsError::Model("transient boom".to_string()))
+    }
+}
+
+/// A model that always fails with a retryable error and records the
+/// (virtual) `tokio::time::Instant` of each `invoke` call, so a test can
+/// assert on the actual elapsed time between retries rather than just the
+/// attempt count.
+struct TimestampingFailingModel {
+    timestamps: Mutex<Vec<tokio::time::Instant>>,
+}
+
+#[async_trait]
+impl ChatModel<()> for TimestampingFailingModel {
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+        self.timestamps
+            .lock()
+            .unwrap()
+            .push(tokio::time::Instant::now());
+        Err(TinyAgentsError::Model("transient boom".to_string()))
+    }
+}
+
+/// A model that always fails with a structured `TinyAgentsError::Provider`
+/// error whose `retryable` flag is fixed at construction, and counts
+/// attempts. Used to prove the agent loop's retry decision consults the
+/// structured flag rather than retrying every provider failure.
+struct ProviderFailingModel {
+    retryable: bool,
+    status: u16,
+    attempts: Mutex<usize>,
+}
+
+#[async_trait]
+impl ChatModel<()> for ProviderFailingModel {
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+        *self.attempts.lock().unwrap() += 1;
+        Err(TinyAgentsError::Provider(Box::new(
+            crate::model::ProviderError {
+                provider: "test-provider".to_string(),
+                status: Some(self.status),
+                retryable: self.retryable,
+                retry_after_ms: None,
+                message: "boom".to_string(),
+                ..crate::model::ProviderError::default()
+            },
+        )))
+    }
+}
+
+/// Around-model wrap middleware that calls the inner pipeline then stamps the
+/// finish reason on the resulting response.
+struct StampModelWrap;
+
+#[async_trait]
+impl ModelMiddleware<()> for StampModelWrap {
+    fn name(&self) -> &str {
+        "stamp_model"
+    }
+    async fn wrap_model(
+        &self,
+        ctx: &mut RunContext<()>,
+        state: &(),
+        request: ModelRequest,
+        next: ModelHandler<'_, (), ()>,
+    ) -> Result<MiddlewareModelOutcome> {
+        let mut response = next.run(ctx, state, request).await?.into_response();
+        response.finish_reason = Some("wrapped".to_string());
+        Ok(response.into())
+    }
+}
+
+/// Around-tool wrap middleware that calls the inner pipeline then prefixes the
+/// result content.
+struct StampToolWrap;
+
+#[async_trait]
+impl ToolMiddleware<()> for StampToolWrap {
+    fn name(&self) -> &str {
+        "stamp_tool"
+    }
+    async fn wrap_tool(
+        &self,
+        ctx: &mut RunContext<()>,
+        state: &(),
+        call: ToolCall,
+        next: ToolHandler<'_, (), ()>,
+    ) -> Result<MiddlewareToolOutcome> {
+        let mut result = next.run(ctx, state, call).await?.into_result();
+        result.content = format!("[wrapped] {}", result.content);
+        Ok(result.into())
+    }
+}
+
+/// Rewrites the call to opt out of the inherited timeout, proving timeout
+/// resolution observes the call that actually reaches the tool.
+struct UnboundToolWrap;
+
+#[async_trait]
+impl ToolMiddleware<()> for UnboundToolWrap {
+    fn name(&self) -> &str {
+        "unbound_tool"
+    }
+    async fn wrap_tool(
+        &self,
+        ctx: &mut RunContext<()>,
+        state: &(),
+        mut call: ToolCall,
+        next: ToolHandler<'_, (), ()>,
+    ) -> Result<MiddlewareToolOutcome> {
+        call.arguments["unbounded"] = json!(true);
+        next.run(ctx, state, call).await
+    }
+}
+
+/// Around-model wrap middleware that short-circuits with a canned response and
+/// never calls the inner pipeline (so the provider is never contacted).
+struct ShortCircuitModelWrap;
+
+#[async_trait]
+impl ModelMiddleware<()> for ShortCircuitModelWrap {
+    fn name(&self) -> &str {
+        "short_circuit_model"
+    }
+    async fn wrap_model(
+        &self,
+        _ctx: &mut RunContext<()>,
+        _state: &(),
+        _request: ModelRequest,
+        _next: ModelHandler<'_, (), ()>,
+    ) -> Result<MiddlewareModelOutcome> {
+        Ok(text_response("canned", 0, 0).into())
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn wrap_middleware_fires_around_model_and_tool_calls() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "lookup", json!({"q": "x"})),
+            text_response("done", 4, 2),
+        ])),
+    );
+    harness.register_tool(Arc::new(FakeTool::new("lookup", "tool-output")));
+    harness.push_model_middleware(Arc::new(StampModelWrap));
+    harness.push_tool_middleware(Arc::new(StampToolWrap));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("run succeeds");
+
+    // The tool-wrap mutated the tool result that was appended to the transcript.
+    assert_eq!(run.messages[2].text(), "[wrapped] tool-output");
+    // The model-wrap stamped the final response's finish reason.
+    assert_eq!(
+        run.final_response.unwrap().finish_reason.as_deref(),
+        Some("wrapped")
+    );
+}
+
+#[tokio::test]
+async fn wrap_model_short_circuit_skips_provider() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    // FailingModel errors on every invoke and counts attempts; if the wrap
+    // middleware short-circuits, the provider is never contacted.
+    let model = Arc::new(FailingModel {
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("mock", model.clone());
+    harness.push_model_middleware(Arc::new(ShortCircuitModelWrap));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("short-circuited run succeeds without the provider");
+
+    assert_eq!(run.text(), Some("canned".to_string()));
+    assert_eq!(*model.attempts.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn single_model_call_no_tools() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("hello there")));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(run.model_calls, 1);
+    assert_eq!(run.tool_calls, 0);
+    assert_eq!(run.steps, 1);
+    assert_eq!(run.text(), Some("hello there".to_string()));
+    // input user + assistant reply.
+    assert_eq!(run.messages.len(), 2);
+}
+
+#[tokio::test]
+async fn empty_response_fails_the_run_when_guard_enabled() {
+    // openhuman#4638: an empty provider completion (no text, no tool calls, no
+    // structured output) must not terminate the run with a blank final answer
+    // when the guard is enabled — it fails with a typed `EmptyResponse` so the
+    // caller can re-prompt instead of silently succeeding on empty content.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("")));
+    harness.with_policy(RunPolicy {
+        error_on_empty_response: true,
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("an empty response should fail the run");
+    assert!(
+        matches!(err, TinyAgentsError::EmptyResponse),
+        "expected EmptyResponse, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn empty_response_terminates_normally_when_guard_disabled() {
+    // The guard is opt-in: with the default policy an empty completion still
+    // terminates the run with a blank final answer (preserved behavior).
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("")));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("run succeeds with a blank final by default");
+    assert_eq!(run.model_calls, 1);
+    assert_eq!(run.text(), Some(String::new()));
+}
+
+#[tokio::test]
+async fn truncated_empty_response_retries_then_succeeds() {
+    // A local reasoning model burns its whole token budget on the hidden
+    // reasoning channel and returns finish_reason="length" with empty content.
+    // The loop must recover automatically: retry the call with a doubled token
+    // budget and finish on the second, usable response.
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+        text_response("recovered", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+
+    use crate::testkit::EventRecorder;
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(
+        RunConfig::new("truncated-retry").with_max_turn_output_tokens(2048),
+        (),
+    )
+    .with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("the truncated-empty response should be retried, not surfaced");
+
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert_eq!(
+        run.model_calls, 2,
+        "the retry counts as a second model call"
+    );
+    assert!(
+        recorder
+            .events()
+            .iter()
+            .any(|e| matches!(e, AgentEvent::RetryScheduled { attempt: 1, .. })),
+        "the retry should be observable; got kinds {:?}",
+        recorder.kinds()
+    );
+    // The first attempt sent the configured 2048 cap; the retry doubled it.
+    let sent: Vec<Option<u32>> = model.requests().iter().map(|r| r.max_tokens).collect();
+    assert_eq!(
+        sent,
+        vec![Some(2048), Some(4096)],
+        "the retried request should carry double the original token budget"
+    );
+}
+
+#[tokio::test]
+async fn truncated_empty_boost_does_not_leak_into_later_turns() {
+    // Regression test: the boosted token cap and the retry counter are per-turn
+    // recovery state, but they used to live for the whole run — so every turn
+    // after a recovered one was dispatched at the boosted cap (overriding the
+    // caller's `max_turn_output_tokens`) and a later truncation got no retry.
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+        tool_call_response("c1", "fake", json!({})),
+        text_response("done", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness
+        .register_model("mock", Arc::clone(&model) as _)
+        .register_tool(Arc::new(FakeTool::new("fake", "tool output")));
+
+    let ctx = RunContext::new(
+        RunConfig::new("truncated-leak").with_max_turn_output_tokens(2048),
+        (),
+    );
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("the recovered run finishes");
+
+    assert_eq!(run.text(), Some("done".to_string()));
+    let sent: Vec<Option<u32>> = model.requests().iter().map(|r| r.max_tokens).collect();
+    assert_eq!(
+        sent,
+        vec![Some(2048), Some(4096), Some(2048)],
+        "only the retry of the truncated turn carries the boost; the next turn \
+         is back at the configured per-turn cap"
+    );
+}
+
+#[tokio::test]
+async fn truncated_empty_retry_budget_is_restored_for_a_later_turn() {
+    // The retry budget is per turn too: a second truncated-empty completion in a
+    // later turn must still be recoverable with the default single retry.
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+        tool_call_response("c1", "fake", json!({})),
+        truncated_empty_response(2048),
+        text_response("done", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness
+        .register_model("mock", Arc::clone(&model) as _)
+        .register_tool(Arc::new(FakeTool::new("fake", "tool output")));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("both truncated turns recover");
+
+    assert_eq!(run.text(), Some("done".to_string()));
+    assert_eq!(run.model_calls, 4);
+}
+
+#[tokio::test]
+async fn truncated_empty_retry_budget_stays_unset_when_request_had_none() {
+    // With no per-turn token cap the budget cannot be doubled, but the retry is
+    // still worthwhile because the failure is stochastic. The retried request
+    // simply carries `None` again.
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(64),
+        text_response("recovered", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("a plain retry still recovers a stochastic truncation");
+
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert_eq!(run.model_calls, 2);
+    let sent: Vec<Option<u32>> = model.requests().iter().map(|r| r.max_tokens).collect();
+    assert_eq!(sent, vec![None, None]);
+}
+
+#[tokio::test]
+async fn truncated_empty_retries_exhausted_returns_blank_by_default() {
+    // When every attempt truncates, the retry budget is exhausted and the
+    // historical behavior applies: a blank final success (the empty-response
+    // guard is off by default).
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+        truncated_empty_response(4096),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+
+    let ctx = RunContext::new(
+        RunConfig::new("truncated-exhausted").with_max_turn_output_tokens(2048),
+        (),
+    );
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("exhausted retries fall back to the blank-final behavior");
+
+    assert_eq!(run.text(), Some(String::new()));
+    assert_eq!(run.model_calls, 2, "one original attempt plus one retry");
+}
+
+#[tokio::test]
+async fn truncated_empty_retries_exhausted_errors_when_guard_enabled() {
+    // With the empty-response guard on, exhausting the retries surfaces the
+    // typed EmptyResponse error rather than a blank success.
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+        truncated_empty_response(4096),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+    harness.with_policy(RunPolicy {
+        error_on_empty_response: true,
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("exhausted retries with the guard on should fail");
+    assert!(
+        matches!(err, TinyAgentsError::EmptyResponse),
+        "expected EmptyResponse, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn truncated_empty_retry_disabled_by_zero_policy() {
+    // truncated_empty_retries=0 restores exact-replay behavior: no retry, a
+    // single model call, blank final.
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+    harness.with_policy(RunPolicy {
+        truncated_empty_retries: 0,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("with retries disabled the blank final is returned");
+    assert_eq!(run.model_calls, 1);
+    assert_eq!(run.text(), Some(String::new()));
+}
+
+#[tokio::test]
+async fn length_finish_with_text_is_not_treated_as_truncated_empty() {
+    // A length-truncated response that still carries visible text is a real
+    // answer and must not trigger the retry.
+    let mut partial = text_response("partial answer", 4, 2048);
+    partial.finish_reason = Some("length".to_string());
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![partial]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("a length response with text is a normal final");
+    assert_eq!(run.model_calls, 1);
+    assert_eq!(run.text(), Some("partial answer".to_string()));
+}
+
+#[tokio::test]
+async fn model_requests_tool_then_finishes() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "lookup", json!({"q": "x"})),
+            text_response("done", 4, 2),
+        ])),
+    );
+    harness.register_tool(Arc::new(FakeTool::new("lookup", "tool-output")));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("please look up")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(run.model_calls, 2);
+    assert_eq!(run.tool_calls, 1);
+    assert_eq!(run.steps, 2);
+    assert_eq!(run.text(), Some("done".to_string()));
+    // user, assistant(tool call), tool result, assistant(final).
+    assert_eq!(run.messages.len(), 4);
+    assert!(matches!(run.messages[2], Message::Tool(_)));
+    assert_eq!(run.messages[2].text(), "tool-output");
+}
+
+#[tokio::test]
+async fn max_model_calls_limit_triggers_limit_exceeded() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    // A model that always asks for the tool -> the loop would never stop.
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_tool_call("spin", json!({}))),
+    );
+    harness.register_tool(Arc::new(FakeTool::new("spin", "again")));
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default().with_max_model_calls(1),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect_err("limit should be exceeded");
+    assert!(
+        matches!(err, TinyAgentsError::LimitExceeded(_)),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn policy_model_call_limit_above_run_config_default_is_honored() {
+    // Regression test: `RunConfig::new` defaults `max_model_calls` to 25, but
+    // a harness-wide `RunPolicy` can configure a higher cap. Before the two
+    // limit sources were unified, the context's tracker (seeded from the
+    // `RunConfig` default) tripped at call 26 while the error message
+    // incorrectly reported the policy's higher limit. This asserts the run
+    // survives past 25 calls and, once it does trip, reports the limit that
+    // actually applies.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_tool_call("spin", json!({}))),
+    );
+    harness.register_tool(Arc::new(FakeTool::new("spin", "again")));
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default()
+            .with_max_model_calls(30)
+            .with_max_tool_calls(1000),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect_err("limit should be exceeded");
+    assert!(
+        matches!(err, TinyAgentsError::LimitExceeded(_)),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("30"),
+        "expected error to report the policy's limit (30), got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn max_tool_calls_limit_triggers_limit_exceeded() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_tool_call("spin", json!({}))),
+    );
+    harness.register_tool(Arc::new(FakeTool::new("spin", "again")));
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default()
+            .with_max_model_calls(10)
+            .with_max_tool_calls(0),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect_err("tool limit should be exceeded");
+    assert!(
+        matches!(err, TinyAgentsError::LimitExceeded(_)),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn before_model_middleware_mutates_request() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    // Echo returns the last user message; the middleware injects one.
+    harness.register_model("mock", Arc::new(MockModel::echo()));
+    harness.push_middleware(Arc::new(InjectMiddleware { text: "injected" }));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("original")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(run.text(), Some("injected".to_string()));
+}
+
+#[tokio::test]
+async fn usage_accumulates_across_calls() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "lookup", json!({})),
+            text_response("done", 4, 2),
+        ])),
+    );
+    harness.register_tool(Arc::new(FakeTool::new("lookup", "out")));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(run.usage.calls, 2);
+    // tool-call response: 7 in / 3 out; text response: 4 in / 2 out.
+    assert_eq!(run.usage.usage.input_tokens, 11);
+    assert_eq!(run.usage.usage.output_tokens, 5);
+}
+
+/// `UnknownToolPolicy::Fail` is opt-in now (the default recovers), so this
+/// pins the opted-in fail-closed behavior rather than the default.
+#[tokio::test]
+async fn tool_not_found_errors_under_the_fail_policy() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_tool_call("missing", json!({}))),
+    );
+    // No tool registered.
+    harness.with_policy(RunPolicy {
+        unknown_tool: UnknownToolPolicy::Fail,
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect_err("tool should be missing");
+    match err {
+        TinyAgentsError::ToolNotFound(name) => assert_eq!(name, "missing"),
+        other => panic!("expected ToolNotFound, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn unknown_tool_return_tool_error_recovers() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "missing", json!({})),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    harness.with_policy(RunPolicy {
+        unknown_tool: UnknownToolPolicy::ReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("unknown tool is recoverable");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    // The injected tool-error message names the requested tool for repair.
+    let injected = run
+        .messages
+        .iter()
+        .any(|m| format!("{m:?}").contains("unknown tool `missing`"));
+    assert!(
+        injected,
+        "recovery message should be injected into transcript"
+    );
+}
+
+#[tokio::test]
+async fn unknown_tool_rewrite_retargets_to_real_tool() {
+    let lookup = Arc::new(FakeTool::new("lookup", "out"));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "missing", json!({})),
+            text_response("done", 1, 1),
+        ])),
+    );
+    harness.register_tool(lookup.clone());
+    harness.with_policy(RunPolicy {
+        unknown_tool: UnknownToolPolicy::Rewrite {
+            tool_name: "lookup".to_string(),
+        },
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("rewrite recovers");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    // The rewritten call actually executed the real tool.
+    assert_eq!(*lookup.calls.lock().unwrap(), 1);
+}
+
+/// `InvalidArgsPolicy::Fail` is opt-in now (the default recovers), so this pins
+/// the opted-in fail-closed behavior rather than the default.
+#[tokio::test]
+async fn invalid_tool_arguments_fail_before_tool_execution_under_the_fail_policy() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_tool_call(
+            "strict_lookup",
+            json!({ "query": 42, "extra": true }),
+        )),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StrictLookupTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::Fail,
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect_err("invalid arguments should fail closed");
+
+    assert!(matches!(err, TinyAgentsError::Validation(_)), "got {err:?}");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "tool implementation must not run"
+    );
+}
+
+#[tokio::test]
+async fn invalid_tool_arguments_return_tool_error_recovers() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            // `query` is required to be a string; 42 violates the schema, so
+            // admission must recover instead of running the tool or aborting.
+            tool_call_response("call-1", "strict_lookup", json!({ "query": 42 })),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StrictLookupTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::ReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("invalid arguments are recoverable under ReturnToolError");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "the tool implementation must not run on invalid arguments"
+    );
+    // The injected tool-error message carries the validation detail so the
+    // model can self-correct on the next turn.
+    let injected = run
+        .messages
+        .iter()
+        .any(|m| format!("{m:?}").contains("invalid arguments for tool `strict_lookup`"));
+    assert!(
+        injected,
+        "recovery message should be injected into the transcript"
+    );
+}
+
+#[tokio::test]
+async fn normalized_json_string_arguments_execute_registered_tool() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response(
+                "call-1",
+                "strict_lookup",
+                json!("```json\n{\"query\":\"rust\"}\n```"),
+            ),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StrictLookupTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("a fenced JSON object should be normalized before validation");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn normalized_non_object_executes_tool_without_required_fields() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "permissive", json!(null)),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let tool = Arc::new(FakeTool::new("permissive", "ok"));
+    harness.register_tool(tool.clone());
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("run")])
+        .await
+        .expect("a non-object should become an empty object for a permissive schema");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*tool.calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn normalization_preserves_valid_primitive_arguments() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "string_echo", json!("hello")),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StringEchoTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("echo")])
+        .await
+        .expect("a schema-valid primitive must not be rewritten to an object");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert!(
+        run.messages
+            .iter()
+            .any(|message| matches!(message, Message::Tool(_)) && message.text() == "\"hello\""),
+        "the tool result must contain the original primitive instead of a rewritten object"
+    );
+}
+
+#[tokio::test]
+async fn normalization_decodes_required_only_object_schema() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "required_only", json!("{\"query\":\"rust\"}")),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(RequiredOnlyTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("a required-only object schema should normalize a JSON string");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn normalization_decodes_object_valued_enum_schema() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "object_enum", json!("{\"query\":\"rust\"}")),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(ObjectEnumTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("an object-valued enum should normalize a matching JSON string");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn normalization_preserves_decoded_array_union_arguments() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "object_array", json!("[1,2]")),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(ObjectArrayTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("an object/array union should preserve a decoded array");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert!(
+        run.messages
+            .iter()
+            .any(|message| matches!(message, Message::Tool(_)) && message.text() == "[1,2]"),
+        "the tool result must contain the decoded array instead of an empty object"
+    );
+}
+
+#[tokio::test]
+async fn normalization_preserves_decoded_invalid_object_for_validation() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response(
+                "call-1",
+                "optional_strict_object",
+                json!("{\"extra\":true}"),
+            ),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(OptionalStrictObjectTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    use crate::testkit::EventRecorder;
+    let recorder = EventRecorder::new();
+    let ctx =
+        RunContext::new(RunConfig::new("decoded-invalid-args"), ()).with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("lookup")])
+        .await
+        .expect("the decoded schema error should be recoverable");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    assert_eq!(*calls.lock().unwrap(), 0);
+    assert!(
+        run.messages.iter().any(|message| {
+            matches!(message, Message::Tool(_)) && message.text().contains("extra is not allowed")
+        }),
+        "validation must report the decoded invalid field instead of executing with an empty object"
+    );
+    assert!(
+        recorder.events().iter().any(|event| matches!(
+            event,
+            AgentEvent::InvalidToolArgs { arguments, .. }
+                if arguments == &json!("{\"extra\":true}")
+        )),
+        "the invalid-args event must retain the raw model-supplied JSON string"
+    );
+}
+
+#[tokio::test]
+async fn normalization_preserves_direct_invalid_object_for_validation() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "optional_strict_object", json!({"extra": true})),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(OptionalStrictObjectTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("the direct schema error should be recoverable");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    assert_eq!(*calls.lock().unwrap(), 0);
+    assert!(
+        run.messages.iter().any(|message| {
+            matches!(message, Message::Tool(_)) && message.text().contains("extra is not allowed")
+        }),
+        "validation must report the direct invalid field instead of executing with an empty object"
+    );
+}
+
+#[tokio::test]
+async fn normalization_preserves_required_field_validation_errors() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "strict_lookup", json!(null)),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StrictLookupTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("required-field validation should remain recoverable");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    assert_eq!(*calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn malformed_tool_arguments_recover_as_error_tool_result() {
+    // A small local model emitted arguments the provider could not parse, so the
+    // response carries a `ToolCall::invalid` call. The loop must feed the parse
+    // error back to the model as a tool result and continue — *without* running
+    // the tool and *without* failing the run — so it can retry. This holds under
+    // the default `InvalidArgsPolicy::Fail` (which governs schema validation of
+    // well-formed args, not unparseable ones), proving the leniency is
+    // unconditional.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            invalid_tool_call_response("call-x", "strict_lookup", "{\"query\":"),
+            text_response("recovered", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StrictLookupTool {
+        calls: Arc::clone(&calls),
+    }));
+
+    use crate::testkit::EventRecorder;
+    let recorder = EventRecorder::new();
+    let ctx =
+        RunContext::new(RunConfig::new("malformed-args-run"), ()).with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("lookup")])
+        .await
+        .expect("malformed args recover without failing the run");
+
+    assert_eq!(run.final_response.unwrap().text(), "recovered");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "the tool implementation must not run on unparseable arguments"
+    );
+    // The injected tool-error message carries the parse detail so the model can
+    // self-correct on the next turn.
+    let injected = run
+        .messages
+        .iter()
+        .any(|m| format!("{m:?}").contains("invalid JSON arguments"));
+    assert!(
+        injected,
+        "an error tool result should be injected into the transcript"
+    );
+    // The recovery is surfaced as an `InvalidToolArgs` event.
+    assert!(
+        recorder
+            .events()
+            .iter()
+            .any(|e| matches!(e, AgentEvent::InvalidToolArgs { .. })),
+        "an InvalidToolArgs event should be emitted; got kinds {:?}",
+        recorder.kinds()
+    );
+}
+
+#[tokio::test]
+async fn structured_output_is_extracted() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::constant(r#"{"value":"hi","score":42}"#)),
+    );
+    harness.with_policy(RunPolicy {
+        default_response_format: Some(ResponseFormat::json_schema(
+            "answer",
+            json!({"type": "object"}),
+        )),
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("answer")])
+        .await
+        .expect("run succeeds");
+
+    let structured = run.structured.expect("structured output present");
+    assert_eq!(structured["value"], "hi");
+    assert_eq!(structured["score"], 42);
+}
+
+#[tokio::test]
+async fn auto_format_uses_provider_schema_for_native_model() {
+    // MockModel advertises a permissive profile (native structured output), so
+    // `Auto` resolves to provider-native schema mode and parses the JSON text.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::constant(r#"{"value":"native","score":1}"#)),
+    );
+    harness.with_policy(RunPolicy {
+        default_response_format: Some(ResponseFormat::auto("answer", json!({"type": "object"}))),
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("answer")])
+        .await
+        .expect("run succeeds");
+
+    let structured = run.structured.expect("structured output present");
+    assert_eq!(structured["value"], "native");
+}
+
+#[tokio::test]
+async fn auto_format_uses_tool_call_for_non_native_model() {
+    // A model without native structured output drives `Auto` down the tool-call
+    // fallback; the structured value is read from the tool-call arguments and
+    // the artificial tool call is treated as the final response.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("tool", Arc::new(ToolStructuredModel::new()));
+    harness.with_policy(RunPolicy {
+        default_response_format: Some(ResponseFormat::auto("answer", json!({"type": "object"}))),
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("answer")])
+        .await
+        .expect("run succeeds");
+
+    let structured = run.structured.expect("structured output present");
+    assert_eq!(structured["value"], "viatool");
+    assert_eq!(structured["score"], 7);
+    // Exactly one model call: the structured tool call ends the loop.
+    assert_eq!(run.model_calls, 1);
+}
+
+#[tokio::test]
+async fn no_model_registered_errors() {
+    let harness: AgentHarness<()> = AgentHarness::new();
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("no model");
+    assert!(
+        matches!(err, TinyAgentsError::ModelNotFound(_)),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_backoff_sleeps_the_documented_schedule() {
+    // Regression test: the loop used to compute the backoff from the
+    // *post-increment* attempt number, so the first retry's sleep skipped
+    // `initial_backoff_ms` entirely and the whole exponential schedule was
+    // shifted one step higher than `RetryPolicy::backoff_for_attempt`
+    // documents. With `initial_backoff_ms = 100`, `multiplier = 2.0`, no
+    // jitter: attempt 0 -> 100ms, attempt 1 -> 200ms, attempt 2 -> 400ms.
+    use std::time::Duration;
+
+    let policy = RetryPolicy::default()
+        .with_max_attempts(4)
+        .with_initial_backoff_ms(100)
+        .with_multiplier(2.0)
+        .with_jitter(false)
+        .with_backoff_sleep(true);
+
+    let model = Arc::new(TimestampingFailingModel {
+        timestamps: Mutex::new(Vec::new()),
+    });
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("flaky", model.clone());
+    harness.with_policy(RunPolicy {
+        retry: policy,
+        ..RunPolicy::default()
+    });
+
+    harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("all 4 attempts fail");
+
+    let timestamps = model.timestamps.lock().unwrap().clone();
+    assert_eq!(timestamps.len(), 4, "expected exactly max_attempts calls");
+
+    let gaps: Vec<Duration> = timestamps
+        .windows(2)
+        .map(|w| w[1].duration_since(w[0]))
+        .collect();
+    assert_eq!(
+        gaps,
+        vec![
+            Duration::from_millis(100), // before retry 1 (attempt 0's backoff)
+            Duration::from_millis(200), // before retry 2 (attempt 1's backoff)
+            Duration::from_millis(400), // before retry 3 (attempt 2's backoff)
+        ],
+        "backoff schedule does not match RetryPolicy::backoff_for_attempt"
+    );
+}
+
+#[tokio::test]
+async fn retry_then_fallback_succeeds() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    let failing = Arc::new(FailingModel {
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("primary", failing.clone());
+    harness.register_model("backup", Arc::new(MockModel::constant("recovered")));
+    harness.with_policy(RunPolicy {
+        // 2 attempts on primary, then fall back to backup.
+        retry: RetryPolicy::default().with_max_attempts(2),
+        fallback: Some(FallbackPolicy::new(["primary", "backup"])),
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("fallback recovers");
+
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    // Primary tried max_attempts (2) times before falling back.
+    assert_eq!(*failing.attempts.lock().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn run_limits_max_retries_per_call_caps_a_looser_retry_policy() {
+    // Regression test: `RunLimits::max_retries_per_call` was parsed but never
+    // enforced, so a `RetryPolicy` with a higher `max_attempts` silently
+    // ignored the harness's "hard" limit. `max_retries_per_call: 1` (one
+    // retry, so 2 attempts total) must win over `max_attempts: 5`.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    let failing = Arc::new(FailingModel {
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("primary", failing.clone());
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(5),
+        limits: RunLimits::default().with_max_retries_per_call(1),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("no fallback, retries capped by RunLimits");
+    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
+    assert_eq!(*failing.attempts.lock().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn provider_error_401_is_not_retried() {
+    // Regression test: before `ProviderError` was preserved structurally, a
+    // 401 flattened into `Model(String)` was retried like any other model
+    // error. A non-retryable `Provider` error must fail on the first attempt.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    let model = Arc::new(ProviderFailingModel {
+        retryable: false,
+        status: 401,
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("primary", model.clone());
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(5),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("401 is not retryable");
+    assert!(matches!(err, TinyAgentsError::Provider(_)), "got {err:?}");
+    assert_eq!(*model.attempts.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn provider_error_429_is_retried_up_to_max_attempts() {
+    // Contrast with the 401 case: a retryable `Provider` error (e.g. a 429)
+    // must still be retried up to `max_attempts`.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    let model = Arc::new(ProviderFailingModel {
+        retryable: true,
+        status: 429,
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("primary", model.clone());
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(3),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("retries exhausted");
+    assert!(matches!(err, TinyAgentsError::Provider(_)), "got {err:?}");
+    assert_eq!(*model.attempts.lock().unwrap(), 3);
+}
+
+#[tokio::test]
+async fn non_retryable_or_exhausted_without_fallback_errors() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "primary",
+        Arc::new(FailingModel {
+            attempts: Mutex::new(0),
+        }),
+    );
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(1),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("no fallback, error propagates");
+    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn fallback_chain_with_repeated_model_name_terminates() {
+    // Regression test: a fallback chain that repeats a model name
+    // (`[primary, backup, primary]`) used to alternate primary <-> backup
+    // forever because `FallbackPolicy::next_after` always resolves from the
+    // *first* occurrence of the current name. Both models fail every call, so
+    // without a visited-set/hop-cap this run would never terminate.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    let primary = Arc::new(FailingModel {
+        attempts: Mutex::new(0),
+    });
+    let backup = Arc::new(FailingModel {
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("primary", primary.clone());
+    harness.register_model("backup", backup.clone());
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(1),
+        fallback: Some(FallbackPolicy::new(["primary", "backup", "primary"])),
+        ..RunPolicy::default()
+    });
+
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        harness.invoke_default(&(), vec![Message::user("hi")]),
+    )
+    .await
+    .expect("fallback chain must terminate, not hang")
+    .expect_err("both models fail, so the run must error out");
+
+    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
+    // Each model is visited at most once: primary, then backup, then the
+    // chain's repeated `primary` entry is skipped as already-visited.
+    assert_eq!(*primary.attempts.lock().unwrap(), 1);
+    assert_eq!(*backup.attempts.lock().unwrap(), 1);
+}
+
+/// A model with an explicit profile that always fails with a retryable error
+/// and counts attempts. Unlike [`FailingModel`] it advertises a profile, so it
+/// can be selected under a `required_capabilities` gate.
+struct ProfiledFailingModel {
+    profile: ModelProfile,
+    attempts: Mutex<usize>,
+}
+
+#[async_trait]
+impl ChatModel<()> for ProfiledFailingModel {
+    fn profile(&self) -> Option<&ModelProfile> {
+        Some(&self.profile)
+    }
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+        *self.attempts.lock().unwrap() += 1;
+        Err(TinyAgentsError::Model("transient boom".to_string()))
+    }
+}
+
+/// A model with an explicit profile that returns fixed text and counts
+/// invocations, so a test can prove an ineligible fallback candidate is never
+/// invoked while a later eligible one is.
+struct ProfiledTextModel {
+    profile: ModelProfile,
+    text: &'static str,
+    attempts: Mutex<usize>,
+}
+
+#[async_trait]
+impl ChatModel<()> for ProfiledTextModel {
+    fn profile(&self) -> Option<&ModelProfile> {
+        Some(&self.profile)
+    }
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+        *self.attempts.lock().unwrap() += 1;
+        Ok(ModelResponse::assistant(self.text))
+    }
+}
+
+/// Middleware that stamps an explicit model override and a required-capability
+/// set onto every request, so a test can drive resolution + fallback under a
+/// capability gate without a public request-building entry point.
+struct RequireCapsMiddleware {
+    model: &'static str,
+    caps: CapabilitySet,
+}
+
+#[async_trait]
+impl Middleware<(), ()> for RequireCapsMiddleware {
+    fn name(&self) -> &str {
+        "require_caps"
+    }
+    async fn before_model(
+        &self,
+        _ctx: &mut RunContext<()>,
+        _state: &(),
+        request: &mut ModelRequest,
+    ) -> Result<()> {
+        request.model = Some(self.model.to_string());
+        request.required_capabilities = Some(self.caps.clone());
+        Ok(())
+    }
+}
+
+/// Runtime fallback must apply the same capability/lifecycle gate that initial
+/// resolution does: on a primary failure, a fallback candidate that cannot
+/// satisfy the request's `required_capabilities` is skipped (never invoked) and
+/// the chain advances to the next eligible model, emitting `FallbackSkipped`
+/// for the skipped candidate (issue #4641).
+#[tokio::test]
+async fn runtime_fallback_skips_capability_ineligible_candidate() {
+    use crate::testkit::EventRecorder;
+
+    let tool_capable = ModelProfile {
+        tool_calling: true,
+        ..ModelProfile::default()
+    };
+    let tool_incapable = ModelProfile {
+        tool_calling: false,
+        ..ModelProfile::default()
+    };
+
+    let primary = Arc::new(ProfiledFailingModel {
+        profile: tool_capable.clone(),
+        attempts: Mutex::new(0),
+    });
+    // Ineligible under the required `tool_calling` gate: must be skipped and
+    // never invoked.
+    let backup = Arc::new(ProfiledTextModel {
+        profile: tool_incapable,
+        text: "from backup",
+        attempts: Mutex::new(0),
+    });
+    // Eligible: the chain must reach and use this one.
+    let tertiary = Arc::new(ProfiledTextModel {
+        profile: tool_capable,
+        text: "recovered",
+        attempts: Mutex::new(0),
+    });
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("primary", primary.clone());
+    harness.register_model("backup", backup.clone());
+    harness.register_model("tertiary", tertiary.clone());
+    harness.push_middleware(Arc::new(RequireCapsMiddleware {
+        model: "primary",
+        caps: CapabilitySet {
+            tool_calling: true,
+            ..CapabilitySet::default()
+        },
+    }));
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(1),
+        fallback: Some(FallbackPolicy::new(["primary", "backup", "tertiary"])),
+        ..RunPolicy::default()
+    });
+
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(RunConfig::new("fallback-caps-run"), ()).with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("fallback reaches the eligible tertiary model");
+
+    // The ineligible `backup` was skipped; the eligible `tertiary` answered.
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert_eq!(*primary.attempts.lock().unwrap(), 1, "primary tried once");
+    assert_eq!(
+        *backup.attempts.lock().unwrap(),
+        0,
+        "capability-ineligible fallback must never be invoked"
+    );
+    assert_eq!(*tertiary.attempts.lock().unwrap(), 1, "tertiary answered");
+
+    // The skip is observable as a diagnostic event naming the skipped model.
+    assert!(
+        recorder.events().iter().any(|e| matches!(
+            e,
+            AgentEvent::FallbackSkipped { model } if model == "backup"
+        )),
+        "skipped fallback candidate must be surfaced as FallbackSkipped; got kinds {:?}",
+        recorder.kinds()
+    );
+}
+
+#[tokio::test]
+async fn invoke_with_status_reports_completed() {
+    use crate::ids::{ExecutionStatus, HarnessPhase};
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("ok")));
+
+    let result = harness
+        .invoke_with_status(&(), (), RunConfig::new("run-x"), vec![Message::user("hi")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(result.status.status, ExecutionStatus::Completed);
+    assert_eq!(result.status.current_phase, HarnessPhase::Done);
+    assert_eq!(result.status.model_calls, 1);
+    assert_eq!(result.run.text(), Some("ok".to_string()));
+}
+
+// Touch `AgentRun` constructor so the import is meaningful even if all
+// assertions above use returned runs.
+#[test]
+fn agent_run_default_is_empty() {
+    let run = AgentRun::new();
+    assert_eq!(run.model_calls, 0);
+}
+
+// ── Streaming path ────────────────────────────────────────────────────────────
+
+/// Middleware that records every `on_model_delta` invocation and the text of
+/// each delta it observes.
+struct DeltaRecorder {
+    count: Arc<Mutex<usize>>,
+    texts: Arc<Mutex<Vec<String>>>,
+    reasonings: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Middleware<(), ()> for DeltaRecorder {
+    fn name(&self) -> &str {
+        "delta-recorder"
+    }
+    async fn on_model_delta(
+        &self,
+        _ctx: &mut RunContext<()>,
+        _state: &(),
+        delta: &mut crate::model::ModelDelta,
+    ) -> Result<()> {
+        *self.count.lock().unwrap() += 1;
+        self.texts.lock().unwrap().push(delta.content.clone());
+        self.reasonings
+            .lock()
+            .unwrap()
+            .push(delta.reasoning.clone());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn invoke_streaming_fires_on_model_delta_per_delta_and_accumulates() {
+    use crate::testkit::StreamingMock;
+
+    let count = Arc::new(Mutex::new(0usize));
+    let texts = Arc::new(Mutex::new(Vec::new()));
+    let reasonings = Arc::new(Mutex::new(Vec::new()));
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "stream",
+        Arc::new(StreamingMock::from_text_chunks(["Hel", "lo, ", "world"])),
+    );
+    harness.push_middleware(Arc::new(DeltaRecorder {
+        count: count.clone(),
+        texts: texts.clone(),
+        reasonings: reasonings.clone(),
+    }));
+
+    let run = harness
+        .invoke_streaming(
+            &(),
+            (),
+            RunConfig::new("stream-run"),
+            vec![Message::user("hi")],
+        )
+        .await
+        .expect("streaming run succeeds");
+
+    // The merged response equals the concatenated chunks.
+    assert_eq!(run.model_calls, 1);
+    assert_eq!(run.text(), Some("Hello, world".to_string()));
+
+    // on_model_delta fired exactly once per streamed message delta.
+    assert_eq!(*count.lock().unwrap(), 3);
+    assert_eq!(
+        *texts.lock().unwrap(),
+        vec!["Hel".to_string(), "lo, ".to_string(), "world".to_string()]
+    );
+    assert_eq!(
+        *reasonings.lock().unwrap(),
+        vec![String::new(), String::new(), String::new()]
+    );
+}
+
+#[tokio::test]
+async fn invoke_streaming_forwards_reasoning_deltas_to_middleware_and_events() {
+    use crate::testkit::{EventRecorder, StreamingMock};
+
+    let count = Arc::new(Mutex::new(0usize));
+    let texts = Arc::new(Mutex::new(Vec::new()));
+    let reasonings = Arc::new(Mutex::new(Vec::new()));
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "stream",
+        Arc::new(StreamingMock::new(vec![
+            ModelStreamItem::Started,
+            ModelStreamItem::MessageDelta(MessageDelta::reasoning("think ")),
+            ModelStreamItem::MessageDelta(MessageDelta::text("answer")),
+            ModelStreamItem::Completed(ModelResponse::assistant("answer")),
+        ])),
+    );
+    harness.push_middleware(Arc::new(DeltaRecorder {
+        count: count.clone(),
+        texts: texts.clone(),
+        reasonings: reasonings.clone(),
+    }));
+
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(RunConfig::new("stream-run"), ()).with_events(recorder.sink());
+
+    let run = harness
+        .invoke_streaming_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("streaming run succeeds");
+
+    assert_eq!(run.text(), Some("answer".to_string()));
+    assert_eq!(*count.lock().unwrap(), 2);
+    assert_eq!(
+        *texts.lock().unwrap(),
+        vec![String::new(), "answer".to_string()]
+    );
+    assert_eq!(
+        *reasonings.lock().unwrap(),
+        vec!["think ".to_string(), String::new()]
+    );
+
+    let event_reasoning: String = recorder
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            crate::events::AgentEvent::ModelDelta { delta, .. } => Some(delta.reasoning),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(event_reasoning, "think ");
+}
+
+#[tokio::test]
+async fn invoke_streaming_emits_model_delta_events() {
+    use crate::testkit::{EventRecorder, StreamingMock};
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "stream",
+        Arc::new(StreamingMock::from_text_chunks(["a", "b"])),
+    );
+
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(RunConfig::new("stream-run"), ()).with_events(recorder.sink());
+
+    let run = harness
+        .invoke_streaming_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("streaming run succeeds");
+
+    assert_eq!(run.text(), Some("ab".to_string()));
+    let delta_run_ids: Vec<_> = recorder
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            crate::events::AgentEvent::ModelDelta { run_id, .. } => Some(run_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        delta_run_ids.len(),
+        2,
+        "one model.delta event per streamed delta"
+    );
+    // Every delta is attributed to its run, so a UI can route it by lineage
+    // without depending on which (shared) sink it arrived on.
+    assert!(
+        delta_run_ids.iter().all(|id| id.as_str() == "stream-run"),
+        "deltas must carry their run id"
+    );
+}
+
+// ── Cooperative cancellation ──────────────────────────────────────────────────
+
+use crate::cancel::CancellationToken;
+
+/// A model that records how many times it was invoked and always asks for a
+/// tool, so the loop only stops via a limit or cancellation.
+struct CountingToolModel {
+    name: &'static str,
+    invocations: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl ChatModel<()> for CountingToolModel {
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+        *self.invocations.lock().unwrap() += 1;
+        Ok(tool_call_response("call-1", self.name, json!({})))
+    }
+}
+
+/// A tool that cancels the run's token the first time it is called, then
+/// returns a fixed reply.
+struct CancelOnCallTool {
+    token: CancellationToken,
+}
+
+#[async_trait]
+impl Tool<()> for CancelOnCallTool {
+    fn name(&self) -> &str {
+        "cancel_me"
+    }
+    fn description(&self) -> &str {
+        "cancels the run"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new("cancel_me", "cancels the run", json!({"type": "object"}))
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        self.token.cancel();
+        Ok(ToolResult::text(call.id, "cancel_me", "cancelled"))
+    }
+}
+
+#[tokio::test]
+async fn token_cancelled_before_run_yields_cancelled() {
+    let invocations = Arc::new(Mutex::new(0usize));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(CountingToolModel {
+            name: "cancel_me",
+            invocations: invocations.clone(),
+        }),
+    );
+
+    // Pre-cancel the token before the run starts.
+    let token = CancellationToken::new();
+    token.cancel();
+    let ctx = RunContext::new(RunConfig::new("cancel-run"), ()).with_cancellation(token);
+
+    let err = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect_err("a pre-cancelled run must not complete");
+
+    assert!(matches!(err, TinyAgentsError::Cancelled), "got {err:?}");
+    // The model was never invoked: cancellation is observed at the first
+    // checkpoint, before any model call.
+    assert_eq!(*invocations.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn cancelled_mid_run_stops_before_next_model_call() {
+    let invocations = Arc::new(Mutex::new(0usize));
+    let token = CancellationToken::new();
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(CountingToolModel {
+            name: "cancel_me",
+            invocations: invocations.clone(),
+        }),
+    );
+    harness.register_tool(Arc::new(CancelOnCallTool {
+        token: token.clone(),
+    }));
+
+    let ctx = RunContext::new(RunConfig::new("cancel-mid"), ()).with_cancellation(token);
+
+    let err = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("go")])
+        .await
+        .expect_err("cancellation during a tool call must stop the run");
+
+    assert!(matches!(err, TinyAgentsError::Cancelled), "got {err:?}");
+    // Exactly one model call happened (the turn that requested the tool); the
+    // tool cancelled the run, so the loop unwound before the second model call.
+    assert_eq!(*invocations.lock().unwrap(), 1);
+}
+
+/// A model whose unary `invoke` never returns on its own, signalling once it has
+/// started so a test can cancel the run while the call is genuinely in flight.
+struct BlockForeverModel {
+    started: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl ChatModel<()> for BlockForeverModel {
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> Result<ModelResponse> {
+        self.started.notify_one();
+        // Simulate a long buffered (non-streamed) provider call that only ends
+        // when the caller drops this future. Without the loop racing
+        // cancellation against the in-flight call, the run would hang here.
+        std::future::pending::<()>().await;
+        unreachable!("pending future never resolves")
+    }
+}
+
+#[tokio::test]
+async fn cancelled_during_unary_model_call_drops_the_in_flight_call() {
+    let token = CancellationToken::new();
+    let started = Arc::new(tokio::sync::Notify::new());
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(BlockForeverModel {
+            started: started.clone(),
+        }),
+    );
+
+    let ctx = RunContext::new(RunConfig::new("cancel-unary"), ()).with_cancellation(token.clone());
+
+    // Cancel only once the model call has actually begun, so the pre-call
+    // checkpoint cannot short-circuit and we exercise the in-flight race.
+    let canceller = tokio::spawn(async move {
+        started.notified().await;
+        token.cancel();
+    });
+
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        harness.invoke_in_context(&(), ctx, vec![Message::user("hi")]),
+    )
+    .await
+    .expect("run must not hang: a cancel mid unary call must drop the in-flight future")
+    .expect_err("a run cancelled mid model call must not complete");
+
+    assert!(matches!(err, TinyAgentsError::Cancelled), "got {err:?}");
+    canceller.await.unwrap();
+}
+
+// ── Per-model-call timeout ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn slow_model_call_is_timed_out_by_remaining_budget() {
+    use std::time::Duration;
+
+    use crate::testkit::SlowModel;
+
+    // The model sleeps far longer (200ms) than the run's wall-clock budget
+    // (20ms), so the per-call timeout must interrupt it mid-flight and surface a
+    // `Timeout` error rather than waiting for the model to return.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "slow",
+        Arc::new(SlowModel::new(Duration::from_millis(200), "too late")),
+    );
+
+    let config = RunConfig::new("timeout-run").with_timeout_ms(20);
+    let err = harness
+        .invoke(&(), (), config, vec![Message::user("hi")])
+        .await
+        .expect_err("a model call slower than the budget must time out");
+
+    assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn fast_model_call_succeeds_under_same_budget() {
+    // Control: under the same small timeout a fast model completes well within
+    // the budget, proving the timeout only fires on genuinely slow calls.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("fast", Arc::new(MockModel::constant("done")));
+
+    let config = RunConfig::new("fast-run").with_timeout_ms(20);
+    let run = harness
+        .invoke(&(), (), config, vec![Message::user("hi")])
+        .await
+        .expect("a fast model call completes within the budget");
+
+    assert_eq!(run.text(), Some("done".to_string()));
+}
+
+#[tokio::test]
+async fn slow_streaming_model_call_is_timed_out() {
+    use std::time::Duration;
+
+    use crate::testkit::SlowModel;
+
+    // The streaming path must enforce the same per-call budget: the default
+    // `stream` impl delegates to `invoke`, whose sleep exceeds the 20ms budget.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "slow",
+        Arc::new(SlowModel::new(Duration::from_millis(200), "too late")),
+    );
+
+    let config = RunConfig::new("timeout-stream-run").with_timeout_ms(20);
+    let err = harness
+        .invoke_streaming(&(), (), config, vec![Message::user("hi")])
+        .await
+        .expect_err("a slow streaming model call must time out");
+
+    assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn slow_tool_call_is_timed_out_by_remaining_budget() {
+    use std::time::Duration;
+
+    // Regression test: the remaining wall-clock budget was previously only
+    // enforced around model calls, so a hanging tool call could block the run
+    // past its deadline. The tool sleeps far longer (200ms) than the run's
+    // budget (20ms), so the same per-call timeout used for model calls must
+    // interrupt it too.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_tool_call("slow", json!({}))),
+    );
+    harness.register_tool(Arc::new(SlowTool {
+        delay: Duration::from_millis(200),
+    }));
+
+    let config = RunConfig::new("tool-timeout-run").with_timeout_ms(20);
+    let err = harness
+        .invoke(&(), (), config, vec![Message::user("go")])
+        .await
+        .expect_err("a tool call slower than the budget must time out");
+
+    assert!(matches!(err, TinyAgentsError::Timeout(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn per_model_call_ceiling_times_out_a_slow_call_with_run_time_left() {
+    use std::time::Duration;
+
+    use crate::testkit::SlowModel;
+
+    // The run has plenty of wall clock left (60s), but the per-model-call
+    // ceiling (20ms) is tighter than the model's 200ms sleep, so the ceiling
+    // interrupts the call — and the error must name the ceiling, not the run's
+    // remaining budget, so triage can tell a wedged call from an exhausted run.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "slow",
+        Arc::new(SlowModel::new(Duration::from_millis(200), "too late")),
+    );
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default().with_max_model_call_ms(Some(20)),
+        ..RunPolicy::default()
+    });
+
+    let config = RunConfig::new("per-call-cap-run").with_timeout_ms(60_000);
+    let err = harness
+        .invoke(&(), (), config, vec![Message::user("hi")])
+        .await
+        .expect_err("a call slower than the per-call ceiling must time out");
+
+    match &err {
+        TinyAgentsError::Timeout(msg) => {
+            assert!(msg.contains("per-model-call ceiling"), "{msg}");
+        }
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn per_model_call_ceiling_bounds_calls_without_any_run_deadline() {
+    use std::time::Duration;
+
+    use crate::testkit::SlowModel;
+
+    // With no run timeout and no policy wall clock, a model call used to be
+    // awaited unbounded. The per-call ceiling alone must bound it.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "slow",
+        Arc::new(SlowModel::new(Duration::from_millis(200), "too late")),
+    );
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default().with_max_model_call_ms(Some(20)),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("the ceiling alone must bound an otherwise-unbounded call");
+
+    match &err {
+        TinyAgentsError::Timeout(msg) => {
+            assert!(msg.contains("per-model-call ceiling"), "{msg}");
+        }
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn run_remainder_bounds_a_model_call_when_tighter_than_the_ceiling() {
+    use std::time::Duration;
+
+    use crate::testkit::SlowModel;
+
+    // A generous ceiling (10s) never extends a call past the run's own
+    // deadline (20ms): the tighter source wins, and the error blames the
+    // remaining wall-clock budget.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "slow",
+        Arc::new(SlowModel::new(Duration::from_millis(200), "too late")),
+    );
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default().with_max_model_call_ms(Some(10_000)),
+        ..RunPolicy::default()
+    });
+
+    let config = RunConfig::new("remainder-tighter-run").with_timeout_ms(20);
+    let err = harness
+        .invoke(&(), (), config, vec![Message::user("hi")])
+        .await
+        .expect_err("the run deadline must still bound the call");
+
+    match &err {
+        TinyAgentsError::Timeout(msg) => {
+            assert!(msg.contains("remaining wall-clock budget"), "{msg}");
+        }
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn per_model_call_ceiling_does_not_bound_tool_calls() {
+    use std::time::Duration;
+
+    // A 20ms per-model-call ceiling with a 100ms tool: tool calls keep the
+    // remaining-only budget (a sub-agent delegation is a tool call wrapping an
+    // entire child run), so the run completes despite the tool outliving the
+    // model-call ceiling many times over.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "slow", json!({})),
+            text_response("done", 0, 0),
+        ])),
+    );
+    harness.register_tool(Arc::new(SlowTool {
+        delay: Duration::from_millis(100),
+    }));
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default().with_max_model_call_ms(Some(20)),
+        ..RunPolicy::default()
+    });
+
+    let config = RunConfig::new("tool-uncapped-run").with_timeout_ms(60_000);
+    let run = harness
+        .invoke(&(), (), config, vec![Message::user("go")])
+        .await
+        .expect("the tool call must not inherit the per-model-call ceiling");
+
+    assert_eq!(run.text(), Some("done".to_string()));
+}
+
+#[tokio::test]
+async fn inherited_tool_timeout_is_enforced_without_a_run_deadline() {
+    use std::time::Duration;
+
+    let settings = ToolTimeoutSettings::new(20, 1, 1_000, 0);
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.with_tool_timeout_settings(settings.clone());
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "policy_slow", json!({})),
+            text_response("recovered", 2, 1),
+        ])),
+    );
+    harness.register_tool(Arc::new(PolicySlowTool {
+        name: "policy_slow",
+        delay: Duration::from_millis(200),
+        timeout: ToolTimeout::Inherit,
+    }));
+
+    let run = harness
+        .invoke(
+            &(),
+            (),
+            RunConfig::new("inherited-tool-timeout-run"),
+            vec![Message::user("go")],
+        )
+        .await
+        .expect("a per-tool timeout should be recoverable by the model");
+
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert!(run.messages[2].text().contains("timed out after 20 ms"));
+
+    settings.set_inherited_timeout_ms(5);
+    assert_eq!(settings.inherited_timeout(), Some(Duration::from_millis(5)));
+}
+
+#[tokio::test]
+async fn tool_timeout_unwinds_wrap_middleware() {
+    use std::time::Duration;
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.with_tool_timeout_settings(ToolTimeoutSettings::new(10, 1, 1_000, 0));
+    harness.push_tool_middleware(Arc::new(StampToolWrap));
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "policy_slow", json!({})),
+            text_response("recovered", 2, 1),
+        ])),
+    );
+    harness.register_tool(Arc::new(PolicySlowTool {
+        name: "policy_slow",
+        delay: Duration::from_millis(200),
+        timeout: ToolTimeout::Inherit,
+    }));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("middleware should unwind after the inner tool times out");
+
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert!(run.messages[2].text().starts_with("[wrapped]"));
+    assert!(run.messages[2].text().contains("timed out after 10 ms"));
+}
+
+#[tokio::test]
+async fn tool_timeout_resolves_after_wrap_middleware_mutation() {
+    use std::time::Duration;
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.with_tool_timeout_settings(ToolTimeoutSettings::new(10, 1, 1_000, 0));
+    harness.push_tool_middleware(Arc::new(UnboundToolWrap));
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("call-1", "policy_slow", json!({})),
+            text_response("done", 2, 1),
+        ])),
+    );
+    harness.register_tool(Arc::new(PolicySlowTool {
+        name: "policy_slow",
+        delay: Duration::from_millis(30),
+        timeout: ToolTimeout::Inherit,
+    }));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("the middleware-mutated unbounded policy should reach the tool");
+
+    assert_eq!(run.text(), Some("done".to_string()));
+    assert_eq!(run.messages[2].text(), "too late");
+}
+
+#[tokio::test]
+async fn parallel_tool_timeouts_return_ordered_recoverable_errors() {
+    use std::time::Duration;
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.with_tool_timeout_settings(ToolTimeoutSettings::new(10, 1, 1_000, 0));
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            multi_tool_call_response(vec![("call-a", "slow_a"), ("call-b", "slow_b")]),
+            text_response("recovered", 2, 1),
+        ])),
+    );
+    for name in ["slow_a", "slow_b"] {
+        harness.register_tool(Arc::new(PolicySlowTool {
+            name,
+            delay: Duration::from_millis(200),
+            timeout: ToolTimeout::Inherit,
+        }));
+    }
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("parallel tool timeouts should be recoverable");
+
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert!(run.messages[2].text().contains("slow_a"));
+    assert!(run.messages[3].text().contains("slow_b"));
+}
+
+// ── Response caching ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn response_cache_serves_repeated_request_without_calling_model() {
+    use crate::cache::InMemoryResponseCache;
+    use crate::testkit::EventRecorder;
+
+    // A scripted model that would yield *different* text on a second call; if
+    // the cache works the second run must reuse the first response, proving the
+    // model was not invoked again.
+    let model = Arc::new(MockModel::with_responses(vec![
+        text_response("first-answer", 4, 2),
+        text_response("second-answer", 4, 2),
+    ]));
+
+    let cache = Arc::new(InMemoryResponseCache::new());
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", model.clone());
+    harness.with_response_cache(cache.clone());
+
+    // First run: cache miss, model invoked once.
+    let recorder1 = EventRecorder::new();
+    let ctx1 = RunContext::new(RunConfig::new("cache-run"), ()).with_events(recorder1.sink());
+    let run1 = harness
+        .invoke_in_context(&(), ctx1, vec![Message::user("same question")])
+        .await
+        .expect("first run succeeds");
+
+    assert_eq!(model.call_count(), 1, "model invoked once on first run");
+    assert_eq!(run1.text(), Some("first-answer".to_string()));
+    assert!(
+        recorder1.kinds().iter().any(|k| k == "cache.miss"),
+        "first run should emit a cache miss"
+    );
+    assert!(
+        !recorder1.kinds().iter().any(|k| k == "cache.hit"),
+        "first run should not emit a cache hit"
+    );
+
+    // Second run with the SAME input: served from cache, model NOT invoked.
+    let recorder2 = EventRecorder::new();
+    let ctx2 = RunContext::new(RunConfig::new("cache-run-2"), ()).with_events(recorder2.sink());
+    let run2 = harness
+        .invoke_in_context(&(), ctx2, vec![Message::user("same question")])
+        .await
+        .expect("second run succeeds");
+
+    assert_eq!(
+        model.call_count(),
+        1,
+        "model must NOT be invoked again on a cache hit"
+    );
+    assert_eq!(
+        run2.text(),
+        Some("first-answer".to_string()),
+        "cached response text is reused"
+    );
+    assert!(
+        recorder2.kinds().iter().any(|k| k == "cache.hit"),
+        "second run should emit a cache hit"
+    );
+    // Accounting stays consistent: the hit is still counted as a model call.
+    assert_eq!(run2.model_calls, 1);
+}
+
+#[tokio::test]
+async fn multi_turn_request_with_prior_assistant_turn_is_not_cached() {
+    use crate::cache::InMemoryResponseCache;
+
+    // A request whose transcript already contains an assistant turn can never be
+    // re-served identically, so it must bypass the cache entirely: the model is
+    // invoked on every run even for identical multi-turn input.
+    let model = Arc::new(MockModel::with_responses(vec![
+        text_response("a1", 4, 2),
+        text_response("a2", 4, 2),
+    ]));
+    let cache = Arc::new(InMemoryResponseCache::new());
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", model.clone());
+    harness.with_response_cache(cache.clone());
+
+    let convo = vec![
+        Message::user("q1"),
+        Message::assistant("prior answer"),
+        Message::user("q2"),
+    ];
+
+    harness
+        .invoke_default(&(), convo.clone())
+        .await
+        .expect("first run succeeds");
+    harness
+        .invoke_default(&(), convo)
+        .await
+        .expect("second run succeeds");
+
+    assert_eq!(
+        model.call_count(),
+        2,
+        "multi-turn requests bypass the cache, so the model runs each time"
+    );
+}
+
+#[tokio::test]
+async fn no_cache_attached_invokes_model_each_run() {
+    // Control: without a cache the model is invoked on every run.
+    let model = Arc::new(MockModel::echo());
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", model.clone());
+
+    harness
+        .invoke_default(&(), vec![Message::user("hello")])
+        .await
+        .expect("first run succeeds");
+    harness
+        .invoke_default(&(), vec![Message::user("hello")])
+        .await
+        .expect("second run succeeds");
+
+    assert_eq!(
+        model.call_count(),
+        2,
+        "without a cache the model is invoked on every run"
+    );
+}
+
+#[tokio::test]
+async fn request_cache_policy_overrides_run_policy_to_disable_caching() {
+    use crate::cache::{CachePolicy, InMemoryResponseCache};
+
+    // A middleware that disables caching for the call via the request-level
+    // cache policy, overriding the harness default (which is enabled).
+    struct DisableCaching;
+    #[async_trait]
+    impl Middleware<(), ()> for DisableCaching {
+        fn name(&self) -> &str {
+            "disable-caching"
+        }
+        async fn before_model(
+            &self,
+            _ctx: &mut RunContext<()>,
+            _state: &(),
+            request: &mut ModelRequest,
+        ) -> Result<()> {
+            request.cache_policy = Some(CachePolicy {
+                response_cache_enabled: false,
+                protect_prompt_prefix: false,
+                ..CachePolicy::default()
+            });
+            Ok(())
+        }
+    }
+
+    let model = Arc::new(MockModel::echo());
+    let cache = Arc::new(InMemoryResponseCache::new());
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", model.clone());
+    harness.with_response_cache(cache.clone());
+    harness.push_middleware(Arc::new(DisableCaching));
+
+    harness
+        .invoke_default(&(), vec![Message::user("hello")])
+        .await
+        .expect("first run succeeds");
+    harness
+        .invoke_default(&(), vec![Message::user("hello")])
+        .await
+        .expect("second run succeeds");
+
+    assert_eq!(
+        model.call_count(),
+        2,
+        "request-level cache_policy disabling caching must bypass the cache"
+    );
+}
+
+/// Middleware whose `before_model` hook always fails, counting how many times
+/// the failure is delivered back to it through `on_error`.
+struct FailingHookMiddleware {
+    on_error_calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl Middleware<(), ()> for FailingHookMiddleware {
+    fn name(&self) -> &str {
+        "failing_hook"
+    }
+    async fn before_model(
+        &self,
+        _ctx: &mut RunContext<()>,
+        _state: &(),
+        _request: &mut ModelRequest,
+    ) -> Result<()> {
+        Err(TinyAgentsError::Model("hook failed".to_string()))
+    }
+    async fn on_error(&self, _ctx: &mut RunContext<()>, _error: &TinyAgentsError) -> Result<()> {
+        *self.on_error_calls.lock().unwrap() += 1;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn hook_failure_delivers_on_error_exactly_once() {
+    // Regression test: the stack fans `on_error` out itself before propagating a
+    // failed lifecycle hook, and the driver used to run the same hook again for
+    // the propagated error — so a guardrail counting failures, alerting, or
+    // compensating did it twice for one failure.
+    let calls = Arc::new(Mutex::new(0usize));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("hi")));
+    harness.push_middleware(Arc::new(FailingHookMiddleware {
+        on_error_calls: calls.clone(),
+    }));
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect_err("the failing hook aborts the run");
+    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
+    assert_eq!(*calls.lock().unwrap(), 1, "one failure, one on_error");
+}
+
+/// Middleware that requests an early stop-with-final control outcome after the
+/// first model response, exercising the harness control channel (gap #13).
+struct EarlyStopMiddleware;
+
+#[async_trait]
+impl Middleware<(), ()> for EarlyStopMiddleware {
+    fn name(&self) -> &str {
+        "early_stop"
+    }
+    async fn after_model(
+        &self,
+        ctx: &mut RunContext<()>,
+        _state: &(),
+        _response: &mut ModelResponse,
+    ) -> Result<()> {
+        ctx.request_control(crate::context::MiddlewareControl::StopWithFinal(
+            "stopped early".into(),
+        ));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn middleware_control_stops_loop_with_final_response() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    // The model asks for a tool; without control the loop would execute it and
+    // continue, but the control outcome stops the run first.
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_tool_call("lookup", json!({}))),
+    );
+    harness.register_tool(Arc::new(FakeTool::new("lookup", "out")));
+    harness.push_middleware(Arc::new(EarlyStopMiddleware));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("control stop yields a run");
+    assert_eq!(run.final_response.unwrap().text(), "stopped early");
+    // The tool was never executed because the loop stopped first.
+    assert_eq!(run.tool_calls, 0);
+}
+
+/// Middleware that requests an interrupt after the first model response.
+struct InterruptMiddleware;
+
+#[async_trait]
+impl Middleware<(), ()> for InterruptMiddleware {
+    fn name(&self) -> &str {
+        "interrupt_ctl"
+    }
+    async fn after_model(
+        &self,
+        ctx: &mut RunContext<()>,
+        _state: &(),
+        _response: &mut ModelResponse,
+    ) -> Result<()> {
+        ctx.request_control(crate::context::MiddlewareControl::Interrupt {
+            node: "review".into(),
+            message: "needs approval".into(),
+        });
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn middleware_control_can_interrupt_run() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("hi")));
+    harness.push_middleware(Arc::new(InterruptMiddleware));
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect_err("control interrupt surfaces as an error");
+    match err {
+        TinyAgentsError::Interrupted { node, message } => {
+            assert_eq!(node, "review");
+            assert_eq!(message, "needs approval");
+        }
+        other => panic!("expected Interrupted, got {other:?}"),
+    }
+}
+
+/// A model that records the tool schemas presented on each `invoke` and replays
+/// scripted responses in order. Used to prove the loop exposes the registered
+/// tool set on *every* turn, not just the first.
+struct ToolCapturingModel {
+    responses: Mutex<std::collections::VecDeque<ModelResponse>>,
+    seen_tools: Arc<Mutex<Vec<Vec<ToolSchema>>>>,
+}
+
+#[async_trait]
+impl ChatModel<()> for ToolCapturingModel {
+    async fn invoke(&self, _state: &(), request: ModelRequest) -> Result<ModelResponse> {
+        self.seen_tools.lock().unwrap().push(request.tools.clone());
+        let next = self.responses.lock().unwrap().pop_front();
+        next.ok_or_else(|| TinyAgentsError::Validation("no scripted response left".into()))
+    }
+}
+
+/// Regression test for the per-run tool-schema cache: hoisting
+/// `self.tools.schemas()` out of the loop must not change the tools the model
+/// sees on any turn. A two-turn run (tool call, then final text) must present
+/// the identical, non-empty schema set on both turns.
+#[tokio::test]
+async fn tool_schemas_are_stable_across_turns() {
+    let seen_tools = Arc::new(Mutex::new(Vec::new()));
+    let model = ToolCapturingModel {
+        responses: Mutex::new(
+            vec![
+                tool_call_response("c1", "spin", json!({})),
+                text_response("done", 5, 2),
+            ]
+            .into(),
+        ),
+        seen_tools: Arc::clone(&seen_tools),
+    };
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(model));
+    harness.register_tool(Arc::new(FakeTool::new("spin", "again")));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("run succeeds");
+    assert_eq!(run.text(), Some("done".to_string()));
+
+    let seen = seen_tools.lock().unwrap();
+    assert_eq!(seen.len(), 2, "model should be invoked twice");
+    assert!(
+        !seen[0].is_empty(),
+        "first turn must expose the registered tool schema"
+    );
+    assert_eq!(
+        seen[0], seen[1],
+        "cached schemas must reach the model identically on every turn"
+    );
+    assert_eq!(seen[0][0].name, "spin");
+}
+
+// ── Explicit model override fall-through diagnostics ────────────────────────
+
+/// Middleware that stamps an explicit model override onto every request.
+struct OverrideModelMiddleware(&'static str);
+
+#[async_trait]
+impl Middleware<(), ()> for OverrideModelMiddleware {
+    fn name(&self) -> &str {
+        "override_model"
+    }
+
+    async fn before_model(
+        &self,
+        _ctx: &mut RunContext<()>,
+        _state: &(),
+        request: &mut ModelRequest,
+    ) -> Result<()> {
+        request.model = Some(self.0.to_string());
+        Ok(())
+    }
+}
+
+/// When an explicit request override cannot be honored (here: an unregistered
+/// model name) resolution falls through to the registry default by documented
+/// fail-closed semantics — but the fall-through must be observable via
+/// `ModelOverrideSkipped` rather than silent.
+#[tokio::test]
+async fn skipped_model_override_emits_diagnostic_event() {
+    use crate::events::AgentEvent;
+    use crate::testkit::EventRecorder;
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("ok")));
+    harness.push_middleware(Arc::new(OverrideModelMiddleware("missing-model")));
+
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(RunConfig::new("override-run"), ()).with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("run falls through to the default model");
+    assert_eq!(run.text(), Some("ok".to_string()));
+
+    assert!(
+        recorder.events().iter().any(|e| matches!(
+            e,
+            AgentEvent::ModelOverrideSkipped { requested, resolved }
+                if requested == "missing-model" && resolved == "mock"
+        )),
+        "the skipped override must be surfaced as a diagnostic event; got kinds {:?}",
+        recorder.kinds()
+    );
+}
+
+/// An override that resolution honors must not emit the diagnostic.
+#[tokio::test]
+async fn honored_model_override_emits_no_diagnostic_event() {
+    use crate::testkit::EventRecorder;
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("default")));
+    harness.register_model("special", Arc::new(MockModel::constant("special answer")));
+    harness.push_middleware(Arc::new(OverrideModelMiddleware("special")));
+
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(RunConfig::new("override-ok-run"), ()).with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("run uses the override");
+    assert_eq!(run.text(), Some("special answer".to_string()));
+    assert!(
+        !recorder
+            .kinds()
+            .iter()
+            .any(|k| k == "model.override_skipped"),
+        "an honored override must not emit the diagnostic"
+    );
+}
+
+// ── Parallel tool execution ─────────────────────────────────────────────────
+
+/// A tool that tracks how many probe tools are in flight at once (and the
+/// maximum observed), sleeping briefly so overlapping calls are observable.
+struct ConcurrencyProbeTool {
+    name: &'static str,
+    reply: &'static str,
+    delay: std::time::Duration,
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    max_seen: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl Tool<()> for ConcurrencyProbeTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        "concurrency probe"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(self.name, "concurrency probe", json!({"type": "object"}))
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        use std::sync::atomic::Ordering;
+        let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_seen.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(ToolResult::text(call.id, self.name, self.reply))
+    }
+}
+
+/// Builds an assistant response carrying several tool calls in one turn.
+fn multi_tool_call_response(calls: Vec<(&str, &str)>) -> ModelResponse {
+    let tool_calls = calls
+        .into_iter()
+        .map(|(id, name)| ToolCall::new(id, name, json!({})))
+        .collect::<Vec<_>>();
+    ModelResponse {
+        message: AssistantMessage {
+            id: Some("msg-multi".to_string()),
+            content: Vec::new(),
+            tool_calls,
+            usage: Some(Usage::new(7, 3)),
+        },
+        usage: Some(Usage::new(7, 3)),
+        finish_reason: Some("tool_calls".to_string()),
+        raw: None,
+        resolved_model: None,
+        continue_turn: None,
+        served_from_cache: false,
+    }
+}
+
+/// Registers two probe tools sharing one active/max counter pair.
+fn probe_pair(
+    harness: &mut AgentHarness<()>,
+    delay_ms: (u64, u64),
+) -> Arc<std::sync::atomic::AtomicUsize> {
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let max_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    harness.register_tool(Arc::new(ConcurrencyProbeTool {
+        name: "alpha",
+        reply: "alpha-out",
+        delay: std::time::Duration::from_millis(delay_ms.0),
+        active: active.clone(),
+        max_seen: max_seen.clone(),
+    }));
+    harness.register_tool(Arc::new(ConcurrencyProbeTool {
+        name: "beta",
+        reply: "beta-out",
+        delay: std::time::Duration::from_millis(delay_ms.1),
+        active,
+        max_seen: max_seen.clone(),
+    }));
+    max_seen
+}
+
+#[tokio::test]
+async fn independent_tool_calls_in_one_turn_run_concurrently() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            multi_tool_call_response(vec![("call-a", "alpha"), ("call-b", "beta")]),
+            text_response("done", 4, 2),
+        ])),
+    );
+    let max_seen = probe_pair(&mut harness, (80, 80));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(run.tool_calls, 2);
+    assert_eq!(
+        max_seen.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "both tools must be in flight at once (latency ~max, not ~sum)"
+    );
+}
+
+#[tokio::test]
+async fn parallel_tool_results_keep_original_call_order_and_ids() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            multi_tool_call_response(vec![("call-a", "alpha"), ("call-b", "beta")]),
+            text_response("done", 4, 2),
+        ])),
+    );
+    // alpha finishes *after* beta; the transcript must still list alpha first.
+    let _ = probe_pair(&mut harness, (120, 0));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("run succeeds");
+
+    // user, assistant(2 tool calls), tool(alpha), tool(beta), assistant(final).
+    assert_eq!(run.messages.len(), 5);
+    let Message::Tool(first) = &run.messages[2] else {
+        panic!("expected tool message at index 2");
+    };
+    let Message::Tool(second) = &run.messages[3] else {
+        panic!("expected tool message at index 3");
+    };
+    assert_eq!(first.tool_call_id, "call-a");
+    assert_eq!(run.messages[2].text(), "alpha-out");
+    assert_eq!(second.tool_call_id, "call-b");
+    assert_eq!(run.messages[3].text(), "beta-out");
+}
+
+#[tokio::test]
+async fn tool_wrap_middleware_forces_serial_execution() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            multi_tool_call_response(vec![("call-a", "alpha"), ("call-b", "beta")]),
+            text_response("done", 4, 2),
+        ])),
+    );
+    let max_seen = probe_pair(&mut harness, (40, 40));
+    // A tool-wrap middleware holds `&mut RunContext` across each wrapped call,
+    // so the loop must fall back to serial execution.
+    harness.push_tool_middleware(Arc::new(StampToolWrap));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(run.tool_calls, 2);
+    assert_eq!(
+        max_seen.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "wrapped tool calls must never overlap"
+    );
+    // The wrap still fired around each call.
+    assert_eq!(run.messages[2].text(), "[wrapped] alpha-out");
+    assert_eq!(run.messages[3].text(), "[wrapped] beta-out");
+}
+
+#[tokio::test]
+async fn unknown_tool_recovery_keeps_its_slot_in_a_parallel_turn() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            multi_tool_call_response(vec![("call-x", "missing"), ("call-b", "beta")]),
+            text_response("done", 4, 2),
+        ])),
+    );
+    let _ = probe_pair(&mut harness, (0, 0));
+    harness.with_policy(RunPolicy {
+        unknown_tool: UnknownToolPolicy::ReturnToolError,
+        ..Default::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("run recovers from the unknown tool");
+
+    assert_eq!(run.tool_calls, 2, "recovery consumes a tool-call slot");
+    let Message::Tool(first) = &run.messages[2] else {
+        panic!("expected tool message at index 2");
+    };
+    let Message::Tool(second) = &run.messages[3] else {
+        panic!("expected tool message at index 3");
+    };
+    // The recovery message occupies the unknown call's original slot.
+    assert_eq!(first.tool_call_id, "call-x");
+    assert!(run.messages[2].text().contains("unknown tool `missing`"));
+    assert_eq!(second.tool_call_id, "call-b");
+    assert_eq!(run.messages[3].text(), "beta-out");
+}
+
+// ── invoke_stream (caller-consumable streaming) ──────────────────────────────
+
+/// Collects an `invoke_stream` run into a vec and returns (events, terminal).
+async fn collect_stream(items: Vec<AgentStreamItem>) -> (Vec<AgentEvent>, AgentStreamItem) {
+    let terminal = items
+        .last()
+        .cloned()
+        .expect("stream must yield at least a terminal item");
+    // Exactly one terminal, and it is the final item.
+    let terminals = items
+        .iter()
+        .filter(|i| !matches!(i, AgentStreamItem::Event(_)))
+        .count();
+    assert_eq!(terminals, 1, "exactly one terminal item");
+    assert!(
+        !matches!(
+            items[..items.len() - 1].last(),
+            Some(AgentStreamItem::Completed(_))
+        ) && !matches!(
+            items[..items.len() - 1].last(),
+            Some(AgentStreamItem::Failed(_))
+        ),
+        "terminal must be last"
+    );
+    let events = items
+        .into_iter()
+        .filter_map(|i| match i {
+            AgentStreamItem::Event(r) => Some(r.event),
+            _ => None,
+        })
+        .collect();
+    (events, terminal)
+}
+
+#[tokio::test]
+async fn invoke_stream_yields_events_then_completed() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("hello there")));
+
+    let items: Vec<AgentStreamItem> = harness
+        .invoke_stream(
+            &(),
+            (),
+            RunConfig::new("run-stream"),
+            vec![Message::user("hi")],
+        )
+        .collect()
+        .await;
+    let (events, terminal) = collect_stream(items).await;
+
+    match terminal {
+        AgentStreamItem::Completed(run) => {
+            assert_eq!(run.text().as_deref(), Some("hello there"));
+        }
+        other => panic!("expected Completed terminal, got {other:?}"),
+    }
+    // Live events flowed before the terminal: run lifecycle + a model delta.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::RunStarted { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ModelDelta { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::RunCompleted { .. }))
+    );
+}
+
+#[tokio::test]
+async fn invoke_stream_in_context_preserves_caller_context() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("hello there")));
+    let ctx = RunContext::new(
+        RunConfig::new("caller-run").with_thread("caller-thread"),
+        (),
+    );
+
+    let items: Vec<AgentStreamItem> = harness
+        .invoke_stream_in_context(&(), ctx, vec![Message::user("hi")])
+        .collect()
+        .await;
+    let (events, terminal) = collect_stream(items).await;
+
+    let started = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::RunStarted { run_id, thread_id } => Some((run_id, thread_id)),
+            _ => None,
+        })
+        .expect("RunStarted event");
+    assert_eq!(started.0.as_str(), "caller-run");
+    assert_eq!(
+        started.1.as_ref().map(|thread| thread.as_str()),
+        Some("caller-thread")
+    );
+    match terminal {
+        AgentStreamItem::Completed(run) => {
+            assert_eq!(run.text().as_deref(), Some("hello there"));
+        }
+        other => panic!("expected Completed terminal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn invoke_stream_in_context_unsubscribes_channel_listener() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("hello there")));
+    let events = EventSink::new();
+    let ctx = RunContext::new(RunConfig::new("shared-events-run"), ()).with_events(events.clone());
+
+    assert_eq!(events.listener_count(), 0);
+    let items: Vec<AgentStreamItem> = harness
+        .invoke_stream_in_context(&(), ctx, vec![Message::user("hi")])
+        .collect()
+        .await;
+    let (_events, terminal) = collect_stream(items).await;
+
+    assert!(matches!(terminal, AgentStreamItem::Completed(_)));
+    assert_eq!(events.listener_count(), 0);
+}
+
+#[test]
+fn invoke_stream_in_context_stream_is_send() {
+    fn assert_send<T: Send>(_value: T) {}
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::constant("hello there")));
+    let ctx = RunContext::new(RunConfig::new("send-stream-run"), ());
+
+    assert_send(harness.invoke_stream_in_context(&(), ctx, vec![Message::user("hi")]));
+}
+
+#[tokio::test]
+async fn invoke_stream_surfaces_tool_lifecycle() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("c1", "spin", json!({})),
+            text_response("done", 5, 2),
+        ])),
+    );
+    harness.register_tool(Arc::new(FakeTool::new("spin", "again")));
+
+    let items: Vec<AgentStreamItem> = harness
+        .invoke_stream(
+            &(),
+            (),
+            RunConfig::new("run-tools"),
+            vec![Message::user("go")],
+        )
+        .collect()
+        .await;
+    let (events, terminal) = collect_stream(items).await;
+
+    let started = events.iter().position(
+        |e| matches!(e, AgentEvent::ToolStarted { tool_name, .. } if tool_name == "spin"),
+    );
+    let completed = events.iter().position(
+        |e| matches!(e, AgentEvent::ToolCompleted { tool_name, .. } if tool_name == "spin"),
+    );
+    assert!(started.is_some(), "ToolStarted for spin must be streamed");
+    assert!(
+        completed.is_some(),
+        "ToolCompleted for spin must be streamed"
+    );
+    assert!(
+        started < completed,
+        "ToolStarted must precede ToolCompleted in the stream"
+    );
+    match terminal {
+        AgentStreamItem::Completed(run) => assert_eq!(run.text().as_deref(), Some("done")),
+        other => panic!("expected Completed terminal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn invoke_stream_yields_failed_terminal_on_error() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    // A model that always asks for the tool, capped so the loop trips the limit.
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_tool_call("spin", json!({}))),
+    );
+    harness.register_tool(Arc::new(FakeTool::new("spin", "again")));
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default().with_max_model_calls(1),
+        ..RunPolicy::default()
+    });
+
+    let items: Vec<AgentStreamItem> = harness
+        .invoke_stream(
+            &(),
+            (),
+            RunConfig::new("run-fail"),
+            vec![Message::user("go")],
+        )
+        .collect()
+        .await;
+    let (_events, terminal) = collect_stream(items).await;
+
+    match terminal {
+        AgentStreamItem::Failed(message) => {
+            assert!(message.contains("max model calls"), "got: {message}");
+        }
+        other => panic!("expected Failed terminal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn invoke_stream_scripted_incremental_deltas_surface_reasoning() {
+    // A scripted stream drives truly incremental deltas — a reasoning fragment
+    // and two text fragments — which must all surface on the event stream.
+    let script = vec![
+        ModelStreamItem::Started,
+        ModelStreamItem::MessageDelta(MessageDelta::reasoning("thinking hard")),
+        ModelStreamItem::MessageDelta(MessageDelta::text("hel")),
+        ModelStreamItem::MessageDelta(MessageDelta::text("lo")),
+        ModelStreamItem::Completed(ModelResponse::assistant("hello")),
+    ];
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::new(MockModel::streaming_script(script)));
+
+    let items: Vec<AgentStreamItem> = harness
+        .invoke_stream(
+            &(),
+            (),
+            RunConfig::new("run-script"),
+            vec![Message::user("hi")],
+        )
+        .collect()
+        .await;
+    let (events, terminal) = collect_stream(items).await;
+
+    // The scripted reasoning fragment surfaces on a ModelDelta event.
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::ModelDelta { delta, .. } if delta.reasoning == "thinking hard")
+    ));
+    // Text arrives as multiple incremental deltas, not one merged blob.
+    let text_deltas = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::ModelDelta { delta, .. } if !delta.text.is_empty()))
+        .count();
+    assert!(
+        text_deltas >= 2,
+        "expected incremental text deltas, got {text_deltas}"
+    );
+
+    match terminal {
+        AgentStreamItem::Completed(run) => assert_eq!(run.text().as_deref(), Some("hello")),
+        other => panic!("expected Completed terminal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn mock_streaming_script_invoke_folds_items_to_response() {
+    // `invoke` on a scripted-stream mock folds the items into the equivalent
+    // unary response (delta-only script → reconstructed from deltas).
+    let model = MockModel::streaming_script(vec![
+        ModelStreamItem::MessageDelta(MessageDelta::text("ab")),
+        ModelStreamItem::MessageDelta(MessageDelta::text("cd")),
+    ]);
+    let response = ChatModel::invoke(&model, &(), ModelRequest::new(vec![]))
+        .await
+        .expect("fold succeeds");
+    assert_eq!(response.text(), "abcd");
+}
+
+#[tokio::test]
+async fn tool_completed_event_carries_outcome() {
+    use crate::events::RecordingListener;
+
+    // A tool that fails: its ToolCompleted event must carry the failure message,
+    // a real duration, and the output size — from the event itself, not a
+    // side-channel — so journal-backed exporters can render the outcome.
+    struct FailTool;
+    #[async_trait]
+    impl Tool<()> for FailTool {
+        fn name(&self) -> &str {
+            "boom"
+        }
+        fn description(&self) -> &str {
+            "always fails"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new("boom", "always fails", json!({ "type": "object" }))
+        }
+        async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+            Ok(ToolResult {
+                call_id: call.id,
+                name: "boom".to_string(),
+                content: "nope".to_string(),
+                raw: None,
+                error: Some("kaboom".to_string()),
+                elapsed_ms: 0,
+            })
+        }
+    }
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response("c1", "boom", json!({})),
+            text_response("done", 1, 1),
+        ])),
+    );
+    harness.register_tool(Arc::new(FailTool));
+
+    let recorder = Arc::new(RecordingListener::new());
+    let ctx: RunContext<()> = RunContext::new(RunConfig::new("run-tc"), ());
+    ctx.events.subscribe(recorder.clone());
+    harness
+        .invoke_in_context(&(), ctx, vec![Message::user("go")])
+        .await
+        .expect("run succeeds");
+
+    let (error, duration_ms, output_bytes) = recorder
+        .events()
+        .into_iter()
+        .find_map(|record| match record.event {
+            AgentEvent::ToolCompleted {
+                tool_name,
+                error,
+                duration_ms,
+                output_bytes,
+                ..
+            } if tool_name == "boom" => Some((error, duration_ms, output_bytes)),
+            _ => None,
+        })
+        .expect("a ToolCompleted event for `boom`");
+
+    assert_eq!(
+        error.as_deref(),
+        Some("kaboom"),
+        "failure message on the event"
+    );
+    assert!(duration_ms.is_some(), "wall-clock duration present");
+    assert_eq!(output_bytes, Some(4), "\"nope\".len() == 4");
+}
+
+// ── `ModelResponse::continue_turn` ───────────────────────────────────────────
+
+/// A tool-less response that keeps the floor by carrying `nudge`.
+fn continuing(text: &str, nudge: &str) -> ModelResponse {
+    let mut response = ModelResponse::assistant(text.to_string());
+    response.continue_turn = Some(nudge.to_string());
+    response
+}
+
+/// A tool-less response normally ends the turn. `continue_turn` overrides that:
+/// the loop appends the carried nudge as the next user turn and asks for another
+/// reply — which is what lets a model speak before it acts.
+#[tokio::test]
+async fn continue_turn_keeps_the_floor_and_appends_the_nudge() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            continuing("let me look that up", "(next)"),
+            ModelResponse::assistant("found it".to_string()),
+        ])),
+    );
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(
+        run.model_calls, 2,
+        "the continuing reply must not end the turn"
+    );
+    assert_eq!(run.text(), Some("found it".to_string()));
+    // user, assistant(continuing), user(nudge), assistant(final)
+    assert_eq!(run.messages.len(), 4);
+    assert_eq!(run.messages[2].text(), "(next)");
+}
+
+/// The default is `None`, which must leave the historical behaviour byte-for-byte
+/// intact: the first tool-less reply ends the turn.
+#[tokio::test]
+async fn no_continue_turn_ends_on_the_first_tool_less_reply() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            ModelResponse::assistant("done".to_string()),
+            ModelResponse::assistant("never reached".to_string()),
+        ])),
+    );
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(run.model_calls, 1);
+    assert_eq!(run.text(), Some("done".to_string()));
+}
+
+/// Continuing needs no cap of its own: each continue costs one model call, so a
+/// model that never stops is already bounded by `max_model_calls`.
+#[tokio::test]
+async fn an_endless_continue_is_bounded_by_max_model_calls() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            continuing("still going", "(next)"),
+            continuing("still going", "(next)"),
+            continuing("still going", "(next)"),
+            continuing("still going", "(next)"),
+            continuing("still going", "(next)"),
+        ])),
+    );
+
+    let config = RunConfig::new("continue-cap").with_max_model_calls(3);
+    let err = harness
+        .invoke_in_context(&(), RunContext::new(config, ()), vec![Message::user("hi")])
+        .await
+        .expect_err("an endless continue must hit the model-call cap");
+
+    assert!(
+        err.to_string().contains("max model calls"),
+        "expected the model-call cap to stop it, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Schema-echo argument recovery
+//
+// Small local models sometimes fill the tool's own JSON Schema in place and
+// send the whole envelope as the arguments. These pin the conservative
+// unwrap in `normalize_tool_arguments`, in both directions.
+// ---------------------------------------------------------------------------
+
+/// A tool whose arguments genuinely include a field named `properties`, so the
+/// echo-unwrap must leave its calls alone.
+struct SchemaShapedTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl Tool<()> for SchemaShapedTool {
+    fn name(&self) -> &str {
+        "schema_shaped"
+    }
+    fn description(&self) -> &str {
+        "takes a literal `properties` argument"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "schema_shaped",
+            "takes a literal `properties` argument",
+            json!({
+                "type": "object",
+                "required": ["properties"],
+                "properties": {
+                    "properties": { "type": "object" }
+                }
+            }),
+        )
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolResult::text(
+            call.id,
+            self.name(),
+            serde_json::to_string(&call.arguments).unwrap_or_default(),
+        ))
+    }
+}
+
+/// A tool that records the arguments it was actually invoked with, so a test
+/// can assert what normalization produced rather than only that it ran.
+struct ArgumentRecordingTool {
+    seen: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+#[async_trait]
+impl Tool<()> for ArgumentRecordingTool {
+    fn name(&self) -> &str {
+        "strict_lookup"
+    }
+    fn description(&self) -> &str {
+        "strict lookup"
+    }
+    fn schema(&self) -> ToolSchema {
+        StrictLookupTool {
+            calls: Arc::new(Mutex::new(0)),
+        }
+        .schema()
+    }
+    async fn call(&self, _state: &(), call: ToolCall) -> Result<ToolResult> {
+        self.seen.lock().unwrap().push(call.arguments.clone());
+        Ok(ToolResult::text(call.id, self.name(), "strict-output"))
+    }
+}
+
+#[tokio::test]
+async fn echoed_schema_arguments_are_unwrapped_before_validation() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response(
+                "call-1",
+                "strict_lookup",
+                // The exact shape `llama3.2:3b` emits: the declaration filled
+                // in place, rather than the arguments object.
+                json!({
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": { "query": "rust" }
+                }),
+            ),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    harness.register_tool(Arc::new(ArgumentRecordingTool {
+        seen: Arc::clone(&seen),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("an echoed schema should be unwrapped, not rejected");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    // The tool ran once, with the unwrapped arguments — not the envelope.
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![json!({ "query": "rust" })],
+        "the envelope should have been unwrapped to the inner arguments"
+    );
+}
+
+/// The other envelope shapes captured from `llama3.2:3b`: the arguments nested
+/// under `arguments` alongside a schema echo, and under a bare `param` key.
+#[tokio::test]
+async fn wrapped_arguments_are_unwrapped_from_every_known_envelope_key() {
+    for envelope in [
+        json!({
+            "properties": { "query": { "type": "string" } },
+            "required": ["query"],
+            "arguments": { "query": "rust" }
+        }),
+        json!({ "param": { "query": "rust" } }),
+        json!({ "params": { "query": "rust" } }),
+        json!({ "args": { "query": "rust" } }),
+        json!({ "parameters": { "query": "rust" } }),
+        json!({ "input": { "query": "rust" } }),
+    ] {
+        let mut harness: AgentHarness<()> = AgentHarness::new();
+        harness.register_model(
+            "mock",
+            Arc::new(MockModel::with_responses(vec![
+                tool_call_response("call-1", "strict_lookup", envelope.clone()),
+                text_response("done", 1, 1),
+            ])),
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        harness.register_tool(Arc::new(ArgumentRecordingTool {
+            seen: Arc::clone(&seen),
+        }));
+        harness.with_policy(RunPolicy {
+            invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+            ..RunPolicy::default()
+        });
+
+        harness
+            .invoke_default(&(), vec![Message::user("lookup")])
+            .await
+            .unwrap_or_else(|e| panic!("{envelope} should be unwrapped: {e}"));
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![json!({ "query": "rust" })],
+            "{envelope} should have been unwrapped to the inner arguments"
+        );
+    }
+}
+
+#[tokio::test]
+async fn echo_unwrap_leaves_a_tool_that_really_takes_properties_alone() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response(
+                "call-1",
+                "schema_shaped",
+                json!({ "properties": { "query": "rust" } }),
+            ),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(SchemaShapedTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("run")])
+        .await
+        .expect("a valid call must not be rewritten");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn echo_unwrap_is_skipped_when_the_inner_value_is_still_invalid() {
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            tool_call_response(
+                "call-1",
+                "strict_lookup",
+                // `query` is an integer, so unwrapping would not rescue it.
+                // The original envelope must survive so the model sees a
+                // precise validation error rather than a rewritten one.
+                json!({
+                    "type": "object",
+                    "properties": { "query": 7 }
+                }),
+            ),
+            text_response("done", 1, 1),
+        ])),
+    );
+    let calls = Arc::new(Mutex::new(0));
+    harness.register_tool(Arc::new(StrictLookupTool {
+        calls: Arc::clone(&calls),
+    }));
+    harness.with_policy(RunPolicy {
+        invalid_args: InvalidArgsPolicy::NormalizeThenReturnToolError,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("lookup")])
+        .await
+        .expect("the loop recovers by handing the validation error back");
+
+    assert_eq!(run.final_response.unwrap().text(), "done");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "the tool must not run with arguments that never validated"
+    );
+}

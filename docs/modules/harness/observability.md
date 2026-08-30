@@ -278,7 +278,7 @@ re-mints identical ids for the same `(stream_id, offset)`. `EventSink::new()`
 never collide at offset 0.
 
 ```rust
-use tinyagents::harness::events::{AgentEvent, EventSink};
+use tinyagents_harness::events::{AgentEvent, EventSink};
 
 // Two "processes" replaying the same run re-mint identical, stable ids.
 let first = EventSink::with_stream_id("run-42");

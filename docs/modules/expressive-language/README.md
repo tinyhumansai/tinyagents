@@ -61,7 +61,7 @@ see [Implementation status](implementation-status.md).
 Target layout:
 
 ```text
-src/language/
+crates/tinyagents-language/src/
   mod.rs
   ast.rs
   compiler.rs

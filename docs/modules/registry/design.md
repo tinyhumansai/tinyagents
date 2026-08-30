@@ -63,7 +63,7 @@ Primary code references:
 Target layout:
 
 ```text
-src/registry/
+crates/tinyagents-registry/src/
   mod.rs
   agent.rs
   catalog.rs

@@ -1,0 +1,385 @@
+//! Compiled graph and execution-result types.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use crate::builder::START;
+use crate::builder::{BarrierRelief, Branch, BuilderNode, NodeMeta};
+use crate::checkpoint::{CheckpointConfig, CheckpointMetadata, Checkpointer, DurabilityMode};
+use crate::command::Interrupt;
+use crate::observability::{GraphEventJournal, GraphStatusStore};
+use crate::recursion::{ChildRun, RunTree};
+use crate::reducer::StateReducer;
+use crate::status::GraphRunStatus;
+use crate::stream::GraphEventSink;
+use tinyagents_harness::ids::{CheckpointId, GraphId, NodeId, RunId};
+
+/// An immutable, validated graph ready to execute.
+///
+/// Cheap to clone (all heavy fields are `Arc`-shared) and safe to run
+/// concurrently. Construct one with [`crate::GraphBuilder::compile`].
+pub struct CompiledGraph<State, Update> {
+    pub(crate) graph_id: GraphId,
+    /// Optional human-readable graph name surfaced by the topology export.
+    pub(crate) name: Option<String>,
+    pub(crate) nodes: Arc<HashMap<NodeId, BuilderNode<State, Update>>>,
+    pub(crate) edges: Arc<HashMap<NodeId, NodeId>>,
+    pub(crate) branches: Arc<HashMap<NodeId, Branch<State>>>,
+    #[allow(dead_code)]
+    pub(crate) command_nodes: Arc<HashSet<NodeId>>,
+    /// Barrier/waiting edges: target -> the predecessor set that must all
+    /// complete (across steps) before the target activates.
+    pub(crate) waiting: Arc<HashMap<NodeId, HashSet<NodeId>>>,
+    /// Mixed fan-in barrier relief registrations; see [`BarrierRelief`].
+    pub(crate) barrier_reliefs: Arc<Vec<BarrierRelief>>,
+    /// Behavior-free per-node markers/metadata surfaced by the topology export.
+    pub(crate) node_meta: Arc<HashMap<NodeId, NodeMeta>>,
+    pub(crate) entry: NodeId,
+    pub(crate) reducer: Arc<dyn StateReducer<State, Update>>,
+    pub(crate) recursion_limit: usize,
+    /// Explicit recursion caps (run-tree depth, per-node visits, total steps)
+    /// enforced by the executor; configured via
+    /// [`CompiledGraph::with_recursion_policy`](crate::CompiledGraph::with_recursion_policy).
+    pub(crate) recursion_policy: crate::recursion::RecursionPolicy,
+    /// Inherited recursion frames of an enclosing run (empty for a top-level
+    /// graph). A subgraph/sub-agent wrapper seeds these so a nested run extends
+    /// the parent's recursion stack rather than starting a fresh tree.
+    pub(crate) recursion_frames: Vec<crate::recursion::RecursionFrame>,
+    /// The hosting node this graph runs under when embedded as a subgraph; used
+    /// as the `node_id` of this run's root recursion frame so the run tree names
+    /// the embedding node. `None` for a top-level run.
+    pub(crate) recursion_node: Option<NodeId>,
+    pub(crate) checkpointer: Option<Arc<dyn Checkpointer<State>>>,
+    pub(crate) event_sink: Option<Arc<dyn GraphEventSink>>,
+    /// Optional durable observation journal (opt-in via
+    /// [`CompiledGraph::with_event_journal`]).
+    pub(crate) journal: Option<Arc<dyn GraphEventJournal>>,
+    /// Optional run-status surface (opt-in via
+    /// [`CompiledGraph::with_status_store`]).
+    pub(crate) status_store: Option<Arc<dyn GraphStatusStore>>,
+    pub(crate) namespace: Vec<String>,
+    /// When true, the active node set of a superstep is executed concurrently.
+    pub(crate) parallel: bool,
+    /// Upper bound on concurrently-running branches per step (`None` = unbounded).
+    pub(crate) max_concurrency: Option<usize>,
+    /// Default per-node handler timeout (`None` = no timeout).
+    pub(crate) node_timeout: Option<std::time::Duration>,
+    /// Optional whole-run wall-clock deadline (`None` = no deadline). Checked at
+    /// every super-step boundary: when the elapsed run time reaches it the run
+    /// stops *between* super-steps with a [`TinyAgentsError::Timeout`], leaving
+    /// the last committed boundary checkpoint intact and resumable. Configured
+    /// via [`CompiledGraph::with_run_deadline`](crate::CompiledGraph::with_run_deadline).
+    pub(crate) run_deadline: Option<std::time::Duration>,
+    /// When checkpoints are persisted relative to execution (default
+    /// [`DurabilityMode::Sync`]).
+    pub(crate) durability: DurabilityMode,
+    /// Optional per-node retry policy applied around each node handler. When
+    /// set, a handler that fails with a
+    /// [retryable][tinyagents_harness::retry::is_retryable] error is re-run from its
+    /// start (with opt-in backoff) up to the policy's attempt cap before the
+    /// failure escalates. `None` (default) preserves the original
+    /// abort-on-first-error behavior. Configured via
+    /// [`CompiledGraph::with_node_retry`](crate::CompiledGraph::with_node_retry).
+    pub(crate) node_retry: Option<tinyagents_harness::retry::RetryPolicy>,
+}
+
+impl<State, Update> std::fmt::Debug for CompiledGraph<State, Update> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledGraph")
+            .field("graph_id", &self.graph_id)
+            .field("nodes", &self.nodes.len())
+            .field("entry", &self.entry)
+            .field("recursion_limit", &self.recursion_limit)
+            .field("namespace", &self.namespace)
+            .field("parallel", &self.parallel)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<State, Update> Clone for CompiledGraph<State, Update> {
+    fn clone(&self) -> Self {
+        Self {
+            graph_id: self.graph_id.clone(),
+            name: self.name.clone(),
+            nodes: self.nodes.clone(),
+            edges: self.edges.clone(),
+            branches: self.branches.clone(),
+            command_nodes: self.command_nodes.clone(),
+            waiting: self.waiting.clone(),
+            barrier_reliefs: self.barrier_reliefs.clone(),
+            node_meta: self.node_meta.clone(),
+            entry: self.entry.clone(),
+            reducer: self.reducer.clone(),
+            recursion_limit: self.recursion_limit,
+            recursion_policy: self.recursion_policy,
+            recursion_frames: self.recursion_frames.clone(),
+            recursion_node: self.recursion_node.clone(),
+            checkpointer: self.checkpointer.clone(),
+            event_sink: self.event_sink.clone(),
+            journal: self.journal.clone(),
+            status_store: self.status_store.clone(),
+            namespace: self.namespace.clone(),
+            parallel: self.parallel,
+            max_concurrency: self.max_concurrency,
+            node_timeout: self.node_timeout,
+            run_deadline: self.run_deadline,
+            durability: self.durability,
+            node_retry: self.node_retry.clone(),
+        }
+    }
+}
+
+/// Tracks checkpoint writes handed to background tasks under
+/// [`DurabilityMode::Async`].
+///
+/// # Failure semantics
+///
+/// Async durability is fire-and-forget for *latency*, never for *outcome*: a
+/// background `put` error is recorded here rather than dropped, and the
+/// executor surfaces it at the next durability boundary
+/// ([`Self::take_failure`]) or — at the latest — when the run drains all
+/// in-flight writes at its terminal/interrupt boundary ([`Self::drain`]). A
+/// run therefore never reports success while one of its checkpoints silently
+/// failed to persist.
+///
+/// # Ordering
+///
+/// Writes are *chained*, not merely spawned: each background task awaits the
+/// previously spawned one before performing its own `put`. Every bundled
+/// backend defines a thread's "latest" checkpoint by insertion order, so
+/// letting boundary N+1 land before boundary N would make a concurrent reader
+/// (or a `retry` racing a straggler append) observe a stale record as latest.
+#[derive(Default)]
+pub(crate) struct AsyncCheckpointWrites {
+    /// In-flight (or finished-but-unharvested) background writes, in the order
+    /// they were spawned. Because each spawn chains onto its predecessor, this
+    /// holds at most the tail of the chain.
+    handles: Vec<tokio::task::JoinHandle<tinyagents_harness::error::Result<CheckpointId>>>,
+}
+
+impl AsyncCheckpointWrites {
+    /// Spawns `write` so it runs only after every previously spawned write has
+    /// settled, keeping appends in boundary order.
+    ///
+    /// The spawned task reports the first error along the chain (in spawn
+    /// order), so a predecessor's failure is never lost by being folded behind
+    /// a later success. Awaiting a panicked predecessor yields a join error
+    /// rather than deadlocking the chain.
+    pub(crate) fn spawn_ordered<F>(&mut self, runtime: &tokio::runtime::Handle, write: F)
+    where
+        F: std::future::Future<Output = tinyagents_harness::error::Result<CheckpointId>>
+            + Send
+            + 'static,
+    {
+        let previous = self.handles.pop();
+        self.handles.push(runtime.spawn(async move {
+            let prior = match previous {
+                Some(handle) => Self::harvest(handle.await),
+                None => None,
+            };
+            // A predecessor that never persisted would leave this record's
+            // `parent_checkpoint_id` dangling, so skip the write entirely and
+            // report the failure that broke the lineage.
+            match prior {
+                Some(err) => Err(err),
+                None => write.await,
+            }
+        }));
+    }
+
+    /// Harvests writes that have already finished, without blocking on the
+    /// ones still in flight. Returns the first error found (a failed `put` or
+    /// a panicked task), or `None` when every finished write succeeded.
+    pub(crate) async fn take_failure(
+        &mut self,
+    ) -> Option<tinyagents_harness::error::TinyAgentsError> {
+        let mut failure = None;
+        let mut remaining = Vec::with_capacity(self.handles.len());
+        for handle in self.handles.drain(..) {
+            if !handle.is_finished() {
+                remaining.push(handle);
+                continue;
+            }
+            // Finished, so this await is immediate.
+            if let Some(err) = Self::harvest(handle.await)
+                && failure.is_none()
+            {
+                failure = Some(err);
+            }
+        }
+        self.handles = remaining;
+        failure
+    }
+
+    /// Awaits every in-flight write. Returns the first error (spawn order),
+    /// after all writes have settled. This is the "final await at run end":
+    /// terminal, interrupt, and failure boundaries drain before returning so
+    /// the run result reflects persistence failures.
+    pub(crate) async fn drain(&mut self) -> tinyagents_harness::error::Result<()> {
+        let mut failure = None;
+        for handle in self.handles.drain(..) {
+            if let Some(err) = Self::harvest(handle.await)
+                && failure.is_none()
+            {
+                failure = Some(err);
+            }
+        }
+        match failure {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+    /// Maps one settled join result onto its error, if any.
+    fn harvest(
+        joined: std::result::Result<
+            tinyagents_harness::error::Result<CheckpointId>,
+            tokio::task::JoinError,
+        >,
+    ) -> Option<tinyagents_harness::error::TinyAgentsError> {
+        match joined {
+            Ok(Ok(_)) => None,
+            Ok(Err(err)) => Some(err),
+            Err(join_err) => Some(tinyagents_harness::error::TinyAgentsError::Checkpoint(
+                format!("background checkpoint write task failed: {join_err}"),
+            )),
+        }
+    }
+}
+
+/// The result of a durable graph run.
+///
+/// Carries the final committed state, the visited node history, the superstep
+/// count, any pending interrupts, the run status snapshot, and the latest
+/// checkpoint id (when checkpointing was enabled).
+#[derive(Clone, Debug)]
+pub struct GraphExecution<State> {
+    /// Final committed state.
+    pub state: State,
+    /// This run's own id.
+    pub run_id: RunId,
+    /// The graph that produced this run.
+    pub graph_id: GraphId,
+    /// The root run id of the recursion tree (equals `run_id` for a top-level
+    /// run; the shared ancestor for a subgraph/sub-agent child run).
+    pub root_run_id: RunId,
+    /// The enclosing run's id, when this run was spawned as a child.
+    pub parent_run_id: Option<RunId>,
+    /// Child runs spawned from subgraph nodes during this run, in completion
+    /// order, keyed by the embedding node.
+    pub child_runs: Vec<ChildRun>,
+    /// Ordered list of executed nodes (may repeat across supersteps).
+    pub visited: Vec<NodeId>,
+    /// Number of supersteps executed.
+    pub steps: usize,
+    /// Interrupts that paused the run, if any.
+    pub interrupts: Vec<Interrupt>,
+    /// Compact status snapshot at the final boundary.
+    pub status: GraphRunStatus,
+    /// The latest persisted checkpoint id, if checkpointing was enabled.
+    pub checkpoint_id: Option<CheckpointId>,
+}
+
+/// One external input used to seed a graph run.
+///
+/// Most runs should target [`START`] via [`GraphInput::start`], which delivers
+/// the payload to the graph's compiled entry node. More complex orchestrations
+/// can seed additional nodes in the same first superstep, letting independent
+/// loops receive user input, tool results, webhook payloads, or other external
+/// events without forcing every input through one entry handler.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphInput {
+    /// Target node for this input. `__start__` is accepted as the virtual entry
+    /// target and is resolved to the graph's compiled entry node at run time.
+    pub node: NodeId,
+    /// Optional per-input payload delivered as [`NodeContext::send_arg`].
+    pub payload: Option<serde_json::Value>,
+}
+
+impl GraphInput {
+    /// Delivers `payload` to the graph's compiled entry node.
+    pub fn start(payload: serde_json::Value) -> Self {
+        Self {
+            node: NodeId::from(START),
+            payload: Some(payload),
+        }
+    }
+
+    /// Delivers `payload` directly to `node` in the first superstep.
+    pub fn new(node: impl Into<NodeId>, payload: serde_json::Value) -> Self {
+        Self {
+            node: node.into(),
+            payload: Some(payload),
+        }
+    }
+
+    /// Activates `node` without a per-input payload.
+    pub fn node(node: impl Into<NodeId>) -> Self {
+        Self {
+            node: node.into(),
+            payload: None,
+        }
+    }
+}
+
+impl<State> GraphExecution<State> {
+    /// Returns true when the run paused on an interrupt rather than completing.
+    pub fn is_interrupted(&self) -> bool {
+        !self.interrupts.is_empty()
+    }
+
+    /// Builds the parent/child run-lineage view for this run.
+    ///
+    /// This is the run-id counterpart to the live recursion stack: it reports
+    /// this run's id, the shared root, the enclosing parent (when this was a
+    /// child run), and every child run spawned from a subgraph node.
+    pub fn run_tree(&self) -> RunTree {
+        RunTree {
+            run_id: self.run_id.clone(),
+            root_run_id: self.root_run_id.clone(),
+            parent_run_id: self.parent_run_id.clone(),
+            children: self.child_runs.clone(),
+        }
+    }
+}
+
+/// A point-in-time view of a thread's checkpointed state, returned by
+/// [`CompiledGraph::get_state`](crate::CompiledGraph::get_state) and
+/// [`CompiledGraph::get_state_history`](crate::CompiledGraph::get_state_history).
+///
+/// This is the state-inspection / time-travel surface: it bundles the committed
+/// channel values at a checkpoint with everything a caller needs to reason about
+/// or resume from that point — the next nodes that would run, the config that
+/// addresses this snapshot, the config of its parent (for walking the lineage),
+/// the checkpoint metadata (source/step/run id), and any pending interrupts.
+#[derive(Clone, Debug)]
+pub struct StateSnapshot<State> {
+    /// Committed graph state (channel values) at the snapshot's checkpoint.
+    pub values: State,
+    /// Nodes that would run if execution resumed from this snapshot.
+    pub next_nodes: Vec<NodeId>,
+    /// Tasks scheduled for the next superstep (mirrors `next_nodes`).
+    pub tasks: Vec<NodeId>,
+    /// Config that addresses this snapshot's checkpoint.
+    pub config: CheckpointConfig,
+    /// Lightweight metadata for the snapshot's checkpoint (source, step, run id).
+    pub metadata: CheckpointMetadata,
+    /// Config addressing the parent checkpoint, when one exists.
+    pub parent_config: Option<CheckpointConfig>,
+    /// Interrupts that paused the run at this checkpoint, if any.
+    pub pending_interrupts: Vec<Interrupt>,
+}
+
+/// Selects which checkpoint a time-travel resume starts from.
+///
+/// [`CompiledGraph::resume`](crate::CompiledGraph::resume) is shorthand
+/// for [`ResumeTarget::Latest`]; [`CompiledGraph::resume_from`](crate::CompiledGraph::resume_from)
+/// accepts an explicit target so a run can be replayed from an older checkpoint
+/// config (time travel) without mutating the original record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResumeTarget {
+    /// Resume from the thread's most recent checkpoint.
+    Latest,
+    /// Resume from a specific checkpoint id within the thread.
+    Checkpoint(String),
+}

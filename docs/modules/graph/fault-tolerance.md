@@ -77,4 +77,4 @@ node failures (resumable on a checkpointed thread):
 - Populate the checkpoint `pending_writes` list explicitly (today partial
   progress is folded into committed state instead).
 
-[retryable]: ../../../src/harness/retry/mod.rs
+[retryable]: ../../../crates/tinyagents-harness/src/retry/mod.rs
