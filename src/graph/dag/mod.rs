@@ -82,7 +82,7 @@ pub fn has_cycle(nodes: &[DagNode<'_>]) -> bool {
 
     let mut queue: VecDeque<&str> = indegree
         .iter()
-        .filter(|(_, &d)| d == 0)
+        .filter(|&(_, &d)| d == 0)
         .map(|(&n, _)| n)
         .collect();
     let mut visited = 0usize;
