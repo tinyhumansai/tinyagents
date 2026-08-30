@@ -75,6 +75,16 @@ pub fn has_cycle(nodes: &[DagNode<'_>]) -> bool {
     // two conflicting declarations of the same id (e.g. `a[]` and `a[b]`) get
     // merged into edges that no single declaration actually names, which can
     // fabricate a cycle that would not exist under either declaration alone.
+    //
+    // Consequence for callers: a caller that wants to add dependency edges to
+    // a node that already exists in `nodes` must merge those edges into that
+    // node's single `DagNode` declaration, not append a second `DagNode` with
+    // the same id and the new edges — the second declaration's edges are
+    // silently dropped here (first declaration wins), so a real cycle they
+    // would have introduced goes undetected. This is unreachable in a caller
+    // that only ever mints fresh, never-reused ids (e.g. a fresh UUID per
+    // node), but is a live footgun for any caller that revisits an existing
+    // id.
     let mut processed: HashSet<&str> = HashSet::with_capacity(ids.len());
     for node in nodes {
         if !processed.insert(node.id) {
