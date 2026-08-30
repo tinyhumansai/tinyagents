@@ -13,7 +13,7 @@ use super::run::is_incompatible_checkpoint_error;
 use super::*;
 use crate::CancellationToken;
 use crate::graph::checkpoint::{Checkpoint, Checkpointer};
-use crate::graph::{Interrupt, NodeContext};
+use crate::graph::Interrupt;
 
 /// A reviewer that rejects the first `reject_first` executions, then approves,
 /// driving the execute⇄review revision loop.
@@ -643,4 +643,93 @@ async fn terminal_checkpoint_with_a_pending_interrupt_surfaces_it() {
     assert_eq!(pending.node, "approval");
     assert_eq!(pending.interrupt_id, "intr-1");
     assert_eq!(outcome.state.final_output.as_deref(), Some("done"));
+}
+
+/// Pins the exact serialized shape of a fully-populated [`DelegationState`].
+///
+/// `DelegationState` is an **on-disk checkpoint format**: installations carry
+/// persisted state written by an earlier release, and a resume decodes it with
+/// whatever the current binary declares. A renamed field, a changed
+/// `#[serde(...)]` attribute, a new field without `#[serde(default)]`, or a
+/// reordering that changes the emitted JSON silently breaks resume for those
+/// installations — the checkpoint decodes into something subtly different, or
+/// fails to decode at all and is expired, discarding in-flight work.
+///
+/// The literal below is the byte-for-byte output of the implementation this
+/// module was moved from, captured before the move. It is not merely a snapshot
+/// of current behaviour: it is the compatibility contract. A change here must be
+/// deliberate and paired with a [`CURRENT_SCHEMA_VERSION`] bump so
+/// `run_or_resume_delegation` expires older checkpoints rather than misreading
+/// them.
+#[test]
+fn serialized_state_shape_is_pinned() {
+    let state = DelegationState {
+        plan: Some("PLAN".into()),
+        executions: vec![
+            StepRecord {
+                index: 0,
+                prompt: "P0".into(),
+                result: "R0".into(),
+            },
+            StepRecord {
+                index: 1,
+                prompt: "P1".into(),
+                result: "R1".into(),
+            },
+        ],
+        reviews: vec!["review-0".into(), "review-1".into()],
+        revisions: 1,
+        approved: true,
+        final_output: Some("FINAL".into()),
+        cancelled: false,
+        human_approved: Some(true),
+        denied: false,
+        schema_version: CURRENT_SCHEMA_VERSION,
+    };
+
+    let json = serde_json::to_string(&state).expect("serializes");
+    assert_eq!(
+        json,
+        r#"{"plan":"PLAN","executions":[{"index":0,"prompt":"P0","result":"R0"},{"index":1,"prompt":"P1","result":"R1"}],"reviews":["review-0","review-1"],"revisions":1,"approved":true,"final_output":"FINAL","cancelled":false,"human_approved":true,"denied":false,"schema_version":1}"#,
+        "DelegationState's on-disk shape changed; see this test's doc comment"
+    );
+
+    // And it decodes back to an equal value, so the pin covers both directions.
+    let back: DelegationState = serde_json::from_str(&json).expect("round-trips");
+    assert_eq!(back.plan, state.plan);
+    assert_eq!(back.executions, state.executions);
+    assert_eq!(back.reviews, state.reviews);
+    assert_eq!(back.revisions, state.revisions);
+    assert_eq!(back.approved, state.approved);
+    assert_eq!(back.final_output, state.final_output);
+    assert_eq!(back.cancelled, state.cancelled);
+    assert_eq!(back.human_approved, state.human_approved);
+    assert_eq!(back.denied, state.denied);
+    assert_eq!(back.schema_version, state.schema_version);
+}
+
+/// A pre-versioned checkpoint — one written before `schema_version`,
+/// `human_approved` and `denied` existed — must still decode, taking the
+/// documented defaults. This is the half of the contract that lets
+/// `run_or_resume_delegation` *classify* a stale checkpoint (version `0`) rather
+/// than failing to read it at all.
+#[test]
+fn pre_versioned_state_decodes_with_documented_defaults() {
+    let legacy = r#"{"plan":"PLAN","executions":[],"reviews":[],"revisions":0,"approved":false,"final_output":null,"cancelled":false}"#;
+    let state: DelegationState = serde_json::from_str(legacy).expect("decodes");
+    assert_eq!(state.schema_version, 0, "defaults below CURRENT, so it expires");
+    assert_eq!(state.human_approved, None);
+    assert!(!state.denied);
+    assert!(state.schema_version < CURRENT_SCHEMA_VERSION);
+}
+
+/// The default state (a fresh, unstarted run) also has a pinned shape — it is
+/// what the very first checkpoint of a run serializes from.
+#[test]
+fn default_state_shape_is_pinned() {
+    let json = serde_json::to_string(&DelegationState::default()).expect("serializes");
+    assert_eq!(
+        json,
+        r#"{"plan":null,"executions":[],"reviews":[],"revisions":0,"approved":false,"final_output":null,"cancelled":false,"human_approved":null,"denied":false,"schema_version":0}"#
+    );
 }
