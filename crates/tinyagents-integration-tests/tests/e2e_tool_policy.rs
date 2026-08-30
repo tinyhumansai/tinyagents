@@ -27,7 +27,6 @@ use tinyagents_harness::testkit::ScriptedModel;
 use tinyagents_harness::tool::{
     SandboxMode, Tool, ToolAccess, ToolPolicy, ToolResult, ToolRuntime, ToolSideEffects,
 };
-use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyagents_harness::workspace::WorkspaceDescriptor;
 use tinyagents_harness::*;
 use tinyagents_language::*;
@@ -35,6 +34,7 @@ use tinyagents_registry::*;
 use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyinference::model::ModelResponse;
 use tinyinference::tool::ToolCall as TC;
+use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyinference::usage::Usage;
 
 // ── Model response builders (verbatim from the task spec) ─────────────────────

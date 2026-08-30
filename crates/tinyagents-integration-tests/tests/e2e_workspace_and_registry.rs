@@ -19,10 +19,7 @@ use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::events::AgentEvent;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool};
-use tinyagents_harness::tool::{
-    SandboxMode, Tool, ToolExecutionContext, ToolResult,
-};
-use tinyinference::tool::{ToolCall, ToolSchema};
+use tinyagents_harness::tool::{SandboxMode, Tool, ToolExecutionContext, ToolResult};
 use tinyagents_harness::workspace::{cleanup_workspace, enforce_workspace_path, prepare_workspace};
 use tinyagents_harness::*;
 use tinyagents_language::Blueprint;
@@ -31,6 +28,7 @@ use tinyagents_registry::*;
 use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyinference::model::ModelResponse;
 use tinyinference::providers::MockModel;
+use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyinference::usage::Usage;
 
 // ---------------------------------------------------------------------------
