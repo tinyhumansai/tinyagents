@@ -186,11 +186,20 @@ fn detect_verbs(prompt: &str) -> HashSet<ToolVerb> {
             }
         }
     }
-    // Resource nouns for Send are checked only when no explicit action verb
-    // matched above — a noun alone (e.g. "message support") may still imply
-    // Send, but must not add it alongside an already-detected conflicting
-    // verb ("delete a message", "read email").
-    if found.is_empty() {
+    // Resource nouns for Send are checked whenever `Send` was not already
+    // matched by one of its action aliases above. This is exactly equivalent
+    // to the pre-extraction behaviour, where these nouns lived in `Send`'s
+    // own alias list: `Send` was added iff ANY of its aliases matched, action
+    // word or noun. Splitting the nouns out keeps the verb table honest
+    // (a noun is not an action word) without changing which verbs are found.
+    //
+    // Gating this on `found.is_empty()` instead is NOT equivalent and is a
+    // real ranking regression: "Post a message to #general" matches "post"
+    // (a `Create` alias), so `found` is non-empty and `Send` is never added
+    // — which ranks SLACK_CREATE_CHANNEL above SLACK_SEND_MESSAGE and drops
+    // SLACK_SEND_MESSAGE out of the top 15 entirely. Pinned by the host's
+    // pre-extraction ranking snapshot.
+    if !found.contains(&ToolVerb::Send) {
         for alias in SEND_NOUN_ALIASES {
             if contains_whole_word(&lowered, alias) {
                 found.insert(ToolVerb::Send);
