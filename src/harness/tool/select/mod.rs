@@ -218,6 +218,9 @@ const CLAUSE_BOUNDARY_WORDS: &[&str] = &["and", "then", "also", "plus", "next"];
 /// appears strictly between them. Order-agnostic (`verb_idx` may be before or
 /// after `noun_idx`).
 fn same_clause(words: &[String], verb_idx: usize, noun_idx: usize) -> bool {
+    if verb_idx == noun_idx {
+        return true;
+    }
     let (lo, hi) = if verb_idx < noun_idx {
         (verb_idx, noun_idx)
     } else {
