@@ -22,6 +22,16 @@ use crate::graph::{Command, END};
 /// This is the non-gated convenience wrapper: with the default config
 /// (`require_review_approval = false`) the graph never interrupts, so the
 /// returned state is always terminal.
+///
+/// Rejects `require_review_approval = true` rather than silently discarding
+/// [`DelegationOutcome::pending`]: with the gate on, a legitimately
+/// configured run can still return at the durable approval interrupt with
+/// `final_output` unset. Returning only `.state` here would hand the caller
+/// an unfinished state with no indication that approval is pending — the
+/// caller loses the one signal that would tell it to call
+/// [`resume_delegation`]. Use [`run_delegation_durable`] (or
+/// [`run_or_resume_delegation`]) when the gate is on, and read
+/// `DelegationOutcome::pending`.
 pub async fn run_delegation<F, Fut>(
     config: DelegationConfig,
     run_stage: F,
@@ -30,6 +40,15 @@ where
     F: Fn(DelegationStage, DelegationState) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Result<DelegationStageOutput, String>> + Send + 'static,
 {
+    if config.require_review_approval {
+        return Err(
+            "run_delegation does not support require_review_approval=true (it would \
+             silently discard a pending durable approval interrupt); call \
+             run_delegation_durable or run_or_resume_delegation instead and read \
+             DelegationOutcome::pending"
+                .to_string(),
+        );
+    }
     Ok(run_delegation_durable(config, run_stage).await?.state)
 }
 
