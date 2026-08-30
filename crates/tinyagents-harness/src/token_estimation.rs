@@ -44,8 +44,8 @@
 //!
 //! Nothing here is a real tokenizer. Treat every number as ±30%.
 
-use super::{AssistantMessage, Message};
-use crate::tool::ToolSchema;
+use tinyinference::message::{AssistantMessage, Message};
+use tinyinference::tool::ToolSchema;
 
 /// Default characters per token (~4 for English prose and code).
 pub const DEFAULT_CHARS_PER_TOKEN: f64 = 4.0;
