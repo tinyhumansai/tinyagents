@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::run::is_incompatible_checkpoint_error;
+use super::run::{decision_is_approve, is_incompatible_checkpoint_error};
 use super::*;
 use crate::CancellationToken;
 use crate::graph::Interrupt;
@@ -655,6 +655,30 @@ async fn checkpoint_above_current_schema_version_also_expires_to_fresh_run() {
         Some("PLAN"),
         "re-planned from scratch, not resumed with the future-schema plan"
     );
+}
+
+#[test]
+fn decision_is_approve_rejects_unrecognized_string_prefixes() {
+    // Object-shaped decisions must be checked against the SAME allowlist as
+    // string-shaped ones, not a `starts_with("approve")` prefix check: an
+    // unvalidated JSON value like `{"decision":"approve_not_authorized"}`
+    // must not release the durable human-approval gate just because it
+    // begins with "approve".
+    assert!(!decision_is_approve(&json!({"decision": "approve_not_authorized"})));
+    assert!(!decision_is_approve(&json!({"decision": "approved_by_nobody"})));
+    assert!(!decision_is_approve(&json!("approve_not_authorized")));
+
+    // The real allowlisted spellings still approve, in both shapes.
+    assert!(decision_is_approve(&json!("approve_once")));
+    assert!(decision_is_approve(&json!("approve_always_for_tool")));
+    assert!(decision_is_approve(&json!({"decision": "approve_once"})));
+    assert!(decision_is_approve(&json!({"approved": true})));
+    assert!(decision_is_approve(&json!(true)));
+
+    // Denials and unrecognized shapes stay denials.
+    assert!(!decision_is_approve(&json!("deny")));
+    assert!(!decision_is_approve(&json!(false)));
+    assert!(!decision_is_approve(&json!(null)));
 }
 
 #[test]
