@@ -57,7 +57,7 @@ is useful for scalar workflows; multi-key state is the default for agent graphs.
 The channel model is shipped **additively**: the monolithic `State` +
 `StateReducer` path is unchanged, and channels are an opt-in alternative that
 runs on the *existing* executor. The implementation lives in
-`src/graph/channel/` and is `serde_json::Value`-backed for generality.
+`crates/tinyagents-graph/src/channel/` and is `serde_json::Value`-backed for generality.
 
 - `Channel` (object-safe trait): per-key `merge(current, incoming) -> value`
   plus `allows_concurrent`, `is_ephemeral`, `is_tracked`, and `is_ready`

@@ -1,0 +1,127 @@
+//! Default model-tool-model agent loop.
+//!
+//! This loop is the innermost turn of the recursive runtime: it is where one
+//! model call is driven to completion, and because a
+//! whole harness can be exposed as a tool
+//! ([`crate::subagent::SubAgentTool`]), the very tools this loop
+//! executes may themselves be other agents — so "a model calling a model" is
+//! just this loop nested inside one of its own tool calls. Each invocation runs
+//! inside a [`RunContext`] that tracks recursion depth, fans usage/cost up to a
+//! parent run, and observes cooperative cancellation and steering at safe
+//! checkpoints.
+//!
+//! This module implements the harness's standard execution loop as inherent
+//! methods on [`crate::runtime::AgentHarness`]: build a model request,
+//! invoke the model (with retry and fallback), execute any requested tools,
+//! append the tool results, and repeat until the model produces a final
+//! assistant message with no tool calls or a configured limit is reached.
+//!
+//! # Lifecycle
+//!
+//! 1. Build a [`RunContext`] from the [`RunConfig`] and emit
+//!    [`AgentEvent::RunStarted`].
+//! 2. Run `before_agent` middleware.
+//! 3. Repeatedly:
+//!    - enforce the model-call cap and wall-clock deadline (fail-closed),
+//!    - build the [`ModelRequest`] from the working messages, registered tool
+//!      schemas, and the policy's default response format,
+//!    - run `before_model` middleware, emit [`AgentEvent::ModelStarted`],
+//!    - resolve and invoke the model with retry + fallback,
+//!    - run `after_model` middleware, emit [`AgentEvent::ModelCompleted`], fold
+//!      usage into the [`AgentRun`], append the assistant message,
+//!    - if the assistant requested tools, execute them (enforcing the tool-call
+//!      cap, running `before_tool`/`after_tool`, emitting tool events) and
+//!      append the tool results, then continue. Multi-call turns run
+//!      concurrently when no tool-wrap middleware is registered — see the
+//!      `tools` submodule for the dispatch rules, the semantics preserved in
+//!      each mode, and why tool-wrap middleware forces serial execution,
+//!    - otherwise extract structured output when configured and break.
+//! 4. Run `after_agent` middleware and emit [`AgentEvent::RunCompleted`].
+//!
+//! On any error the loop emits [`AgentEvent::RunFailed`], fans the error out
+//! through `on_error` middleware, and returns the error.
+//!
+//! # Limits
+//!
+//! Model and tool caps are enforced by the run context's own
+//! [`crate::limits::LimitTracker`], reconciled once at the start of
+//! each run with [`RunPolicy::limits`][crate::runtime::RunPolicy] so
+//! the harness policy and the per-run [`RunConfig`] agree on a single enforced
+//! cap instead of silently disagreeing.
+//!
+//! The reconciliation is **asymmetric**, which is why [`RunConfig`]'s caps are
+//! `Option<usize>`: an explicitly-set config cap is the caller's ceiling and
+//! the stricter of the two wins (fail-closed), while an unset cap merely
+//! defaulted and the policy wins outright — including when it raises the cap
+//! above the crate default. Both cases are legitimate and they are
+//! indistinguishable while the config cap is a bare `usize`, which is how
+//! `RunConfig::new("r").with_max_model_calls(2)` came to run 25 model calls.
+//!
+//! Each call is checked *before* it is made. Under the default
+//! [`LimitBehavior::Error`][crate::limits::LimitBehavior] exhaustion
+//! returns [`TinyAgentsError::LimitExceeded`] whose message always names the
+//! limit that actually tripped; under
+//! [`LimitBehavior::StopWithPartial`][crate::limits::LimitBehavior] the
+//! loop instead emits [`AgentEvent::LimitReached`], stops, and finalizes with
+//! everything the run produced. The wall-clock deadline (from the run config) is
+//! checked each iteration and surfaces as [`TinyAgentsError::Timeout`].
+//!
+//! # Exits
+//!
+//! The loop distinguishes three deliberate stops (see the private `LoopExit`):
+//! a normal finish, a `StopWithPartial` limit stop, and a **steering pause**.
+//! A pause is not a completion: it sets
+//! [`AgentRun::paused`][crate::middleware::AgentRun::paused], reports
+//! the run interrupted, and leaves the pause latched on the
+//! [`SteeringHandle`][crate::steering::SteeringHandle] so a later
+//! `Resume` lifts it. The working transcript is written onto the
+//! [`AgentRun`] on **every** exit path, including errors, so a failed run's
+//! partial conversation can still be inspected or repaired (see
+//! [`AgentHarness::invoke_collecting_partial`]).
+//!
+//! # Backoff
+//!
+//! Retry backoff durations are *computed* via
+//! [`crate::retry::RetryPolicy::backoff_for_attempt`]. Whether the loop
+//! actually sleeps for that duration is opt-in: it is off by default (keeping
+//! tests fast and deterministic) and enabled per policy via
+//! [`crate::retry::RetryPolicy::with_backoff_sleep`], so a real
+//! provider integration retries after a genuine, growing delay while unit tests
+//! stay sleep-free.
+
+mod types;
+
+pub use types::*;
+
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::cache::{ResponseCache, cache_key};
+use crate::context::{MiddlewareControl, RunConfig, RunContext};
+use crate::error::{Result, TinyAgentsError};
+use crate::events::{AgentEvent, HarnessRunStatus, LimitKind};
+use crate::ids::{CallId, ComponentId, HarnessPhase};
+use crate::message::{Message, MessageDelta};
+use crate::middleware::{AgentRun, BoxModelFuture, BoxToolFuture, ModelBaseCall, ToolBaseCall};
+use crate::model::{
+    ChatModel, ModelDelta, ModelRequest, ModelResolutionSource, ModelResponse, ModelStreamItem,
+    ResolvedModel, ResolvedModelBinding, ResponseFormat, StreamAccumulator, ToolChoice,
+    model_eligible,
+};
+use crate::runtime::{AgentHarness, InvalidArgsPolicy, UnknownToolPolicy};
+use crate::structured::{StructuredExtractor, StructuredStrategy};
+use crate::tool::{Tool, ToolCall, ToolSchema};
+use futures::StreamExt;
+use serde_json::Value;
+
+mod entry;
+mod model_call;
+mod run_loop;
+mod stream;
+mod tools;
+
+pub use stream::AgentStreamItem;
+
+#[cfg(test)]
+mod test;

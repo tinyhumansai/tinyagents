@@ -149,7 +149,7 @@ errors, tests, middleware, or provider adapters, it belongs in its own submodule
 Target layout:
 
 ```text
-src/harness/
+crates/tinyagents-harness/src/
   mod.rs
   agent_loop.rs
   cache.rs

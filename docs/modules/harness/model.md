@@ -304,7 +304,7 @@ be updateable independently.
 - `is_deprecated()` — `true` for both `Deprecated` and `Retired`.
 
 ```rust
-use tinyagents::harness::model::{ModelProfile, ModelStatus};
+use tinyagents_harness::model::{ModelProfile, ModelStatus};
 
 let retired = ModelProfile { status: ModelStatus::Retired, ..ModelProfile::default() };
 assert!(!retired.is_usable());
@@ -325,7 +325,7 @@ true, .. }` (for example when replaying historical runs). `Deprecated` models
 remain selectable.
 
 ```rust
-use tinyagents::harness::model::ModelSelection;
+use tinyagents_harness::model::ModelSelection;
 
 // A retired model resolves only when the caller opts in.
 let allowed = registry.resolve(ModelSelection {

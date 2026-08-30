@@ -1,0 +1,56 @@
+//! The named capability registry: a higher-level catalog of capabilities
+//! addressable by name — the data structure that lets a workflow reference
+//! sub-capabilities it didn't hardcode.
+//!
+//! This layer is deliberately distinct from the harness'
+//! [`tinyagents_harness::model::ModelRegistry`] and
+//! [`tinyagents_harness::tool::ToolRegistry`], which are per-run executable stores.
+//! The [`CapabilityRegistry`] is a *capability catalog*: it owns named models,
+//! tools, graph blueprints, routers, and reducers so declarative `.rag`
+//! sources can be bound by name, then validated against what Rust has actually
+//! registered and allowed.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::component::{ComponentKind, ComponentMetadata};
+use tinyagents_harness::model::ChatModel;
+use tinyagents_harness::tool::Tool;
+use tinyagents_language::Blueprint;
+
+/// A name-addressable catalog of registered capabilities.
+///
+/// The registry is generic over the application `State` because models and
+/// tools are generic over it. The default `State = ()` matches the common case
+/// of stateless capabilities.
+///
+/// Storage is partitioned by [`ComponentKind`]:
+///
+/// - **Models, tools, graphs** keep an executable/serializable value.
+/// - **Routers, reducers** (and the reserved store/agent kinds) are name-only
+///   descriptors for now: enough for the `.rag` resolver to answer "is this
+///   name registered?".
+///
+/// The [`metadata`](CapabilityRegistry::metadata) map is the source of truth for
+/// *presence*: every successful registration records a
+/// [`ComponentMetadata`] entry keyed by `(kind, name)`, so
+/// [`has`](CapabilityRegistry::has) and [`names`](CapabilityRegistry::names)
+/// work uniformly across kinds.
+pub struct CapabilityRegistry<State = ()>
+where
+    State: Send + Sync,
+{
+    pub(crate) models: HashMap<String, Arc<dyn ChatModel<State>>>,
+    pub(crate) tools: HashMap<String, Arc<dyn Tool<State>>>,
+    pub(crate) graphs: HashMap<String, Blueprint>,
+    /// Executable harness agents, keyed by registered name. Resolved by a
+    /// [`tinyagents_graph::subagent_node::SubAgentNode`] to delegate a graph step to
+    /// a model-driven agent loop. Agents are state-decoupled (they receive a
+    /// mapped prompt, not the registry's `State`), so this map is independent of
+    /// the `State` generic.
+    pub(crate) agents: HashMap<String, Arc<dyn tinyagents_graph::subagent_node::HarnessAgent>>,
+    /// Presence + discovery metadata, keyed by `(kind, canonical name)`.
+    pub(crate) meta: HashMap<(ComponentKind, String), ComponentMetadata>,
+    /// Alias map, keyed by `(kind, alias)` -> canonical name.
+    pub(crate) aliases: HashMap<(ComponentKind, String), String>,
+}

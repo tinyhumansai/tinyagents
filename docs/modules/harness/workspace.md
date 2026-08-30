@@ -6,8 +6,8 @@ sandbox policy; it owns the interface, so parallel agents (and their sub-agents)
 can be isolated consistently and a tool can discover its allowed filesystem root
 from run context instead of an application global.
 
-Source: `src/harness/workspace/{mod.rs,types.rs}`; tests:
-`src/harness/workspace/test.rs`.
+Source: `crates/tinyagents-harness/src/workspace/{mod.rs,types.rs}`; tests:
+`crates/tinyagents-harness/src/workspace/test.rs`.
 
 ## Core Types
 
@@ -36,8 +36,8 @@ the built-in provider: it scopes every agent to one shared root without copying
 Build a descriptor fluently:
 
 ```rust
-use tinyagents::harness::tool::SandboxMode;
-use tinyagents::harness::workspace::WorkspaceDescriptor;
+use tinyagents_harness::tool::SandboxMode;
+use tinyagents_harness::workspace::WorkspaceDescriptor;
 
 let ws = WorkspaceDescriptor::new("/work/agent-a")
     .with_trusted_root("/shared/cache")
@@ -62,9 +62,9 @@ every `ToolExecutionContext` the run builds then carries it, so a tool reads its
 allowed root from `context.workspace` rather than an application global:
 
 ```rust
-use tinyagents::harness::context::{RunConfig, RunContext};
-use tinyagents::harness::tool::ToolExecutionContext;
-use tinyagents::harness::workspace::WorkspaceDescriptor;
+use tinyagents_harness::context::{RunConfig, RunContext};
+use tinyagents_harness::tool::ToolExecutionContext;
+use tinyagents_harness::workspace::WorkspaceDescriptor;
 
 let ws = WorkspaceDescriptor::new("/work/agent-a").with_policy_id("run-9");
 let ctx: RunContext =
@@ -93,8 +93,8 @@ event sink:
 
 ```rust
 use std::sync::Arc;
-use tinyagents::harness::events::{EventSink, RecordingListener};
-use tinyagents::harness::workspace::{
+use tinyagents_harness::events::{EventSink, RecordingListener};
+use tinyagents_harness::workspace::{
     cleanup_workspace, prepare_workspace, SharedRootWorkspace,
 };
 
@@ -122,7 +122,7 @@ moved there with it — so the event-emitting half of the old `enforce()` method
 is a free function here instead of an inherent method on a foreign type.
 
 ```rust
-use tinyagents::harness::workspace::{WorkspaceDescriptor, enforce_workspace_path};
+use tinyagents_harness::workspace::{WorkspaceDescriptor, enforce_workspace_path};
 
 let ws = WorkspaceDescriptor::new("/work/agent-a");
 enforce_workspace_path(&ws, std::path::Path::new("/work/agent-a/out.txt"), &events)?; // allowed, no event

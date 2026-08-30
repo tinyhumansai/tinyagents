@@ -2,12 +2,15 @@
 
 ## Project Structure & Module Organization
 
-TinyAgents is a Rust 2024 library crate rooted at `Cargo.toml`. Public API
-exports live in `src/lib.rs`, with the crate-wide error type in `src/error.rs`.
-The four surfaces each live in their own module directory: `src/graph/`
-(durable typed state graphs), `src/harness/` (provider-neutral model calls,
-tools, middleware, streaming), `src/language/` (the declarative `.rag`
-blueprint format), and `src/registry/` (the named capability catalog).
+TinyAgents is a Rust 2024 virtual workspace rooted at `Cargo.toml`. It has no
+compatibility facade crate: consumers depend directly on the focused package
+that owns an API. The public packages are `crates/tinyagents-graph/` (durable
+typed state graphs), `crates/tinyagents-harness/` (provider-neutral model
+calls, tools, middleware, and streaming), `crates/tinyagents-language/` (the
+declarative `.rag` blueprint format), `crates/tinyagents-registry/` (the named
+capability catalog), and `crates/tinyagents-session/` (durable session data).
+`crates/tinyagents-tracing/` supplies shared opt-in tracing macros, while
+`crates/tinyagents-integration-tests/` owns cross-crate tests and examples.
 Scripted, interpreter-backed orchestration (a CodeAct/REPL loop) is a host
 concern and is deliberately not implemented here.
 
@@ -18,16 +21,17 @@ dedicated `types.rs` file and keep module-local unit tests in a dedicated
 `test.rs` file. The module root should wire the pieces together and expose the
 smallest useful API.
 
-Two Cargo features gate optional dependencies: `sqlite` (embedded SQLite
-checkpointer, `graph::checkpoint::SqliteCheckpointer`) and `tools` (the builtin
-generic tool family, `harness::tools`); every other provider and surface is
-compiled in by default.
+Cargo features are package-local. `tinyagents-harness` exposes `sqlite`,
+`tools`, `multimodal`, and `tracing`; `tinyagents-graph` exposes `sqlite` and
+`tracing`; registry and session expose `tracing`. Tracing instrumentation is
+compiled out by default.
 
-Integration tests are in `tests/`, covering serialization, graph routing,
+Integration tests are in `crates/tinyagents-integration-tests/tests/`, covering serialization, graph routing,
 registry binding, the expressive language, streaming, subagents,
 and provider contracts (including live, network-gated tests such as
-`tests/live_*.rs`). Runnable usage examples are in `examples/`, especially
-`examples/basic_graph.rs`. Design notes and module-level specifications live
+`tests/live_*.rs`). Runnable usage examples are in
+`crates/tinyagents-integration-tests/examples/`, especially `basic_graph.rs`.
+Design notes and module-level specifications live
 in `docs/`, with `docs/spec/README.md` as the top-level architecture
 reference and `docs/modules/` holding per-surface design docs (`graph/`,
 `harness/`, `registry/`, `expressive-language/`). A `wiki/`
@@ -39,11 +43,11 @@ change.
 
 - `cargo fmt --check`: verify Rust formatting without changing files.
 - `cargo fmt`: format the crate before committing.
-- `cargo clippy --all-targets -- -D warnings`: run lint checks for the library,
+- `cargo clippy --workspace --all-targets -- -D warnings`: run lint checks for the libraries,
   tests, and examples, treating warnings as failures.
-- `cargo build --all-targets`: compile all crate targets.
-- `cargo test`: run the full test suite.
-- `cargo run --example basic_graph`: run the bundled graph execution example.
+- `cargo build --workspace --all-targets`: compile all crate targets.
+- `cargo test --workspace`: run the full test suite.
+- `cargo run -p tinyagents-integration-tests --example basic_graph`: run the bundled graph execution example.
 
 Run commands from the repository root unless a future workspace layout changes
 the crate location.
@@ -53,13 +57,13 @@ the crate location.
 Use standard `rustfmt` output and Rust 2024 idioms. Module and file names should
 be `snake_case`; public types and traits should be `PascalCase`; functions,
 methods, fields, and local variables should be `snake_case`. Prefer small,
-typed APIs with `Result<T>` using the crate error type exported from
-`src/error.rs`. Keep public exports centralized in `src/lib.rs` so downstream
-users have a predictable surface.
+typed APIs with `Result<T>` using `tinyagents_harness::TinyAgentsError`. Keep
+public exports centralized in each package's `src/lib.rs` so downstream users
+have a predictable surface.
 
 ## Testing Guidelines
 
-Place integration tests in `tests/` and use descriptive test names such as
+Place integration tests in `crates/tinyagents-integration-tests/tests/` and use descriptive test names such as
 `serializes_chat_messages`. Add focused tests when changing serialization,
 graph routing, tool invocation, or public model request/response shapes. For
 async behavior, use the existing `tokio` dev dependency rather than introducing

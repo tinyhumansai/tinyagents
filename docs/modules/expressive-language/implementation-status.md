@@ -1,13 +1,13 @@
 # Implementation Status
 
-This tracks what the `src/language/` pipeline implements today against the
+This tracks what the `crates/tinyagents-language/src/` pipeline implements today against the
 grammar and AST sketched in [README.md](README.md). The runtime stays
 declarative: the compiler captures topology and policy in an inspectable
 [`Blueprint`], while runnable behaviour is supplied by a Rust-side `NodeFactory`.
 
 ## Package shape
 
-Flat files under `src/language/`:
+Flat files under `crates/tinyagents-language/src/`:
 
 | file | role |
 | --- | --- |

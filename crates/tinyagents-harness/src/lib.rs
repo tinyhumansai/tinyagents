@@ -1,0 +1,95 @@
+//! Harness runtime modules — the execution layer of the recursive runtime.
+//!
+//! The harness is the surface where a single model call becomes a recursive
+//! system: it runs the agent loop (model ⇄ tools), and because a whole harness
+//! agent can be wrapped as a [`tool`] via [`subagent`], an agent calling a tool
+//! *is* an agent calling another agent. Parent/child run lineage, depth limits,
+//! usage/cost roll-up, [`steering`], and [`cancel`]lation all flow through here,
+//! making nested runs first-class, observable, and policy-checked.
+//!
+//! The harness is intentionally split by feature. Each submodule owns one
+//! substantial part of model/tool orchestration so the implementation can grow
+//! without creating one large runtime file.
+
+#![cfg_attr(
+    not(feature = "tracing"),
+    allow(dead_code, unused_imports, unused_variables)
+)]
+
+pub mod agent_loop;
+pub mod artifacts;
+pub mod cache;
+pub mod cancel;
+pub mod config;
+pub mod context;
+pub mod cost;
+pub mod embeddings;
+pub mod error;
+pub mod events;
+pub mod handoff;
+pub mod host;
+pub mod ids;
+pub mod limits;
+pub mod memory;
+pub mod message;
+pub mod middleware;
+pub mod model;
+#[cfg(feature = "multimodal")]
+pub mod multimodal;
+pub mod no_progress;
+pub mod observability;
+pub mod prompt;
+pub mod providers;
+pub mod retry;
+pub mod run_queue;
+pub mod runtime;
+pub mod steering;
+pub mod store;
+pub mod stream;
+pub mod structured;
+pub mod subagent;
+pub mod summarization;
+pub mod testkit;
+pub mod tool;
+pub mod tool_calling;
+#[cfg(feature = "tools")]
+pub mod tools;
+pub mod usage;
+pub mod workspace;
+
+pub use cancel::CancellationToken;
+pub use cost::CostTotals;
+pub use embeddings::{
+    EmbeddingModel, InMemoryVectorStore, MockEmbeddingModel, Retriever, ScoredDoc, VectorStore,
+    cosine_similarity,
+};
+pub use error::{Result, TinyAgentsError};
+pub use ids::*;
+pub use message::{ContentBlock, Message};
+pub use model::{
+    CapabilitySet, Modalities, ModelProfile, ModelRequest, ModelResponse, ModelStatus, ModelStream,
+    ModelStreamItem, ProviderError, ResponseFormat, StreamAccumulator, ToolChoice,
+    collect_model_stream, context_window_for_model_id,
+};
+pub use no_progress::{
+    DEFAULT_IDENTICAL_HALT_THRESHOLD, DEFAULT_REPEAT_CALL_THRESHOLD,
+    DEFAULT_REPEAT_OUTPUT_THRESHOLD, NoProgress, NoProgressTracker, SuccessfulRepeat,
+    SuccessfulRepeatTracker, ToolAttempt,
+};
+pub use observability::{
+    AgentCallLatency, AgentLatencyMetrics, AgentObservation, FanOutSink, HarnessEventJournal,
+    HarnessStatusStore, InMemoryEventJournal, InMemoryStatusStore, JournalSink, JsonlSink,
+    LangfuseAuth, LangfuseClient, LangfuseScore, LangfuseScoreValue, LangfuseTraceConfig,
+    RedactingSink, StoreEventJournal,
+};
+pub use run_queue::{QueueLane, QueueStatus, RunQueue};
+pub use steering::{
+    SteeringCommand, SteeringCommandKind, SteeringHandle, SteeringOutcome, SteeringPolicy,
+};
+pub use subagent::{SubAgent, SubAgentSession, SubAgentTool};
+pub use tool::{
+    Tool as HarnessTool, ToolCall as HarnessToolCall, ToolFormat, ToolRegistry,
+    ToolResult as HarnessToolResult, ToolSchema,
+};
+pub use usage::Usage;
+pub use workspace::{SharedRootWorkspace, WorkspaceDescriptor, WorkspaceIsolation};

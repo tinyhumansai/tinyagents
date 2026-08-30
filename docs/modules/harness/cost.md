@@ -67,7 +67,7 @@ closed or emit an unpriced usage record depending on policy.
 
 ## Budget Middleware
 
-`BudgetMiddleware` (`src/harness/middleware/library/`) enforces a
+`BudgetMiddleware` (`crates/tinyagents-harness/src/middleware/library/`) enforces a
 `BudgetLimits` across a run — or across a whole recursive run tree, when the same
 `BudgetTracker` is shared with every sub-agent harness (cloning a tracker shares
 its accumulator). Every `BudgetLimits` field is optional; an unset limit is not
@@ -108,7 +108,7 @@ fresh input tokens.
 
 ```rust
 use std::sync::Arc;
-use tinyagents::harness::middleware::{BudgetLimits, BudgetMiddleware, MiddlewareStack};
+use tinyagents_harness::middleware::{BudgetLimits, BudgetMiddleware, MiddlewareStack};
 
 let mw = BudgetMiddleware::new(BudgetLimits {
     max_input_tokens: Some(5),

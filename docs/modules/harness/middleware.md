@@ -200,7 +200,7 @@ Each built-in must document:
 
 ## Tool policy enforcement
 
-`ToolPolicyMiddleware` (`src/harness/middleware/library/`) enforces the
+`ToolPolicyMiddleware` (`crates/tinyagents-harness/src/middleware/library/`) enforces the
 per-tool [`ToolPolicy`](tool.md#tool-policy-enforcement) metadata at two hooks:
 `before_model` (exposure — a blocked tool is hidden from the model) and
 `before_tool` (execution — a blocked call is rejected with
@@ -225,10 +225,10 @@ enforcement builders:
 
 ```rust
 use std::sync::Arc;
-use tinyagents::harness::middleware::{MiddlewareStack, ToolPolicyMiddleware};
-use tinyagents::harness::tool::{SandboxMode, ToolPolicy, ToolRuntime};
-use tinyagents::harness::context::{RunConfig, RunContext};
-use tinyagents::harness::workspace::WorkspaceDescriptor;
+use tinyagents_harness::middleware::{MiddlewareStack, ToolPolicyMiddleware};
+use tinyagents_harness::tool::{SandboxMode, ToolPolicy, ToolRuntime};
+use tinyagents_harness::context::{RunConfig, RunContext};
+use tinyagents_harness::workspace::WorkspaceDescriptor;
 
 let mut policies = std::collections::HashMap::new();
 policies.insert(
@@ -238,7 +238,7 @@ policies.insert(
         ..ToolRuntime::default()
     }),
 );
-use tinyagents::harness::tool::ToolCall;
+use tinyagents_harness::tool::ToolCall;
 let call = || ToolCall::new("c1", "shell", serde_json::json!({}));
 
 let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
@@ -278,7 +278,7 @@ Two constructors:
   restrict; the single restriction when only one does; unrestricted otherwise).
 
 ```rust
-use tinyagents::harness::middleware::ContextualToolSelectionMiddleware;
+use tinyagents_harness::middleware::ContextualToolSelectionMiddleware;
 
 // Parent allows {a,b,c} and denies {c}; child tries to allow {b,c,d}.
 // Effective allow = {a,b,c} ∩ {b,c,d} = {b,c}; deny adds parent's c -> {c}.

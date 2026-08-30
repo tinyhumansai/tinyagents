@@ -9,10 +9,10 @@ The graph module must be usable without the expressive language. The expressive
 language compiles into graph structures; the graph runtime must not know or care
 where a graph came from.
 
-The current implementation in `src/graph.rs` is a milestone-1 scaffold:
-closure-backed nodes, whole-state node outputs, direct and conditional edges,
-sequential execution, and a recursion limit. The feature specifications below
-describe the target contract that the scaffold should grow into.
+The implementation lives in `crates/tinyagents-graph/src/` and includes the
+typed builder, compiled executor, channels, checkpointing, interrupts,
+streaming, parallel execution, subgraphs, sub-agent nodes, and observability.
+The specifications below describe the contract those modules implement.
 
 ## Source Inspiration
 

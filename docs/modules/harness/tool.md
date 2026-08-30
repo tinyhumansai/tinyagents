@@ -146,7 +146,7 @@ Example:
 
 ```rust
 use serde_json::json;
-use tinyagents::harness::tool::{ToolFormat, ToolSchema};
+use tinyagents_harness::tool::{ToolFormat, ToolSchema};
 
 let json_tool = ToolSchema::new(
     "weather",
@@ -242,7 +242,7 @@ Provider-supplied tool calls must fail closed:
 
 When the model calls a tool that is not registered, the agent loop's behavior is
 governed by `RunPolicy::unknown_tool: UnknownToolPolicy`
-(`src/harness/runtime/types.rs`):
+(`crates/tinyagents-harness/src/runtime/types.rs`):
 
 - `UnknownToolPolicy::Fail` (default, historical) — abort the run with
   `TinyAgentsError::ToolNotFound(name)`.
@@ -261,7 +261,7 @@ can re-target or replay the intended call, and `recovery` is a label such as
 `"tool_error"` or `"rewrite:lookup"`.
 
 ```rust
-use tinyagents::harness::runtime::{AgentHarness, RunPolicy, UnknownToolPolicy};
+use tinyagents_harness::runtime::{AgentHarness, RunPolicy, UnknownToolPolicy};
 
 let mut harness: AgentHarness<()> = AgentHarness::new();
 // ... register a model whose first turn calls the unregistered `missing` ...
@@ -309,7 +309,7 @@ are handled separately:
 ## Tool policy enforcement
 
 Beyond the model-visible `ToolSchema`, each tool advertises a structured,
-serializable `ToolPolicy` (`src/harness/tool/types.rs`) via `Tool::policy()`.
+serializable `ToolPolicy` (`crates/tinyagents-harness/src/tool/types.rs`) via `Tool::policy()`.
 The default is **unclassified** (`classified == false`), so strict enforcement
 can fail closed on any tool that has not declared its safety profile.
 

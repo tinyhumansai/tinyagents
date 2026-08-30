@@ -2,38 +2,24 @@
 
 ## Package Shape
 
-Target layout:
+Package layout:
 
 ```text
-src/graph/
-  mod.rs
-  builder.rs
-  cache.rs
-  channel.rs
-  checkpoint.rs
-  command.rs
-  compile.rs
-  edge.rs
-  error.rs
-  event.rs
-  executor.rs
-  interrupt.rs
-  node.rs
-  parallel.rs
-  policy.rs
-  reducer.rs
-  recursion.rs
-  state.rs
-  stream.rs
-  subagent.rs
-  subgraph.rs
-  testkit.rs
-  visualize.rs
+crates/tinyagents-graph/src/
+  lib.rs
+  builder/
+  channel/
+  checkpoint/
+  command/
+  compiled/
+  parallel/
+  recursion/
+  reducer/
+  stream/
+  subagent_node/
+  subgraph/
+  testkit/
 ```
-
-The current single-file `src/graph.rs` can remain through milestone 1. Split the
-package when the API adds compile-time graph freezing, checkpointing, or typed
-streaming; those features are large enough to deserve module boundaries.
 
 ## Core Types
 

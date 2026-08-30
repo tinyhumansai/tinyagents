@@ -6,7 +6,7 @@ a graph-native way to keep working it. It is a provider-neutral port of
 OpenHuman's `thread_goals`, re-hosted on the harness `Store` and driven off the
 graph runtime rather than an out-of-band heartbeat.
 
-See the source module README at `src/graph/goals/README.md` for the full public
+See the source module README at `crates/tinyagents-graph/src/goals/README.md` for the full public
 surface; this spec captures the design contract.
 
 ## Model
@@ -86,7 +86,7 @@ and wiring a stop into a turn stays the host's call.
 
 ## Testing
 
-Unit tests in `src/graph/goals/test.rs` (types, store, tools, the gate loop, and
+Unit tests in `crates/tinyagents-graph/src/goals/test.rs` (types, store, tools, the gate loop, and
 budget enforcement on `InMemoryStore`); an end-to-end self-driving loop in
 `tests/e2e_graph_goals.rs`; feature coverage for budget accounting and the
 mid-turn guard in `tests/feature_graph_goal_budget.rs`.

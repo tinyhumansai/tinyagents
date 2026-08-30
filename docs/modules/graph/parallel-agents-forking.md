@@ -272,8 +272,8 @@ Per-item timeout — a slow item fails in isolation while fast items still
 succeed:
 
 ```rust
-use tinyagents::graph::parallel::{map_reduce, FailurePolicy, ParallelOptions};
-use tinyagents::TinyAgentsError;
+use tinyagents_graph::parallel::{map_reduce, FailurePolicy, ParallelOptions};
+use tinyagents_harness::TinyAgentsError;
 
 // Item 1 hangs; a 50ms per-item timeout turns it into a recoverable failure.
 let out = map_reduce(
@@ -310,7 +310,7 @@ assert!(matches!(err, TinyAgentsError::Timeout(_)));
 Cancellation — a cancelled token stops the batch:
 
 ```rust
-use tinyagents::CancellationToken;
+use tinyagents_harness::CancellationToken;
 
 let token = CancellationToken::new();
 token.cancel();

@@ -72,14 +72,14 @@ enters a model request.
 Target layout:
 
 ```text
-src/harness/embeddings.rs
+crates/tinyagents-harness/src/embeddings.rs
 ```
 
 The first implementation can keep the feature in one module. If it grows large,
 split it into:
 
 ```text
-src/harness/embeddings/
+crates/tinyagents-harness/src/embeddings/
   mod.rs
   embedding.rs
   vector_store.rs
