@@ -20,8 +20,9 @@ use tinyagents_harness::events::AgentEvent;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::{EventRecorder, FakeTool};
 use tinyagents_harness::tool::{
-    SandboxMode, Tool, ToolCall, ToolExecutionContext, ToolResult, ToolSchema,
+    SandboxMode, Tool, ToolExecutionContext, ToolResult,
 };
+use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyagents_harness::workspace::{cleanup_workspace, enforce_workspace_path, prepare_workspace};
 use tinyagents_harness::*;
 use tinyagents_language::Blueprint;

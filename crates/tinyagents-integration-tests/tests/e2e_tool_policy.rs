@@ -25,9 +25,9 @@ use tinyagents_harness::middleware::ToolPolicyMiddleware;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::testkit::ScriptedModel;
 use tinyagents_harness::tool::{
-    SandboxMode, Tool, ToolAccess, ToolCall, ToolPolicy, ToolResult, ToolRuntime, ToolSchema,
-    ToolSideEffects,
+    SandboxMode, Tool, ToolAccess, ToolPolicy, ToolResult, ToolRuntime, ToolSideEffects,
 };
+use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyagents_harness::workspace::WorkspaceDescriptor;
 use tinyagents_harness::*;
 use tinyagents_language::*;
