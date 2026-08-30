@@ -165,6 +165,13 @@ pub struct DelegationConfig {
     /// exactly as-is. Durable graphs pause by checkpoint; chat turns pause by
     /// steering. See the `approval` node below.
     pub require_review_approval: bool,
+    /// Optional observability sink for the graph's run/node/route events.
+    ///
+    /// Host-supplied and `None` by default: this crate emits its own `tracing`
+    /// diagnostics for the graph runtime, and a host that wants delegation runs
+    /// journalled into its own observability surface attaches a sink here
+    /// rather than the module reaching for a host-specific logger.
+    pub event_sink: Option<Arc<dyn GraphEventSink>>,
 }
 
 impl Default for DelegationConfig {
@@ -175,6 +182,7 @@ impl Default for DelegationConfig {
             thread_id: None,
             cancel: CancellationToken::new(),
             require_review_approval: false,
+            event_sink: None,
         }
     }
 }
