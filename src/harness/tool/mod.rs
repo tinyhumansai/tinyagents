@@ -17,8 +17,6 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::error::{Result, TinyAgentsError};
-
 pub use schema::*;
 pub use types::*;
 
