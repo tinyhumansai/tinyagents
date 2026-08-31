@@ -2975,3 +2975,117 @@ async fn a_transport_failure_is_reported_as_a_structured_provider_error() {
         "the failing URL is what makes this diagnosable, got: {rendered}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Prompt-cache breakpoints (ContentBlock::CacheBreakpoint)
+// ---------------------------------------------------------------------------
+//
+// The point of these is the *first* one: a request that declares no breakpoint
+// must serialize exactly as it did before the feature existed. Every host on
+// the OpenAI-compatible path shares this code, and most of them talk to
+// backends that cache automatically and would be actively harmed by a content
+// array appearing where a string used to be.
+
+mod cache_breakpoints {
+    use crate::harness::message::{ContentBlock, Message, SystemMessage};
+    use crate::harness::providers::openai::convert::translate_message;
+
+    fn wire(message: &Message) -> serde_json::Value {
+        serde_json::to_value(translate_message(message).expect("translates")).expect("serializes")
+    }
+
+    fn system(blocks: Vec<ContentBlock>) -> Message {
+        Message::System(SystemMessage { content: blocks })
+    }
+
+    #[test]
+    fn a_system_message_without_a_breakpoint_is_still_a_bare_string() {
+        let got = wire(&system(vec![ContentBlock::Text("be helpful".into())]));
+        assert_eq!(
+            got["content"],
+            serde_json::json!("be helpful"),
+            "declaring no breakpoint must leave the wire bytes untouched"
+        );
+    }
+
+    #[test]
+    fn a_breakpoint_marks_the_part_it_follows() {
+        let got = wire(&system(vec![
+            ContentBlock::Text("stable".into()),
+            ContentBlock::CacheBreakpoint,
+            ContentBlock::Text("volatile".into()),
+        ]));
+        assert_eq!(
+            got["content"],
+            serde_json::json!([
+                {"type": "text", "text": "stable", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "volatile"}
+            ])
+        );
+    }
+
+    #[test]
+    fn several_breakpoints_are_all_emitted() {
+        let got = wire(&system(vec![
+            ContentBlock::Text("a".into()),
+            ContentBlock::CacheBreakpoint,
+            ContentBlock::Text("b".into()),
+            ContentBlock::CacheBreakpoint,
+            ContentBlock::Text("c".into()),
+        ]));
+        let parts = got["content"].as_array().expect("parts");
+        assert_eq!(parts.len(), 3);
+        assert!(parts[0].get("cache_control").is_some());
+        assert!(parts[1].get("cache_control").is_some());
+        assert!(parts[2].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn breakpoints_beyond_the_providers_limit_keep_the_longest_prefixes() {
+        // Anthropic 400s past four. Five are declared; the earliest is dropped
+        // because it covers the shortest prefix and is worth the least.
+        let mut blocks = Vec::new();
+        for i in 0..5 {
+            blocks.push(ContentBlock::Text(format!("block{i}")));
+            blocks.push(ContentBlock::CacheBreakpoint);
+        }
+        let got = wire(&system(blocks));
+        let parts = got["content"].as_array().expect("parts");
+        assert_eq!(parts.len(), 5);
+        assert!(
+            parts[0].get("cache_control").is_none(),
+            "the earliest breakpoint is the one to drop"
+        );
+        assert_eq!(
+            parts[1..]
+                .iter()
+                .filter(|p| p.get("cache_control").is_some())
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn a_leading_breakpoint_is_dropped_rather_than_guessed_at() {
+        let got = wire(&system(vec![
+            ContentBlock::CacheBreakpoint,
+            ContentBlock::Text("body".into()),
+        ]));
+        let parts = got["content"].as_array().expect("parts");
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn a_breakpoint_does_not_change_the_messages_text() {
+        // `Message::text()` feeds token budgeting, summarization and every
+        // provider that does not implement caching. A marker must be invisible
+        // to all of them.
+        let message = system(vec![
+            ContentBlock::Text("one ".into()),
+            ContentBlock::CacheBreakpoint,
+            ContentBlock::Text("two".into()),
+        ]);
+        assert_eq!(message.text(), "one two");
+    }
+}
