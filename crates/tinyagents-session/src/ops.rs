@@ -135,7 +135,15 @@ pub fn record_message(
     cost_usd: Option<f64>,
 ) -> Result<i64> {
     record_message_with_reasoning(
-        workspace_dir, session_id, role, content, None, model, input_tokens, output_tokens, cost_usd,
+        workspace_dir,
+        session_id,
+        role,
+        content,
+        None,
+        model,
+        input_tokens,
+        output_tokens,
+        cost_usd,
     )
 }
 
