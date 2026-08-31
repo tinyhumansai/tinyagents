@@ -56,6 +56,10 @@ tinyagents-harness = { git = "https://github.com/tinyhumansai/tinyagents", packa
 tinyagents-graph = { git = "https://github.com/tinyhumansai/tinyagents", package = "tinyagents-graph" }
 tinyagents-language = { git = "https://github.com/tinyhumansai/tinyagents", package = "tinyagents-language" }
 tinyagents-registry = { git = "https://github.com/tinyhumansai/tinyagents", package = "tinyagents-registry" }
+# The code samples below build `Message` and provider types directly from
+# TinyInference, the message/model crate TinyAgents is built on. It is a
+# separate git dependency, not re-exported by the crates above.
+tinyinference = { git = "https://github.com/tinyhumansai/tinyinference", package = "tinyinference" }
 ```
 
 A minimal typed graph — a whole-state agent/tool loop (trimmed from
