@@ -97,9 +97,14 @@ fn normalize_tool_call_id(id: &str) -> String {
 /// [`TinyAgentsError::Validation`] instead of being discarded.
 pub(super) fn translate_message(message: &Message) -> Result<ChatMessageWire> {
     let wire = match message {
-        Message::System(_) => ChatMessageWire {
+        // Routed through the same content translation as user messages rather
+        // than `message.text()`. `text()` concatenates only the text blocks, so
+        // it silently discards a `CacheBreakpoint` — which is precisely the
+        // message that carries one, since the system prompt is the stable
+        // prefix worth caching.
+        Message::System(system) => ChatMessageWire {
             role: "system".to_string(),
-            content: Some(MessageContentWire::Text(message.text())),
+            content: Some(translate_user_content(&system.content)?),
             tool_calls: Vec::new(),
             tool_call_id: None,
         },
@@ -158,11 +163,17 @@ pub(super) fn translate_message(message: &Message) -> Result<ChatMessageWire> {
 /// representation, so it fails closed with a validation error rather than being
 /// silently dropped.
 pub(super) fn translate_user_content(blocks: &[ContentBlock]) -> Result<MessageContentWire> {
-    let has_image = blocks
-        .iter()
-        .any(|block| matches!(block, ContentBlock::Image(_)));
+    // Two things force the content-parts shape: an image, which has no string
+    // representation, and a declared cache breakpoint, which is an attribute of
+    // a *part* and therefore cannot be expressed on a bare string.
+    let needs_parts = blocks.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::Image(_) | ContentBlock::CacheBreakpoint
+        )
+    });
 
-    if !has_image {
+    if !needs_parts {
         // No image: render as a single string, but still fail closed on blocks
         // that cannot be represented.
         let mut text = String::new();
@@ -170,7 +181,11 @@ pub(super) fn translate_user_content(blocks: &[ContentBlock]) -> Result<MessageC
             match block {
                 ContentBlock::Text(t) => text.push_str(t),
                 ContentBlock::Json(value) => text.push_str(&value.to_string()),
-                ContentBlock::Image(_) => unreachable!("guarded by has_image"),
+                ContentBlock::Image(_) => unreachable!("guarded by needs_parts"),
+                // Unreachable for the same reason, and deliberately not folded
+                // into the drop arm below: a breakpoint that silently vanished
+                // would leave the caller believing the request was cached.
+                ContentBlock::CacheBreakpoint => unreachable!("guarded by needs_parts"),
                 // OpenAI-compatible requests have no representation for
                 // reasoning blocks; they are dropped rather than failing the
                 // request (matching the assistant path, which serializes via
@@ -187,9 +202,13 @@ pub(super) fn translate_user_content(blocks: &[ContentBlock]) -> Result<MessageC
     let mut parts = Vec::with_capacity(blocks.len());
     for block in blocks {
         match block {
-            ContentBlock::Text(t) => parts.push(ContentPartWire::Text { text: t.clone() }),
+            ContentBlock::Text(t) => parts.push(ContentPartWire::Text {
+                text: t.clone(),
+                cache_control: None,
+            }),
             ContentBlock::Json(value) => parts.push(ContentPartWire::Text {
                 text: value.to_string(),
+                cache_control: None,
             }),
             ContentBlock::Image(image) => parts.push(ContentPartWire::ImageUrl {
                 image_url: ImageUrlWire {
@@ -199,11 +218,28 @@ pub(super) fn translate_user_content(blocks: &[ContentBlock]) -> Result<MessageC
             // See the string-rendering arm above: reasoning blocks have no
             // OpenAI representation and are dropped, not failed.
             ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
+            // The marker attaches to the part it follows: the provider caches
+            // through the end of that block. A leading breakpoint (nothing to
+            // mark) is a caller mistake with no safe interpretation, so it is
+            // dropped rather than guessed at — caching the empty prefix and
+            // caching the whole message are both wrong.
+            ContentBlock::CacheBreakpoint => match parts.last_mut() {
+                Some(ContentPartWire::Text { cache_control, .. }) => {
+                    *cache_control = Some(CacheControlWire::Ephemeral);
+                }
+                Some(ContentPartWire::ImageUrl { .. }) | None => {
+                    tracing::warn!(
+                        "[openai] ignoring a CacheBreakpoint with no preceding text part; \
+                         place it after the content it should make cacheable"
+                    );
+                }
+            },
             ContentBlock::ProviderExtension(_) => {
                 return Err(unrepresentable_block_error());
             }
         }
     }
+    enforce_breakpoint_limit(&mut parts);
     Ok(MessageContentWire::Parts(parts))
 }
 
