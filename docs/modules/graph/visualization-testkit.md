@@ -1,6 +1,6 @@
 # Graph Visualization, Introspection, And Testkit
 
-The graph exports (implemented in `src/graph/export`):
+The graph exports (implemented in `crates/tinyagents-graph/src/export`):
 
 - graph id and name — `GraphTopology::graph_id` / `GraphTopology::name`
   (set via `GraphBuilder::with_name`)
@@ -40,7 +40,7 @@ All three extraction sources — `CompiledGraph::topology`,
 
 ## Testkit
 
-`graph::testkit` (implemented in `src/graph/testkit`) provides graph-test
+`graph::testkit` (implemented in `crates/tinyagents-graph/src/testkit`) provides graph-test
 building blocks distinct from the harness testkit. Each node helper returns a
 closure ready for `GraphBuilder::add_node`:
 
@@ -93,9 +93,9 @@ durable backing so the same store can be closed and reconstructed. Wire them
 across every backend in one test file:
 
 ```rust
-use tinyagents::graph::checkpoint::{FileCheckpointer, InMemoryCheckpointer};
-use tinyagents::graph::orchestration::{InMemoryTaskStore, JsonlTaskStore};
-use tinyagents::graph::testkit::conformance::{
+use tinyagents_graph::checkpoint::{FileCheckpointer, InMemoryCheckpointer};
+use tinyagents_graph::orchestration::{InMemoryTaskStore, JsonlTaskStore};
+use tinyagents_graph::testkit::conformance::{
     checkpointer_concurrent_contract, taskstore_concurrent_contract, taskstore_replay_contract,
 };
 
@@ -125,7 +125,7 @@ against the durable ones.
 Example:
 
 ```rust
-use tinyagents::graph::testkit::{assert_graph, run_recorded};
+use tinyagents_graph::testkit::{assert_graph, run_recorded};
 
 let run = run_recorded(&graph, Some("t1"), 0).await?;
 assert_graph(&run)

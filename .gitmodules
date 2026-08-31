@@ -4,4 +4,6 @@
 [submodule "vendor/tinytools"]
 	path = vendor/tinytools
 	url = https://github.com/tinyhumansai/tinytools.git
-	branch = main
+[submodule "vendor/tinyinference"]
+	path = vendor/tinyinference
+	url = git@github.com:tinyhumansai/tinyinference.git

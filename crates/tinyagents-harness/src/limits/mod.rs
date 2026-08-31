@@ -1,0 +1,349 @@
+//! Run-scoped limit enforcement.
+//!
+//! Limits are what keep recursion bounded: because agents can call agents and
+//! graphs can run graphs, an unbounded run tree could fan out forever or burn a
+//! provider budget. [`RunLimits::max_depth`] caps how deep the sub-agent /
+//! sub-graph recursion may go, while the call and wall-clock caps bound the
+//! work within each run.
+//!
+//! [`RunLimits`] holds the policy; [`LimitTracker`] tracks live counters and
+//! checks them against the policy.  Every model call and tool call must go
+//! through the tracker so limits are fail-closed.
+//!
+//! # Example
+//!
+//! ```
+//! use tinyagents_harness::limits::{RunLimits, LimitTracker};
+//!
+//! let limits = RunLimits::default();
+//! let mut tracker = LimitTracker::new(limits);
+//! tracker.record_model_call().expect("within limit");
+//! assert_eq!(tracker.model_calls(), 1);
+//! assert_eq!(tracker.remaining_model_calls(), 24);
+//! ```
+
+mod types;
+
+pub use types::*;
+
+use std::time::{Duration, Instant};
+
+use crate::error::{Result, TinyAgentsError};
+
+impl RunLimits {
+    /// Sets the maximum number of model calls allowed per run.
+    pub fn with_max_model_calls(mut self, n: usize) -> Self {
+        self.max_model_calls = n;
+        self
+    }
+
+    /// Sets the maximum number of tool calls allowed per run.
+    pub fn with_max_tool_calls(mut self, n: usize) -> Self {
+        self.max_tool_calls = n;
+        self
+    }
+
+    /// Sets a wall-clock deadline in milliseconds. `None` removes the limit.
+    pub fn with_max_wall_clock_ms(mut self, ms: Option<u64>) -> Self {
+        self.max_wall_clock_ms = ms;
+        self
+    }
+
+    /// Sets a per-model-call wall-clock ceiling in milliseconds. `None`
+    /// removes the ceiling. See [`RunLimits::max_model_call_ms`].
+    pub fn with_max_model_call_ms(mut self, ms: Option<u64>) -> Self {
+        self.max_model_call_ms = ms;
+        self
+    }
+
+    /// Sets the per-call retry cap (a retry *count*, not counting the first
+    /// attempt). See [`RunLimits::max_retries_per_call`].
+    pub fn with_max_retries_per_call(mut self, n: usize) -> Self {
+        self.max_retries_per_call = n;
+        self
+    }
+
+    /// Sets the maximum sub-agent / recursion depth for the run tree.
+    pub fn with_max_depth(mut self, n: usize) -> Self {
+        self.max_depth = n;
+        self
+    }
+
+    /// Sets what the run does when a call cap is reached. See
+    /// [`LimitBehavior`].
+    pub fn with_behavior(mut self, behavior: LimitBehavior) -> Self {
+        self.behavior = behavior;
+        self
+    }
+}
+
+/// Tracks live counters for a single harness run and enforces [`RunLimits`].
+///
+/// The tracker records the wall-clock start time when it is created and
+/// computes elapsed time on demand via [`check_wall_clock`].
+///
+/// [`check_wall_clock`]: LimitTracker::check_wall_clock
+pub struct LimitTracker {
+    limits: RunLimits,
+    model_calls: usize,
+    tool_calls: usize,
+    started_at: Instant,
+}
+
+impl LimitTracker {
+    /// Creates a new tracker with zeroed counters and the current time as the
+    /// run start.
+    pub fn new(limits: RunLimits) -> Self {
+        Self {
+            limits,
+            model_calls: 0,
+            tool_calls: 0,
+            started_at: Instant::now(),
+        }
+    }
+
+    /// Records one model call and returns an error if the cap is exceeded.
+    ///
+    /// The counter is incremented **before** the check so the limit is
+    /// inclusive (a cap of `N` allows exactly `N` calls).
+    pub fn record_model_call(&mut self) -> Result<()> {
+        self.try_record_model_call()?;
+        Ok(())
+    }
+
+    /// Records one tool call and returns an error if the cap is exceeded.
+    pub fn record_tool_call(&mut self) -> Result<()> {
+        self.try_record_tool_call()?;
+        Ok(())
+    }
+
+    /// Records one model call and reports the cap decision as a
+    /// [`LimitOutcome`], honoring [`RunLimits::behavior`].
+    ///
+    /// - Within the cap → `Ok(LimitOutcome::Proceed)`.
+    /// - Cap exhausted under [`LimitBehavior::Error`] → `Err(LimitExceeded)`,
+    ///   exactly as [`LimitTracker::record_model_call`] has always behaved.
+    /// - Cap exhausted under [`LimitBehavior::StopWithPartial`] →
+    ///   `Ok(LimitOutcome::Stop(LimitKind::ModelCalls))`, so the loop can stop
+    ///   cleanly and return the partial run instead of discarding it.
+    pub fn try_record_model_call(&mut self) -> Result<LimitOutcome> {
+        self.model_calls += 1;
+        if self.model_calls > self.limits.max_model_calls {
+            return self.exhausted(LimitKind::ModelCalls, self.limits.max_model_calls);
+        }
+        Ok(LimitOutcome::Proceed)
+    }
+
+    /// Records one tool call and reports the cap decision as a
+    /// [`LimitOutcome`]. See [`LimitTracker::try_record_model_call`].
+    pub fn try_record_tool_call(&mut self) -> Result<LimitOutcome> {
+        self.tool_calls += 1;
+        if self.tool_calls > self.limits.max_tool_calls {
+            return self.exhausted(LimitKind::ToolCalls, self.limits.max_tool_calls);
+        }
+        Ok(LimitOutcome::Proceed)
+    }
+
+    /// Shared exhaustion branch: error or clean stop, per [`RunLimits::behavior`].
+    fn exhausted(&self, kind: LimitKind, cap: usize) -> Result<LimitOutcome> {
+        match self.limits.behavior {
+            LimitBehavior::Error => {
+                tinyagents_tracing::debug!(
+                    target: "tinyagents::limits",
+                    limit_kind = kind.as_str(),
+                    cap,
+                    "[limits] cap exhausted; failing the run"
+                );
+                Err(TinyAgentsError::Validation(format!(
+                    "max {} ({cap}) exceeded",
+                    match kind {
+                        LimitKind::ModelCalls => "model calls",
+                        LimitKind::ToolCalls => "tool calls",
+                    }
+                )))
+            }
+            LimitBehavior::StopWithPartial => {
+                tinyagents_tracing::debug!(
+                    target: "tinyagents::limits",
+                    limit_kind = kind.as_str(),
+                    cap,
+                    "[limits] cap exhausted; stopping with the partial result"
+                );
+                Ok(LimitOutcome::Stop(kind))
+            }
+        }
+    }
+
+    /// Un-counts `n` tool calls that were requested but never executed.
+    ///
+    /// Needed by the [`LimitBehavior::StopWithPartial`] tool path: when the cap
+    /// trips mid-batch the loop answers the remaining `tool_call_id`s with a
+    /// "stopped before this could run" result rather than executing them, so
+    /// leaving them counted would over-report the work done. LangChain's
+    /// `ToolCallLimitMiddleware` does the same rollback under `"end"`.
+    ///
+    /// Saturates at zero.
+    pub fn rollback_tool_calls(&mut self, n: usize) {
+        self.tool_calls = self.tool_calls.saturating_sub(n);
+    }
+
+    /// Checks whether the run has exceeded the configured wall-clock deadline.
+    ///
+    /// Returns `Ok(())` when no deadline is configured or the deadline has not
+    /// been reached. Returns a [`Validation`][crate::error::TinyAgentsError::Validation]
+    /// error otherwise.
+    pub fn check_wall_clock(&self) -> Result<()> {
+        if let Some(max_ms) = self.limits.max_wall_clock_ms {
+            let elapsed_ms = self.started_at.elapsed().as_millis() as u64;
+            if elapsed_ms > max_ms {
+                return Err(TinyAgentsError::Validation(format!(
+                    "wall-clock limit ({max_ms} ms) exceeded after {elapsed_ms} ms"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the wall-clock time elapsed since this tracker was created.
+    ///
+    /// Exposed so callers (the agent loop) can compute a remaining budget
+    /// against a deadline sourced from somewhere other than the run config —
+    /// for example the harness-level [`RunLimits::max_wall_clock_ms`].
+    pub fn elapsed(&self) -> Duration {
+        self.started_at.elapsed()
+    }
+
+    /// Returns the wall-clock budget still remaining before the configured
+    /// deadline, measured from this tracker's start instant.
+    ///
+    /// Returns `None` when no wall-clock deadline is configured (so callers
+    /// should not bound work by time). When a deadline is configured the
+    /// returned [`Duration`] is the remaining budget, saturating at
+    /// [`Duration::ZERO`] once the deadline has already elapsed.
+    ///
+    /// This is the budget the agent loop uses to bound an individual model call
+    /// (via `tokio::time::timeout`) so a hung or slow provider call is
+    /// interrupted rather than only being detected by the between-call
+    /// [`check_wall_clock`] check.
+    ///
+    /// [`check_wall_clock`]: LimitTracker::check_wall_clock
+    pub fn remaining_wall_clock(&self) -> Option<Duration> {
+        self.limits.max_wall_clock_ms.map(|max_ms| {
+            let max = Duration::from_millis(max_ms);
+            max.checked_sub(self.started_at.elapsed())
+                .unwrap_or(Duration::ZERO)
+        })
+    }
+
+    /// Returns the number of model calls recorded so far.
+    pub fn model_calls(&self) -> usize {
+        self.model_calls
+    }
+
+    /// Returns the number of tool calls recorded so far.
+    pub fn tool_calls(&self) -> usize {
+        self.tool_calls
+    }
+
+    /// Returns the number of model calls remaining before the cap is hit.
+    ///
+    /// Returns `0` rather than wrapping if the counter has somehow already
+    /// exceeded the limit.
+    pub fn remaining_model_calls(&self) -> usize {
+        self.limits.max_model_calls.saturating_sub(self.model_calls)
+    }
+
+    /// Returns a reference to the active [`RunLimits`] policy.
+    pub fn limits(&self) -> &RunLimits {
+        &self.limits
+    }
+
+    /// **Fail-open** override of the model-call and tool-call caps in place,
+    /// preserving already-recorded counts and the wall-clock start time.
+    ///
+    /// A `RunContext` derives its tracker's initial limits from its
+    /// `RunConfig`, which always carries a concrete default. That can silently
+    /// disagree with a harness-wide `RunPolicy` configured with a different
+    /// cap, so the *reported* limit (the policy's) and the limit that actually
+    /// trips (the tracker's) diverge. The agent loop calls this once per run to
+    /// reconcile the two into a single enforced source of truth.
+    ///
+    /// # This is a plain assignment, in **both** directions
+    ///
+    /// It raises a cap as readily as it lowers one. A caller writing
+    /// `RunConfig::new("r").with_max_model_calls(2)` against the default policy
+    /// therefore gets **25** model calls, not 2 — their explicit ceiling is
+    /// silently widened by a policy default they never set.
+    ///
+    /// Prefer [`LimitTracker::tighten_call_limits`], which takes the stricter
+    /// of the two and cannot widen anything. This method remains for the one
+    /// case that genuinely needs widening: a harness-wide `RunPolicy` that
+    /// deliberately configures a *higher* cap than the `RunConfig` **default**
+    /// (not than an explicitly-set `RunConfig` value).
+    ///
+    /// Distinguishing those two cases needs information this module does not
+    /// have — whether a `RunConfig` cap was set by the caller or merely
+    /// defaulted. See the note on [`LimitTracker::tighten_call_limits`] for what
+    /// the agent loop has to do about it.
+    pub fn sync_call_limits(&mut self, max_model_calls: usize, max_tool_calls: usize) {
+        tinyagents_tracing::debug!(
+            target: "tinyagents::limits",
+            from_model_calls = self.limits.max_model_calls,
+            from_tool_calls = self.limits.max_tool_calls,
+            to_model_calls = max_model_calls,
+            to_tool_calls = max_tool_calls,
+            "[limits] fail-open sync_call_limits override"
+        );
+        self.limits.max_model_calls = max_model_calls;
+        self.limits.max_tool_calls = max_tool_calls;
+    }
+
+    /// **Fail-closed** reconciliation: keeps whichever of the tracker's current
+    /// cap and the supplied cap is *stricter*, so a second limit source can
+    /// only ever tighten the run, never loosen it.
+    ///
+    /// This is the semantics a "hard limit" needs, and the same rule
+    /// [`RetryPolicy::max_attempts_capped_at`][crate::retry::RetryPolicy::max_attempts_capped_at]
+    /// already applies to the retry cap. Counts and the wall-clock start are
+    /// preserved.
+    ///
+    /// # Wiring note for the agent loop (wave 2)
+    ///
+    /// The loop currently calls [`LimitTracker::sync_call_limits`] with the
+    /// `RunPolicy` caps. Switching that call site to this method fixes the
+    /// silent widening of an explicit `RunConfig` cap, but it also changes the
+    /// case a policy raising the cap **above the `RunConfig` default** stops
+    /// working — which `policy_model_call_limit_above_run_config_default_is_honored`
+    /// in `agent_loop/test.rs` pins.
+    ///
+    /// Both cases are legitimate, and they are only distinguishable by knowing
+    /// whether the `RunConfig` cap was *explicitly set* or merely defaulted. The
+    /// clean fix is on the `RunConfig` side (a `RunConfig` owned by
+    /// `harness::context`, not this module): make its call caps
+    /// `Option<usize>` — or track an `explicitly_set` flag — and then in the
+    /// loop:
+    ///
+    /// - `RunConfig` cap explicitly set → `tighten_call_limits(policy caps)`
+    ///   (the caller's ceiling wins, and the policy may only tighten it).
+    /// - `RunConfig` cap merely defaulted → `sync_call_limits(policy caps)`
+    ///   (the policy is the only real source of truth, so it may raise it).
+    pub fn tighten_call_limits(&mut self, max_model_calls: usize, max_tool_calls: usize) {
+        let model = self.limits.max_model_calls.min(max_model_calls);
+        let tool = self.limits.max_tool_calls.min(max_tool_calls);
+        tinyagents_tracing::debug!(
+            target: "tinyagents::limits",
+            from_model_calls = self.limits.max_model_calls,
+            from_tool_calls = self.limits.max_tool_calls,
+            candidate_model_calls = max_model_calls,
+            candidate_tool_calls = max_tool_calls,
+            to_model_calls = model,
+            to_tool_calls = tool,
+            "[limits] fail-closed tighten_call_limits"
+        );
+        self.limits.max_model_calls = model;
+        self.limits.max_tool_calls = tool;
+    }
+}
+
+#[cfg(test)]
+mod test;

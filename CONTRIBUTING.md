@@ -28,17 +28,27 @@ cargo test --features sqlite
 cargo test --features repl
 ```
 
-### Wiki Submodule
+### Submodules
 
-The published GitHub wiki lives in `wiki/`, checked out as a git submodule
-pointing at the `tinyhumansai/tinyagents.wiki` repository. It is not part of
-the crate build and is not covered by this project's Markdown line-length or
-review rules. Clone with submodules to pull it down:
+This repository has two git submodules, and they are not interchangeable:
+
+- **`vendor/tinytools`** — the vendored tool vocabulary crate `Cargo.toml`
+  resolves `tinytools` from (`vendor/tinytools/crates/tinytools`). This one is
+  **required**: without it, cargo cannot even read the manifest, and every
+  build fails at "Updating crates.io index" with "failed to read
+  vendor/tinytools/crates/tinytools/Cargo.toml".
+- **`wiki`** — the published GitHub wiki, pointing at the
+  `tinyhumansai/tinyagents.wiki` repository. It is not part of the crate build
+  and is not covered by this project's Markdown line-length or review rules.
+
+Clone with submodules to pull down both:
 
 ```sh
 git clone --recurse-submodules https://github.com/tinyhumansai/tinyagents.git
 # or, in an existing checkout:
-git submodule update --init wiki
+git submodule update --init --recursive
+# or, to fetch only the required build dependency:
+git submodule update --init vendor/tinytools
 ```
 
 Do not edit `wiki/` content as part of an unrelated code or docs change; wiki

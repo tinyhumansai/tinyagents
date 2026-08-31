@@ -154,7 +154,7 @@ config or by forking a thread. It must not mutate old checkpoint records.
 
 ## Implemented (TinyAgents)
 
-The checkpoint core lives in `src/graph/checkpoint/`:
+The checkpoint core lives in `crates/tinyagents-graph/src/checkpoint/`:
 
 - `Checkpoint<State>` — the persisted superstep snapshot (thread/checkpoint ids,
   parent lineage, namespace, committed state, next/completed nodes, pending

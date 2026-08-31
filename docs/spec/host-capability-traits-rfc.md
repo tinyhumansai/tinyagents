@@ -283,7 +283,7 @@ route to models the host cannot call.
    2026-08-02** — this trait is `AgentMemory`; `tinyflows` keeps
    `MemoryProvider`. See the note in §3.1.
 2. ~~**Where do these live?**~~ **Resolved 2026-08-02** — one module per trait
-   under `src/harness/host/`, re-exported from `host::*`.
+   under `crates/tinyagents-harness/src/host/`, re-exported from `host::*`.
    *Partially deferred:* each capability is currently a single flat file
    (trait + value types + default impl + inline tests) rather than the crate's
    `<area>/{mod,types,test}.rs` split, so its value types sit in a module that
@@ -331,7 +331,7 @@ different ways — `agent` vs `agent_id`, `thread` vs `thread_id`, and one
 - [x] Trait signatures reviewed and the ten-trait budget accepted — all ten
       landed 2026-08-02, budget held at ten, no eleventh needed.
 - [x] §5.1 naming collision resolved (`AgentMemory`, 2026-08-02).
-- [x] §5.2 module layout agreed (`src/harness/host/`); per-capability
+- [x] §5.2 module layout agreed (`crates/tinyagents-harness/src/host/`); per-capability
       types/test split deferred — see §5.2.
 - [x] §5.3 decided: `HostCapabilities<State>` bundle.
 - [ ] Inert value-type module named and confirmed dependency-free — **not met**;

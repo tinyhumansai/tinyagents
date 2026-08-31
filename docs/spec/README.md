@@ -1,16 +1,17 @@
 # TinyAgents System Specification
 
 TinyAgents is a Rust-native LLM application framework inspired by LangChain and
-LangGraph. The system is organized around four modules:
+LangGraph. The system is organized as focused crates for five public surfaces:
 
 1. the harness
 2. the graph
 3. the registry
 4. the expressive language
+5. durable sessions
 
 Scripted, interpreter-backed orchestration (a CodeAct/REPL loop over
 model-written code cells) is deliberately a *host* concern built on top of these
-modules, not a surface this crate ships. See "Host-side surfaces" below.
+crates, not a surface this workspace ships. See "Host-side surfaces" below.
 
 The goal is to make agent systems easy to define, inspect, run, test, and
 eventually serialize without hiding the Rust types that make production systems
@@ -59,7 +60,7 @@ shipping them would drag an embedded interpreter into every dependent's build:
 - the driver loop that prompts a model for the next code cell and feeds the
   cell's output back in
 
-What this crate provides for those hosts: the capability `registry` (so a script
+What these crates provide for those hosts: the capability `registry` (so a script
 can only reach named `llm` / `tool` / `agent` capabilities), the harness and its
 sub-agent recursion accounting, typed `SessionId` / `CellId` / `CallId`, the
 event journal, and the `.rag` `repl_agent` node kind, which binds a
@@ -171,26 +172,27 @@ for implementation status.
 
 ## Package Layout
 
-The crate is a single library at the repository root (`Cargo.toml`), with
-`src/lib.rs` re-exporting the public surface and `src/error.rs` holding the
-crate-wide error type. Each of the four surfaces lives in its own module
-directory:
+The repository root is a virtual Cargo workspace. There is no `tinyagents`
+compatibility facade: applications depend directly on the packages whose APIs
+they use. Shared runtime errors live in `tinyagents-harness`.
 
 ```text
-src/
-  error.rs
-  lib.rs
-  graph/       # durable typed state graphs (checkpoint, interrupt, streaming, ...)
-  harness/     # provider-neutral model calls, tools, middleware, streaming, ...
-  language/    # the declarative `.rag` blueprint format (lexer/parser/compiler)
-  registry/    # the named capability catalog (models, tools, agents, stores, ...)
+crates/
+  tinyagents-harness/           # models, tools, middleware, providers, runtime
+  tinyagents-language/          # .rag lexer, parser, compiler, and resolver
+  tinyagents-graph/             # durable typed state graphs
+  tinyagents-registry/          # named capabilities and model catalog
+  tinyagents-session/           # durable session history and run ledger
+  tinyagents-tracing/           # shared opt-in tracing macros
+  tinyagents-integration-tests/ # cross-crate tests and runnable examples
 ```
 
 Provider implementations (OpenAI and the OpenAI-compatible endpoints for
 Anthropic, Ollama, DeepSeek, Groq, xAI, OpenRouter, Together, and Mistral)
-live inside `src/harness/providers/` and are compiled in unconditionally.
-Two Cargo features gate optional dependencies: `sqlite` (embedded SQLite
-checkpointer) and `tools` (the builtin generic tool family).
+live inside `crates/tinyagents-harness/src/providers/` and are compiled in
+unconditionally. Optional features are owned by their packages. Tracing calls
+and the direct `tracing` dependency are disabled unless a package's `tracing`
+feature is enabled.
 
 ## Milestones
 
@@ -211,7 +213,7 @@ projections, and mock model/tool testkit utilities.
 
 The `.rag` AST, lexer, parser, compiler into the graph runtime, parse/
 validation diagnostics with source spans, and example `.rag` workflow files
-(see `examples/rag_blueprint.rs`, `examples/openai_self_blueprint.rs`).
+(see the examples in `crates/tinyagents-integration-tests/examples/`).
 
 ### Milestone 4: Provider Integrations (shipped)
 
@@ -234,8 +236,8 @@ Historical decisions that have since been settled, kept for context:
   removed from this crate as a host concern.
 - State schemas remain Rust-owned; `.rag` binds to them by name through the
   registry rather than declaring schemas itself.
-- Provider crates live in this crate as always-compiled modules behind
-  `src/harness/providers/`, not separate crates or feature flags.
+- Providers remain always-compiled modules of `tinyagents-harness`, rather
+  than becoming one crate per provider.
 - Memory and embeddings are async, matching the rest of the harness surface.
 
 Remaining open question:

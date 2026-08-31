@@ -1,139 +1,28 @@
-[package]
-name = "tinyagents"
-version = "2.1.1"
+[workspace]
+members = ["crates/*"]
+default-members = [
+    "crates/tinyagents-harness",
+    "crates/tinyagents-language",
+    "crates/tinyagents-graph",
+    "crates/tinyagents-registry",
+    "crates/tinyagents-session",
+]
+exclude = ["vendor", "worktrees"]
+resolver = "3"
+
+[workspace.package]
+version = "2.1.2"
 edition = "2024"
 license = "GPL-3.0-only"
-description = "A durable agent + graph harness for Rust."
 repository = "https://github.com/tinyhumansai/tinyagents"
-readme = "README.md"
-keywords = ["llm", "agents", "graph", "langchain", "langgraph"]
-categories = ["asynchronous", "api-bindings"]
 
-[dependencies]
-async-trait = "0.1"
-# The tool vocabulary. This crate re-exports the host-facing naming/context
-# helpers (`humanize_tool_name`, `context_detail_from_args`, `WorkspaceDescriptor`,
-# `SandboxMode`, …) rather than declaring its own copies, so a host and this
-# harness read a tool's workspace root and display name identically.
-#
-# `harness::tool::Tool<State>` itself stays a distinct, harness-owned trait —
-# it is generic over application `State` and its signature carries this
-# crate's own model-facing dialect types (`ToolCall` / `ToolResult` /
-# `ToolPolicy` / `ToolTimeout`), which are a deliberately separate concern from
-# `tinytools::Tool`'s host-facing shape. The interop point is
-# `ToolExecutionContext` implementing `tinytools::ToolRunContext` (below in
-# `harness::tool::types`), which lets a tool read its workspace descriptor
-# without this crate naming `ToolExecutionContext` inside `tinytools` (the
-# edge points one way: `tinytools` must never depend on this crate).
-#
-# Path-only for now, which is what stops this crate being published. Publishing
-# `tinytools` is the prerequisite; see that repository's AGENTS.md.
-tinytools = { path = "vendor/tinytools/crates/tinytools" }
-# Cheap, reference-counted byte buffers. Used only on the *internal* SSE
-# byte-stream seam (`harness::providers::openai::sse::SseState`) so each
-# network chunk from `reqwest::Response::bytes_stream` is forwarded without a
-# per-chunk `Vec<u8>` copy. Already in the dependency tree via `reqwest`;
-# `bytes` never appears in the public API.
-bytes = "1"
-# Runtime-agnostic future combinators (`join_all` for concurrent supersteps) and
-# the `Stream`/`StreamExt` traits backing the real streaming pipeline
-# (`harness::model::ModelStream`).
-futures = "0.3"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-# `regex` has two consumers: the prompt-guided tool-call parsers in
-# `harness::tool_calling`, and the markup / data-URI / whitespace stripping
-# applied to oversized payloads in `harness::handoff`. Already resolved in
-# OpenHuman's kernel profile, so it adds no package there.
-regex = "1"
-thiserror = "2"
-tracing = "0.1"
+[workspace.lints.rust]
+unsafe_code = "allow"
 
-# Async runtime primitives used by the streaming pipeline, plus task spawning
-# for `DurabilityMode::Async` background checkpoint writes, `spawn_blocking`
-# file I/O, and `block_in_place` JSONL task-store writes (which requires the
-# multi-threaded runtime feature).
-# `fs` is required by `harness::artifacts`, which writes offloaded worker
-# artifacts to disk. It enables more of tokio, not another package, so the
-# kernel-floor package count is unaffected.
-tokio = { version = "1", default-features = false, features = ["sync", "time", "macros", "rt", "rt-multi-thread", "fs"] }
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
 
-# HTTP client used by hosted providers and the embedded Langfuse exporter. The
-# `stream` feature enables `Response::bytes_stream` for Server-Sent-Events
-# streaming.
-reqwest = { version = "0.12", default-features = false, features = [
-    "json",
-    "rustls-tls",
-    "stream",
-    # `http2` lets TLS endpoints negotiate HTTP/2 via ALPN, which is what
-    # enables the transport-liveness PING keepalives the provider clients
-    # configure (`http2_keep_alive_*`): a dead peer fails the in-flight call in
-    # under a minute even when zero application bytes are flowing — e.g. a
-    # provider stream that goes silent during long hidden reasoning. Plaintext
-    # endpoints (local Ollama/LM Studio) have no ALPN and stay on HTTP/1.1.
-    "http2",
-] }
-
-# Optional embedded SQLite checkpointer backend (`graph::checkpoint::sqlite`).
-# `bundled` compiles SQLite from vendored C source so no system library is
-# required; the dependency is pulled in only by the `sqlite` feature.
-# `bundled` compiles SQLite with FTS5 already enabled, which
-# `harness::session_store` relies on for its `sessions_fts` cross-session
-# search table. There is no separate `fts5` cargo feature at this version — do
-# not add one, it does not resolve.
-rusqlite = { version = "0.40", features = ["bundled"], optional = true }
-
-# Optional builtin tool family for deterministic time/date helpers.
-# `serde` is required by `harness::session_store`, whose records carry
-# `DateTime<Utc>` timestamps across the serde boundary.
-chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = { version = "0.10", optional = true }
-
-# ── `multimodal` feature deps ────────────────────────────────────────────
-# Both are optional and reached only through `harness::multimodal`, so a host
-# that does not turn the feature on resolves neither.
-#
-# `base64` decodes and re-encodes `data:` URI payloads. The engine choice is
-# load-bearing rather than incidental: a complete four-character group is what
-# `STANDARD` accepts (padded or not) and only a partial group needs
-# `STANDARD_NO_PAD`, so `harness::multimodal::data_uri` picks by length instead
-# of trying both — trying both decoded a multi-MB image twice for every
-# unpadded payload.
-base64 = { version = "0.22", optional = true }
-# `flate2` decompresses `application/gzip` data URIs that carry an
-# `original_mime=` parameter — the shape a renderer emits when it compresses an
-# attachment before handing it over. Decompression is bounded by `Read::take`
-# against the caller's byte cap, so a zip bomb fails the cap rather than the
-# allocator.
-flate2 = { version = "1", optional = true }
-
-[features]
-default = []
-# Embedded SQLite-backed checkpointer (`graph::checkpoint::SqliteCheckpointer`).
-sqlite = ["dep:rusqlite"]
-# Builtin generic tools (`harness::tools`) kept out of the default dependency
-# graph so host applications can choose whether they want these implementations.
-tools = ["dep:chrono-tz"]
-# Attachment resolution for `[IMAGE:…]` / `[FILE:…]` markers
-# (`harness::multimodal`): marker parsing, `data:` URI decoding, MIME
-# detection, size/count limits, and the rendered provider payload. Off by
-# default because a host that never carries attachments should not resolve
-# `base64` / `flate2`.
-multimodal = ["dep:base64", "dep:flate2"]
-
-[dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
-# Throwaway workspace roots for `harness::session_store` tests, which exercise
-# the real on-disk SQLite path rather than an in-memory database.
-tempfile = "3"
-# `.env` loading for the runnable examples.
-dotenvy = "0.15"
-# Stream combinators (`StreamExt::next`) for integration tests that drive a
-# `ModelStream` directly.
-futures = "0.3"
-
-# --- OpenAI-backed examples ---
-# The OpenAI provider is always compiled, so these build with a plain
-# `cargo build --examples`; they only need a network call + `OPENAI_API_KEY`
-# at run time.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
