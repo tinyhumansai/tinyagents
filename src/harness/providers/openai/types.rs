@@ -245,12 +245,38 @@ pub enum ContentPartWire {
     Text {
         /// The text content.
         text: String,
+        /// Marks this part as the end of a cacheable prefix.
+        ///
+        /// Absent for every part that is not a declared breakpoint, so a
+        /// request with no [`crate::harness::message::ContentBlock::CacheBreakpoint`]
+        /// serializes exactly as it did before this field existed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControlWire>,
     },
     /// An image reference, by URL or data URI.
     ImageUrl {
         /// The `image_url` object.
         image_url: ImageUrlWire,
     },
+}
+
+/// A prompt-cache breakpoint on a content part.
+///
+/// Anthropic's wire format (and the OpenAI-compatible surfaces that proxy to
+/// it, notably OpenRouter) reads `cache_control` on a content block and caches
+/// everything from the start of the request through that block. Providers that
+/// do not implement it ignore an unknown key, and providers that cache
+/// automatically never receive one because the caller does not declare
+/// breakpoints for them.
+///
+/// Only `ephemeral` exists today. Modelled as an enum rather than a bare string
+/// so a future lifetime is a compile error at every construction site instead of
+/// a typo that silently disables caching.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CacheControlWire {
+    /// The provider's default (short) cache lifetime.
+    Ephemeral,
 }
 
 /// The `image_url` payload of a [`ContentPartWire::ImageUrl`].
