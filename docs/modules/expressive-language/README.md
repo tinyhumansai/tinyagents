@@ -15,11 +15,10 @@ become
 registry binding, policy checks, and graph compiler as a human-authored file.
 Generated topology must never be installed directly into the runtime.
 
-This module is intentionally declarative. Interactive scripting and
-CodeAct-style recursive execution are host concerns and are not implemented in
-this crate. A `.rag` file defines graph topology and bindings; a host session
-inspects, scripts, and orchestrates harness or graph calls through
-capability-bound functions of its own.
+This module is intentionally declarative. Interactive scripting is a host
+concern and is not implemented in this crate. A `.rag` file defines graph
+topology and bindings; a host session inspects, scripts, and orchestrates
+harness or graph calls through capability-bound functions of its own.
 
 For what the parser/compiler implement today versus what is still aspirational,
 see [Implementation status](implementation-status.md).
@@ -111,8 +110,7 @@ The docs can still describe the language as TinyAgents source.
 ## Expressiveness Targets
 
 The long-term language should cover the graph concepts proven useful in
-LangGraph, LangChain agent graphs, OpenHuman's state-machine harness, and CodeAct
-style orchestration:
+LangGraph, LangChain agent graphs, and OpenHuman's state-machine harness:
 
 - graph defaults: recursion limits, timeouts, checkpointing, durability,
   streaming modes, cache policy, steering policy, and concurrency

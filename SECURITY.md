@@ -9,8 +9,8 @@ Report concerns to `contact@tinyhumans.ai`.
 
 ## Supported Versions
 
-TinyAgents is pre-1.0. Security fixes target the `main` branch until the project
-starts maintaining release branches.
+Security fixes target the `main` branch until the project starts maintaining
+release branches.
 
 ## Reporting A Vulnerability
 
@@ -31,7 +31,7 @@ before publishing details.
 
 Examples of in-scope issues:
 
-- generated `.rag` or `.ragsh` source bypassing registry or policy checks
+- generated `.rag` source bypassing registry or policy checks
 - unintended tool, model, store, or filesystem access
 - unsafe handling of credentials or secrets
 - prompt/context leakage across runs, forks, or sub-agents

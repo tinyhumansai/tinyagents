@@ -1,6 +1,6 @@
 # Roadmap
 
-TinyAgents is at v1.5.0. The roadmap favors small, well-tested modules that
+TinyAgents is at v2.1.2. The roadmap favors small, well-tested modules that
 build toward a production-grade Rust agent runtime.
 
 ## Shipped Foundation
@@ -17,15 +17,12 @@ build toward a production-grade Rust agent runtime.
   middleware, policy) bound by name (`registry/`)
 - the declarative `.rag` blueprint language: lexer, parser, compiler, and
   registry-backed binding (`language/`)
-- the imperative `.ragsh` REPL language for capability-bound interactive
-  orchestration (`repl/`)
-- an optional SQLite-backed checkpointer (`sqlite` feature) and an optional
-  Rhai-backed `.ragsh` session runtime (`repl` feature)
+- an optional SQLite-backed checkpointer (`sqlite` feature)
 - an embedded Langfuse client and graph exporter for observability
 
 ## Near-Term Work
 
-- broaden `.rag`/`.ragsh` example coverage for less-common routing and
+- broaden `.rag` example coverage for less-common routing and
   parallel-fanout shapes
 - continue splitting any module or doc that grows past the 500-line limit
   into focused files

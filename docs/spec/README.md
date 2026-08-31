@@ -1,7 +1,11 @@
 # TinyAgents System Specification
 
-TinyAgents is a Rust-native LLM application framework inspired by LangChain and
-LangGraph. The system is organized as focused crates for five public surfaces:
+TinyAgents is a small, provider-neutral agent harness for Rust, plus a durable
+typed state-graph runtime. It takes its shape from LangChain (models, tools,
+middleware, structured output, streaming, usage/cost) and LangGraph
+(`START`/`END`, nodes, conditional edges, channels/reducers, checkpoints,
+interrupts, subgraphs, time travel) — rebuilt as ordinary, typed Rust. The
+system is organized as five public crates:
 
 1. the harness
 2. the graph
@@ -9,18 +13,12 @@ LangGraph. The system is organized as focused crates for five public surfaces:
 4. the expressive language
 5. durable sessions
 
-Scripted, interpreter-backed orchestration (a CodeAct/REPL loop over
-model-written code cells) is deliberately a *host* concern built on top of these
-crates, not a surface this workspace ships. See "Host-side surfaces" below.
-
 The goal is to make agent systems easy to define, inspect, run, test, and
-eventually serialize without hiding the Rust types that make production systems
-reliable.
+serialize without hiding the Rust types that make production systems reliable.
 
 ## Reference Positioning
 
-TinyAgents should synthesize the reference systems rather than clone any one of
-them:
+TinyAgents synthesizes the reference systems rather than cloning either one:
 
 - LangGraph contributes the durable execution model: explicit state graphs,
   virtual `START` and `END`, Pregel-style supersteps, reducers/channels,
@@ -29,42 +27,12 @@ them:
 - LangChain contributes the harness model: provider-neutral models, tools,
   middleware, runtime context, memory, retrieval, structured output, tracing,
   usage, cost, and conformance tests for integrations.
-- `rust-langgraph` shows the Rust-facing precedent for a stateful graph runtime
-  with nodes, conditional edges, checkpoints, streaming, optional model
-  adapters, and ReAct/tool helpers. TinyAgents should go deeper on typed state,
-  harness composition, registries, and language-backed graph definitions.
-- OpenHuman PR #4261 contributes the closest product-shaped precedent: a
-  harness-decoupled graph engine, persistent checkpoints, HITL, graph
-  observability, blueprints, JSON-RPC run control, and a behavior-preserving
-  cutover from an implicit turn loop to an explicit phase machine.
-- CodeAct/recursive-language-model runtimes contribute the recursion model:
-  context and prompts as runtime values, recursive sub-model or sub-agent calls
-  as functions, persistent session variables, and trajectory logging. TinyAgents
-  provides the primitives (registry capabilities, sub-agents, session/cell/call
-  ids, event journals); the interpreter and its sandbox stay host-side.
 
-The target architecture is therefore layered: the harness owns model/tool
-execution and policies, the graph owns deterministic state transition and
-durability, the registry owns named capabilities, and `.rag` owns serializable
-graph blueprints. No layer should bypass another layer's safety, policy,
+The target architecture is layered: the harness owns model/tool execution and
+policies, the graph owns deterministic state transition and durability, the
+registry owns named capabilities, and `.rag` owns serializable graph
+blueprints. No layer should bypass another layer's safety, policy,
 observability, or test contracts.
-
-## Host-side surfaces
-
-Some things a recursive agent system needs are intentionally *not* implemented
-here, because a host can implement them on top of the four modules and because
-shipping them would drag an embedded interpreter into every dependent's build:
-
-- the scripted CodeAct/REPL session loop (an embedded Rhai / Python / JavaScript
-  interpreter running model-written code cells)
-- the driver loop that prompts a model for the next code cell and feeds the
-  cell's output back in
-
-What these crates provide for those hosts: the capability `registry` (so a script
-can only reach named `llm` / `tool` / `agent` capabilities), the harness and its
-sub-agent recursion accounting, typed `SessionId` / `CellId` / `CallId`, the
-event journal, and the `.rag` `repl_agent` node kind, which binds a
-host-provided scripted node to a registered `Script` component by name.
 
 ## Detailed Module Docs
 

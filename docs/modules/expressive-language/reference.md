@@ -118,9 +118,9 @@ node, where the policy is actually attached to the run's `SteeringHandle`.
 
 ### `repl_agent`
 
-Runs a host-provided script or model-driven CodeAct loop, bound by name to a
-registered `Script` component. The node implementation is supplied by the host;
-this crate ships no interpreter.
+Runs a host-provided script node, bound by name to a registered `Script`
+component. The node implementation is supplied by the host; this crate ships
+no interpreter.
 
 Supported fields:
 

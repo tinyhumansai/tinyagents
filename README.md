@@ -9,154 +9,95 @@
  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3" /></a>
 </p>
 
-**TinyAgents is a durable agent and graph harness for Rust.** It is a typed,
-checkpointed runtime where language models call models, agents call agents,
-graphs run graphs, and a model can author, compile, and run the very workflow it
-is standing inside — all as inspectable, checkpointed, policy-checked Rust.
+TinyAgents is a small, provider-neutral agent harness for Rust, plus a durable
+typed state-graph runtime. It takes its shape from
+[LangChain](https://www.langchain.com/) (models, tools, middleware, structured
+output, streaming, usage/cost) and
+[LangGraph](https://www.langchain.com/langgraph) (`START`/`END`, nodes,
+conditional edges, channels/reducers, checkpoints, interrupts, subgraphs, time
+travel) — rebuilt as ordinary, typed Rust with no hidden magic.
 
-## Recursion, without an embedded interpreter
+It is for Rust services that need to call models and tools in a loop, want
+that loop to be resumable and inspectable, and would rather not carry a
+Python runtime or a framework's DSL to get there.
 
-Most agent frameworks stuff everything into one ever-growing context window and
-hope the model copes. TinyAgents takes the other stance: a long task is an
-external *environment* that gets decomposed, and the runtime is re-entrant, so a
-model can recurse over pieces of it instead of swallowing the whole thing at
-once. The concrete surfaces:
+## What's inside
 
-- **Sub-agents (agents calling agents).** A harness agent is exposed *as a tool*
-  to another agent, so orchestration is literally a model calling a model
-  (`SubAgent`, `SubAgentSession`, `SubAgentTool`).
-- **Recursion policy + depth tracking.** The runtime tracks `root_run_id` /
-  `parent_run_id`, enforces a recursion limit, and rolls child runs' events,
-  usage, and cost up to the parent as first-class observable runs.
-- **Graphs that run graphs.** A node can embed another compiled graph, so a
-  whole compiled workflow can appear as a single step inside another one.
-- **Self-authoring (the deepest recursion).** A model can emit a `.rag`
-  blueprint that compiles through the *same* registry-bound compiler path as a
-  human-authored file, then runs on the *same* runtime the model is already
-  executing in. The harness can describe and re-enter itself.
+TinyAgents is a Cargo workspace, not one crate. Depend on the pieces you need:
 
-One language, one runtime: `.rag` blueprints lower into the exact same `graph` +
-`harness` types as hand-written Rust — a language whose programs *are* the
-runtime that interprets them.
-
-**Not in this workspace, by design:** the scripted CodeAct/REPL loop — an embedded
-interpreter (Rhai, Python, JavaScript) executing model-written code cells whose
-only host surface is capability calls. That is a host concern. TinyAgents gives
-it everything it needs (the capability `registry`, the harness, typed
-`SessionId`/`CellId`/`CallId`, and the `repl_agent` node kind for binding a
-host-provided scripted node by name) without pulling an interpreter into your
-dependency graph.
-
-## Features
-
-- **Harness** — provider-neutral model calls, typed tools, middleware,
-  structured output, streaming, usage/cost accounting, retries and limits,
-  response caching, memory/embeddings, summarization, steering, and a testkit.
-- **Graph runtime** — LangGraph-style durable, typed state graphs: `START`/`END`,
-  nodes, edges, conditional routing, commands, `Send` fanout, reducers/channels,
-  checkpoints, interrupts, subgraphs, streaming, topology export, and time
-  travel.
-- **Registry** — a named capability catalog (models, tools, agents, graphs,
-  stores, middleware, policy) that `.rag` binds by name.
-- **`.rag` expressive language** — a declarative, side-effect-free blueprint
-  format that compiles (lexer → parser → compiler) into the runtime; the safe
-  boundary for agent-authored plans.
-- **Recursion & sub-agents** — agents-as-tools, subgraphs, depth tracking, and a
-  recursion policy so deep call trees stay bounded and observable.
-- **Durability & checkpoints** — resume long runs, replay history, and travel
-  back in time across superstep boundaries.
-- **Provider-neutral** — one interface across hosted and local providers; swap
-  models without rewriting workflows.
-- **Observability** — normalized events, usage, and cost that roll up across
-  recursive child runs.
-- **Structured output & streaming** — typed responses and incremental token
-  streams at the harness boundary.
-
-## Architecture
-
-```text
-                         +-----------------------+
-                         |   .rag blueprint      |
-                         | declarative workflow  |
-                         +-----------+-----------+
-                                     |
-                                     |  compile / lower (by name)
-                                     v
-+-------------+        +-------------------------------------------+
-| Application |------->| Capability Registry                       |
-| Rust code   |        | models | tools | agents | graphs | policy |
-+------+------+        +---------------------+---------------------+
-       |                                     |
-       |                                     v
-       |              +-------------------------------------------+
-       +------------->| Durable Graph Runtime                     |
-                      | typed state | nodes | edges | checkpoints |
-                      +---------------------+---------------------+
-                                            |
-                                            v
-                      +-------------------------------------------+
-                      | Agent Harness                             |
-                      | prompts | tools | middleware | usage/cost |
-                      +----+--------------------------+-----------+
-                           |                          |
-                           v                          v
-                 +------------------+        +------------------+
-                 | Model Providers  |        | Typed Tools      |
-                 | OpenAI/Anthropic |        | local functions  |
-                 | Ollama/etc.      |        | external systems |
-                 +------------------+        +------------------+
-```
-
-The recursion loop — agents call agents, and graphs run graphs:
-
-```text
-        +-------+
-        | START |
-        +---+---+
-            |
-            v
-      +-------------+        a sub-agent is just a tool,
-      | Agent Node  |        and a tool may itself be a
-      +------+------+        whole compiled graph...
-             |
-      +------+-------------------------+
-      |              |                 |
- needs tool     calls sub-agent    done
-      |              |                 |
-      v              v                 v
-+-----------+  +---------------+    +-----+
-| Tool Node |  | SubAgent /    |    | END |
-+-----+-----+  | Subgraph Node |    +-----+
-      |        +-------+-------+
-      |                |  depth +1, recursion policy,
-      |                |  child run rolls up usage/cost
-      +-- loops back --+--- re-enters the runtime ---+
-          to Agent Node     (graph -> subgraph -> graph)
-```
+- **`tinyagents-harness`** — provider-neutral model calls, typed tools,
+  middleware, structured output, streaming, usage/cost accounting, retries,
+  caching, and memory. Features: `sqlite`, `tools`, `multimodal`, `tracing`.
+- **`tinyagents-graph`** — a LangGraph-style durable, typed state graph:
+  `START`/`END`, nodes, conditional edges, `Send` fanout, reducers/channels,
+  checkpoints, interrupts, subgraphs, and time travel. Features: `sqlite`,
+  `tracing`.
+- **`tinyagents-language`** — the `.rag` blueprint format: a declarative,
+  side-effect-free workflow description that lexes, parses, and compiles into
+  the same graph and harness types as hand-written Rust.
+- **`tinyagents-registry`** — a named capability catalog (models, tools,
+  agents, graphs, routers) that `.rag` and application code bind against by
+  name, plus an offline model price/capability catalog.
+- **`tinyagents-session`** — a SQLite-backed store for session history,
+  messages, tool calls, cost, and run lineage.
+- **`tinyagents-tracing`** — the `tracing` macros the other crates gate behind
+  their `tracing` feature. Compiled out by default.
+- **`tinyagents-integration-tests`** — cross-crate tests and the runnable
+  examples referenced below (not published, workspace-internal).
 
 ## Quick start
 
-Add only the TinyAgents crates your project uses. There is deliberately no
-`tinyagents` facade crate, so migrating from the former monolith is a breaking
-change:
+None of the crates are published to crates.io (`publish = false` in every
+`Cargo.toml`), so add them as git or path dependencies:
 
 ```toml
 [dependencies]
-tinyagents-harness = "2.1.1"
-tinyagents-graph = "2.1.1"
-tinyagents-language = "2.1.1"
-tinyagents-registry = "2.1.1"
-tinyagents-session = "2.1.1"
+tinyagents-harness = { git = "https://github.com/tinyhumansai/tinyagents", package = "tinyagents-harness" }
+tinyagents-graph = { git = "https://github.com/tinyhumansai/tinyagents", package = "tinyagents-graph" }
+tinyagents-language = { git = "https://github.com/tinyhumansai/tinyagents", package = "tinyagents-language" }
+tinyagents-registry = { git = "https://github.com/tinyhumansai/tinyagents", package = "tinyagents-registry" }
+# The code samples below build `Message` and provider types directly from
+# TinyInference, the message/model crate TinyAgents is built on. It is a
+# separate git dependency, not re-exported by the crates above.
+tinyinference = { git = "https://github.com/tinyhumansai/tinyinference", package = "tinyinference" }
 ```
 
-The OpenAI (and OpenAI-compatible) provider is compiled in by default; the
-build stays offline unless you actually make a call. Optional features live on
-the crate that owns the behavior: `tinyagents-harness` provides `sqlite`,
-`tools`, `multimodal`, and `tracing`; `tinyagents-graph` provides `sqlite` and
-`tracing`; and the registry and session crates forward `tracing`. Tracing
-instrumentation is disabled unless that feature is selected.
+A minimal typed graph — a whole-state agent/tool loop (trimmed from
+[`examples/basic_graph.rs`](crates/tinyagents-integration-tests/examples/basic_graph.rs)):
 
-To explore locally:
+```rust
+use tinyagents_graph::*;
+use tinyinference::message::Message;
+
+#[derive(Clone, Debug)]
+struct AgentState {
+    messages: Vec<Message>,
+    needs_tool: bool,
+}
+
+let graph = GraphBuilder::<AgentState, AgentState>::overwrite()
+    .add_node("agent", |mut state: AgentState, _ctx: NodeContext| async move {
+        state.messages.push(Message::assistant("checking the local tool"));
+        Ok(NodeResult::Update(state))
+    })
+    .add_node("tool", |mut state: AgentState, _ctx: NodeContext| async move {
+        state.messages.push(Message::tool("echo", "tool result"));
+        state.needs_tool = false;
+        Ok(NodeResult::Update(state))
+    })
+    .set_entry("agent")
+    .add_conditional_edges(
+        "agent",
+        |state: &AgentState| if state.needs_tool { "tool".to_string() } else { "done".to_string() },
+        [("tool", "tool"), ("done", END)],
+    )
+    .add_edge("tool", "agent")
+    .compile()?;
+
+let run = graph.run(AgentState { messages: vec![], needs_tool: true }).await?;
+```
+
+Run it for real:
 
 ```sh
 git clone git@github.com:tinyhumansai/tinyagents.git
@@ -164,127 +105,104 @@ cd tinyagents
 cargo run -p tinyagents-integration-tests --example basic_graph
 ```
 
-OpenAI-backed examples need an API key:
-
-```sh
-export OPENAI_API_KEY=...
-cargo run -p tinyagents-integration-tests --example openai_chat
-```
-
-Bound individual tool calls by installing shared timeout settings on the
-harness. Tools return `ToolTimeout::Inherit` by default; they may instead opt
-out with `Unbounded` or request a clamped explicit `Millis` budget:
+A one-shot model call through the harness (`export OPENAI_API_KEY=...` then
+`cargo run -p tinyagents-integration-tests --example openai_chat`):
 
 ```rust
-use tinyagents_harness::{AgentHarness, ToolTimeoutSettings};
+use std::sync::Arc;
+use tinyagents_harness::runtime::AgentHarness;
+use tinyinference::message::Message;
+use tinyinference::providers::openai::OpenAiModel;
 
+let model = OpenAiModel::from_env()?;
 let mut harness: AgentHarness<()> = AgentHarness::new();
-harness.with_tool_timeout_settings(ToolTimeoutSettings::new(
-    120_000, // inherited default
-    1_000,   // minimum explicit budget
-    3_600_000,
-    5_000,   // scheduling grace for explicit budgets
-));
-```
+harness.register_model("openai", Arc::new(model)).set_default_model("openai");
 
-A per-tool deadline produces a recoverable tool-error message and the agent
-loop continues, so the model can retry or choose another tool. The run's
-wall-clock deadline remains the outer hard abort. Clones of the settings share
-their inherited value, allowing a host to update it without rebuilding a
-harness.
-
-Export durable harness observations to Langfuse with the embedded client:
-
-```rust
-use tinyagents_harness::{LangfuseClient, LangfuseTraceConfig};
-
-let client = LangfuseClient::proxy("https://api.tinyhumans.ai", backend_jwt)?;
-client
-    .send_observations(
-        LangfuseTraceConfig {
-            user_id: Some("user_123".to_string()),
-            session_id: Some("thread_abc".to_string()),
-            ..Default::default()
-        },
-        &observations,
-    )
+let run = harness
+    .invoke_default(&(), vec![Message::user("What is a Rust trait?")])
     .await?;
+println!("{}", run.text().unwrap_or_default());
 ```
 
-`LangfuseClient::proxy` sends to the backend
-`/telemetry/langfuse/ingestion` endpoint with bearer auth. Use
-`LangfuseClient::direct(langfuse_url, public_key, secret_key)` when an
-application is allowed to talk to Langfuse directly.
+## Graph runtime
 
-Graph runs export the same way through `GraphLangfuseExporter`, which reuses the
-harness `LangfuseClient` transport and turns supersteps and nodes into timed
-spans (failures promoted to `ERROR`), with per-node **tool health** telemetry
-attached to the trace:
+`tinyagents-graph` is a durable, typed state graph modeled on LangGraph:
+`START`/`END` markers, nodes, static and conditional edges, `Command`-based
+routing, `Send` fanout, reducers over named channels, checkpointing (with an
+optional `sqlite` backend), interrupts, streaming events, topology export, and
+replay/time travel across superstep boundaries. A node can embed another
+compiled graph as a subgraph, so a whole workflow can appear as a single step
+inside a larger one.
 
-```rust
-use tinyagents_graph::GraphLangfuseExporter;
-use tinyagents_harness::{LangfuseClient, LangfuseTraceConfig};
+## Harness
 
-let exporter = GraphLangfuseExporter::new(LangfuseClient::from_env()?);
-let observations = journal.read_from(run_id, 0).await?;
-exporter
-    .send_observations(LangfuseTraceConfig::default(), &observations)
-    .await?;
-```
+`tinyagents-harness` runs the model/tool agent loop: provider-neutral model
+calls, typed tool definitions, middleware, structured output, streaming,
+usage and cost accounting, retries and limits, response caching, memory, and
+a testkit for exercising the loop without a live provider. An agent can be
+wrapped as a tool and handed to another agent (`SubAgent` /
+`SubAgentSession` / `SubAgentTool`), which is how multi-agent orchestration
+is composed — plain function composition, not a distinct execution mode.
 
-Because a graph run and the agent runs its nodes spawn share the same
-`root_run_id` — the default Langfuse `traceId` for both exporters — exporting a
-graph run and its child agents lands every step, node, model generation, and
-tool call under one trace for full end-to-end observability.
+## Registry
 
-## Examples to explore
+`tinyagents-registry` is a name-addressable catalog of models, tools, agents,
+graphs, and routers. `.rag` blueprints and application code both resolve
+capabilities by name against it rather than holding direct handles, which is
+what lets a blueprint be validated against exactly the capabilities a host
+chose to register.
+
+## `.rag` blueprint language
+
+`tinyagents-language` implements `.rag`: a declarative, side-effect-free
+format for describing a graph's state channels, nodes, routes, and named
+capability references. It compiles through a fixed pipeline —
+`source -> lexer -> tokens -> parser -> AST -> compiler -> Blueprint` — into
+the same `tinyagents-graph` and `tinyagents-harness` types produced by
+hand-written Rust. It can only reference capabilities by name; it has no way
+to embed arbitrary code, so a blueprint is bound and validated against a
+registry before it runs. See
+[`examples/rag_blueprint.rs`](crates/tinyagents-integration-tests/examples/rag_blueprint.rs).
+
+## Providers
+
+Every provider speaks the OpenAI Chat Completions wire format, so one adapter
+reaches all of them; only the base URL and model differ. Built-in presets:
+OpenAI, Anthropic (via its OpenAI-compatible endpoint), DeepSeek, Groq, xAI,
+OpenRouter, Together, Mistral, and Ollama (local). Any other OpenAI-compatible
+endpoint works by base URL — see [`providers.env.example`](providers.env.example)
+for the full list and configuration format.
+
+## Examples
 
 All live in
 [`crates/tinyagents-integration-tests/examples/`](crates/tinyagents-integration-tests/examples/):
 
-- **`basic_graph`** — a minimal typed state graph: `START`, nodes, edges, `END`.
-- **`complex_graph`** — conditional routing, fanout, and richer topology.
-- **`durable_graph`** — checkpoints, resume, and time-travel over supersteps.
-- **`resilient_graph`** — node-level retry over transient failures, plus a
-  resumable failure checkpoint that `retry` restarts after an outage clears.
-- **`agent_loop_tools`** — the agent ↔ tool loop the harness runs.
-- **`orchestrator_subagents`** — **recursion in action:** an orchestrator agent
-  that calls sub-agents as tools, with depth tracking and rolled-up usage.
-- **`openai_self_blueprint`** — **the deepest recursion:** a model authors a
-  `.rag` blueprint that is compiled and run on the same runtime.
-- **`rag_blueprint`** — load and run a declarative `.rag` workflow.
-- **`goals_and_todos`** — a durable `ThreadGoal` driving a `TaskBoard` kanban
-  on one thread.
+- **`basic_graph`**, **`complex_graph`**, **`durable_graph`**,
+  **`resilient_graph`** — a minimal typed graph, then conditional
+  routing/fanout, checkpoint/resume/time-travel, and node-level retry.
+- **`agent_loop_tools`** — the agent/tool loop the harness runs.
+- **`orchestrator_subagents`** — an orchestrator agent that resolves and calls
+  sub-agents by name from the registry.
+- **`rag_blueprint`** — parse and compile a `.rag` workflow, then bind it
+  against a registry.
+- **`openai_self_blueprint`** — a model emits a `.rag` blueprint that is
+  compiled and run.
+- **`goals_and_todos`** — a durable goal driving a task-board kanban on one
+  thread.
+- **`openai_chat`**, **`openai_tools`**, **`openai_structured`**,
+  **`openai_graph_agent`** — provider-backed chat, tool calling, structured
+  output, and a graph-driven agent (all need `OPENAI_API_KEY`).
 - **`subconscious_loop`** — an offline, testable autonomous closed-loop
-  harness (see
-  [`examples/subconscious_loop/README.md`](crates/tinyagents-integration-tests/examples/subconscious_loop/README.md)).
-- **`openai_chat`** — a single provider-backed chat turn.
-- **`openai_tools`** — tool calling against a hosted model.
-- **`openai_structured`** — typed structured output.
-- **`openai_graph_agent`** — a provider-backed agent driven inside a graph.
-
-OpenAI-backed examples require `OPENAI_API_KEY` at run time.
+  harness (see its own
+  [README](crates/tinyagents-integration-tests/examples/subconscious_loop/README.md)).
 
 ## Documentation
 
-- [Harness API](https://docs.rs/tinyagents-harness)
-- [Graph API](https://docs.rs/tinyagents-graph)
-- [Language API](https://docs.rs/tinyagents-language)
-- [Registry API](https://docs.rs/tinyagents-registry)
-- [Session API](https://docs.rs/tinyagents-session)
-- [Wiki home](https://github.com/tinyhumansai/tinyagents/wiki)
-  - [Recursion and sub-agents](https://github.com/tinyhumansai/tinyagents/wiki/Recursion-and-RLM)
-  - [Harness](https://github.com/tinyhumansai/tinyagents/wiki/Harness)
-  - [Graph runtime](https://github.com/tinyhumansai/tinyagents/wiki/Graph-Runtime)
-  - [Registry](https://github.com/tinyhumansai/tinyagents/wiki/Registry)
-  - [Expressive language `.rag`](https://github.com/tinyhumansai/tinyagents/wiki/Expressive-Language-RAG)
-  - [Providers](https://github.com/tinyhumansai/tinyagents/wiki/Providers)
-  - [Quick start](https://github.com/tinyhumansai/tinyagents/wiki/Quick-Start)
-  - [Examples](https://github.com/tinyhumansai/tinyagents/wiki/Examples)
-  - [Development](https://github.com/tinyhumansai/tinyagents/wiki/Development)
-
-Contributors working directly in the repository should also read the checked-in
-architecture specification under [`docs/spec/README.md`](docs/spec/README.md).
+- [`docs/spec/README.md`](docs/spec/README.md) — architecture specification.
+- [Wiki](https://github.com/tinyhumansai/tinyagents/wiki) — Harness, Graph
+  Runtime, Registry, Expressive Language, Providers, Quick Start,
+  Examples, Development.
 
 ## Development
 
@@ -307,22 +225,13 @@ PROVIDER_MATRIX=1 cargo test -p tinyagents-integration-tests --test live_provide
 ```
 
 Dialling is opt-in through `PROVIDER_MATRIX=1`, so a bare `cargo test` stays
-offline even with a fully configured `providers.env`.
-
-`providers.env` is gitignored — never commit real keys. See
-[`crates/tinyagents-harness/src/providers/openai/README.md`](crates/tinyagents-harness/src/providers/openai/README.md)
-for the configuration format.
+offline even with a fully configured `providers.env`. `providers.env` is
+gitignored — never commit real keys.
 
 ## Contributing
-
-TinyAgents welcomes focused contributions that improve the graph runtime,
-harness contracts, the registry, the `.rag` language, provider
-adapters, tests, examples, and documentation.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## License
 
 TinyAgents is licensed under [GPL-3.0-only](LICENSE).
-
-Built by TinyHumans for the Rust agent ecosystem.
