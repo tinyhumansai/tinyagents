@@ -36,8 +36,11 @@ host chooses only where its workspace lives:
 Re-exported from the crate root (see `src/lib.rs`); the full surface stays
 reachable under `session::` and `session::run_ledger::`.
 
-- **Recording** — `record_session_start`, `record_message`, `record_tool_call`,
-  `record_session_end`
+- **Recording** — `record_session_start`, `record_message`,
+  `record_message_with_reasoning`, `record_tool_call`, `record_session_end`.
+  Use `record_message_with_reasoning` when an assistant response has hidden
+  reasoning that must remain separate from its visible content;
+  `record_message` remains the compatibility wrapper for content-only callers.
 - **Querying** — `get_session`, `list_sessions`, `search_sessions`,
   `list_messages`, `list_tool_calls`, `list_children`
 - **Recovery** — `mark_interrupted`
@@ -53,7 +56,7 @@ Six tables plus one FTS5 virtual table, created on demand and idempotently:
 | Table | Holds |
 | --- | --- |
 | `sessions` | one row per session; lineage via `parent_session_id` |
-| `session_messages` | per-message content, model, tokens, cost |
+| `session_messages` | per-message visible content, optional assistant reasoning, model, tokens, cost |
 | `session_tool_calls` | tool name, input, bounded output, status, duration |
 | `sessions_fts` | FTS5 index over session name, message content, tool name |
 | `agent_runs` / `workflow_runs` | background execution state |

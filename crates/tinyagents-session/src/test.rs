@@ -4,7 +4,7 @@
 //! than per-file inline `mod tests` blocks. Sections mirror the source files.
 
 use super::context::StorageContext;
-use super::migrations::apply as init_schema;
+use super::migrations::{MIGRATIONS, apply as init_schema, apply_one};
 use super::ops::*;
 use super::store::with_memory_connection;
 use super::types::*;
@@ -725,6 +725,35 @@ fn schema_is_idempotent() {
         .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 0);
+}
+
+#[test]
+fn stale_migration_plan_rechecks_version_after_lock() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("sessions.db");
+    let first = Connection::open(&path).expect("open first");
+    let stale = Connection::open(&path).expect("open stale");
+
+    init_schema(&first).expect("first connection migrates");
+    let latest = MIGRATIONS.len() as i64 - 1;
+    let did_apply = apply_one(&stale, latest, MIGRATIONS[latest as usize])
+        .expect("stale plan is skipped rather than repeating ALTER TABLE");
+
+    assert!(!did_apply);
+    let columns: Vec<String> = stale
+        .prepare("PRAGMA table_info(session_messages)")
+        .expect("prepare columns")
+        .query_map([], |row| row.get(1))
+        .expect("query columns")
+        .collect::<rusqlite::Result<_>>()
+        .expect("collect columns");
+    assert_eq!(
+        columns
+            .iter()
+            .filter(|column| column.as_str() == "reasoning_content")
+            .count(),
+        1
+    );
 }
 
 #[test]

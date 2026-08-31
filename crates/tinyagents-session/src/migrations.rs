@@ -14,7 +14,8 @@
 //! `schema_version` table records the highest index applied. On connection open
 //! every migration with an index greater than the recorded version runs, in
 //! order, each inside its own transaction, and the version is bumped after each
-//! one.
+//! one. The version is re-read after taking the write lock so two connections
+//! opening the same newly-upgraded workspace cannot repeat non-idempotent DDL.
 //!
 //! Two rules keep this sound:
 //!
@@ -284,36 +285,58 @@ pub(super) fn apply(conn: &Connection) -> Result<()> {
         if version <= current {
             continue;
         }
-        conn.execute_batch("BEGIN IMMEDIATE")
-            .storage_context("begin migration transaction")?;
-        let applied = (|| -> Result<()> {
-            conn.execute_batch(sql)
-                .storage_context(&format!("failed to apply session DB migration {version}"))?;
-            conn.execute(
-                "INSERT INTO schema_version (id, version) VALUES (1, ?1)
-                 ON CONFLICT(id) DO UPDATE SET version = excluded.version",
-                params![version],
-            )
-            .storage_context("failed to record schema version")?;
-            Ok(())
-        })();
-        match applied {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")
-                    .storage_context("commit migration transaction")?;
-                tinyagents_tracing::debug!("{LOG_PREFIX} applied migration {version}");
-            }
-            Err(err) => {
-                if let Err(rollback) = conn.execute_batch("ROLLBACK") {
-                    tinyagents_tracing::warn!(
-                        "{LOG_PREFIX} rollback of migration {version} failed: {rollback} (original: {err})"
-                    );
-                }
-                return Err(err);
-            }
-        }
+        apply_one(conn, version, sql)?;
     }
     Ok(())
+}
+
+/// Apply one migration after acquiring the database write lock.
+///
+/// The schema version is deliberately re-read *after* `BEGIN IMMEDIATE`:
+/// another connection may have completed this migration after our optimistic
+/// read in [`apply`] but before this connection acquired the lock.
+pub(super) fn apply_one(conn: &Connection, version: i64, sql: &str) -> Result<bool> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .storage_context("begin migration transaction")?;
+    let applied = (|| -> Result<bool> {
+        let locked_current: i64 = conn
+            .query_row(
+                "SELECT COALESCE((SELECT version FROM schema_version WHERE id = 1), -1)",
+                [],
+                |row| row.get(0),
+            )
+            .storage_context("re-read schema_version under migration lock")?;
+        if version <= locked_current {
+            return Ok(false);
+        }
+        conn.execute_batch(sql)
+            .storage_context(&format!("failed to apply session DB migration {version}"))?;
+        conn.execute(
+            "INSERT INTO schema_version (id, version) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET version = excluded.version",
+            params![version],
+        )
+        .storage_context("failed to record schema version")?;
+        Ok(true)
+    })();
+    match applied {
+        Ok(did_apply) => {
+            conn.execute_batch("COMMIT")
+                .storage_context("commit migration transaction")?;
+            if did_apply {
+                tinyagents_tracing::debug!("{LOG_PREFIX} applied migration {version}");
+            }
+            Ok(did_apply)
+        }
+        Err(err) => {
+            if let Err(rollback) = conn.execute_batch("ROLLBACK") {
+                tinyagents_tracing::warn!(
+                    "{LOG_PREFIX} rollback of migration {version} failed: {rollback} (original: {err})"
+                );
+            }
+            Err(err)
+        }
+    }
 }
 
 #[cfg(test)]
