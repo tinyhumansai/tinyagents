@@ -11,9 +11,6 @@ declarative `.rag` blueprint format), `crates/tinyagents-registry/` (the named
 capability catalog), and `crates/tinyagents-session/` (durable session data).
 `crates/tinyagents-tracing/` supplies shared opt-in tracing macros, while
 `crates/tinyagents-integration-tests/` owns cross-crate tests and examples.
-Scripted, interpreter-backed orchestration (a CodeAct/REPL loop) is a host
-concern and is deliberately not implemented here.
-
 Prefer small, focused modules that do one thing extremely well. New feature
 areas should live in module directories instead of accumulating broad,
 multi-purpose files. Within each module directory, keep type definitions in a
