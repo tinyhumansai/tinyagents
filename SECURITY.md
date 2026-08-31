@@ -9,8 +9,8 @@ Report concerns to `contact@tinyhumans.ai`.
 
 ## Supported Versions
 
-TinyAgents is pre-1.0. Security fixes target the `main` branch until the project
-starts maintaining release branches.
+Security fixes target the `main` branch until the project starts maintaining
+release branches.
 
 ## Reporting A Vulnerability
 
