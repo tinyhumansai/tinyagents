@@ -134,6 +134,36 @@ pub fn record_message(
     output_tokens: Option<u64>,
     cost_usd: Option<f64>,
 ) -> Result<i64> {
+    record_message_with_reasoning(
+        workspace_dir,
+        session_id,
+        role,
+        content,
+        None,
+        model,
+        input_tokens,
+        output_tokens,
+        cost_usd,
+    )
+}
+
+/// Record a session message together with provider-exposed hidden reasoning.
+///
+/// The historical [`record_message`] API deliberately remains visible-text
+/// only. Hosts that retain a structured assistant message should use this
+/// variant so a tool-call turn does not discard its thinking trace.
+#[allow(clippy::too_many_arguments)]
+pub fn record_message_with_reasoning(
+    workspace_dir: &Path,
+    session_id: &str,
+    role: &str,
+    content: &str,
+    reasoning_content: Option<&str>,
+    model: Option<&str>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cost_usd: Option<f64>,
+) -> Result<i64> {
     let now = Utc::now();
     tinyagents_tracing::trace!(
         "[session_db] record_message session={session_id} role={role} len={}",
@@ -149,13 +179,14 @@ pub fn record_message(
     with_transaction(workspace_dir, |conn| {
         conn.execute(
             "INSERT INTO session_messages (
-                session_id, role, content, model,
+                session_id, role, content, reasoning_content, model,
                 input_tokens, output_tokens, cost_usd, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 session_id,
                 role,
                 content,
+                reasoning_content.filter(|value| !value.trim().is_empty()),
                 model,
                 input_tokens.map(|v| v as i64),
                 output_tokens.map(|v| v as i64),
@@ -456,7 +487,7 @@ pub fn list_messages(
     with_connection(workspace_dir, |conn| {
         let lim = limit.unwrap_or(200).min(1000) as i64;
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, role, content, model,
+            "SELECT id, session_id, role, content, reasoning_content, model,
                     input_tokens, output_tokens, cost_usd, created_at
              FROM session_messages
              WHERE session_id = ?1
@@ -470,11 +501,12 @@ pub fn list_messages(
                 session_id: row.get(1)?,
                 role: row.get(2)?,
                 content: row.get(3)?,
-                model: row.get(4)?,
-                input_tokens: row.get::<_, Option<i64>>(5)?.map(|v| v as u64),
-                output_tokens: row.get::<_, Option<i64>>(6)?.map(|v| v as u64),
-                cost_usd: row.get(7)?,
-                created_at: parse_rfc3339(&row.get::<_, String>(8)?)
+                reasoning_content: row.get(4)?,
+                model: row.get(5)?,
+                input_tokens: row.get::<_, Option<i64>>(6)?.map(|v| v as u64),
+                output_tokens: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+                cost_usd: row.get(8)?,
+                created_at: parse_rfc3339(&row.get::<_, String>(9)?)
                     .map_err(sql_conversion_error)?,
             })
         })?;

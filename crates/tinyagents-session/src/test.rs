@@ -555,6 +555,46 @@ fn public_session_operations_round_trip_every_record_kind() {
 }
 
 #[test]
+fn assistant_reasoning_round_trips_separately_from_visible_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path();
+    record_session_start(
+        workspace,
+        "reasoning-session",
+        "agent",
+        "Agent",
+        "reasoning-session",
+        None,
+        None,
+        None,
+        Some("reasoning-model"),
+        None,
+    )
+    .unwrap();
+
+    record_message_with_reasoning(
+        workspace,
+        "reasoning-session",
+        "assistant",
+        "I will inspect the repository.",
+        Some("First identify the relevant files."),
+        Some("reasoning-model"),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let messages = list_messages(workspace, "reasoning-session", None).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].content, "I will inspect the repository.");
+    assert_eq!(
+        messages[0].reasoning_content.as_deref(),
+        Some("First identify the relevant files.")
+    );
+}
+
+#[test]
 fn public_listing_filters_and_caps_results() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path();
