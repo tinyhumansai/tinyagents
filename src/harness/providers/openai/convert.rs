@@ -243,6 +243,48 @@ pub(super) fn translate_user_content(blocks: &[ContentBlock]) -> Result<MessageC
     Ok(MessageContentWire::Parts(parts))
 }
 
+/// Anthropic accepts at most four `cache_control` breakpoints per request and
+/// rejects the whole request with a 400 beyond that.
+///
+/// Keep the **last** four. Each breakpoint caches from the start of the request
+/// through its own block, so the later ones cover strictly longer prefixes and
+/// are strictly more valuable; dropping from the front loses the least. A
+/// caller declaring more than four has a prompt-assembly bug, so this warns
+/// rather than trimming silently — but it trims, because a 400 on every turn is
+/// a worse failure than a smaller cache.
+fn enforce_breakpoint_limit(parts: &mut [ContentPartWire]) {
+    const MAX_BREAKPOINTS: usize = 4;
+    let marked: Vec<usize> = parts
+        .iter()
+        .enumerate()
+        .filter(|(_, part)| {
+            matches!(
+                part,
+                ContentPartWire::Text {
+                    cache_control: Some(_),
+                    ..
+                }
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if marked.len() <= MAX_BREAKPOINTS {
+        return;
+    }
+    let drop_count = marked.len() - MAX_BREAKPOINTS;
+    tracing::warn!(
+        declared = marked.len(),
+        kept = MAX_BREAKPOINTS,
+        "[openai] more cache breakpoints than the provider accepts; keeping the \
+         last {MAX_BREAKPOINTS} (longest prefixes) and dropping the earliest {drop_count}"
+    );
+    for &index in &marked[..drop_count] {
+        if let Some(ContentPartWire::Text { cache_control, .. }) = parts.get_mut(index) {
+            *cache_control = None;
+        }
+    }
+}
+
 /// Error returned when a content block cannot be represented in an OpenAI
 /// request. Failing closed keeps the block from being silently dropped.
 pub(super) fn unrepresentable_block_error() -> TinyAgentsError {
