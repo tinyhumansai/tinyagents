@@ -1,6 +1,6 @@
 # Roadmap
 
-TinyAgents is at v1.5.0. The roadmap favors small, well-tested modules that
+TinyAgents is at v2.1.2. The roadmap favors small, well-tested modules that
 build toward a production-grade Rust agent runtime.
 
 ## Shipped Foundation
