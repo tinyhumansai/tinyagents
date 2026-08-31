@@ -45,12 +45,10 @@ TinyAgents is a Cargo workspace, not one crate. Depend on the pieces you need:
 - **`tinyagents-integration-tests`** — cross-crate tests and the runnable
   examples referenced below (not published, workspace-internal).
 
-None of the crates are published to crates.io (`publish = false` in every
-`Cargo.toml`); use path or git dependencies.
-
 ## Quick start
 
-None of the crates ship on crates.io, so add them as git or path dependencies:
+None of the crates are published to crates.io (`publish = false` in every
+`Cargo.toml`), so add them as git or path dependencies:
 
 ```toml
 [dependencies]
