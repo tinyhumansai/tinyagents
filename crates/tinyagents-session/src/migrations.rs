@@ -14,7 +14,8 @@
 //! `schema_version` table records the highest index applied. On connection open
 //! every migration with an index greater than the recorded version runs, in
 //! order, each inside its own transaction, and the version is bumped after each
-//! one.
+//! one. The version is re-read after taking the write lock so two connections
+//! opening the same newly-upgraded workspace cannot repeat non-idempotent DDL.
 //!
 //! Two rules keep this sound:
 //!
