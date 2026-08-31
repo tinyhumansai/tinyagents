@@ -8,8 +8,9 @@ that works in development and stalls in production.
 
 This page documents what actually differs, what the crate already handles, and
 what a caller still has to configure. Everything here is asserted by
-[`tests/live_local_models.rs`](../../../tests/live_local_models.rs) and
-[`tests/live_local_embeddings.rs`](../../../tests/live_local_embeddings.rs)
+[`tests/live_local_models.rs`](../../../crates/tinyagents-integration-tests/tests/live_local_models.rs)
+and
+[`tests/live_local_embeddings.rs`](../../../crates/tinyagents-integration-tests/tests/live_local_embeddings.rs)
 against real servers.
 
 ## Presets
