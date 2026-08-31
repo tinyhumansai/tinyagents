@@ -176,11 +176,9 @@ for the full list and configuration format.
 All live in
 [`crates/tinyagents-integration-tests/examples/`](crates/tinyagents-integration-tests/examples/):
 
-- **`basic_graph`** — a minimal typed state graph: `START`, nodes, edges, `END`.
-- **`complex_graph`** — conditional routing, fanout, and richer topology.
-- **`durable_graph`** — checkpoints, resume, and time travel over supersteps.
-- **`resilient_graph`** — node-level retry over transient failures, with a
-  resumable checkpoint.
+- **`basic_graph`**, **`complex_graph`**, **`durable_graph`**,
+  **`resilient_graph`** — a minimal typed graph, then conditional
+  routing/fanout, checkpoint/resume/time-travel, and node-level retry.
 - **`agent_loop_tools`** — the agent/tool loop the harness runs.
 - **`orchestrator_subagents`** — an orchestrator agent that resolves and calls
   sub-agents by name from the registry.
@@ -192,12 +190,10 @@ All live in
   thread.
 - **`openai_chat`**, **`openai_tools`**, **`openai_structured`**,
   **`openai_graph_agent`** — provider-backed chat, tool calling, structured
-  output, and a graph-driven agent.
+  output, and a graph-driven agent (all need `OPENAI_API_KEY`).
 - **`subconscious_loop`** — an offline, testable autonomous closed-loop
   harness (see its own
   [README](crates/tinyagents-integration-tests/examples/subconscious_loop/README.md)).
-
-OpenAI-backed examples require `OPENAI_API_KEY` at run time.
 
 ## Documentation
 
