@@ -15,11 +15,10 @@ become
 registry binding, policy checks, and graph compiler as a human-authored file.
 Generated topology must never be installed directly into the runtime.
 
-This module is intentionally declarative. Interactive scripting and
-CodeAct-style recursive execution are host concerns and are not implemented in
-this crate. A `.rag` file defines graph topology and bindings; a host session
-inspects, scripts, and orchestrates harness or graph calls through
-capability-bound functions of its own.
+This module is intentionally declarative. Interactive scripting is a host
+concern and is not implemented in this crate. A `.rag` file defines graph
+topology and bindings; a host session inspects, scripts, and orchestrates
+harness or graph calls through capability-bound functions of its own.
 
 For what the parser/compiler implement today versus what is still aspirational,
 see [Implementation status](implementation-status.md).

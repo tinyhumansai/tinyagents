@@ -9,23 +9,25 @@ Install a stable Rust toolchain with Rust 2024 support, then run:
 
 ```sh
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo build --all-targets
-cargo test
+cargo clippy --workspace --all-targets -- -D warnings
+cargo build --workspace --all-targets
+cargo test --workspace
 ```
 
 The bundled example should also run:
 
 ```sh
-cargo run --example basic_graph
+cargo run -p tinyagents-integration-tests --example basic_graph
 ```
 
-To build with the optional embedded SQLite checkpointer or the `.ragsh` Rhai
-session runtime, enable the relevant feature:
+Cargo features are package-local. `tinyagents-harness` exposes `sqlite`,
+`tools`, `multimodal`, and `tracing`; `tinyagents-graph` exposes `sqlite` and
+`tracing`; `tinyagents-registry` and `tinyagents-session` expose `tracing`.
+To build with a feature enabled, pass it on the relevant package:
 
 ```sh
-cargo test --features sqlite
-cargo test --features repl
+cargo test -p tinyagents-harness --features sqlite
+cargo test -p tinyagents-integration-tests --features sqlite
 ```
 
 ### Submodules
@@ -74,9 +76,9 @@ module-local unit tests in `test.rs`. Integration tests belong in `tests/`.
 Before opening a pull request:
 
 - run `cargo fmt --check`
-- run `cargo clippy --all-targets -- -D warnings`
-- run `cargo build --all-targets`
-- run `cargo test`
+- run `cargo clippy --workspace --all-targets -- -D warnings`
+- run `cargo build --workspace --all-targets`
+- run `cargo test --workspace`
 - add or update tests for behavior changes
 - update docs when public APIs, architecture, or examples change
 - keep the PR focused on one logical change
