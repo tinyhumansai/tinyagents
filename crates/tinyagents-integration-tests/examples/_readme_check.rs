@@ -11,7 +11,7 @@ struct AgentState {
 }
 
 #[allow(dead_code)]
-async fn graph_snippet() -> Result<(), Box<dyn std::error::Error>> {
+async fn graph_snippet() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let graph = GraphBuilder::<AgentState, AgentState>::overwrite()
         .add_node("agent", |mut state: AgentState, _ctx: NodeContext| async move {
             state.messages.push(Message::assistant("checking the local tool"));
@@ -36,7 +36,7 @@ async fn graph_snippet() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[allow(dead_code)]
-async fn harness_snippet() -> Result<(), Box<dyn std::error::Error>> {
+async fn harness_snippet() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let model = OpenAiModel::from_env()?;
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model("openai", Arc::new(model)).set_default_model("openai");
