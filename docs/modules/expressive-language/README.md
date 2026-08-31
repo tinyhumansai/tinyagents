@@ -110,8 +110,7 @@ The docs can still describe the language as TinyAgents source.
 ## Expressiveness Targets
 
 The long-term language should cover the graph concepts proven useful in
-LangGraph, LangChain agent graphs, OpenHuman's state-machine harness, and CodeAct
-style orchestration:
+LangGraph, LangChain agent graphs, and OpenHuman's state-machine harness:
 
 - graph defaults: recursion limits, timeouts, checkpointing, durability,
   streaming modes, cache policy, steering policy, and concurrency
