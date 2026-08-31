@@ -88,6 +88,10 @@ impl ContentBlock {
             ContentBlock::Thinking { text, .. } => text.chars().count(),
             ContentBlock::RedactedThinking { data } => data.chars().count(),
             ContentBlock::ProviderExtension(value) => value.to_string().chars().count(),
+            // A zero-width marker weighs nothing. It must not contribute here:
+            // this figure gates compaction, and inflating it would trigger
+            // summarization earlier for a block that carries no information.
+            ContentBlock::CacheBreakpoint => 0,
         }
     }
 }

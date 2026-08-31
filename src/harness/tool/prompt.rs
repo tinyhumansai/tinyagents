@@ -175,6 +175,10 @@ fn is_resolvable_user_query(message: &Message) -> bool {
         ContentBlock::Thinking { .. }
         | ContentBlock::RedactedThinking { .. }
         | ContentBlock::ProviderExtension(_) => false,
+        // Nor is a cache marker. Counting it as user input would let a message
+        // that is only a breakpoint satisfy the "has a user turn" check and
+        // hand a chat template an empty turn to render.
+        ContentBlock::CacheBreakpoint => false,
     })
 }
 

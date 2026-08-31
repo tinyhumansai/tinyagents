@@ -76,6 +76,8 @@ fn render_content(content: &[ContentBlock]) -> Vec<String> {
                 "<image mime=\"{}\" />",
                 image.mime_type.as_deref().unwrap_or("unknown")
             )),
+            // Carries no information a summary could keep.
+            ContentBlock::CacheBreakpoint => None,
             ContentBlock::Thinking { text, .. } if text.trim().is_empty() => None,
             ContentBlock::Thinking { text, .. } => {
                 Some(format!("<reasoning>{}</reasoning>", elide(text)))
