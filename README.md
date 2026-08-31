@@ -103,7 +103,8 @@ cd tinyagents
 cargo run -p tinyagents-integration-tests --example basic_graph
 ```
 
-A one-shot model call through the harness ([`examples/openai_chat.rs`](crates/tinyagents-integration-tests/examples/openai_chat.rs)):
+A one-shot model call through the harness (`export OPENAI_API_KEY=...` then
+`cargo run -p tinyagents-integration-tests --example openai_chat`):
 
 ```rust
 use std::sync::Arc;
@@ -119,11 +120,6 @@ let run = harness
     .invoke_default(&(), vec![Message::user("What is a Rust trait?")])
     .await?;
 println!("{}", run.text().unwrap_or_default());
-```
-
-```sh
-export OPENAI_API_KEY=...
-cargo run -p tinyagents-integration-tests --example openai_chat
 ```
 
 ## Graph runtime
