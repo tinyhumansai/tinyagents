@@ -295,7 +295,7 @@ pub(super) fn apply(conn: &Connection) -> Result<()> {
 /// The schema version is deliberately re-read *after* `BEGIN IMMEDIATE`:
 /// another connection may have completed this migration after our optimistic
 /// read in [`apply`] but before this connection acquired the lock.
-fn apply_one(conn: &Connection, version: i64, sql: &str) -> Result<bool> {
+pub(super) fn apply_one(conn: &Connection, version: i64, sql: &str) -> Result<bool> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .storage_context("begin migration transaction")?;
     let applied = (|| -> Result<bool> {
@@ -392,35 +392,6 @@ mod test {
         assert!(
             exists,
             "migration 3 added the agent_teams(updated_at) index"
-        );
-    }
-
-    #[test]
-    fn stale_migration_plan_rechecks_version_after_lock() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("sessions.db");
-        let first = Connection::open(&path).expect("open first");
-        let stale = Connection::open(&path).expect("open stale");
-
-        apply(&first).expect("first connection migrates");
-        let latest = MIGRATIONS.len() as i64 - 1;
-        let did_apply = apply_one(&stale, latest, MIGRATIONS[latest as usize])
-            .expect("stale plan is skipped rather than repeating ALTER TABLE");
-
-        assert!(!did_apply);
-        let columns: Vec<String> = stale
-            .prepare("PRAGMA table_info(session_messages)")
-            .expect("prepare columns")
-            .query_map([], |row| row.get(1))
-            .expect("query columns")
-            .collect::<rusqlite::Result<_>>()
-            .expect("collect columns");
-        assert_eq!(
-            columns
-                .iter()
-                .filter(|column| column.as_str() == "reasoning_content")
-                .count(),
-            1
         );
     }
 }
