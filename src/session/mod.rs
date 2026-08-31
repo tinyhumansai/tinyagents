@@ -74,8 +74,9 @@ pub mod types;
 
 pub use ops::{
     DEFAULT_FTS_SNIPPET_BYTES, fts_snippet_bytes, get_session, list_children, list_messages,
-    list_sessions, list_tool_calls, mark_interrupted, record_message, record_session_end,
-    record_session_start, record_tool_call, search_sessions, set_fts_snippet_bytes,
+    list_sessions, list_tool_calls, mark_interrupted, record_message, record_message_with_reasoning,
+    record_session_end, record_session_start, record_tool_call, search_sessions,
+    set_fts_snippet_bytes,
 };
 pub use retention::{
     RetentionReport, apply_retention, prune_run_events_before, prune_run_telemetry_before,
