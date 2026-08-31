@@ -241,6 +241,8 @@ pub(super) const MIGRATIONS: &[&str] = &[
      CREATE INDEX IF NOT EXISTS idx_agent_teams_updated ON agent_teams(updated_at);
      CREATE INDEX IF NOT EXISTS idx_agent_team_tasks_order
         ON agent_team_tasks(team_id, order_index, created_at);",
+    // ---- 4: retain hidden assistant reasoning ---------------------------
+    "ALTER TABLE session_messages ADD COLUMN reasoning_content TEXT;",
 ];
 
 /// Applies every migration newer than the database's recorded schema version.
@@ -325,7 +327,7 @@ mod test {
     fn migration_list_is_append_only() {
         assert_eq!(
             MIGRATIONS.len(),
-            4,
+            5,
             "MIGRATIONS is append-only — adding one is fine, reordering or \
              deleting one silently re-numbers every later migration"
         );

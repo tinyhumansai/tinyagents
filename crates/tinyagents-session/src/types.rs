@@ -57,6 +57,10 @@ pub struct SessionMessage {
     pub session_id: String,
     pub role: String,
     pub content: String,
+    /// Hidden model reasoning, when the provider exposed it. Kept separate
+    /// from visible `content` so search/UI consumers never mistake it for an
+    /// assistant reply.
+    pub reasoning_content: Option<String>,
     pub model: Option<String>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
