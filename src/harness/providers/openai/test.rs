@@ -2988,7 +2988,7 @@ async fn a_transport_failure_is_reported_as_a_structured_provider_error() {
 
 mod cache_breakpoints {
     use crate::harness::message::{ContentBlock, Message, SystemMessage};
-    use crate::harness::providers::openai::convert::translate_message;
+    use super::super::convert::translate_message;
 
     fn wire(message: &Message) -> serde_json::Value {
         serde_json::to_value(translate_message(message).expect("translates")).expect("serializes")
