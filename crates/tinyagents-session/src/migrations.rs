@@ -284,36 +284,58 @@ pub(super) fn apply(conn: &Connection) -> Result<()> {
         if version <= current {
             continue;
         }
-        conn.execute_batch("BEGIN IMMEDIATE")
-            .storage_context("begin migration transaction")?;
-        let applied = (|| -> Result<()> {
-            conn.execute_batch(sql)
-                .storage_context(&format!("failed to apply session DB migration {version}"))?;
-            conn.execute(
-                "INSERT INTO schema_version (id, version) VALUES (1, ?1)
-                 ON CONFLICT(id) DO UPDATE SET version = excluded.version",
-                params![version],
-            )
-            .storage_context("failed to record schema version")?;
-            Ok(())
-        })();
-        match applied {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")
-                    .storage_context("commit migration transaction")?;
-                tinyagents_tracing::debug!("{LOG_PREFIX} applied migration {version}");
-            }
-            Err(err) => {
-                if let Err(rollback) = conn.execute_batch("ROLLBACK") {
-                    tinyagents_tracing::warn!(
-                        "{LOG_PREFIX} rollback of migration {version} failed: {rollback} (original: {err})"
-                    );
-                }
-                return Err(err);
-            }
-        }
+        apply_one(conn, version, sql)?;
     }
     Ok(())
+}
+
+/// Apply one migration after acquiring the database write lock.
+///
+/// The schema version is deliberately re-read *after* `BEGIN IMMEDIATE`:
+/// another connection may have completed this migration after our optimistic
+/// read in [`apply`] but before this connection acquired the lock.
+fn apply_one(conn: &Connection, version: i64, sql: &str) -> Result<bool> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .storage_context("begin migration transaction")?;
+    let applied = (|| -> Result<bool> {
+        let locked_current: i64 = conn
+            .query_row(
+                "SELECT COALESCE((SELECT version FROM schema_version WHERE id = 1), -1)",
+                [],
+                |row| row.get(0),
+            )
+            .storage_context("re-read schema_version under migration lock")?;
+        if version <= locked_current {
+            return Ok(false);
+        }
+        conn.execute_batch(sql)
+            .storage_context(&format!("failed to apply session DB migration {version}"))?;
+        conn.execute(
+            "INSERT INTO schema_version (id, version) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET version = excluded.version",
+            params![version],
+        )
+        .storage_context("failed to record schema version")?;
+        Ok(true)
+    })();
+    match applied {
+        Ok(did_apply) => {
+            conn.execute_batch("COMMIT")
+                .storage_context("commit migration transaction")?;
+            if did_apply {
+                tinyagents_tracing::debug!("{LOG_PREFIX} applied migration {version}");
+            }
+            Ok(did_apply)
+        }
+        Err(err) => {
+            if let Err(rollback) = conn.execute_batch("ROLLBACK") {
+                tinyagents_tracing::warn!(
+                    "{LOG_PREFIX} rollback of migration {version} failed: {rollback} (original: {err})"
+                );
+            }
+            Err(err)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -369,6 +391,35 @@ mod test {
         assert!(
             exists,
             "migration 3 added the agent_teams(updated_at) index"
+        );
+    }
+
+    #[test]
+    fn stale_migration_plan_rechecks_version_after_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sessions.db");
+        let first = Connection::open(&path).expect("open first");
+        let stale = Connection::open(&path).expect("open stale");
+
+        apply(&first).expect("first connection migrates");
+        let latest = MIGRATIONS.len() as i64 - 1;
+        let did_apply = apply_one(&stale, latest, MIGRATIONS[latest as usize])
+            .expect("stale plan is skipped rather than repeating ALTER TABLE");
+
+        assert!(!did_apply);
+        let columns: Vec<String> = stale
+            .prepare("PRAGMA table_info(session_messages)")
+            .expect("prepare columns")
+            .query_map([], |row| row.get(1))
+            .expect("query columns")
+            .collect::<rusqlite::Result<_>>()
+            .expect("collect columns");
+        assert_eq!(
+            columns
+                .iter()
+                .filter(|column| column.as_str() == "reasoning_content")
+                .count(),
+            1
         );
     }
 }
