@@ -50,6 +50,26 @@ pub enum ContentBlock {
     },
     /// An opaque provider-specific block preserved verbatim.
     ProviderExtension(Value),
+    /// A zero-width marker: every block before this point is a stable prefix
+    /// the provider may cache.
+    ///
+    /// Providers differ in what they need to be told. Backends with automatic
+    /// longest-prefix caching (OpenAI, DeepSeek, most vLLM deployments) infer
+    /// the prefix from the bytes and need nothing; **Anthropic caches nothing
+    /// at all unless the request marks a breakpoint explicitly**. A host that
+    /// freezes its system prompt for the life of a session is therefore paying
+    /// full price on Anthropic and full price only there, which is exactly the
+    /// kind of bug that never shows up as an error.
+    ///
+    /// This block is the provider-neutral way to say it. It carries no content:
+    /// [`ContentBlock::as_text`] returns `None`, so a provider that has no use
+    /// for the marker drops it as it already drops thinking blocks, and the
+    /// wire bytes for that provider are unchanged.
+    ///
+    /// Place it *after* the content it makes cacheable. A message of
+    /// `[Text(stable), CacheBreakpoint, Text(volatile)]` asks the provider to
+    /// cache through the end of `stable`.
+    CacheBreakpoint,
 }
 
 /// A reference to an image, either by URL or inline base64 data.
