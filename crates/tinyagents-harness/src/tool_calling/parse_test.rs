@@ -416,7 +416,7 @@ fn a_pformat_tag_does_not_suppress_a_sibling_glm_tag() {
     );
 
     let response = concat!(
-        "<tool_call>echo[hello]</tool_call>\n",
+        "<tool_call>echo[0|hello]</tool_call>\n",
         "<tool_call>shell/command>ls -la</tool_call>"
     );
     let (_narrative, calls) = parse_tool_calls_with_pformat(response, &reg);
@@ -446,7 +446,7 @@ fn a_pformat_tag_does_not_suppress_a_sibling_fenced_json_tag() {
     );
 
     let response = concat!(
-        "<tool_call>echo[hello]</tool_call>\n",
+        "<tool_call>echo[0|hello]</tool_call>\n",
         "<tool_call>\n```json\n{\"name\": \"shell\", \"arguments\": {\"command\": \"ls\"}}\n```\n</tool_call>"
     );
     let (_narrative, calls) = parse_tool_calls_with_pformat(response, &reg);
@@ -478,7 +478,7 @@ fn a_json_body_is_not_double_counted_by_the_glm_fallback() {
     );
 
     let response = concat!(
-        "<tool_call>echo[hello]</tool_call>\n",
+        "<tool_call>echo[0|hello]</tool_call>\n",
         "<tool_call>{\"name\": \"shell\", \"arguments\": {\"command\": \"cat a/b>c\"}}</tool_call>"
     );
     let (_narrative, calls) = parse_tool_calls_with_pformat(response, &reg);
@@ -510,7 +510,7 @@ fn a_tagged_body_still_honours_argument_key_aliases() {
     );
 
     let response = concat!(
-        "<tool_call>echo[hello]</tool_call>\n",
+        "<tool_call>echo[0|hello]</tool_call>\n",
         "<tool_call>{\"name\": \"shell\", \"args\": {\"command\": \"ls\"}}</tool_call>"
     );
     let (_narrative, calls) = parse_tool_calls_with_pformat(response, &reg);

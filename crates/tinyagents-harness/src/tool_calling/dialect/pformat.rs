@@ -1,13 +1,16 @@
-//! The positional dialect: `<tool_call>read_file[src/main.rs]</tool_call>`.
+//! The slot-indexed dialect: `<tool_call>read_file[0|src/main.rs]</tool_call>`.
 //!
 //! Roughly an 80% token saving over the JSON form on the call side, and more
 //! than that on the catalogue side, since a signature replaces a schema. See
 //! [`crate::tool_calling::pformat`] for the grammar itself.
 //!
 //! The interesting property is that it degrades rather than fails: a body that
-//! is not a well-formed positional call falls through to the JSON parser per
-//! tag, so a model that mixes the two forms in one response — or ignores the
-//! protocol entirely and emits JSON — is still understood.
+//! is not a well-formed p-format call falls through to the JSON parser per tag,
+//! so a model that mixes the two forms in one response — or ignores the protocol
+//! entirely and emits JSON — is still understood. That fallback is also what
+//! makes the parser's strictness affordable: a call with a miscounted or
+//! non-numeric index is refused here and retried as JSON, rather than being
+//! bound to whichever parameters it happens to line up with.
 
 use std::sync::Arc;
 
@@ -58,19 +61,25 @@ impl PFormatDialect {
         let mut instructions = String::new();
         instructions.push_str("## Tool Use Protocol\n\n");
         instructions.push_str(
-            "Tool calls use **P-Format** (Parameter-Format): compact, positional, \
+            "Tool calls use **P-Format** (Parameter-Format): compact, slot-indexed, \
              pipe-delimited syntax wrapped in `<tool_call>` tags. ~80% cheaper on tokens \
              than JSON.\n\n",
         );
         instructions
-            .push_str("```\n<tool_call>\nget_weather[London|metric]\n</tool_call>\n```\n\n");
+            .push_str("```\n<tool_call>\nget_weather[0|London|1|metric]\n</tool_call>\n```\n\n");
         instructions.push_str(
             "**Rules:**\n\
-             - Form: `name[arg1|arg2|...|argN]`. Arguments are positional and must match the \
-               order shown in each tool's `Call as:` signature in the `## Tools` section above \
-               (alphabetical by parameter name).\n\
-             - Empty calls: `name[]` for zero-arg tools.\n\
-             - Empty argument: `name[||value]` is three positional values, the first two empty.\n\
+             - Form: `name[index|value|index|value|...]`. Each value is preceded by the slot \
+               number it fills, taken from that tool's `Call as:` signature in the `## Tools` \
+               section above.\n\
+             - **Send only the arguments you mean to send.** To pass just the third slot, \
+               write `name[2|value]` — there are no empty slots to count.\n\
+             - The signature shows each slot as `index|<name>`, e.g. \
+               `search[0|<query>|1|<limit>]`. `<name>` is a placeholder: replace it with the \
+               value, and do not send the name itself.\n\
+             - Empty calls: `name[]` for zero-arg tools, or for a call sending no arguments.\n\
+             - A call whose indices are missing, non-numeric, or not in the signature is \
+               **rejected** — it will not run. Copy the numbers from the signature.\n\
              - Escapes inside argument values: `\\|` → `|`, `\\]` → `]`, `\\\\` → `\\`.\n\
              - You may emit multiple `<tool_call>` blocks in a single response. Each tag holds \
                exactly one call.\n\
