@@ -70,9 +70,16 @@ pub trait ToolDialect: Send + Sync {
     /// Split a model response into narrative text and the calls it requested.
     fn parse_response(&self, response: &DialectResponse) -> (String, Vec<ParsedToolCall>);
 
-    /// Render executed outcomes into the transcript record that follows the
+    /// Render executed outcomes into the transcript records that follow the
     /// assistant turn.
-    fn format_results(&self, results: &[ToolOutcome]) -> TranscriptEntry;
+    ///
+    /// Usually one record. It is a `Vec` because a
+    /// [`trusted_verbatim`](ToolOutcome::trusted_verbatim) outcome must reach
+    /// the model at byte 0 of its own message, which a batch cannot provide: a
+    /// text dialect closes the batch before such an outcome and reopens it
+    /// after. A dialect that never reshapes output — the native one — always
+    /// returns exactly one record.
+    fn format_results(&self, results: &[ToolOutcome]) -> Vec<TranscriptEntry>;
 
     /// The protocol block for the system prompt.
     ///

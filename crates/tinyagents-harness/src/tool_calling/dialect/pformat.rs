@@ -97,7 +97,7 @@ impl ToolDialect for PFormatDialect {
         (text, calls)
     }
 
-    fn format_results(&self, results: &[ToolOutcome]) -> TranscriptEntry {
+    fn format_results(&self, results: &[ToolOutcome]) -> Vec<TranscriptEntry> {
         text::format_results(results)
     }
 

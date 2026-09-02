@@ -108,8 +108,16 @@ impl ToolDialect for NativeDialect {
         (text, calls)
     }
 
-    fn format_results(&self, results: &[ToolOutcome]) -> TranscriptEntry {
-        TranscriptEntry::ToolResults(
+    /// Always exactly one record.
+    ///
+    /// Native tool results are carried as their own provider message with the
+    /// content passed through untouched, so a
+    /// [`trusted_verbatim`](ToolOutcome::trusted_verbatim) outcome already gets
+    /// what it asked for — there is no banner to precede it and no batch to fold
+    /// it into. The flag is still carried onto the entry so a transcript written
+    /// by this dialect and replayed through a text one keeps the guarantee.
+    fn format_results(&self, results: &[ToolOutcome]) -> Vec<TranscriptEntry> {
+        vec![TranscriptEntry::ToolResults(
             results
                 .iter()
                 .map(|result| ToolResultEntry {
@@ -121,9 +129,10 @@ impl ToolDialect for NativeDialect {
                         UNKNOWN_CALL_ID.to_string()
                     }),
                     content: result.output.clone(),
+                    trusted_verbatim: result.trusted_verbatim,
                 })
                 .collect(),
-        )
+        )]
     }
 
     fn prompt_instructions(&self, _tools: &[ToolSchema]) -> String {

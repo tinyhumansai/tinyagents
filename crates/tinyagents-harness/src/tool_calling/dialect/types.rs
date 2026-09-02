@@ -163,6 +163,17 @@ pub struct ToolOutcome {
     pub success: bool,
     /// The provider call id this answers, when the call had one.
     pub tool_call_id: Option<String>,
+    /// The producing tool asked for this output to reach the model **unchanged**
+    /// — at byte 0 of its own message, with no banner, no `<tool_result>`
+    /// wrapper, and not batched with the results around it.
+    ///
+    /// Mirrors [`ToolResult::is_trusted_verbatim`](crate::tool::ToolResult::is_trusted_verbatim);
+    /// a host sets it when converting its own result type into an outcome.
+    /// Default `false` — reshaping is the right thing for almost every result,
+    /// and this marks the few where a faithful-looking rewrite is still wrong:
+    /// an input schema whose argument names must be copied character for
+    /// character, a signature, a diff.
+    pub trusted_verbatim: bool,
 }
 
 impl ToolOutcome {
@@ -173,6 +184,7 @@ impl ToolOutcome {
             output: output.into(),
             success: true,
             tool_call_id: None,
+            trusted_verbatim: false,
         }
     }
 
@@ -183,12 +195,22 @@ impl ToolOutcome {
             output: output.into(),
             success: false,
             tool_call_id: None,
+            trusted_verbatim: false,
         }
     }
 
     /// Correlates the outcome with a provider call id.
     pub fn with_call_id(mut self, id: impl Into<String>) -> Self {
         self.tool_call_id = Some(id.into());
+        self
+    }
+
+    /// Marks the output as one that must reach the model unchanged.
+    ///
+    /// See [`Self::trusted_verbatim`]. Text dialects give such an outcome a
+    /// message of its own rather than folding it into the batch.
+    pub fn verbatim(mut self) -> Self {
+        self.trusted_verbatim = true;
         self
     }
 }
@@ -200,6 +222,31 @@ pub struct ToolResultEntry {
     pub tool_call_id: String,
     /// The rendered output.
     pub content: String,
+    /// The producing tool asked for this content to reach the model unchanged.
+    /// See [`ToolOutcome::trusted_verbatim`].
+    ///
+    /// `#[serde(default)]` so a transcript written before this field existed
+    /// still deserializes — as `false`, which is the pre-existing behaviour.
+    #[serde(default)]
+    pub trusted_verbatim: bool,
+}
+
+impl ToolResultEntry {
+    /// A result that the dialect is free to reshape — the ordinary case.
+    pub fn new(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            content: content.into(),
+            trusted_verbatim: false,
+        }
+    }
+
+    /// Marks the content as one that must reach the model unchanged, at byte 0
+    /// of its own message. See [`ToolOutcome::trusted_verbatim`].
+    pub fn verbatim(mut self) -> Self {
+        self.trusted_verbatim = true;
+        self
+    }
 }
 
 /// One durable transcript record.

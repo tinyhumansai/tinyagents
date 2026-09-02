@@ -29,7 +29,7 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
-use super::types::{DialectMessage, ToolOutcome, TranscriptEntry};
+use super::types::{DialectMessage, ToolOutcome, ToolResultEntry, TranscriptEntry};
 
 /// Prefix of the synthetic user turn that carries tool results back to a
 /// text-mode model.
@@ -165,7 +165,53 @@ fn neutralize_protocol_tags(value: &str) -> Cow<'_, str> {
 /// escaped ([`escape_attribute`]); the output is the body, so only protocol
 /// tag openers are neutralized ([`neutralize_protocol_tags`]) and the rest
 /// reaches the model byte-for-byte.
-pub fn format_results(results: &[ToolOutcome]) -> TranscriptEntry {
+pub fn format_results(results: &[ToolOutcome]) -> Vec<TranscriptEntry> {
+    // The overwhelmingly common shape: nothing marked, one framed batch. Kept as
+    // its own branch so an unmarked round allocates exactly what it always did.
+    if !results.iter().any(|result| result.trusted_verbatim) {
+        return vec![TranscriptEntry::Chat(DialectMessage::user(format!(
+            "{TOOL_RESULTS_PREFIX}{}",
+            frame_batch(results)
+        )))];
+    }
+
+    let mut out = Vec::new();
+    let mut batch: Vec<&ToolOutcome> = Vec::new();
+    let flush = |batch: &mut Vec<&ToolOutcome>, out: &mut Vec<TranscriptEntry>| {
+        if batch.is_empty() {
+            return;
+        }
+        let framed: Vec<ToolOutcome> = batch.drain(..).cloned().collect();
+        out.push(TranscriptEntry::Chat(DialectMessage::user(format!(
+            "{TOOL_RESULTS_PREFIX}{}",
+            frame_batch(&framed)
+        ))));
+    };
+
+    for result in results {
+        if result.trusted_verbatim {
+            // Close the open batch first, so the verbatim content lands at byte 0
+            // of its own turn. That position is the whole point: a consumer that
+            // identifies this output by a leading marker, or re-hashes it to
+            // confirm it arrived intact, sees neither if a banner precedes it or
+            // another result is appended under it.
+            flush(&mut batch, &mut out);
+            out.push(TranscriptEntry::Chat(DialectMessage::user(
+                result.output.clone(),
+            )));
+        } else {
+            batch.push(result);
+        }
+    }
+    flush(&mut batch, &mut out);
+    out
+}
+
+/// The `<tool_result>` envelope this dialect wraps a batch of outcomes in.
+///
+/// Split out so [`format_results`] can apply it to a *subset* of a round —
+/// everything except the outcomes that asked to be delivered unchanged.
+fn frame_batch(results: &[ToolOutcome]) -> String {
     let mut content = String::new();
     for result in results {
         let status = if result.success { "ok" } else { "error" };
@@ -177,9 +223,7 @@ pub fn format_results(results: &[ToolOutcome]) -> TranscriptEntry {
             neutralize_protocol_tags(&result.output)
         );
     }
-    TranscriptEntry::Chat(DialectMessage::user(format!(
-        "{TOOL_RESULTS_PREFIX}{content}"
-    )))
+    content
 }
 
 /// Replay a transcript as flat chat messages.
@@ -211,18 +255,44 @@ pub fn to_provider_messages(history: &[TranscriptEntry]) -> Vec<DialectMessage> 
                     .with_metadata(extra_metadata.clone()),
             ],
             TranscriptEntry::ToolResults(results) => {
-                let mut content = String::new();
-                for result in results {
-                    let _ = writeln!(
-                        content,
-                        "<tool_result id=\"{}\">\n{}\n</tool_result>",
-                        escape_attribute(&result.tool_call_id),
-                        neutralize_protocol_tags(&result.content)
-                    );
+                // Same split as `format_results`, for the same reason: a durable
+                // record replayed after a restart has to put a verbatim result
+                // back at byte 0 of its own turn, or the guarantee only holds
+                // until the first reload.
+                let frame = |batch: &[&ToolResultEntry]| {
+                    let mut content = String::new();
+                    for result in batch {
+                        let _ = writeln!(
+                            content,
+                            "<tool_result id=\"{}\">\n{}\n</tool_result>",
+                            escape_attribute(&result.tool_call_id),
+                            neutralize_protocol_tags(&result.content)
+                        );
+                    }
+                    DialectMessage::user(format!("{TOOL_RESULTS_PREFIX}{content}"))
+                };
+
+                if !results.iter().any(|result| result.trusted_verbatim) {
+                    let all: Vec<&ToolResultEntry> = results.iter().collect();
+                    return vec![frame(&all)];
                 }
-                vec![DialectMessage::user(format!(
-                    "{TOOL_RESULTS_PREFIX}{content}"
-                ))]
+
+                let mut out = Vec::new();
+                let mut batch: Vec<&ToolResultEntry> = Vec::new();
+                for result in results {
+                    if result.trusted_verbatim {
+                        if !batch.is_empty() {
+                            out.push(frame(&std::mem::take(&mut batch)));
+                        }
+                        out.push(DialectMessage::user(result.content.clone()));
+                    } else {
+                        batch.push(result);
+                    }
+                }
+                if !batch.is_empty() {
+                    out.push(frame(&batch));
+                }
+                out
             }
         })
         .collect()
