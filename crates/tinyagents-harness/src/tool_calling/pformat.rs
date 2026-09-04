@@ -298,8 +298,12 @@ pub fn parse_call(body: &str, registry: &PFormatRegistry) -> Option<(String, Val
     }
 
     let mut args = Map::with_capacity(tokens.len() / 2);
-    for pair in tokens.chunks_exact(2) {
-        let (raw_index, raw) = (pair[0].trim(), &pair[1]);
+    // `as_chunks` rather than `chunks_exact`: the length is already known even,
+    // so the remainder is empty by construction and the pair is a fixed-size
+    // array the compiler can index without a bounds check.
+    let (pairs, _empty_remainder) = tokens.as_chunks::<2>();
+    for [raw_index, raw] in pairs {
+        let raw_index = raw_index.trim();
         let Ok(slot) = raw_index.parse::<usize>() else {
             // A non-numeric index is a call in the old bare-positional form (or
             // simply malformed). Refusing is deliberate: parsing it positionally
@@ -332,6 +336,12 @@ pub fn parse_call(body: &str, registry: &PFormatRegistry) -> Option<(String, Val
                 param = param_name.as_str(),
                 "[pformat] empty value for a named slot — argument omitted"
             );
+            // `remove`, not `continue`. A repeated slot takes its *last* value,
+            // and "empty" is a value — the model saying it is not sending this
+            // one. Skipping would leave an earlier `[0|London|0|]` bound to
+            // `London`, which is the last-write rule silently not applying to
+            // the one case where the last write is a retraction.
+            args.remove(param_name.as_str());
             continue;
         }
         let coerced = coerce_value(
@@ -686,6 +696,21 @@ mod tests {
         // value is the model's latest intent.
         let (_, args) = parse_call("get_weather[0|London|0|Berlin]", &reg).unwrap();
         assert_eq!(args, json!({"location": "Berlin"}));
+    }
+
+    #[test]
+    fn an_empty_repeated_slot_retracts_the_earlier_value() {
+        let reg = make_registry();
+        // Both documented rules meet here: a repeated slot takes its last value,
+        // and an empty value means "not sent". So the second `0|` retracts the
+        // first rather than being skipped — otherwise the last-write rule holds
+        // everywhere except the one case where the last write is a retraction.
+        let (_, args) = parse_call("get_weather[0|London|0|]", &reg).unwrap();
+        assert_eq!(args, json!({}));
+
+        // And it retracts only its own slot.
+        let (_, args) = parse_call("get_weather[0|London|1|metric|0|]", &reg).unwrap();
+        assert_eq!(args, json!({"unit": "metric"}));
     }
 
     #[test]
