@@ -23,22 +23,49 @@
 //! # Spec
 //!
 //! - One call per `<tool_call>...</tool_call>` tag body.
-//! - Form: `name[arg1|arg2|...|argN]`.
+//! - Form: `name[index|value|index|value|...]` — each argument carries the
+//!   slot index it belongs to, so **only the arguments actually being sent
+//!   appear**.
 //! - `name` is the tool's registered name (alphanumerics + `_`).
-//! - Arguments are **positional**, with the order pinned to the
-//!   **alphabetical** sort of the JSON-schema property names. The
-//!   project's `serde_json` build does not enable `preserve_order`, so
-//!   `Map` iterates as a `BTreeMap` — alphabetical iteration is the
-//!   only order we can produce deterministically without flipping a
-//!   crate-wide feature flag, and it is stable across rebuilds and
-//!   workspaces.
-//! - The renderer always exposes the order in the tool catalogue
-//!   (e.g. `get_weather[location|unit]`, `math[verbose|x|y]`), so the
-//!   model never has to guess which slot maps to which parameter — it
-//!   reads the signature line and copies that order verbatim.
-//! - Empty calls: `tool_name[]` for zero-arg tools.
-//! - Empty arguments: `tool_name[||value]` is three args, the first two
-//!   being empty strings.
+//! - Slot indices number the parameters **required first** (in the order the
+//!   schema declares them), then the optional ones alphabetically. Both halves
+//!   are deterministic across rebuilds and workspaces: a JSON array preserves
+//!   order, and `Map` iterates as a `BTreeMap` because this build does not
+//!   enable `preserve_order`.
+//! - The renderer exposes the numbering in the tool catalogue, each slot marked
+//!   as a placeholder to fill:
+//!   `get_weather[0|<location>|1|<unit>]`, `math[0|<verbose>|1|<x>|2|<y>]`.
+//!   The brackets matter: rendered as bare names the signature reads as a call
+//!   to copy, and a live model duly sent the parameter names as the argument
+//!   values.
+//! - Empty calls: `tool_name[]` for zero-arg tools, and for a call that sends
+//!   no arguments at all.
+//!
+//!   ## Why indices, rather than counting empty slots
+//!
+//!   The form used to be bare positional — `name[arg1|arg2|...]` — with skipped
+//!   arguments written as empty slots (`name[||value]`). That made the *count
+//!   of leading delimiters* load-bearing, and it is the single thing models get
+//!   wrong most. Two failures observed on a live host:
+//!
+//!   - `GMAIL_LIST_THREADS[||50|<query>]` failed schema validation **12 times in
+//!     one turn** before the turn was cut short.
+//!   - A `GMAIL_LIST_THREADS` call wrote four leading empties where three were
+//!     needed, so `query` and `user_id` each landed one slot late, in `user_id`
+//!     and `verbose`. The call **ran**, with the search text as the account id.
+//!
+//!   Both are off-by-one on a delimiter, and both bound arguments to the wrong
+//!   parameter **silently**. Indices remove the counting: a sparse call names
+//!   its slots, and there is nothing to miscount. An index that is missing,
+//!   non-numeric, or out of range is **rejected** rather than guessed at, so the
+//!   failure mode moves from a wrong call that succeeds to a malformed call the
+//!   model is told about.
+//!
+//!   Required-first ordering is why the natural minimal call — the one required
+//!   value — is `name[0|value]` rather than an arbitrary index. An alphabetical
+//!   layout put the optional parameters first for most tools, and a live model
+//!   wrote `memory_recall[Colorado]` six times in one turn against
+//!   `[limit|namespace|query]` and never got a tool to run.
 //! - Escapes: `\|` → `|`, `\]` → `]`, `\\` → `\`. Other backslashes
 //!   pass through verbatim so URLs and Windows paths remain readable.
 //! - Type coercion: schema property `type: integer | number | boolean`
@@ -113,11 +140,10 @@ impl PFormatToolParams {
     /// shell-style tools) return an empty list — the renderer falls
     /// back to `name[]`.
     ///
-    /// Iteration order is alphabetical because `serde_json::Map` is
-    /// a `BTreeMap` in this build (no `preserve_order` feature). The
-    /// renderer always shows the resulting order in the tool catalogue
-    /// so the model — and the parser — agree on the layout. See the
-    /// module-level docs for the rationale.
+    /// Order is required-first, then optional alphabetically. The renderer
+    /// always shows the resulting order in the tool catalogue so the model — and
+    /// the parser — agree on the layout; both read it from here, so they cannot
+    /// disagree. See the module-level docs for why required comes first.
     pub fn from_schema(schema: &Value) -> Self {
         let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
             return Self {
@@ -125,11 +151,35 @@ impl PFormatToolParams {
                 types: Vec::new(),
             };
         };
-        let mut names = Vec::with_capacity(props.len());
-        let mut types = Vec::with_capacity(props.len());
-        for (name, def) in props {
-            names.push(name.clone());
-            types.push(PFormatParamType::from_schema_type(def.get("type")));
+        // Required parameters first, in the order the schema declares them, then
+        // the optional ones alphabetically. Both halves are deterministic (a JSON
+        // array preserves order; `Map` is a `BTreeMap` in this build), which is the
+        // property the layout actually needs.
+        let required: Vec<&str> = schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+
+        let mut ordered: Vec<&String> = Vec::with_capacity(props.len());
+        for name in &required {
+            if let Some((key, _)) = props.get_key_value(*name)
+                && !ordered.contains(&key)
+            {
+                ordered.push(key);
+            }
+        }
+        for key in props.keys() {
+            if !ordered.contains(&key) {
+                ordered.push(key);
+            }
+        }
+
+        let mut names = Vec::with_capacity(ordered.len());
+        let mut types = Vec::with_capacity(ordered.len());
+        for key in ordered {
+            names.push(key.clone());
+            types.push(PFormatParamType::from_schema_type(props[key].get("type")));
         }
         Self { names, types }
     }
@@ -166,7 +216,7 @@ where
         .collect()
 }
 
-/// Render a single tool's p-format signature, e.g. `get_weather[location|unit]`.
+/// Render a single tool's p-format signature, e.g. `get_weather[0|<location>|1|<unit>]`.
 ///
 /// This signature is included in the tool catalogue within the system prompt
 /// to tell the LLM exactly how to order positional arguments for a tool.
@@ -174,7 +224,20 @@ pub fn render_signature(name: &str, params: &PFormatToolParams) -> String {
     if params.names.is_empty() {
         format!("{name}[]")
     } else {
-        format!("{name}[{}]", params.names.join("|"))
+        // Each slot carries its index, and the name is wrapped in angle brackets
+        // so it reads as a placeholder to fill rather than a call to copy. Bare
+        // names do get copied: a live model answered `memory_recall[limit|
+        // namespace|query]` — the signature verbatim, the parameter names sent as
+        // the argument *values*. Backticking the whole signature does not help
+        // either; that made it copy the backticks instead. `<…>` marks the slot
+        // without decorating the form.
+        let slots: Vec<String> = params
+            .names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| format!("{i}|<{n}>"))
+            .collect();
+        format!("{name}[{}]", slots.join("|"))
     }
 }
 
@@ -219,27 +282,79 @@ pub fn parse_call(body: &str, registry: &PFormatRegistry) -> Option<(String, Val
     // values back to named JSON keys with the correct types.
     let params = registry.get(name)?;
 
-    let raw_values = split_pipes(inner);
-    let mut args = Map::with_capacity(params.names.len());
-    for (i, raw) in raw_values.iter().enumerate() {
-        let Some(param_name) = params.names.get(i) else {
-            // Excess values: drop silently. The schema is the source
-            // of truth for argument count.
+    let tokens = split_pipes(inner);
+    // Index/value pairs, so an odd token count means the model dropped or added
+    // a delimiter. Reject rather than guess: the whole point of the indices is
+    // that a miscounted delimiter can no longer bind a value to the wrong
+    // parameter, and silently keeping the pairs that happen to line up would put
+    // that failure right back.
+    if !tokens.len().is_multiple_of(2) {
+        tinyagents_tracing::debug!(
+            tool = name,
+            tokens = tokens.len(),
+            "[pformat] odd token count — not index/value pairs, refusing to parse"
+        );
+        return None;
+    }
+
+    let mut args = Map::with_capacity(tokens.len() / 2);
+    // `as_chunks` rather than `chunks_exact`: the length is already known even,
+    // so the remainder is empty by construction and the pair is a fixed-size
+    // array the compiler can index without a bounds check.
+    let (pairs, _empty_remainder) = tokens.as_chunks::<2>();
+    for [raw_index, raw] in pairs {
+        let raw_index = raw_index.trim();
+        let Ok(slot) = raw_index.parse::<usize>() else {
+            // A non-numeric index is a call in the old bare-positional form (or
+            // simply malformed). Refusing is deliberate: parsing it positionally
+            // would silently resurrect the off-by-one this format exists to end.
             tinyagents_tracing::debug!(
                 tool = name,
-                index = i,
-                "[pformat] dropping excess positional argument"
+                index = raw_index,
+                "[pformat] slot index is not a number — refusing to parse"
             );
-            continue;
+            return None;
         };
+        let Some(param_name) = params.names.get(slot) else {
+            tinyagents_tracing::debug!(
+                tool = name,
+                slot,
+                slots = params.names.len(),
+                "[pformat] slot index out of range — refusing to parse"
+            );
+            return None;
+        };
+        // An empty value is an argument the model did not send, so the key is
+        // left out entirely rather than set to `""`. Inserting `""` makes every
+        // non-string parameter fail schema validation — a typed `max_results`
+        // arriving as `""` means the tool never runs, and the error names a field
+        // the model deliberately left blank, which it cannot satisfy.
+        if raw.trim().is_empty() {
+            tinyagents_tracing::debug!(
+                tool = name,
+                slot,
+                param = param_name.as_str(),
+                "[pformat] empty value for a named slot — argument omitted"
+            );
+            // `remove`, not `continue`. A repeated slot takes its *last* value,
+            // and "empty" is a value — the model saying it is not sending this
+            // one. Skipping would leave an earlier `[0|London|0|]` bound to
+            // `London`, which is the last-write rule silently not applying to
+            // the one case where the last write is a retraction.
+            args.remove(param_name.as_str());
+            continue;
+        }
         let coerced = coerce_value(
             raw,
             params
                 .types
-                .get(i)
+                .get(slot)
                 .copied()
                 .unwrap_or(PFormatParamType::String),
         );
+        // Last write wins on a repeated slot. Rare enough not to be worth
+        // rejecting the whole call over, and the later value is the model's
+        // latest intent.
         args.insert(param_name.clone(), coerced);
     }
 
@@ -374,14 +489,14 @@ mod tests {
         let reg = make_registry();
         assert_eq!(
             render_signature("get_weather", &reg["get_weather"]),
-            "get_weather[location|unit]"
+            "get_weather[0|<location>|1|<unit>]"
         );
     }
 
     #[test]
     fn parses_simple_call() {
         let reg = make_registry();
-        let (name, args) = parse_call("get_weather[London|metric]", &reg).unwrap();
+        let (name, args) = parse_call("get_weather[0|London|1|metric]", &reg).unwrap();
         assert_eq!(name, "get_weather");
         assert_eq!(args, json!({"location": "London", "unit": "metric"}));
     }
@@ -397,7 +512,7 @@ mod tests {
     #[test]
     fn parses_single_arg_with_spaces() {
         let reg = make_registry();
-        let (name, args) = parse_call("shell[ls -la /tmp]", &reg).unwrap();
+        let (name, args) = parse_call("shell[0|ls -la /tmp]", &reg).unwrap();
         assert_eq!(name, "shell");
         assert_eq!(args, json!({"command": "ls -la /tmp"}));
     }
@@ -405,38 +520,38 @@ mod tests {
     #[test]
     fn handles_pipe_escape() {
         let reg = make_registry();
-        let (_, args) = parse_call(r"shell[cat foo \| grep bar]", &reg).unwrap();
+        let (_, args) = parse_call(r"shell[0|cat foo \| grep bar]", &reg).unwrap();
         assert_eq!(args, json!({"command": "cat foo | grep bar"}));
     }
 
     #[test]
     fn handles_bracket_escape() {
         let reg = make_registry();
-        let (_, args) = parse_call(r"shell[echo \]done\]]", &reg).unwrap();
+        let (_, args) = parse_call(r"shell[0|echo \]done\]]", &reg).unwrap();
         assert_eq!(args, json!({"command": "echo ]done]"}));
     }
 
     #[test]
     fn handles_backslash_escape() {
         let reg = make_registry();
-        let (_, args) = parse_call(r"shell[C:\\Users\\bob]", &reg).unwrap();
+        let (_, args) = parse_call(r"shell[0|C:\\Users\\bob]", &reg).unwrap();
         assert_eq!(args, json!({"command": r"C:\Users\bob"}));
     }
 
     #[test]
     fn coerces_typed_arguments() {
         let reg = make_registry();
-        // Alphabetical order: verbose, x, y. The signature the model
-        // sees in the catalogue is `math[verbose|x|y]` so this is the
-        // order it would emit.
-        let (_, args) = parse_call("math[true|42|2.75]", &reg).unwrap();
+        // No `required` list on `math`, so all three are optional and sort
+        // alphabetically: verbose, x, y. The signature the model sees is
+        // `math[0|<verbose>|1|<x>|2|<y>]`, so these are the slots it would emit.
+        let (_, args) = parse_call("math[0|true|1|42|2|2.75]", &reg).unwrap();
         assert_eq!(args, json!({"verbose": true, "x": 42, "y": 2.75}));
     }
 
     #[test]
     fn coercion_falls_back_to_string_on_failure() {
         let reg = make_registry();
-        let (_, args) = parse_call("math[maybe|notanumber|alsonotanumber]", &reg).unwrap();
+        let (_, args) = parse_call("math[0|maybe|1|notanumber|2|alsonotanumber]", &reg).unwrap();
         assert_eq!(
             args,
             json!({
@@ -448,11 +563,14 @@ mod tests {
     }
 
     #[test]
-    fn signature_uses_alphabetical_order() {
+    fn optional_only_signature_is_alphabetical() {
         let reg = make_registry();
-        // `math` has properties (in source) {x, y, verbose} but
-        // BTreeMap iteration sorts to {verbose, x, y}.
-        assert_eq!(render_signature("math", &reg["math"]), "math[verbose|x|y]");
+        // `math` declares no `required`, so every parameter is optional and the
+        // layout falls back to `BTreeMap` order: {verbose, x, y}.
+        assert_eq!(
+            render_signature("math", &reg["math"]),
+            "math[0|<verbose>|1|<x>|2|<y>]"
+        );
     }
 
     #[test]
@@ -472,23 +590,147 @@ mod tests {
         let reg = make_registry();
         // Closing bracket isn't last char → invalid p-format, dispatcher
         // should try the JSON fallback path.
-        assert!(parse_call("get_weather[London|metric] // comment", &reg).is_none());
+        assert!(parse_call("get_weather[0|London|1|metric] // comment", &reg).is_none());
     }
 
     #[test]
-    fn drops_excess_positional_arguments() {
+    fn rejects_a_slot_the_schema_has_no_parameter_for() {
         let reg = make_registry();
-        // get_weather only has 2 schema params; the third value is dropped.
-        let (_, args) = parse_call("get_weather[London|metric|extra]", &reg).unwrap();
-        assert_eq!(args, json!({"location": "London", "unit": "metric"}));
+        // `get_weather` has two slots, 0 and 1. Slot 2 is not a value to drop —
+        // it means the model is working from a layout this schema does not have,
+        // so every *other* slot in the call is suspect too.
+        assert!(parse_call("get_weather[0|London|1|metric|2|extra]", &reg).is_none());
     }
 
     #[test]
-    fn empty_body_pipes_produce_empty_strings() {
+    fn an_empty_value_omits_the_key_rather_than_sending_a_blank() {
         let reg = make_registry();
-        let (_, args) = parse_call("get_weather[||]", &reg).unwrap();
-        // 3 raw values: "", "", "". get_weather has 2 params, third is dropped.
-        assert_eq!(args, json!({"location": "", "unit": ""}));
+        let (_, args) = parse_call("get_weather[0|London|1|]", &reg).unwrap();
+        // `unit` is absent, not `""`. A blank string is what the old form sent,
+        // and for a typed parameter it fails schema validation naming a field the
+        // model deliberately left empty — an error it cannot act on.
+        assert_eq!(args, json!({"location": "London"}));
+    }
+
+    // ── Indexed slots: the behaviour the format exists for ──────────────────
+
+    fn sparse_registry() -> PFormatRegistry {
+        let mut reg = PFormatRegistry::new();
+        // Mirrors the shape that produced the live failures: one required
+        // parameter, several optional ones that sort ahead of it alphabetically.
+        reg.insert(
+            "list_threads".to_string(),
+            PFormatToolParams::from_schema(&json!({
+                "type": "object",
+                "properties": {
+                    "max_results": { "type": "integer" },
+                    "query": { "type": "string" },
+                    "user_id": { "type": "string" },
+                    "verbose": { "type": "boolean" }
+                },
+                "required": ["query"]
+            })),
+        );
+        reg
+    }
+
+    #[test]
+    fn required_parameters_are_numbered_first() {
+        let reg = sparse_registry();
+        // Alphabetically `query` would be slot 1, behind `max_results`. Required
+        // first puts it at 0, which is what makes the one-argument call
+        // `list_threads[0|…]` rather than an index the model has to look up.
+        assert_eq!(
+            render_signature("list_threads", &reg["list_threads"]),
+            "list_threads[0|<query>|1|<max_results>|2|<user_id>|3|<verbose>]"
+        );
+    }
+
+    #[test]
+    fn a_sparse_call_sends_only_the_slots_it_names() {
+        let reg = sparse_registry();
+        let (_, args) = parse_call("list_threads[0|from:alice|1|50]", &reg).unwrap();
+        // No empty slots to count, and the absent parameters are absent rather
+        // than blank.
+        assert_eq!(args, json!({"query": "from:alice", "max_results": 50}));
+    }
+
+    #[test]
+    fn the_live_misbinding_is_now_a_refusal_rather_than_a_wrong_call() {
+        let reg = sparse_registry();
+        // The failure this format replaces: a bare-positional call whose leading
+        // delimiter count was off by one bound the search text to `user_id` and
+        // *ran*. In the indexed form the same body has no numeric index at slot
+        // 0, so it is rejected and the model is told, instead of a wrong call
+        // succeeding.
+        assert!(parse_call("list_threads[|||from:alice]", &reg).is_none());
+    }
+
+    #[test]
+    fn rejects_a_bare_positional_call() {
+        let reg = make_registry();
+        // Deliberate: parsing this positionally is exactly the silent misbinding
+        // the indices exist to end, so the old form is refused rather than
+        // accepted for compatibility.
+        assert!(parse_call("get_weather[London|metric]", &reg).is_none());
+    }
+
+    #[test]
+    fn rejects_an_odd_token_count() {
+        let reg = make_registry();
+        // A dropped or added delimiter. Keeping the pairs that happen to line up
+        // would put the off-by-one straight back.
+        assert!(parse_call("get_weather[0|London|1]", &reg).is_none());
+    }
+
+    #[test]
+    fn rejects_a_non_numeric_index() {
+        let reg = make_registry();
+        assert!(parse_call("get_weather[location|London]", &reg).is_none());
+    }
+
+    #[test]
+    fn a_repeated_slot_takes_the_last_value() {
+        let reg = make_registry();
+        // Rare enough not to be worth failing the whole call over, and the later
+        // value is the model's latest intent.
+        let (_, args) = parse_call("get_weather[0|London|0|Berlin]", &reg).unwrap();
+        assert_eq!(args, json!({"location": "Berlin"}));
+    }
+
+    #[test]
+    fn an_empty_repeated_slot_retracts_the_earlier_value() {
+        let reg = make_registry();
+        // Both documented rules meet here: a repeated slot takes its last value,
+        // and an empty value means "not sent". So the second `0|` retracts the
+        // first rather than being skipped — otherwise the last-write rule holds
+        // everywhere except the one case where the last write is a retraction.
+        let (_, args) = parse_call("get_weather[0|London|0|]", &reg).unwrap();
+        assert_eq!(args, json!({}));
+
+        // And it retracts only its own slot.
+        let (_, args) = parse_call("get_weather[0|London|1|metric|0|]", &reg).unwrap();
+        assert_eq!(args, json!({"unit": "metric"}));
+    }
+
+    #[test]
+    fn an_empty_body_is_a_call_with_no_arguments() {
+        let reg = make_registry();
+        // Distinct from `ping[]`: `get_weather` *has* slots, and sending none of
+        // them is a valid (if incomplete) call the schema validator should judge,
+        // not a parse failure.
+        let (name, args) = parse_call("get_weather[]", &reg).unwrap();
+        assert_eq!(name, "get_weather");
+        assert_eq!(args, json!({}));
+    }
+
+    #[test]
+    fn an_escaped_pipe_stays_inside_its_value() {
+        let reg = make_registry();
+        // The index/value split runs over `split_pipes`, which honours escapes —
+        // so an escaped pipe is part of one value and does not shift the pairing.
+        let (_, args) = parse_call(r"shell[0|cat a \| grep b]", &reg).unwrap();
+        assert_eq!(args, json!({"command": "cat a | grep b"}));
     }
 
     #[test]
@@ -497,7 +739,7 @@ mod tests {
         let sig = render_signature("get_weather", &reg["get_weather"]);
         // Render uses the same identifier the parser expects.
         assert!(sig.starts_with("get_weather["));
-        let synthesised = "get_weather[Berlin|imperial]";
+        let synthesised = "get_weather[0|Berlin|1|imperial]";
         let (name, args) = parse_call(synthesised, &reg).unwrap();
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], json!("Berlin"));

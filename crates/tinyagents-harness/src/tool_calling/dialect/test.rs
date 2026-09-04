@@ -65,12 +65,12 @@ fn xml_dialect_embeds_the_full_schema_catalogue() {
 }
 
 #[test]
-fn pformat_dialect_parses_a_positional_call() {
+fn pformat_dialect_parses_an_indexed_call() {
     let registry = build_registry([("get_weather", weather_schema().parameters)]);
     let dialect = PFormatDialect::new(registry);
 
     let (_text, calls) = dialect.parse_response(&response(
-        "<tool_call>get_weather[London|metric]</tool_call>",
+        "<tool_call>get_weather[0|London|1|metric]</tool_call>",
     ));
 
     assert_eq!(calls.len(), 1);
@@ -85,7 +85,7 @@ fn pformat_dialect_falls_back_to_json_per_tag() {
     let dialect = PFormatDialect::new(registry);
 
     let (_text, calls) = dialect.parse_response(&response(
-        "<tool_call>get_weather[London|metric]</tool_call>\n\
+        "<tool_call>get_weather[0|London|1|metric]</tool_call>\n\
          <tool_call>{\"name\": \"other_tool\", \"arguments\": {\"x\": 1}}</tool_call>",
     ));
 
@@ -104,7 +104,7 @@ fn pformat_dialect_leaves_the_catalogue_to_the_prompt() {
     // (`get_weather` and `Call as:` still appear — as the syntax example and as
     // a pointer at the `## Tools` section that owns the real listing.)
     assert!(!instructions.contains("Look up the weather"));
-    assert!(!instructions.contains("get_weather[location|unit]"));
+    assert!(!instructions.contains("get_weather[0|<location>|1|<unit>]"));
     assert!(!PFormatDialect::new(PFormatRegistry::new()).embeds_tool_catalogue());
 }
 
@@ -532,7 +532,7 @@ fn catalogue_signature_matches_what_the_parser_reconstructs() {
     let rendered = render_pformat_catalogue(&tools);
 
     assert!(rendered.starts_with(CATALOGUE_HEADING));
-    assert!(rendered.contains("Call as: `get_weather[location|unit]`"));
+    assert!(rendered.contains("Call as: `get_weather[0|<location>|1|<unit>]`"));
 
     // The catalogue order is the order the parser assigns, not a coincidence.
     let dialect = PFormatDialect::new(build_registry([(
@@ -540,7 +540,7 @@ fn catalogue_signature_matches_what_the_parser_reconstructs() {
         weather_schema().parameters,
     )]));
     let (_text, calls) = dialect.parse_response(&response(
-        "<tool_call>get_weather[London|metric]</tool_call>",
+        "<tool_call>get_weather[0|London|1|metric]</tool_call>",
     ));
     assert_eq!(calls[0].arguments["location"], "London");
     assert_eq!(calls[0].arguments["unit"], "metric");
