@@ -140,7 +140,7 @@ pub struct AgentStream<'a, State: Send + Sync + 'static, Ctx: Send + Sync> {
     inner: Option<Pin<Box<dyn Stream<Item = AgentStreamItem> + Send + 'a>>>,
     // Kept after `inner` so Rust drops the borrowed stream before the overlay
     // that owns its harness. See `extend_overlay_stream_lifetime`.
-    runtime: Option<std::sync::Arc<InvocationRuntime<State, Ctx>>>,
+    _runtime: Option<std::sync::Arc<InvocationRuntime<State, Ctx>>>,
     cancellation: crate::CancellationToken,
     terminal_observer: std::sync::Arc<std::sync::Mutex<Option<crate::context::TerminalObserver>>>,
     terminal_observed: bool,
@@ -464,7 +464,7 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync + 'static> AgentHarness<Stat
             // relationship at the one boundary where the owned hosted
             // invocation meets the borrowed stream API.
             inner: Some(unsafe { extend_overlay_stream_lifetime(Box::pin(stream)) }),
-            runtime,
+            _runtime: runtime,
             cancellation,
             terminal_observer,
             terminal_observed: false,

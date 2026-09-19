@@ -67,10 +67,6 @@ pub fn find_root_transcripts_for_thread(workspace_dir: &Path, thread_id: &str) -
     matches
 }
 
-pub fn find_root_transcript_for_thread_in_dir(raw_dir: &Path, thread_id: &str) -> Option<PathBuf> {
-    root_transcripts_for_thread_in_dir(raw_dir, thread_id).pop()
-}
-
 fn root_transcripts_for_thread_in_dir(raw_dir: &Path, thread_id: &str) -> Vec<PathBuf> {
     let thread_id = thread_id.trim();
     if thread_id.is_empty() {

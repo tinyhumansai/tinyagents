@@ -2913,19 +2913,17 @@ async fn direct_parent_subagent_entry_fails_closed_for_hosted_authority() {
     fn hosted_parent_context(host: Arc<crate::host::HostCapabilities<()>>) -> RunContext<()> {
         let mut context = RunContext::new(RunConfig::new("hosted-direct-parent"), ());
         context.host_agent_id = Some("parent".to_string());
-        context.host_authority = Some(Arc::new(
-            crate::runtime::HostInvocationAuthority::<(), ()> {
-                binding: crate::runtime::HostInvocationBinding {
-                    host,
-                    agent_id: "parent".to_string(),
-                    model_pin: None,
-                    role: None,
-                    allowed_tools: HashSet::new(),
-                    progress: None,
-                    runtime: None,
-                },
+        context.host_authority = Some(Arc::new(super::agent::HostInvocationAuthority::<(), ()> {
+            binding: crate::runtime::HostInvocationBinding {
+                host,
+                agent_id: "parent".to_string(),
+                model_pin: None,
+                role: None,
+                allowed_tools: HashSet::new(),
+                progress: None,
+                runtime: None,
             },
-        ));
+        }));
         context
     }
 
@@ -2997,6 +2995,10 @@ async fn direct_parent_subagent_entry_fails_closed_for_hosted_authority() {
         .invoke_hosted_in_parent(&(), (), &hosted_parent_context(authorized_host), "delegate")
         .await
         .expect_err("a hosted child without the parent's invocation overlay fails closed");
+    assert!(matches!(
+        authorized,
+        crate::error::TinyAgentsError::Validation(_)
+    ));
     assert_eq!(
         hosted_child_model.requests().len(),
         0,

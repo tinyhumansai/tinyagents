@@ -561,7 +561,7 @@ where
         let tx = conn
             .transaction()
             .map_err(|e| sqlite_err("begin put_writes", e))?;
-        let mut stored = 0usize;
+        let mut _stored = 0usize;
         for write in writes {
             // The replace-vs-ignore rule pushed into SQL: a control-plane write
             // (`idx < 0`) legitimately changes on a retry and upserts, while a
@@ -584,7 +584,7 @@ where
             };
             let payload = serde_json::to_string(&write.payload)
                 .map_err(|e| sqlite_err("encode write payload", e))?;
-            stored += tx
+            _stored += tx
                 .execute(
                     sql,
                     params![
@@ -603,7 +603,7 @@ where
         tx.commit()
             .map_err(|e| sqlite_err("commit put_writes", e))?;
         tinyagents_tracing::debug!(
-            "[checkpoint:sqlite] put_writes thread={} checkpoint={checkpoint_id} offered={} stored={stored}",
+            "[checkpoint:sqlite] put_writes thread={} checkpoint={checkpoint_id} offered={} stored={_stored}",
             config.thread_id,
             writes.len()
         );

@@ -51,23 +51,6 @@ fn sanitize_stem(stem: &str) -> String {
     }
 }
 
-pub fn resolve_new_transcript_path(workspace_dir: &Path, agent_name: &str) -> Result<PathBuf> {
-    let raw_dir = raw_session_dir(workspace_dir);
-    fs::create_dir_all(&raw_dir)
-        .with_context(|| format!("create session_raw dir {}", raw_dir.display()))?;
-
-    let sanitized = sanitize_agent_name(agent_name);
-    let idx_raw = next_index(&raw_dir, &sanitized)?;
-    // Also consider today's md companion dir so a stale .md from this
-    // session doesn't cause an index collision when only .md exists.
-    let md_dir = today_md_session_dir(workspace_dir);
-    let idx_md = next_index(&md_dir, &sanitized)?;
-    let next_idx = idx_raw.max(idx_md);
-    let filename = format!("{}_{}.jsonl", sanitized, next_idx);
-
-    Ok(raw_dir.join(filename))
-}
-
 /// Find the most recent transcript for `agent_name`.
 ///
 /// **Primary**: scan the flat `session_raw/` directory and pick the
@@ -116,14 +99,6 @@ pub fn find_latest_transcript(workspace_dir: &Path, agent_name: &str) -> Option<
     }
 
     None
-}
-
-/// Date-grouped directory for human-readable `.md` companions, e.g.
-/// `{workspace}/sessions/2026_05_02`. ISO-style `YYYY_MM_DD` so the
-/// listing sorts lexicographically by date.
-pub(super) fn today_md_session_dir(workspace_dir: &Path) -> PathBuf {
-    let date = chrono::Local::now().format("%Y_%m_%d").to_string();
-    workspace_dir.join("sessions").join(date)
 }
 
 /// Flat directory for the JSONL source of truth, e.g.
@@ -187,39 +162,6 @@ pub(super) fn sanitize_agent_name(name: &str) -> String {
             }
         })
         .collect()
-}
-
-/// Compute the next free index for `agent_prefix` in `dir`.
-///
-/// Considers both `.jsonl` and `.md` files so that indices stay unique
-/// during the one-release migration window when both extensions may exist.
-pub(super) fn next_index(dir: &Path, agent_prefix: &str) -> Result<usize> {
-    let prefix = format!("{}_", agent_prefix);
-    let mut max_idx: Option<usize> = None;
-
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if !name.starts_with(&prefix) {
-                continue;
-            }
-            // Accept both extensions.
-            let stem_end = if name.ends_with(".jsonl") {
-                name.len() - 6
-            } else if name.ends_with(".md") {
-                name.len() - 3
-            } else {
-                continue;
-            };
-            let idx_str = &name[prefix.len()..stem_end];
-            if let Ok(idx) = idx_str.parse::<usize>() {
-                max_idx = Some(max_idx.map_or(idx, |m: usize| m.max(idx)));
-            }
-        }
-    }
-
-    Ok(max_idx.map_or(0, |m| m + 1))
 }
 
 /// Find the latest transcript file for `agent_prefix` in `dir`.

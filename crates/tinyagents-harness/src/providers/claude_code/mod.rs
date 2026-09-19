@@ -325,7 +325,11 @@ fn render_content(content: &[ContentBlock]) -> String {
     content
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text(text) => Some(text.clone()),
+            // Typed image blocks are flattened into the private marker below
+            // and rehydrated by `input_builder::content_blocks`. Escape the
+            // same marker when it occurs in ordinary text so user-authored
+            // prose can never be mistaken for an attachment.
+            ContentBlock::Text(text) => Some(text.replace("[OH_IMAGE:", "[OH_IMAGE_LITERAL:")),
             ContentBlock::Image(image) => Some(format!("[OH_IMAGE:{}]", image.url)),
             ContentBlock::Json(value) | ContentBlock::ProviderExtension(value) => {
                 Some(value.to_string())
@@ -334,7 +338,10 @@ fn render_content(content: &[ContentBlock]) -> String {
             ContentBlock::RedactedThinking { .. } => None,
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        // Content-block boundaries carry no implicit whitespace. Inserting a
+        // newline here changes adjacent captions and diverges from
+        // `tinyinference_llm::Message::text`, which concatenates text blocks.
+        .join("")
 }
 
 fn model_response(response: ChatResponse) -> ModelResponse {
