@@ -233,6 +233,13 @@ gitignored — never commit real keys.
 ## Contributing
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+## Common Use Cases
+
+- Compressing large terminal logs before sending them to an AI model
+- Reducing token usage when analyzing code diffs
+- Summarizing search results and web content
+- Making long JSON outputs easier to inspect
+- Keeping important errors and warnings visible in large logs
 
 ## License
 
