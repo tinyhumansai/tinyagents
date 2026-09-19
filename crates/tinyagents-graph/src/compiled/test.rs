@@ -8,10 +8,13 @@ use crate::checkpoint::{Checkpointer, InMemoryCheckpointer};
 use crate::command::{Command, Interrupt, NodeResult, Send};
 use crate::reducer::ClosureStateReducer;
 use crate::stream::{CollectingSink, GraphEvent};
+use async_trait::async_trait;
 use serde_json::json;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tinyagents_harness::cancel::CancellationToken;
+use tinyagents_harness::events::{AgentEvent, EventSink, RecordingListener};
 use tinyagents_harness::ids::ExecutionStatus;
 use tinyagents_harness::retry::RetryPolicy;
 
@@ -19,6 +22,42 @@ use tinyagents_harness::retry::RetryPolicy;
 struct Counter {
     value: i32,
     log: Vec<String>,
+}
+
+/// A host invoker whose recorded request makes a continuation's live binding
+/// observable without putting host capabilities in durable graph state.
+#[derive(Clone, Default)]
+struct BindingRecordingInvoker(Arc<Mutex<Vec<crate::AgentInvocation>>>);
+
+#[async_trait]
+impl crate::AgentInvoker for BindingRecordingInvoker {
+    async fn invoke(
+        &self,
+        request: crate::AgentInvocation,
+    ) -> crate::Result<crate::SubAgentOutput> {
+        self.0.lock().unwrap().push(request.clone());
+        request.events.emit(AgentEvent::StateUpdate);
+        Ok(crate::SubAgentOutput {
+            text: request.input.prompt,
+            ..Default::default()
+        })
+    }
+}
+
+struct BindingFailingInvoker;
+
+#[async_trait]
+impl crate::AgentInvoker for BindingFailingInvoker {
+    async fn invoke(
+        &self,
+        _request: crate::AgentInvocation,
+    ) -> crate::Result<crate::SubAgentOutput> {
+        Err(TinyAgentsError::Model("continuation failure".to_string()))
+    }
+}
+
+fn agent_binding(invoker: Arc<dyn crate::AgentInvoker>) -> crate::AgentInvocationBinding {
+    crate::AgentInvocationBinding::new(invoker, EventSink::new(), CancellationToken::new())
 }
 
 /// Builds a graph whose nodes return partial `i32` updates merged by a custom
@@ -794,6 +833,203 @@ async fn resume_from_older_checkpoint_replays_forward() {
         .await
         .unwrap_err();
     assert!(matches!(err, TinyAgentsError::Resume(_)));
+}
+
+#[tokio::test]
+async fn resume_from_with_agent_binding_keeps_host_capabilities_live_only() {
+    // A bound run pauses before delegation. Its checkpoint must be enough to
+    // resume graph state, but must never retain the invoker, event sink, or
+    // cancellation handle that happened to start the run.
+    let checkpointer = Arc::new(InMemoryCheckpointer::<String>::new());
+    let graph = GraphBuilder::<String, String>::overwrite()
+        .add_node("gate", |state: String, ctx: NodeContext| async move {
+            if state == "unbound" || ctx.resume.is_some() {
+                Ok(NodeResult::Update(state))
+            } else {
+                Ok(NodeResult::Interrupt(Interrupt::new(
+                    "gate",
+                    json!({ "ask": "continue?" }),
+                )))
+            }
+        })
+        .add_node(
+            "delegate",
+            crate::subagent_node(crate::SubAgentNode::from_fns(
+                "researcher",
+                |state: &String| crate::SubAgentInput::prompt(state.clone()),
+                |output: crate::SubAgentOutput| output.text,
+            )),
+        )
+        .set_entry("gate")
+        .add_edge("gate", "delegate")
+        .set_finish("delegate")
+        .compile()
+        .unwrap()
+        .with_checkpointer(checkpointer.clone());
+
+    let initial_invoker = Arc::new(BindingRecordingInvoker::default());
+    let paused = graph
+        .run_with_thread_agent_binding(
+            "resume-binding",
+            "question".to_string(),
+            agent_binding(initial_invoker),
+        )
+        .await
+        .unwrap();
+    assert!(paused.is_interrupted());
+
+    let checkpoint = checkpointer
+        .get("resume-binding", None)
+        .await
+        .unwrap()
+        .expect("interrupt is checkpointed");
+    let interrupted_checkpoint_id = checkpoint.checkpoint_id.clone();
+    let checkpoint_json = serde_json::to_value(checkpoint).unwrap();
+    assert!(checkpoint_json.get("agent_binding").is_none());
+    assert!(
+        !checkpoint_json
+            .to_string()
+            .contains("AgentInvocationBinding"),
+        "a durable checkpoint must contain no live invocation capability"
+    );
+
+    // Reloading this bound checkpoint without a fresh binding reaches the
+    // SubAgentNode but must fail closed. Retrying the resulting failure
+    // boundary without a binding must do the same; neither continuation may
+    // recover capabilities from the original bound execution.
+    let unbound_resume = graph
+        .resume("resume-binding", Command::resume(json!("approved")))
+        .await
+        .unwrap_err();
+    assert!(matches!(unbound_resume, TinyAgentsError::Capability(_)));
+    assert!(
+        unbound_resume
+            .to_string()
+            .contains("sub-agent `researcher`"),
+        "unbound resume must fail at SubAgentNode: {unbound_resume}"
+    );
+
+    let unbound_retry = graph.retry("resume-binding").await.unwrap_err();
+    assert!(matches!(unbound_retry, TinyAgentsError::Capability(_)));
+    assert!(
+        unbound_retry.to_string().contains("sub-agent `researcher`"),
+        "unbound retry must fail at SubAgentNode: {unbound_retry}"
+    );
+
+    let latest_after_unbound_failures = checkpointer
+        .get("resume-binding", None)
+        .await
+        .unwrap()
+        .expect("unbound failures are checkpointed")
+        .checkpoint_id;
+    assert_ne!(
+        latest_after_unbound_failures, interrupted_checkpoint_id,
+        "the selected interrupt checkpoint must no longer be latest"
+    );
+
+    let invoker = Arc::new(BindingRecordingInvoker::default());
+    let events = EventSink::new();
+    let listener = Arc::new(RecordingListener::new());
+    events.subscribe(listener.clone());
+    let cancellation = CancellationToken::new();
+    let resumed = graph
+        .resume_from_with_agent_binding(
+            "resume-binding",
+            ResumeTarget::Checkpoint(interrupted_checkpoint_id),
+            Command::resume(json!("approved")),
+            crate::AgentInvocationBinding::new(invoker.clone(), events, cancellation.clone()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.state, "question");
+    let request = invoker.0.lock().unwrap().pop().expect("delegate ran");
+    assert_eq!(request.parent_run_id, resumed.run_id);
+    assert_eq!(request.root_run_id, resumed.root_run_id);
+    let request_cancellation = request.cancellation.expect("binding supplies cancellation");
+    assert!(
+        !request_cancellation.is_cancelled(),
+        "the captured request must initially observe the supplied live token"
+    );
+    cancellation.cancel();
+    assert!(
+        request_cancellation.is_cancelled(),
+        "cancelling the supplied token after invocation must reach the captured request"
+    );
+    assert_eq!(listener.len(), 1);
+}
+
+#[tokio::test]
+async fn retry_with_agent_binding_replaces_failed_run_capabilities() {
+    let checkpointer = Arc::new(InMemoryCheckpointer::<String>::new());
+    let graph = GraphBuilder::<String, String>::overwrite()
+        .add_node(
+            "delegate",
+            crate::subagent_node(crate::SubAgentNode::from_fns(
+                "researcher",
+                |state: &String| crate::SubAgentInput::prompt(state.clone()),
+                |output: crate::SubAgentOutput| output.text,
+            )),
+        )
+        .set_entry("delegate")
+        .set_finish("delegate")
+        .compile()
+        .unwrap()
+        .with_checkpointer(checkpointer);
+
+    let failed = graph
+        .run_with_thread_agent_binding(
+            "retry-binding",
+            "question".to_string(),
+            agent_binding(Arc::new(BindingFailingInvoker)),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(failed, TinyAgentsError::Model(_)));
+
+    // Give every capability a distinct observable behavior: the replacement
+    // invoker records the retry and its event sink has this listener only. The
+    // live cancellation handle is checked after the invocation below, proving
+    // the request received this exact replacement token.
+    let replacement = Arc::new(BindingRecordingInvoker::default());
+    let events = EventSink::new();
+    let listener = Arc::new(RecordingListener::new());
+    events.subscribe(listener.clone());
+    let cancellation = CancellationToken::new();
+    let retried = graph
+        .retry_with_agent_binding(
+            "retry-binding",
+            crate::AgentInvocationBinding::new(replacement.clone(), events, cancellation.clone()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(retried.state, "question");
+    let request = replacement
+        .0
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("retry delegated");
+    assert_eq!(request.parent_run_id, retried.run_id);
+    assert_eq!(request.root_run_id, retried.root_run_id);
+    let request_cancellation = request
+        .cancellation
+        .expect("retry binding supplies a cancellation token");
+    assert!(
+        !request_cancellation.is_cancelled(),
+        "the captured retry request must initially observe a live token"
+    );
+    cancellation.cancel();
+    assert!(
+        request_cancellation.is_cancelled(),
+        "cancelling the supplied token after invocation must reach the captured retry request"
+    );
+    assert_eq!(
+        listener.len(),
+        1,
+        "retry must forward the supplied event sink to the replacement invoker"
+    );
 }
 
 // --- Parallel (fan-out / fan-in) execution ---------------------------------

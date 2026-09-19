@@ -13,12 +13,10 @@ loading, personality profiles, and event bus).
 Pure functions over a board snapshot — no store, so they are trivially testable
 and can be applied to cards a host already holds.
 
-- `pick_next_card(cards, agent_assigned_only)` — the highest-urgency
+- `pick_next_card(cards)` — the highest-urgency
   dispatchable card (`Todo` or approved `Ready`). Urgency comes from
   `source_metadata.urgency` (`card_urgency`, default `0.0`); ties break toward
   the lower board `order`, so equal-priority work runs in planned order.
-  `agent_assigned_only` restricts the pick to cards with an `assigned_agent`,
-  which is how a host keeps an autonomous sweep off a person's own todos.
 - `has_card_in_progress(cards)` — the board already has a card being worked, so
   there is nothing to claim this tick.
 - `requires_plan_approval(global_required, approval_mode)` — the card's own

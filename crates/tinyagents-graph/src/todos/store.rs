@@ -182,7 +182,6 @@ pub async fn add(
         status: patch.status.unwrap_or(TaskCardStatus::Todo),
         objective: patch.objective.and_then(non_empty),
         plan: patch.plan.unwrap_or_default(),
-        assigned_agent: patch.assigned_agent.and_then(non_empty),
         allowed_tools: patch.allowed_tools.unwrap_or_default(),
         approval_mode: patch.approval_mode.flatten(),
         acceptance_criteria: patch.acceptance_criteria.unwrap_or_default(),
@@ -231,9 +230,6 @@ pub async fn edit(
     }
     if let Some(plan) = patch.plan {
         card.plan = plan;
-    }
-    if let Some(assigned_agent) = patch.assigned_agent {
-        card.assigned_agent = non_empty(assigned_agent);
     }
     if let Some(allowed_tools) = patch.allowed_tools {
         card.allowed_tools = allowed_tools;

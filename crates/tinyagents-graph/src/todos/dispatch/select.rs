@@ -36,14 +36,10 @@ pub fn has_card_in_progress(cards: &[TaskBoardCard]) -> bool {
 /// urgency break toward the lower board `order`, so equal-priority work runs in
 /// the order it was planned.
 ///
-/// `agent_assigned_only` restricts the pick to cards with an `assigned_agent`.
-/// A host uses it for boards that mix human-authored and agent-authored cards,
-/// so an autonomous sweep never picks up a card a person wrote for themselves.
-pub fn pick_next_card(cards: &[TaskBoardCard], agent_assigned_only: bool) -> Option<TaskBoardCard> {
+pub fn pick_next_card(cards: &[TaskBoardCard]) -> Option<TaskBoardCard> {
     cards
         .iter()
         .filter(|card| matches!(card.status, TaskCardStatus::Todo | TaskCardStatus::Ready))
-        .filter(|card| !agent_assigned_only || is_agent_assigned(card))
         .max_by(|a, b| {
             card_urgency(a)
                 .partial_cmp(&card_urgency(b))
@@ -52,12 +48,6 @@ pub fn pick_next_card(cards: &[TaskBoardCard], agent_assigned_only: bool) -> Opt
                 .then(b.order.cmp(&a.order))
         })
         .cloned()
-}
-
-fn is_agent_assigned(card: &TaskBoardCard) -> bool {
-    card.assigned_agent
-        .as_deref()
-        .is_some_and(|agent| !agent.trim().is_empty())
 }
 
 /// Whether a card must be parked at

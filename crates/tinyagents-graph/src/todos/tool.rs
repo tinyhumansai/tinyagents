@@ -27,8 +27,8 @@ const TODO_DESCRIPTION: &str = "Maintain a visible plan for THIS thread: an orde
     the start, `add` one card per step; keep exactly ONE card `in_progress` at a time; mark a card \
     `done` the moment it finishes; if a step is blocked, set it `blocked` with a `blocker`. `list` \
     to re-read the plan. The board is bound automatically to the current thread — do not pass a \
-    thread id. Dispatch via `op`: `add` (content, status?, objective?, plan?, assignedAgent?, \
-    allowedTools?, approvalMode?, acceptanceCriteria?, evidence?, notes?, blocker?), `edit` (id, \
+    thread id. Dispatch via `op`: `add` (content, status?, objective?, plan?, allowedTools?, \
+    approvalMode?, acceptanceCriteria?, evidence?, notes?, blocker?), `edit` (id, \
     same optional fields), `update_status` (id, status), `decide_plan` (id, approve), \
     `revise_plan`, `remove` (id), `replace` (cards), `clear`, or `list`. Returns the updated cards \
     plus a markdown rendering.";
@@ -219,7 +219,6 @@ fn patch_from_args(args: &Value) -> std::result::Result<CardPatch, String> {
         status,
         objective: optional_string(args, "objective"),
         plan: optional_string_array(args, "plan")?,
-        assigned_agent: optional_string(args, "assignedAgent"),
         allowed_tools: optional_string_array(args, "allowedTools")?,
         approval_mode,
         acceptance_criteria: optional_string_array(args, "acceptanceCriteria")?,
@@ -250,7 +249,6 @@ fn parameters_schema() -> Value {
             "blocker": { "type": "string" },
             "objective": { "type": "string", "description": "Desired outcome for this task." },
             "plan": { "type": "array", "items": { "type": "string" }, "description": "Ordered execution steps." },
-            "assignedAgent": { "type": "string" },
             "allowedTools": { "type": "array", "items": { "type": "string" } },
             "approvalMode": { "type": ["string", "null"], "enum": ["required", "not_required", null] },
             "acceptanceCriteria": { "type": "array", "items": { "type": "string" } },

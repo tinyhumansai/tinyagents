@@ -54,6 +54,32 @@ pub struct TranscriptTurn<'a> {
     pub request_id: Option<&'a str>,
 }
 
+/// Display-only content produced before a turn stopped without a final answer.
+///
+/// This deliberately uses transcript-neutral fields. It is never added to a
+/// model-context replay: the file writer records it as an interrupted message
+/// line for the display projection only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TranscriptPartial {
+    /// Visible assistant text accumulated before the interruption.
+    pub content: String,
+    /// Optional provider reasoning text associated with the partial.
+    pub reasoning_content: Option<String>,
+    /// Optional one-based engine iteration associated with the partial.
+    pub iteration: Option<u32>,
+}
+
+impl TranscriptPartial {
+    /// Creates a display-only partial with no provider-specific metadata.
+    pub fn new(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            reasoning_content: None,
+            iteration: None,
+        }
+    }
+}
+
 /// The seam a host turn path holds as `Arc<dyn TranscriptHistory>`.
 ///
 /// `append_turn` is deliberately **sync**: `persist_session_transcript` is a
@@ -62,6 +88,23 @@ pub struct TranscriptTurn<'a> {
 pub trait TranscriptHistory: TranscriptRead {
     /// Appends one turn, forwarding every argument to the format owner.
     fn append_turn(&self, turn: TranscriptTurn<'_>) -> anyhow::Result<()>;
+
+    /// Appends the logical turn and its optional display-only partial as one
+    /// history operation.
+    ///
+    /// Implementors that cannot make the combined mutation atomic must reject
+    /// a partial rather than persist either half. Existing implementors which
+    /// only support logical turns remain source-compatible through this default.
+    fn append_turn_with_partial(
+        &self,
+        turn: TranscriptTurn<'_>,
+        partial: Option<&TranscriptPartial>,
+    ) -> anyhow::Result<()> {
+        if partial.is_some() {
+            anyhow::bail!("transcript history does not support atomic display partials");
+        }
+        self.append_turn(turn)
+    }
 
     /// Returns the lossless model-context replay of this transcript.
     fn messages(&self) -> anyhow::Result<Vec<TranscriptMessage>>;
@@ -426,6 +469,29 @@ impl TranscriptHistory for FileTranscriptHistory {
             turn.meta,
             turn.turn_usage,
             turn.request_id,
+        )
+    }
+
+    fn append_turn_with_partial(
+        &self,
+        turn: TranscriptTurn<'_>,
+        partial: Option<&TranscriptPartial>,
+    ) -> anyhow::Result<()> {
+        log::debug!(
+            "[transcript-history] append_turn_with_partial prev={} next={} partial={} path={}",
+            turn.prev.len(),
+            turn.next.len(),
+            partial.is_some(),
+            self.path.display()
+        );
+        crate::transcript::append_transcript_turn_with_partial(
+            &self.path,
+            turn.prev,
+            turn.next,
+            turn.meta,
+            turn.turn_usage,
+            turn.request_id,
+            partial,
         )
     }
     fn messages(&self) -> anyhow::Result<Vec<TranscriptMessage>> {

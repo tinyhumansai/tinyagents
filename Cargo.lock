@@ -1562,7 +1562,9 @@ dependencies = [
  "tempfile",
  "tinyagents-graph",
  "tinyagents-harness",
+ "tinyagents-runtime",
  "tinyagents-session",
+ "tinyinference-llm",
  "tokio",
  "uuid",
 ]
@@ -1578,6 +1580,23 @@ dependencies = [
  "tinyagents-definition",
  "tinyagents-harness",
  "tinyagents-language",
+ "tinyinference-llm",
+ "tinytools",
+ "tokio",
+]
+
+[[package]]
+name = "tinyagents-runtime"
+version = "2.1.2"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tinyagents-harness",
+ "tinyagents-session",
  "tinyinference-llm",
  "tinytools",
  "tokio",

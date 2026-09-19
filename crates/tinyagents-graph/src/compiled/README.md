@@ -99,6 +99,12 @@ Accessors: `graph_id()`, `name()`, `namespace()`.
   failure boundary.
 - `retry(thread_id)` — re-run the failed node(s) recorded in the last
   failure-boundary checkpoint.
+- `run_with_agent_binding(..)`, `run_with_thread_agent_binding(..)`,
+  `resume_with_agent_binding(..)`, `resume_from_with_agent_binding(..)`, and
+  `retry_with_agent_binding(..)` — execution-scoped variants for graphs that
+  reach a `SubAgentNode`. The supplied `AgentInvocationBinding` is forwarded
+  to resumed nodes and nested subgraphs, but is never stored on the reusable
+  graph or in a checkpoint; an unbound sub-agent continuation fails closed.
 
 ### State inspection / time travel
 

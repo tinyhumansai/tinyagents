@@ -104,11 +104,13 @@
 //! | `paths`         | `session_raw` / `sessions` path resolution and resume scan.  |
 //! | `markdown`      | Human-readable `.md` companion rendering.                    |
 //! | `legacy_md`     | Legacy HTML-comment `.md` reader.                            |
+//! | `migration`     | One-shot legacy date-grouped layout conversion.               |
 
 mod history;
 mod jsonl;
 mod legacy_md;
 mod markdown;
+mod migration;
 mod paths;
 mod reader;
 mod thread_lookup;
@@ -117,9 +119,10 @@ mod writer;
 
 pub use history::{
     FileTranscriptHistory, FileTranscriptLocator, TranscriptHistory, TranscriptLocator,
-    TranscriptRead, TranscriptTurn,
+    TranscriptPartial, TranscriptRead, TranscriptTurn,
 };
 pub use legacy_md::read_transcript_legacy_md;
+pub use migration::{TranscriptLayoutMigration, migrate_layout_if_needed};
 pub use paths::{find_latest_transcript, resolve_keyed_transcript_path};
 pub use reader::{read_transcript, read_transcript_display};
 pub use thread_lookup::{
@@ -131,7 +134,10 @@ pub use types::{
     SessionTranscript, ToolFailure, TranscriptMessage, TranscriptMeta, TranscriptToolCall,
     TurnUsage,
 };
-pub use writer::{append_interrupted_partial, append_transcript_turn, write_transcript};
+pub use writer::{
+    append_interrupted_partial, append_transcript_turn, append_transcript_turn_with_partial,
+    write_transcript,
+};
 
 // ── Tests ─────────────────────────────────────────────────────────────
 

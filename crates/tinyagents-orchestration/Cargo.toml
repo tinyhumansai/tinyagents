@@ -17,6 +17,8 @@ serde_json = "1"
 tinyagents-graph = { path = "../tinyagents-graph", version = "2.1.2", default-features = false }
 tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.2", default-features = false }
 tinyagents-session = { path = "../tinyagents-session", version = "2.1.2", default-features = false }
+tinyagents-runtime = { path = "../tinyagents-runtime", version = "2.1.2", default-features = false }
+tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.3.0" }
 tokio = { version = "1", default-features = false, features = ["sync", "rt", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 
@@ -30,7 +32,7 @@ tracing = [
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true

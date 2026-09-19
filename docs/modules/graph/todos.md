@@ -10,8 +10,8 @@ surface; this spec captures the design contract.
 
 ## Model
 
-- `TaskBoardCard { id, title, status, objective, plan, assigned_agent,
-  allowed_tools, approval_mode, acceptance_criteria, evidence, notes, blocker,
+- `TaskBoardCard { id, title, status, objective, plan, allowed_tools,
+  approval_mode, acceptance_criteria, evidence, notes, blocker,
   session_thread_id, source_metadata, order, updated_at }`.
 - `TaskCardStatus`: `Todo`, `AwaitingApproval`, `Ready`, `InProgress`,
   `Blocked`, `Done`, `Rejected`. `TaskApprovalMode`: `Required`, `NotRequired`.

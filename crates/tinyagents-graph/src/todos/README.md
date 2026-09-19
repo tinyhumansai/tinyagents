@@ -13,8 +13,8 @@ the concrete work items.
 
 - `TaskCardStatus { Todo, AwaitingApproval, Ready, InProgress, Blocked, Done,
   Rejected }` and `TaskApprovalMode { Required, NotRequired }` (each `as_str`).
-- `TaskBoardCard { id, title, status, objective, plan, assigned_agent,
-  allowed_tools, approval_mode, acceptance_criteria, evidence, notes, blocker,
+- `TaskBoardCard { id, title, status, objective, plan, allowed_tools,
+  approval_mode, acceptance_criteria, evidence, notes, blocker,
   session_thread_id, source_metadata, order, updated_at }` (serde `camelCase`).
 - `TaskBoard { thread_id, cards, updated_at }`.
 - `CardPatch` — optional `add`/`edit` fields; `approval_mode` is doubly-optional

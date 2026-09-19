@@ -9,6 +9,7 @@
 //! `orchestration -> {graph, harness, session}`. The lower-level crates never
 //! depend on this composition layer.
 
+pub mod subagent;
 pub mod teams;
 pub mod workflow;
 
@@ -23,6 +24,7 @@ mod boundary_tests {
             include_str!("../../tinyagents-graph/Cargo.toml"),
             include_str!("../../tinyagents-harness/Cargo.toml"),
             include_str!("../../tinyagents-session/Cargo.toml"),
+            include_str!("../../tinyagents-runtime/Cargo.toml"),
         ] {
             assert!(
                 !lower_layer.contains("tinyagents-orchestration"),

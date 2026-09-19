@@ -26,11 +26,6 @@ fn with_urgency(mut card: TaskBoardCard, urgency: f64) -> TaskBoardCard {
     card
 }
 
-fn assigned(mut card: TaskBoardCard, agent: &str) -> TaskBoardCard {
-    card.assigned_agent = Some(agent.to_string());
-    card
-}
-
 // ── Selection ───────────────────────────────────────────────────────────────
 
 #[test]
@@ -42,11 +37,11 @@ fn only_todo_and_ready_cards_are_dispatchable() {
         card("rejected", TaskCardStatus::Rejected, 3),
         card("running", TaskCardStatus::InProgress, 4),
     ];
-    assert!(pick_next_card(&cards, false).is_none());
+    assert!(pick_next_card(&cards).is_none());
 
     let mut cards = cards;
     cards.push(card("ready", TaskCardStatus::Ready, 5));
-    assert_eq!(pick_next_card(&cards, false).unwrap().id, "ready");
+    assert_eq!(pick_next_card(&cards).unwrap().id, "ready");
 }
 
 #[test]
@@ -56,7 +51,7 @@ fn the_most_urgent_card_wins() {
         with_urgency(card("high", TaskCardStatus::Todo, 1), 0.9),
         card("none", TaskCardStatus::Todo, 2),
     ];
-    assert_eq!(pick_next_card(&cards, false).unwrap().id, "high");
+    assert_eq!(pick_next_card(&cards).unwrap().id, "high");
 }
 
 #[test]
@@ -65,42 +60,19 @@ fn equal_urgency_runs_in_board_order() {
         with_urgency(card("second", TaskCardStatus::Todo, 5), 0.5),
         with_urgency(card("first", TaskCardStatus::Todo, 1), 0.5),
     ];
-    assert_eq!(pick_next_card(&cards, false).unwrap().id, "first");
+    assert_eq!(pick_next_card(&cards).unwrap().id, "first");
 
     // Unscored cards tie at 0.0 and follow the same rule.
     let cards = vec![
         card("later", TaskCardStatus::Todo, 9),
         card("earlier", TaskCardStatus::Todo, 2),
     ];
-    assert_eq!(pick_next_card(&cards, false).unwrap().id, "earlier");
-}
-
-#[test]
-fn agent_assigned_only_skips_human_authored_cards() {
-    let cards = vec![
-        with_urgency(card("mine", TaskCardStatus::Todo, 0), 0.9),
-        with_urgency(
-            assigned(card("agents", TaskCardStatus::Todo, 1), "researcher"),
-            0.1,
-        ),
-    ];
-
-    // Unfiltered, urgency wins; filtered, the unassigned card is invisible even
-    // though it is the more urgent one.
-    assert_eq!(pick_next_card(&cards, false).unwrap().id, "mine");
-    assert_eq!(pick_next_card(&cards, true).unwrap().id, "agents");
-}
-
-#[test]
-fn a_blank_assignee_does_not_count_as_assigned() {
-    let cards = vec![assigned(card("blank", TaskCardStatus::Todo, 0), "   ")];
-    assert!(pick_next_card(&cards, true).is_none());
-    assert_eq!(pick_next_card(&cards, false).unwrap().id, "blank");
+    assert_eq!(pick_next_card(&cards).unwrap().id, "earlier");
 }
 
 #[test]
 fn an_empty_board_has_nothing_to_dispatch() {
-    assert!(pick_next_card(&[], false).is_none());
+    assert!(pick_next_card(&[]).is_none());
     assert!(!has_card_in_progress(&[]));
 }
 

@@ -82,10 +82,7 @@ pub struct TaskBoardCard {
     /// Ordered plan steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plan: Vec<String>,
-    /// The agent assigned to run this card, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assigned_agent: Option<String>,
-    /// Tools the assigned agent is allowed to use.
+    /// Tools an agent working this card is allowed to use.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tools: Vec<String>,
     /// Plan-approval mode, if the card is gated.
@@ -127,7 +124,6 @@ impl TaskBoardCard {
             status: TaskCardStatus::Todo,
             objective: None,
             plan: Vec::new(),
-            assigned_agent: None,
             allowed_tools: Vec::new(),
             approval_mode: None,
             acceptance_criteria: Vec::new(),
@@ -191,8 +187,6 @@ pub struct CardPatch {
     pub objective: Option<String>,
     /// New plan steps.
     pub plan: Option<Vec<String>>,
-    /// New assigned agent (empty clears).
-    pub assigned_agent: Option<String>,
     /// New allowed-tools list.
     pub allowed_tools: Option<Vec<String>>,
     /// New approval mode (`Some(None)` clears).
@@ -252,11 +246,6 @@ pub fn render_markdown(cards: &[TaskBoardCard]) -> String {
         if let Some(objective) = card.objective.as_deref() {
             out.push_str("  - objective: ");
             out.push_str(objective);
-            out.push('\n');
-        }
-        if let Some(agent) = card.assigned_agent.as_deref() {
-            out.push_str("  - agent: ");
-            out.push_str(agent);
             out.push('\n');
         }
         if !card.allowed_tools.is_empty() {
@@ -326,7 +315,6 @@ pub fn normalise_board(board: &mut TaskBoard) {
         }
         card.notes = trim_opt(card.notes.take());
         card.objective = trim_opt(card.objective.take());
-        card.assigned_agent = trim_opt(card.assigned_agent.take());
         trim_string_vec(&mut card.plan);
         trim_string_vec(&mut card.allowed_tools);
         trim_string_vec(&mut card.acceptance_criteria);

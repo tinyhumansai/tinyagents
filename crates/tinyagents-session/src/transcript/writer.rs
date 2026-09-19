@@ -2,6 +2,7 @@
 //! delta (message tail or compaction record), interrupted partials, and the
 //! derived `.md` companion.
 
+use super::history::TranscriptPartial;
 use super::jsonl::{
     COMPACTION_KIND, CompactionLine, MessageLine, build_message_line, meta_line_json,
     serialise_message_lines,
@@ -80,6 +81,34 @@ pub fn append_transcript_turn(
     turn_usage: Option<&TurnUsage>,
     request_id: Option<&str>,
 ) -> Result<()> {
+    append_transcript_turn_with_partial(
+        jsonl_path,
+        prev_persisted,
+        messages,
+        meta,
+        turn_usage,
+        request_id,
+        None,
+    )
+}
+
+/// Appends one logical turn and, when present, its display-only interruption
+/// row from one serialized buffer and one file-write operation.
+///
+/// The partial is written after the logical delta and refreshed metadata. It
+/// has `interrupted: true`, so the model-context reader skips it while the
+/// display reader preserves it. Serialization happens before opening the file
+/// for append, preventing a serialization failure from leaving a logical turn
+/// without its associated display partial.
+pub fn append_transcript_turn_with_partial(
+    jsonl_path: &Path,
+    prev_persisted: &[TranscriptMessage],
+    messages: &[TranscriptMessage],
+    meta: &TranscriptMeta,
+    turn_usage: Option<&TurnUsage>,
+    request_id: Option<&str>,
+    partial: Option<&TranscriptPartial>,
+) -> Result<()> {
     if let Some(parent) = jsonl_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create transcript dir {}", parent.display()))?;
@@ -93,6 +122,7 @@ pub fn append_transcript_turn(
         buf.push_str(&meta_line_json(meta)?);
         buf.push('\n');
         serialise_message_lines(messages, turn_usage, request_id, &mut buf)?;
+        serialise_interrupted_partial(partial, request_id, &mut buf)?;
         fs::write(jsonl_path, buf.as_bytes())
             .with_context(|| format!("create transcript {}", jsonl_path.display()))?;
         log::debug!(
@@ -159,9 +189,38 @@ pub fn append_transcript_turn(
     // last one). Keeps append-only + O(1)-per-turn (no full-file rewrite).
     buf.push_str(&meta_line_json(meta)?);
     buf.push('\n');
+    serialise_interrupted_partial(partial, request_id, &mut buf)?;
 
     append_bytes(jsonl_path, buf.as_bytes())?;
     render_md_companion(jsonl_path, messages, meta, turn_usage);
+    Ok(())
+}
+
+/// Appends the optional display-only row to an already assembled turn buffer.
+fn serialise_interrupted_partial(
+    partial: Option<&TranscriptPartial>,
+    request_id: Option<&str>,
+    buf: &mut String,
+) -> Result<()> {
+    let Some(partial) = partial.filter(|partial| !partial.content.is_empty()) else {
+        return Ok(());
+    };
+    let mut line = build_message_line(
+        &TranscriptMessage::assistant(&partial.content),
+        None,
+        request_id,
+        true,
+    );
+    line.iteration = partial.iteration;
+    line.reasoning_content = partial
+        .reasoning_content
+        .as_deref()
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .map(str::to_owned);
+    line.ts = Some(chrono::Utc::now().to_rfc3339());
+    buf.push_str(&serde_json::to_string(&line).context("serialise interrupted partial line")?);
+    buf.push('\n');
     Ok(())
 }
 
@@ -186,20 +245,16 @@ pub fn append_interrupted_partial(
         fs::create_dir_all(parent)
             .with_context(|| format!("create transcript dir {}", parent.display()))?;
     }
-    let mut line = build_message_line(
-        &TranscriptMessage::assistant(partial_content),
-        None,
+    let mut buf = String::new();
+    serialise_interrupted_partial(
+        Some(&TranscriptPartial {
+            content: partial_content.to_owned(),
+            reasoning_content: reasoning_content.map(str::to_owned),
+            iteration,
+        }),
         request_id,
-        true,
-    );
-    line.iteration = iteration;
-    line.reasoning_content = reasoning_content
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    line.ts = Some(chrono::Utc::now().to_rfc3339());
-    let mut buf = serde_json::to_string(&line).context("serialise interrupted partial line")?;
-    buf.push('\n');
+        &mut buf,
+    )?;
     append_bytes(jsonl_path, buf.as_bytes())?;
     log::debug!(
         "[transcript] appended interrupted partial ({} chars, request_id={:?}) to {}",

@@ -33,6 +33,12 @@ both adapters check `execution.is_interrupted()` and return
 `NodeResult::Interrupt(..)` instead of folding the paused child's state
 through `from_child` (or returning it directly, for the shared-state case).
 
+When a parent is resumed through one of `CompiledGraph`'s binding-aware
+continuation APIs, both adapters forward that same live
+`AgentInvocationBinding` into every resumed child branch. Bindings remain
+execution-only data — they are not checkpointed — so a resumed child that
+reaches a `SubAgentNode` without one fails closed.
+
 ## Namespace and recursion bookkeeping
 
 Internal helpers (not part of the public surface, but load-bearing for

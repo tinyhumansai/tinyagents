@@ -83,9 +83,8 @@ async fn add_card(store: &Arc<dyn Store>, title: &str, patch: CardPatch) -> Stri
         .clone()
 }
 
-fn agent_card(agent: &str, urgency: f64) -> CardPatch {
+fn task_card(urgency: f64) -> CardPatch {
     CardPatch {
-        assigned_agent: Some(agent.to_string()),
         source_metadata: Some(json!({ "urgency": urgency })),
         ..CardPatch::default()
     }
@@ -105,7 +104,7 @@ enum Tick {
 
 /// One sweep of the board, wired from the crate's dispatch policy: reclaim
 /// what has gone stale, refuse to double-book a busy board, pick the most
-/// urgent agent-assigned card, and either park it for approval or claim it.
+/// urgent card, and either park it for approval or claim it.
 async fn tick(store: &Arc<dyn Store>, approval_required: bool) -> Tick {
     task_run_store::reclaim_stale(store, THREAD, &RunLimits::default())
         .await
@@ -115,7 +114,7 @@ async fn tick(store: &Arc<dyn Store>, approval_required: bool) -> Tick {
     if has_card_in_progress(&board.cards) {
         return Tick::Idle;
     }
-    let Some(card) = pick_next_card(&board.cards, true) else {
+    let Some(card) = pick_next_card(&board.cards) else {
         return Tick::Idle;
     };
 
@@ -205,24 +204,15 @@ async fn run_card(store: &Arc<dyn Store>, card: &TaskBoardCard, run_id: &str) ->
 }
 
 #[tokio::test]
-async fn the_dispatcher_runs_the_most_urgent_agent_card_and_leaves_human_work_alone() {
+async fn the_dispatcher_runs_the_most_urgent_card() {
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::default());
 
-    // A human's own todo (unassigned, most urgent), and two agent-assigned
-    // cards. Only the agent cards are the dispatcher's to run.
-    let mine = add_card(
-        &store,
-        "call the dentist",
-        CardPatch {
-            source_metadata: Some(json!({ "urgency": 0.99 })),
-            ..CardPatch::default()
-        },
-    )
-    .await;
-    let low = add_card(&store, "tidy the changelog", agent_card("scribe", 0.1)).await;
-    let high = add_card(&store, "apply the migration", agent_card("dba", 0.8)).await;
+    // Every card is eligible for an autonomous sweep; urgency determines the
+    // first card selected.
+    let low = add_card(&store, "tidy the changelog", task_card(0.1)).await;
+    let high = add_card(&store, "apply the migration", task_card(0.8)).await;
 
-    // Tick 1: the urgent agent card is claimed; the human's card is not touched.
+    // Tick 1: the highest-urgency card is claimed.
     let Tick::Dispatched { card_id, run_id } = tick(&store, false).await else {
         panic!("expected a dispatch");
     };
@@ -246,9 +236,9 @@ async fn the_dispatcher_runs_the_most_urgent_agent_card_and_leaves_human_work_al
         "the run is told which card it owns"
     );
 
-    // Tick 2: with the first card done, the remaining agent card goes next.
+    // Tick 2: with the first card done, the remaining card goes next.
     let Tick::Dispatched { card_id, .. } = tick(&store, false).await else {
-        panic!("expected the second agent card");
+        panic!("expected the second card");
     };
     assert_eq!(card_id, low);
 
@@ -258,7 +248,6 @@ async fn the_dispatcher_runs_the_most_urgent_agent_card_and_leaves_human_work_al
         .iter()
         .map(|card| (card.id.clone(), card.status))
         .collect();
-    assert!(statuses.contains(&(mine.clone(), TaskCardStatus::Todo)));
     assert!(statuses.contains(&(high, TaskCardStatus::Done)));
     assert!(statuses.contains(&(low, TaskCardStatus::InProgress)));
 
@@ -274,7 +263,7 @@ async fn the_dispatcher_runs_the_most_urgent_agent_card_and_leaves_human_work_al
 #[tokio::test]
 async fn a_plan_awaiting_approval_never_runs_until_it_is_approved() {
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::default());
-    let card_id = add_card(&store, "delete the old bucket", agent_card("ops", 0.5)).await;
+    let card_id = add_card(&store, "delete the old bucket", task_card(0.5)).await;
 
     // With approval on, the tick parks the card instead of claiming it, and
     // keeps parking nothing afterwards: an awaiting card is not dispatchable.
@@ -309,7 +298,7 @@ async fn a_card_stamped_required_is_parked_even_with_the_global_gate_off() {
         "email the customer",
         CardPatch {
             approval_mode: Some(Some(TaskApprovalMode::Required)),
-            ..agent_card("support", 0.5)
+            ..task_card(0.5)
         },
     )
     .await;
@@ -322,7 +311,7 @@ async fn a_card_stamped_required_is_parked_even_with_the_global_gate_off() {
 #[tokio::test]
 async fn a_cancelled_run_leaves_its_card_blocked_rather_than_stranded() {
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::default());
-    let card_id = add_card(&store, "long crawl", agent_card("crawler", 0.5)).await;
+    let card_id = add_card(&store, "long crawl", task_card(0.5)).await;
     let registry: ActiveRunRegistry<String> = ActiveRunRegistry::new();
 
     let Tick::Dispatched { run_id, .. } = tick(&store, false).await else {
@@ -398,7 +387,7 @@ async fn a_cancelled_run_leaves_its_card_blocked_rather_than_stranded() {
 #[tokio::test]
 async fn an_abandoned_run_is_reclaimed_by_the_next_tick() {
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::default());
-    let card_id = add_card(&store, "flaky job", agent_card("runner", 0.5)).await;
+    let card_id = add_card(&store, "flaky job", task_card(0.5)).await;
 
     let Tick::Dispatched { run_id, .. } = tick(&store, false).await else {
         panic!("expected a dispatch");
@@ -466,7 +455,7 @@ async fn an_idle_board_backs_the_sweep_off_and_fresh_work_resets_it() {
     );
 
     // Work arrives, the tick dispatches, and the cadence snaps back.
-    add_card(&store, "new work", agent_card("worker", 0.5)).await;
+    add_card(&store, "new work", task_card(0.5)).await;
     assert!(matches!(tick(&store, false).await, Tick::Dispatched { .. }));
     idle_ticks = 0;
     assert_eq!(cadence.next_delay(idle_ticks), cadence.base);

@@ -35,6 +35,49 @@ impl crate::subagent_node::AgentInvoker for NestedRecordingInvoker {
     }
 }
 
+struct NestedFailingInvoker;
+
+#[async_trait]
+impl crate::subagent_node::AgentInvoker for NestedFailingInvoker {
+    async fn invoke(
+        &self,
+        _request: crate::subagent_node::AgentInvocation,
+    ) -> crate::Result<crate::subagent_node::SubAgentOutput> {
+        Err(crate::TinyAgentsError::Model(
+            "nested continuation failure".to_string(),
+        ))
+    }
+}
+
+fn delegating_child(
+    checkpointer: Arc<InMemoryCheckpointer<String>>,
+) -> CompiledGraph<String, String> {
+    GraphBuilder::<String, String>::overwrite()
+        .add_node(
+            "delegate",
+            crate::subagent_node::subagent_node(crate::subagent_node::SubAgentNode::from_fns(
+                "researcher",
+                |state: &String| crate::subagent_node::SubAgentInput::prompt(state.clone()),
+                |output: crate::subagent_node::SubAgentOutput| output.text,
+            )),
+        )
+        .set_entry("delegate")
+        .set_finish("delegate")
+        .compile()
+        .unwrap()
+        .with_checkpointer(checkpointer)
+}
+
+fn nested_binding(
+    invoker: Arc<dyn crate::subagent_node::AgentInvoker>,
+) -> crate::subagent_node::AgentInvocationBinding {
+    crate::subagent_node::AgentInvocationBinding::new(
+        invoker,
+        tinyagents_harness::events::EventSink::new(),
+        tinyagents_harness::cancel::CancellationToken::new(),
+    )
+}
+
 /// Builds a minimal [`NodeContext`] standing in for the embedding node `id`.
 fn ctx_for(id: &str) -> NodeContext {
     NodeContext {
@@ -451,6 +494,311 @@ async fn resumed_subgraph_passes_the_supplied_binding_to_its_subagent() {
         1,
         "sub-agent event used the resumed binding sink"
     );
+}
+
+#[tokio::test]
+async fn resumed_adapter_subgraph_passes_the_supplied_binding_to_its_subagent() {
+    // Exercise the adapter route separately: it has its own child-driving
+    // closure, so a shared-state test alone cannot prove a bound resume is not
+    // dropped while mapping parent state into child state and back.
+    let ckpt = Arc::new(InMemoryCheckpointer::<String>::new());
+    let child = GraphBuilder::<String, String>::overwrite()
+        .add_node("gate", |state: String, ctx: NodeContext| async move {
+            if ctx.resume.is_some() {
+                Ok(NodeResult::Update(state))
+            } else {
+                Ok(NodeResult::Interrupt(crate::command::Interrupt::new(
+                    "gate",
+                    serde_json::json!({ "ask": "continue?" }),
+                )))
+            }
+        })
+        .add_node(
+            "delegate",
+            crate::subagent_node::subagent_node(crate::subagent_node::SubAgentNode::from_fns(
+                "researcher",
+                |state: &String| crate::subagent_node::SubAgentInput::prompt(state.clone()),
+                |output: crate::subagent_node::SubAgentOutput| output.text,
+            )),
+        )
+        .set_entry("gate")
+        .add_edge("gate", "delegate")
+        .set_finish("delegate")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt.clone());
+    let parent = GraphBuilder::<String, String>::overwrite()
+        .add_node(
+            "child",
+            adapter_subgraph_node(
+                child,
+                |state: &String| state.clone(),
+                |_parent, child| child,
+            ),
+        )
+        .set_entry("child")
+        .set_finish("child")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt);
+
+    assert!(
+        parent
+            .run_with_thread("adapter-resume", "question".to_string())
+            .await
+            .unwrap()
+            .is_interrupted()
+    );
+
+    let invoker = Arc::new(NestedRecordingInvoker::default());
+    let events = tinyagents_harness::events::EventSink::new();
+    let listener = Arc::new(tinyagents_harness::events::RecordingListener::new());
+    events.subscribe(listener.clone());
+    let cancellation = tinyagents_harness::cancel::CancellationToken::new();
+    cancellation.cancel();
+    let resumed = parent
+        .resume_with_agent_binding(
+            "adapter-resume",
+            crate::command::Command::resume(serde_json::json!("go")),
+            crate::subagent_node::AgentInvocationBinding::new(
+                invoker.clone(),
+                events,
+                cancellation,
+            ),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.state, "question");
+    let request = invoker.0.lock().unwrap().pop().expect("child delegated");
+    assert_eq!(request.parent_run_id, resumed.child_runs[0].run_id);
+    assert_eq!(request.root_run_id, resumed.root_run_id);
+    assert!(request.cancellation.unwrap().is_cancelled());
+    assert_eq!(listener.len(), 1);
+}
+
+#[tokio::test]
+async fn binding_reaches_a_grandchild_that_itself_resumes() {
+    // The grandchild interrupts first. Resuming the root must therefore carry
+    // one binding through *two* resumed drive_child branches, preserving the
+    // same event sink and cancellation token at the eventual SubAgentNode.
+    let ckpt = Arc::new(InMemoryCheckpointer::<String>::new());
+    let grandchild = GraphBuilder::<String, String>::overwrite()
+        .add_node("gate", |state: String, ctx: NodeContext| async move {
+            if ctx.resume.is_some() {
+                Ok(NodeResult::Update(state))
+            } else {
+                Ok(NodeResult::Interrupt(crate::command::Interrupt::new(
+                    "gate",
+                    serde_json::json!({ "ask": "continue?" }),
+                )))
+            }
+        })
+        .add_node(
+            "delegate",
+            crate::subagent_node::subagent_node(crate::subagent_node::SubAgentNode::from_fns(
+                "researcher",
+                |state: &String| crate::subagent_node::SubAgentInput::prompt(state.clone()),
+                |output: crate::subagent_node::SubAgentOutput| output.text,
+            )),
+        )
+        .set_entry("gate")
+        .add_edge("gate", "delegate")
+        .set_finish("delegate")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt.clone());
+    let child = GraphBuilder::<String, String>::overwrite()
+        .add_node("grandchild", shared_subgraph_node(grandchild))
+        .set_entry("grandchild")
+        .set_finish("grandchild")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt.clone());
+    let parent = GraphBuilder::<String, String>::overwrite()
+        .add_node("child", shared_subgraph_node(child))
+        .set_entry("child")
+        .set_finish("child")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt);
+
+    assert!(
+        parent
+            .run_with_thread("grandchild-resume", "question".to_string())
+            .await
+            .unwrap()
+            .is_interrupted()
+    );
+
+    let invoker = Arc::new(NestedRecordingInvoker::default());
+    let events = tinyagents_harness::events::EventSink::new();
+    let listener = Arc::new(tinyagents_harness::events::RecordingListener::new());
+    events.subscribe(listener.clone());
+    let cancellation = tinyagents_harness::cancel::CancellationToken::new();
+    cancellation.cancel();
+    let resumed = parent
+        .resume_with_agent_binding(
+            "grandchild-resume",
+            crate::command::Command::resume(serde_json::json!("go")),
+            crate::subagent_node::AgentInvocationBinding::new(
+                invoker.clone(),
+                events,
+                cancellation,
+            ),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.state, "question");
+    let request = invoker
+        .0
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("grandchild delegated");
+    assert_eq!(request.root_run_id, resumed.root_run_id);
+    assert!(request.cancellation.unwrap().is_cancelled());
+    assert_eq!(listener.len(), 1);
+}
+
+#[tokio::test]
+async fn retrying_shared_subgraph_passes_fresh_binding_to_failed_child() {
+    // A failed child leaves the parent node pending. Retrying that parent with
+    // a replacement binding drives the shared-state child through the fresh
+    // threaded binding branch, rather than reviving the failed invoker.
+    let ckpt = Arc::new(InMemoryCheckpointer::<String>::new());
+    let child = delegating_child(ckpt.clone());
+    let parent = GraphBuilder::<String, String>::overwrite()
+        .add_node("child", shared_subgraph_node(child))
+        .set_entry("child")
+        .set_finish("child")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt);
+
+    let failed = parent
+        .run_with_thread_agent_binding(
+            "shared-retry",
+            "question".to_string(),
+            nested_binding(Arc::new(NestedFailingInvoker)),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(failed, crate::TinyAgentsError::Model(_)));
+
+    let replacement = Arc::new(NestedRecordingInvoker::default());
+    let retried = parent
+        .retry_with_agent_binding("shared-retry", nested_binding(replacement.clone()))
+        .await
+        .unwrap();
+
+    assert_eq!(retried.state, "question");
+    let request = replacement
+        .0
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("shared child used the retry binding");
+    assert_eq!(request.parent_run_id, retried.child_runs[0].run_id);
+    assert_eq!(request.root_run_id, retried.root_run_id);
+}
+
+#[tokio::test]
+async fn retrying_adapter_subgraph_passes_fresh_binding_to_failed_child() {
+    // This covers the adapter's distinct child-driving closure. Mapping parent
+    // state into and out of the child must not drop the retry binding.
+    let ckpt = Arc::new(InMemoryCheckpointer::<String>::new());
+    let child = delegating_child(ckpt.clone());
+    let parent = GraphBuilder::<String, String>::overwrite()
+        .add_node(
+            "child",
+            adapter_subgraph_node(
+                child,
+                |state: &String| state.clone(),
+                |_parent, child| child,
+            ),
+        )
+        .set_entry("child")
+        .set_finish("child")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt);
+
+    let failed = parent
+        .run_with_thread_agent_binding(
+            "adapter-retry",
+            "question".to_string(),
+            nested_binding(Arc::new(NestedFailingInvoker)),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(failed, crate::TinyAgentsError::Model(_)));
+
+    let replacement = Arc::new(NestedRecordingInvoker::default());
+    let retried = parent
+        .retry_with_agent_binding("adapter-retry", nested_binding(replacement.clone()))
+        .await
+        .unwrap();
+
+    assert_eq!(retried.state, "question");
+    let request = replacement
+        .0
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("adapter child used the retry binding");
+    assert_eq!(request.parent_run_id, retried.child_runs[0].run_id);
+    assert_eq!(request.root_run_id, retried.root_run_id);
+}
+
+#[tokio::test]
+async fn retrying_nested_shared_subgraphs_rebinds_the_failed_grandchild() {
+    // Retrying from the root traverses two independent shared-subgraph
+    // drive_child calls. The grandchild failure must be repaired solely by the
+    // fresh root binding, with no capability retained in either checkpoint.
+    let ckpt = Arc::new(InMemoryCheckpointer::<String>::new());
+    let grandchild = delegating_child(ckpt.clone());
+    let child = GraphBuilder::<String, String>::overwrite()
+        .add_node("grandchild", shared_subgraph_node(grandchild))
+        .set_entry("grandchild")
+        .set_finish("grandchild")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt.clone());
+    let parent = GraphBuilder::<String, String>::overwrite()
+        .add_node("child", shared_subgraph_node(child))
+        .set_entry("child")
+        .set_finish("child")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt);
+
+    let failed = parent
+        .run_with_thread_agent_binding(
+            "grandchild-retry",
+            "question".to_string(),
+            nested_binding(Arc::new(NestedFailingInvoker)),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(failed, crate::TinyAgentsError::Model(_)));
+
+    let replacement = Arc::new(NestedRecordingInvoker::default());
+    let retried = parent
+        .retry_with_agent_binding("grandchild-retry", nested_binding(replacement.clone()))
+        .await
+        .unwrap();
+
+    assert_eq!(retried.state, "question");
+    let request = replacement
+        .0
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("grandchild used the retry binding");
+    assert_eq!(request.root_run_id, retried.root_run_id);
+    assert_eq!(retried.child_runs.len(), 1);
 }
 
 #[tokio::test]

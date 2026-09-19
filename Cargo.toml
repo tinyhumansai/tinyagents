@@ -6,6 +6,7 @@ default-members = [
     "crates/tinyagents-graph",
     "crates/tinyagents-registry",
     "crates/tinyagents-session",
+    "crates/tinyagents-runtime",
     "crates/tinyagents-orchestration",
 ]
 exclude = ["vendor", "worktrees"]
