@@ -37,7 +37,8 @@ Command::new()
     .goto(["tools"])
 ```
 
-Typed routes should be supported after string routes:
+Router closures may return any `impl ToString` (plain `&str`/`String`, or a
+user-defined enum implementing `Display`), for example:
 
 ```rust
 enum AgentRoute {
@@ -45,6 +46,15 @@ enum AgentRoute {
     Final,
 }
 ```
+
+Internally, route labels are represented as a `Route` newtype (with
+`From<Route> for String` / `From<String> for Route` / `From<&str> for
+Route`), so `RouterFn`'s public signature stays `Fn(&State) -> R where R:
+ToString` — existing closures returning `String` keep compiling unchanged.
+`GraphBuilder::add_conditional_edges_checked` additionally takes the
+exhaustive set of labels a router can return, so `compile()` can validate
+every branch label against the node's route table before the graph ever
+runs (see `builder.md`).
 
 Routing outputs:
 

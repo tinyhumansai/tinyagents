@@ -18,6 +18,14 @@
 //!
 //! See `types` for the definitions.
 //!
+//! # Not on the agent loop path (M-10)
+//!
+//! This module is a host utility: [`crate::agent_loop`] never reads from or
+//! writes to a [`ChatHistory`]/[`ShortTermMemory`] on its own. A host that
+//! wants a run's transcript persisted here (and re-seeded into a later run)
+//! wires that up itself — reading history into the `input` passed to
+//! `invoke`, and appending the run's messages back afterward.
+//!
 //! # Example
 //!
 //! ```

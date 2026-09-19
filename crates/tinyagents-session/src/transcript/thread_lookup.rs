@@ -106,7 +106,7 @@ fn root_transcripts_for_thread_in_dir(raw_dir: &Path, thread_id: &str) -> Vec<Pa
             }
             Ok(_) => None,
             Err(err) => {
-                log::warn!(
+                tracing::warn!(
                     "[transcript] skipping unreadable root transcript candidate {}: {err}",
                     path.display()
                 );

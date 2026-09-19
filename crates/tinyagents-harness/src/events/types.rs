@@ -36,6 +36,7 @@ use tinyinference_llm::usage::{Usage, UsageTotals};
 /// the event type without inspecting nested fields.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
+#[non_exhaustive]
 pub enum AgentEvent {
     /// A new harness run has been initiated.
     RunStarted {
@@ -615,8 +616,12 @@ pub enum AgentEvent {
 
     /// A middleware hook reported a failure.
     ///
-    /// Defined for future emit alongside [`AgentEvent::MiddlewareStarted`] /
-    /// [`AgentEvent::MiddlewareCompleted`] so a failing hook is observable.
+    /// Emitted by the lifecycle-hook driver ([`crate::middleware`]'s
+    /// `run_stack_hook!` macro) immediately after
+    /// [`AgentEvent::MiddlewareCompleted`] when a hook returns `Err`, so a
+    /// failing middleware is observable alongside
+    /// [`AgentEvent::MiddlewareStarted`] / [`AgentEvent::MiddlewareCompleted`]
+    /// instead of only surfacing as the run's terminal error.
     MiddlewareFailed {
         /// Registered name of the middleware that failed.
         name: String,

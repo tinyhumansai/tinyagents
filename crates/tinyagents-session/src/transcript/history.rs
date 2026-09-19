@@ -175,7 +175,7 @@ impl FileTranscriptLocator {
 impl TranscriptLocator for FileTranscriptLocator {
     fn latest_for_agent(&self, agent_name: &str) -> Option<Arc<dyn TranscriptRead>> {
         let path = find_latest_transcript(&self.workspace_dir, agent_name)?;
-        log::debug!(
+        tracing::debug!(
             "[transcript-history] locator latest_for_agent agent={agent_name} path={}",
             path.display()
         );
@@ -187,7 +187,7 @@ impl TranscriptLocator for FileTranscriptLocator {
 
     fn root_for_thread(&self, thread_id: &str) -> Option<Arc<dyn TranscriptRead>> {
         let path = find_root_transcript_for_thread(&self.workspace_dir, thread_id)?;
-        log::debug!(
+        tracing::debug!(
             "[transcript-history] locator root_for_thread thread={thread_id} path={}",
             path.display()
         );
@@ -208,7 +208,7 @@ impl TranscriptLocator for FileTranscriptLocator {
         // `thread_id` — see `find_root_transcript_for_thread_scoped`.
         let path =
             find_root_transcript_for_thread_scoped(&self.workspace_dir, thread_id, agent_id)?;
-        log::debug!(
+        tracing::debug!(
             "[transcript-history] locator root_for_thread_scoped thread={thread_id} \
              agent_id={agent_id:?} path={}",
             path.display()
@@ -288,7 +288,7 @@ impl FileTranscriptHistory {
         seed_meta: TranscriptMeta,
     ) -> anyhow::Result<Self> {
         let path = resolve_keyed_transcript_path(workspace_dir.as_ref(), stem)?;
-        log::debug!(
+        tracing::debug!(
             "[transcript-history] bound stem={stem} path={}",
             path.display()
         );
@@ -308,7 +308,7 @@ impl FileTranscriptHistory {
     /// Hand the result out as `Arc<dyn TranscriptRead>`, not
     /// `Arc<dyn TranscriptHistory>` — see [`TranscriptRead`]'s doc.
     pub fn opened_at(path: PathBuf, seed_meta: TranscriptMeta) -> Self {
-        log::debug!(
+        tracing::debug!(
             "[transcript-history] opened discovered path={}",
             path.display()
         );
@@ -390,14 +390,14 @@ impl TranscriptRead for FileTranscriptHistory {
     /// same return type — so there is nothing left for the round trip to lose.
     fn read_session(&self) -> anyhow::Result<Option<SessionTranscript>> {
         if !self.path.exists() {
-            log::debug!(
+            tracing::debug!(
                 "[transcript-history] read_session absent path={}",
                 self.path.display()
             );
             return Ok(None);
         }
         let session = read_transcript(&self.path)?;
-        log::debug!(
+        tracing::debug!(
             "[transcript-history] read_session messages={} path={}",
             session.messages.len(),
             self.path.display()
@@ -411,7 +411,7 @@ impl TranscriptHistory for FileTranscriptHistory {
     /// untouched, so the bytes this writes are identical to what the free
     /// function would have written at the call site.
     fn append_turn(&self, turn: TranscriptTurn<'_>) -> anyhow::Result<()> {
-        log::debug!(
+        tracing::debug!(
             "[transcript-history] append_turn prev={} next={} usage={} request_id={:?} path={}",
             turn.prev.len(),
             turn.next.len(),

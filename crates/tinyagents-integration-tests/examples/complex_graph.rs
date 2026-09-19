@@ -22,7 +22,7 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run --example complex_graph
+//! cargo run -p tinyagents-integration-tests --example complex_graph
 //! ```
 
 use tinyagents_graph::END;

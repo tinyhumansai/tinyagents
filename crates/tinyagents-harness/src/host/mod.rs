@@ -103,6 +103,16 @@ pub struct HostCapabilities<State: Send + Sync> {
     /// Procedural memory of how this agent has performed before. `None` means
     /// no experience is recorded or recalled.
     pub experience: Option<Arc<dyn ExperienceStore>>,
+    /// Whether a resolved [`AgentDefinition`] that declares no tools (an
+    /// empty or absent `tools` list) denies every tool, instead of granting
+    /// the whole registered catalogue.
+    ///
+    /// Defaults to `true` (fail-closed): policy metadata that is missing is
+    /// treated as "nothing authorized", not as "unrestricted" (I-9). Set to
+    /// `false` only to restore the legacy behavior for a host that relied on
+    /// an empty list meaning unrestricted — new hosts should leave this on
+    /// and declare tools explicitly.
+    pub fail_closed_tool_allowlist: bool,
 }
 
 impl<State: Send + Sync> HostCapabilities<State> {
@@ -129,7 +139,19 @@ impl<State: Send + Sync> HostCapabilities<State> {
             learning: None,
             tool_outcomes: None,
             experience: None,
+            fail_closed_tool_allowlist: true,
         }
+    }
+
+    /// Opts this host out of the default fail-closed tool allow-list,
+    /// restoring the legacy behavior where a definition that declares no
+    /// tools is granted the entire registered catalogue.
+    ///
+    /// Prefer declaring tools explicitly per definition instead of calling
+    /// this; it exists for hosts migrating from the pre-I-9 behavior.
+    pub fn with_legacy_unrestricted_tool_allowlist(mut self) -> Self {
+        self.fail_closed_tool_allowlist = false;
+        self
     }
 
     /// Supplies durable user memory.
@@ -185,6 +207,7 @@ impl<State: Send + Sync> Clone for HostCapabilities<State> {
             learning: self.learning.clone(),
             tool_outcomes: self.tool_outcomes.clone(),
             experience: self.experience.clone(),
+            fail_closed_tool_allowlist: self.fail_closed_tool_allowlist,
         }
     }
 }

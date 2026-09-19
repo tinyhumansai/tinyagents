@@ -1838,6 +1838,52 @@ async fn malformed_tool_arguments_recover_as_error_tool_result() {
         injected,
         "an error tool result should be injected into the transcript"
     );
+}
+
+/// I-13 regression: provider-invalid arguments that `relaxed_json` can
+/// actually repair (unquoted object keys, here) must be recovered and the
+/// call executed — not turned into a "fix your JSON" round trip the model
+/// often cannot act on. Before the fix, admission short-circuited straight
+/// to the tool-error path without ever trying `recover_relaxed_object`,
+/// even though that module exists specifically for this input shape.
+#[tokio::test]
+async fn provider_invalid_arguments_recoverable_by_relaxed_json_are_repaired_and_executed() {
+    use crate::testkit::EventRecorder;
+
+    let tool = Arc::new(crate::testkit::FakeTool::returning("lookup", "found it"));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            // Unquoted object key: `relaxed_json::recover_relaxed_object`
+            // repairs this to `{"query":"weather"}`.
+            invalid_tool_call_response("call-x", "lookup", "{query:\"weather\"}"),
+            text_response("found it", 1, 1),
+        ])),
+    );
+    harness.register_tool(tool.clone());
+
+    let recorder = EventRecorder::new();
+    let ctx =
+        RunContext::new(RunConfig::new("relaxed-json-repair"), ()).with_events(recorder.sink());
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("lookup the weather")])
+        .await
+        .expect("repaired arguments let the call execute");
+
+    assert_eq!(run.text().as_deref(), Some("found it"));
+    assert_eq!(
+        tool.calls(),
+        vec![json!({"query": "weather"})],
+        "the tool must receive the repaired, strict-JSON arguments"
+    );
+    assert!(
+        recorder.events().iter().any(|event| matches!(
+            event,
+            AgentEvent::InvalidToolArgs { recovery, .. } if recovery == "repaired"
+        )),
+        "the repair must be observable as InvalidToolArgs{{ recovery: \"repaired\" }}"
+    );
     // The recovery is surfaced as an `InvalidToolArgs` event.
     assert!(
         recorder
@@ -2032,6 +2078,40 @@ async fn run_limits_max_retries_per_call_caps_a_looser_retry_policy() {
         .expect_err("no fallback, retries capped by RunLimits");
     assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
     assert_eq!(*failing.attempts.lock().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn retry_middleware_and_run_policy_retry_do_not_multiply_attempts() {
+    // Regression test (I-7): `RetryMiddleware::wrap_model` retries the whole
+    // wrap onion, and `invoke_model_resolving` (the loop's own base call) had
+    // its own independent retry loop; with both configured the worst case was
+    // `mw.max_attempts x policy.retry.max_attempts` provider calls for one
+    // logical failure. A registered `RetryMiddleware` must make the base call
+    // skip its own retry loop, so the total attempt count is bounded by the
+    // middleware's `max_attempts` alone.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    let failing = Arc::new(FailingModel {
+        attempts: Mutex::new(0),
+    });
+    harness.register_model("primary", failing.clone());
+    // The middleware allows 3 attempts; the loop's own retry (if it fired
+    // too) would allow another 5 — 15 total if the two layers multiplied.
+    harness.push_model_middleware(Arc::new(crate::middleware::library::RetryMiddleware::new(
+        RetryPolicy::default().with_max_attempts(3),
+    )));
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(5),
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("FailingModel never succeeds");
+    assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
+
+    // Bounded by the middleware's max_attempts (3), not 3 x 5.
+    assert_eq!(*failing.attempts.lock().unwrap(), 3);
 }
 
 #[tokio::test]
@@ -2296,6 +2376,50 @@ async fn runtime_fallback_skips_capability_ineligible_candidate() {
     );
 }
 
+/// I-2 end-to-end regression: under the default `Auto` text-dialect recovery
+/// policy, a model whose resolved profile reports native tool calling must
+/// never have `<tool_call>` markup it merely quotes — here, inside a fenced
+/// code block explaining the format — executed as a real tool call. Before
+/// the fix, `recover_text_dialect_calls` ran unconditionally whenever the
+/// request offered tools and the provider returned no native calls,
+/// regardless of the model's own advertised capabilities.
+#[tokio::test]
+async fn native_tool_calling_model_does_not_execute_quoted_text_dialect_markup() {
+    let tool = Arc::new(FakeTool::new("shell", "must not run"));
+    let model = Arc::new(ProfiledTextModel {
+        profile: ModelProfile {
+            tool_calling: true,
+            ..ModelProfile::default()
+        },
+        text: "Here is the tool-call format for reference:\n\
+               ```\n\
+               <tool_call>{\"name\": \"shell\", \"arguments\": {\"command\": \"id\"}}</tool_call>\n\
+               ```\n",
+        attempts: Mutex::new(0),
+    });
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("native", model.clone());
+    harness.register_tool(tool.clone());
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("how do tool calls work?")])
+        .await
+        .expect("run succeeds with a plain text final answer");
+
+    assert_eq!(
+        *tool.calls.lock().unwrap(),
+        0,
+        "the quoted call must not run"
+    );
+    assert!(run.text().unwrap_or_default().contains("<tool_call>"));
+    assert_eq!(
+        *model.attempts.lock().unwrap(),
+        1,
+        "no retry/fallback needed"
+    );
+}
+
 #[tokio::test]
 async fn invoke_with_status_reports_completed() {
     use crate::ids::{ExecutionStatus, HarnessPhase};
@@ -2531,6 +2655,85 @@ async fn streaming_delta_transform_controls_final_run_and_cached_response() {
     assert!(
         !second.text().unwrap_or_default().contains("raw-secret"),
         "the cached response must not retain the raw terminal secret"
+    );
+}
+
+/// C-2 regression: a streaming turn whose terminal response carries a signed
+/// `Thinking` block ahead of a tool call must keep that exact signature in
+/// `run.messages`. Anthropic requires the signed thinking block to precede a
+/// `tool_use` block verbatim on replay; synthesizing a fresh, unsigned block
+/// from the streamed reasoning text (the old behavior) breaks that replay on
+/// the very next model call. No delta middleware is registered here, so the
+/// streamed reasoning text is identical to the terminal block's text and the
+/// fix's "keep it verbatim" branch is exercised.
+#[tokio::test]
+async fn streaming_turn_keeps_a_signed_thinking_signature_ahead_of_a_tool_call() {
+    use crate::testkit::StreamingMock;
+
+    let tool = Arc::new(FakeTool::new("lookup", "ok"));
+    let mut terminal = ModelResponse::assistant("");
+    terminal.message.content = vec![tinyinference_llm::message::ContentBlock::Thinking {
+        text: "let me think".to_string(),
+        signature: Some("sig-123".to_string()),
+    }];
+    terminal
+        .message
+        .tool_calls
+        .push(ToolCall::new("call-1", "lookup", json!({})));
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "stream",
+        Arc::new(StreamingMock::new(vec![
+            ModelStreamItem::Started,
+            ModelStreamItem::MessageDelta(MessageDelta::reasoning("let me think")),
+            ModelStreamItem::ToolCallDelta(tinyinference_llm::tool::ToolDelta {
+                call_id: "call-1".to_string(),
+                content: "{}".to_string(),
+                tool_name: Some("lookup".to_string()),
+            }),
+            ModelStreamItem::Completed(terminal),
+        ])),
+    );
+    harness.register_tool(tool.clone());
+
+    // Cap the run at one model call: the mock always replays the same
+    // scripted tool call, so a second turn would just repeat it forever.
+    // Only the first turn's assistant message (the one under test) is
+    // needed.
+    let ctx = RunContext::new(
+        RunConfig::new("thinking-signature").with_max_model_calls(1),
+        (),
+    );
+    let outcome = harness
+        .invoke_streaming_in_context_collecting_partial(&(), ctx, vec![Message::user("go")])
+        .await;
+
+    let thinking_blocks: Vec<_> = outcome
+        .run
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            tinyinference_llm::message::Message::Assistant(assistant) => {
+                Some(assistant.content.iter())
+            }
+            _ => None,
+        })
+        .flatten()
+        .filter(|block| {
+            matches!(
+                block,
+                tinyinference_llm::message::ContentBlock::Thinking { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        thinking_blocks,
+        vec![&tinyinference_llm::message::ContentBlock::Thinking {
+            text: "let me think".to_string(),
+            signature: Some("sig-123".to_string()),
+        }],
+        "the terminal Thinking block's signature must survive into run.messages verbatim"
     );
 }
 
@@ -2977,6 +3180,9 @@ async fn per_model_call_ceiling_times_out_a_slow_call_with_run_time_left() {
     // ceiling (20ms) is tighter than the model's 200ms sleep, so the ceiling
     // interrupts the call — and the error must name the ceiling, not the run's
     // remaining budget, so triage can tell a wedged call from an exhausted run.
+    // A per-call ceiling is a `CallTimeout`, not a `Timeout`: it is retryable
+    // and must not skip the fallback chain the way a run-deadline timeout
+    // does (I-1). One retry attempt is enough to prove that here.
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model(
         "slow",
@@ -2984,6 +3190,9 @@ async fn per_model_call_ceiling_times_out_a_slow_call_with_run_time_left() {
     );
     harness.with_policy(RunPolicy {
         limits: RunLimits::default().with_max_model_call_ms(Some(20)),
+        retry: RetryPolicy::default()
+            .with_max_attempts(1)
+            .with_backoff_sleep(false),
         ..RunPolicy::default()
     });
 
@@ -2994,11 +3203,55 @@ async fn per_model_call_ceiling_times_out_a_slow_call_with_run_time_left() {
         .expect_err("a call slower than the per-call ceiling must time out");
 
     match &err {
-        TinyAgentsError::Timeout(msg) => {
+        TinyAgentsError::CallTimeout(msg) => {
             assert!(msg.contains("per-model-call ceiling"), "{msg}");
         }
-        other => panic!("expected Timeout, got {other:?}"),
+        other => panic!("expected CallTimeout, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn per_model_call_ceiling_consults_the_fallback_chain_instead_of_aborting() {
+    use std::time::Duration;
+
+    use crate::testkit::{ScriptedModel, SlowModel};
+
+    // Same setup as `per_model_call_ceiling_times_out_a_slow_call_with_run_time_left`,
+    // but with a fallback model registered. Before the fix, the per-call
+    // ceiling produced a plain `Timeout`, which the fallback gate in
+    // `invoke_model_resolving` treats as terminal ("the run itself is out of
+    // wall-clock budget") and returns immediately — the fallback model is
+    // never even consulted, let alone called. With the fix, a `CallTimeout`
+    // falls through to the fallback walk, so the run succeeds on the
+    // fallback model instead of failing.
+    let slow = Arc::new(SlowModel::new(Duration::from_millis(200), "too late"));
+    let fallback = Arc::new(ScriptedModel::replies(vec!["fallback answer"]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("slow", slow.clone());
+    harness.register_model("fallback", fallback.clone());
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default().with_max_model_call_ms(Some(20)),
+        retry: RetryPolicy::default()
+            .with_max_attempts(1)
+            .with_backoff_sleep(false),
+        fallback: Some(FallbackPolicy {
+            models: vec!["slow".to_string(), "fallback".to_string()],
+        }),
+        ..RunPolicy::default()
+    });
+
+    let config = RunConfig::new("per-call-cap-fallback").with_timeout_ms(60_000);
+    let run = harness
+        .invoke(&(), (), config, vec![Message::user("hi")])
+        .await
+        .expect("a retryable CallTimeout must fall back instead of aborting the run");
+
+    assert_eq!(run.text().as_deref(), Some("fallback answer"));
+    assert_eq!(
+        fallback.requests().len(),
+        1,
+        "the fallback chain must actually have been consulted and called"
+    );
 }
 
 #[tokio::test]
@@ -3016,6 +3269,9 @@ async fn per_model_call_ceiling_bounds_calls_without_any_run_deadline() {
     );
     harness.with_policy(RunPolicy {
         limits: RunLimits::default().with_max_model_call_ms(Some(20)),
+        retry: RetryPolicy::default()
+            .with_max_attempts(1)
+            .with_backoff_sleep(false),
         ..RunPolicy::default()
     });
 
@@ -3025,10 +3281,10 @@ async fn per_model_call_ceiling_bounds_calls_without_any_run_deadline() {
         .expect_err("the ceiling alone must bound an otherwise-unbounded call");
 
     match &err {
-        TinyAgentsError::Timeout(msg) => {
+        TinyAgentsError::CallTimeout(msg) => {
             assert!(msg.contains("per-model-call ceiling"), "{msg}");
         }
-        other => panic!("expected Timeout, got {other:?}"),
+        other => panic!("expected CallTimeout, got {other:?}"),
     }
 }
 
@@ -3489,6 +3745,27 @@ async fn middleware_control_stops_loop_with_final_response() {
     assert_eq!(run.final_response.unwrap().text(), "stopped early");
     // The tool was never executed because the loop stopped first.
     assert_eq!(run.tool_calls, 0);
+
+    // M-1 regression: the assistant row still carries the `tool_calls` the
+    // model requested, but the loop must synthesize a tool result for each
+    // one so `run.messages` stays replayable (a provider rejects a transcript
+    // whose assistant `tool_calls` have no matching tool message).
+    // user, assistant(1 tool call), tool(synthetic).
+    assert_eq!(run.messages.len(), 3);
+    let Message::Assistant(assistant) = &run.messages[1] else {
+        panic!(
+            "expected assistant message at index 1, got {:?}",
+            run.messages[1]
+        );
+    };
+    assert_eq!(assistant.tool_calls.len(), 1);
+    let Message::Tool(tool_message) = &run.messages[2] else {
+        panic!(
+            "expected synthetic tool message at index 2, got {:?}",
+            run.messages[2]
+        );
+    };
+    assert_eq!(tool_message.tool_call_id, assistant.tool_calls[0].id);
 }
 
 /// Middleware that requests an interrupt after the first model response.
@@ -3710,6 +3987,111 @@ impl Tool for ConcurrencyProbeTool {
     }
 }
 
+/// A concurrency-safe tool that fails fast (a real dispatch error, not a
+/// recoverable `ToolResult::error`), used to exercise the concurrent path's
+/// first-fatal-error handling.
+struct FailingConcurrentTool {
+    name: &'static str,
+}
+
+#[async_trait]
+impl Tool for FailingConcurrentTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        "fails fast"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+    fn is_concurrency_safe(&self, _arguments: &serde_json::Value) -> bool {
+        true
+    }
+    async fn execute(&self, _arguments: serde_json::Value) -> anyhow::Result<ToolResult> {
+        Err(anyhow::anyhow!("boom"))
+    }
+}
+
+/// C-3 regression: on the first fatal error in the concurrent tool path,
+/// every already-started sibling call must still get exactly one terminal
+/// event (`ToolFailed`), and `active_tool_calls` must end up empty — not just
+/// the call that actually failed. Before the fix, siblings whose futures had
+/// already resolved (via `join_all`) but were never reached by the fold after
+/// the first `Err` kept their `ToolStarted` unanswered and stayed listed in
+/// `active_tool_calls` even though the run had already failed.
+#[tokio::test]
+async fn concurrent_tool_failure_fails_every_started_sibling_before_returning() {
+    use crate::testkit::EventRecorder;
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![multi_tool_call_response(
+            // "boom" fails fast and comes first in call order, so the fold
+            // reaches its fatal error while "alpha" (slower, but already
+            // resolved by the time `join_all` returns) is still an
+            // unprocessed sibling — exactly the scenario the fix covers.
+            vec![("call-a", "boom"), ("call-b", "alpha")],
+        )])),
+    );
+    harness.register_tool(Arc::new(ConcurrencyProbeTool {
+        name: "alpha",
+        reply: "alpha-out",
+        delay: std::time::Duration::from_millis(80),
+        active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        max_seen: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    }));
+    harness.register_tool(Arc::new(FailingConcurrentTool { name: "boom" }));
+
+    let recorder = EventRecorder::new();
+    let ctx = RunContext::new(RunConfig::new("concurrent-fatal"), ()).with_events(recorder.sink());
+    let outcome = harness
+        .invoke_in_context_collecting_partial(&(), ctx, vec![Message::user("go")])
+        .await;
+
+    assert!(
+        outcome.error.is_some(),
+        "a fatal sibling error must fail the turn"
+    );
+    assert!(
+        outcome.status.active_tool_calls.is_empty(),
+        "every started call must have a terminal event before the run reports failure, \
+         got active_tool_calls = {:?}",
+        outcome.status.active_tool_calls
+    );
+
+    let started: Vec<_> = recorder
+        .events()
+        .iter()
+        .filter_map(|record| match record {
+            AgentEvent::ToolStarted { call_id, .. } => Some(call_id.as_str().to_string()),
+            _ => None,
+        })
+        .collect();
+    let terminal: Vec<_> = recorder
+        .events()
+        .iter()
+        .filter_map(|record| match record {
+            AgentEvent::ToolFailed { call_id, .. } => Some(call_id.as_str().to_string()),
+            AgentEvent::ToolCompleted { call_id, .. } => Some(call_id.as_str().to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started.len(), 2, "both siblings must have started");
+    assert_eq!(
+        terminal.len(),
+        2,
+        "every started call must be answered by exactly one terminal event, got {terminal:?}"
+    );
+    for call_id in &started {
+        assert!(
+            terminal.contains(call_id),
+            "call `{call_id}` started but has no terminal event"
+        );
+    }
+}
+
 /// Builds an assistant response carrying several tool calls in one turn.
 fn multi_tool_call_response(calls: Vec<(&str, &str)>) -> ModelResponse {
     let tool_calls = calls
@@ -3780,6 +4162,55 @@ async fn independent_tool_calls_in_one_turn_run_concurrently() {
         max_seen.load(std::sync::atomic::Ordering::SeqCst),
         2,
         "both tools must be in flight at once (latency ~max, not ~sum)"
+    );
+}
+
+#[tokio::test]
+async fn max_tool_concurrency_bounds_how_many_tools_run_at_once() {
+    // I-8 regression test: with 4 concurrency-safe tools requested in one
+    // turn and `RunLimits::max_tool_concurrency` set to 2, at most 2 may be
+    // in flight at once, even though all 4 are eligible for the concurrent
+    // path. `max_seen` is an atomic high-water mark, so any window where 3+
+    // ran together would be caught regardless of scheduling order.
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model(
+        "mock",
+        Arc::new(MockModel::with_responses(vec![
+            multi_tool_call_response(vec![
+                ("call-a", "alpha"),
+                ("call-b", "beta"),
+                ("call-c", "gamma"),
+                ("call-d", "delta"),
+            ]),
+            text_response("done", 4, 2),
+        ])),
+    );
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let max_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for name in ["alpha", "beta", "gamma", "delta"] {
+        harness.register_tool(Arc::new(ConcurrencyProbeTool {
+            name,
+            reply: "out",
+            delay: std::time::Duration::from_millis(60),
+            active: active.clone(),
+            max_seen: max_seen.clone(),
+        }));
+    }
+    harness.with_policy(RunPolicy {
+        limits: RunLimits::default().with_max_tool_concurrency(Some(2)),
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("go")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(run.tool_calls, 4);
+    assert_eq!(
+        max_seen.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "no more than max_tool_concurrency (2) tools should ever be in flight at once"
     );
 }
 

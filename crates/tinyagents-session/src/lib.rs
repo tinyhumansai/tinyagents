@@ -62,11 +62,6 @@
 //! See [`README.md`](./README.md) for the schema, the FTS behaviour, and the
 //! coordination guarantees.
 
-#![cfg_attr(
-    not(feature = "tracing"),
-    allow(dead_code, unused_imports, unused_variables)
-)]
-
 mod context;
 mod migrations;
 pub mod ops;

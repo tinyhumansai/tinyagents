@@ -37,6 +37,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> ModelMiddleware<State, Ctx> for Retry
         self.label
     }
 
+    fn overrides_retry(&self) -> bool {
+        true
+    }
+
     async fn wrap_model(
         &self,
         ctx: &mut RunContext<Ctx>,
@@ -59,7 +63,16 @@ impl<State: Send + Sync, Ctx: Send + Sync> ModelMiddleware<State, Ctx> for Retry
                         // one step too high.
                         let backoff_attempt = attempt;
                         attempt += 1;
-                        let call_id = CallId::new(format!("{}-model", ctx.run_id()));
+                        // Prefer the loop's own call id (mirrored onto the
+                        // context for exactly this purpose, see I-7) so
+                        // `RetryScheduled` events correlate with the same
+                        // call id `ModelStarted`/`ModelCompleted` use. Falls
+                        // back to a run-scoped id for a caller that invokes
+                        // this middleware outside the agent loop.
+                        let call_id = ctx
+                            .active_model_call
+                            .clone()
+                            .unwrap_or_else(|| CallId::new(format!("{}-model", ctx.run_id())));
                         ctx.emit(AgentEvent::RetryScheduled { call_id, attempt });
                         // Sleep for the backoff only when the policy opts in
                         // (`with_backoff_sleep`); a no-op otherwise.

@@ -234,17 +234,30 @@ Provider-supplied tool calls must fail closed:
 - allowlist violations emit events and append repairable tool-result messages
   only when the agent loop policy allows recovery
 
+A hosted run's tool allow-list is fail-closed by default. The resolved
+`AgentDefinition.tools` list is collapsed to `Option<HashSet<String>>` at the
+host boundary: a declared, non-empty list is enforced by plain membership,
+and an empty or absent list means "the definition declared nothing" rather
+than "unrestricted" — under `HostCapabilities::fail_closed_tool_allowlist`
+(default `true`), that denies every registered tool. A host that relied on
+the old fail-open behavior (empty list = every tool) must opt back in
+explicitly via `HostCapabilities::with_legacy_unrestricted_tool_allowlist`.
+Explicit-model (non-hosted) runs have no allow-list concept and are
+unaffected.
+
 ## Unknown-tool recovery
 
 When the model calls a tool that is not registered, the agent loop's behavior is
 governed by `RunPolicy::unknown_tool: UnknownToolPolicy`
 (`crates/tinyagents-harness/src/runtime/types.rs`):
 
-- `UnknownToolPolicy::Fail` (default, historical) — abort the run with
-  `TinyAgentsError::ToolNotFound(name)`.
-- `UnknownToolPolicy::ReturnToolError` — inject a tool-error result (naming the
-  requested tool, echoing its arguments, and listing the registered tools) back
-  into the transcript and continue, letting the model retry with a valid tool.
+- `UnknownToolPolicy::Fail` — abort the run with
+  `TinyAgentsError::ToolNotFound(name)`. No longer the default (see below);
+  still available for callers that want a hard stop.
+- `UnknownToolPolicy::ReturnToolError` (default) — inject a tool-error result
+  (naming the requested tool, echoing its arguments, and listing the
+  registered tools) back into the transcript and continue, letting the model
+  retry with a valid tool.
 - `UnknownToolPolicy::Rewrite { tool_name }` — retarget the unknown call to a
   fixed compatibility tool and retry the lookup once; if that target is also
   unregistered, fall back to `ReturnToolError` behavior.
@@ -280,9 +293,10 @@ Two distinct failures can affect a provider-supplied call's arguments, and they
 are handled separately:
 
 - **Schema-invalid** (well-formed JSON that violates the tool's input schema) is
-  governed by `RunPolicy::invalid_args: InvalidArgsPolicy`. `Fail` (default,
-  historical) aborts the turn; `ReturnToolError` injects a repairable tool-error
-  message (carrying the validation detail and the expected schema) and continues.
+  governed by `RunPolicy::invalid_args: InvalidArgsPolicy`. `ReturnToolError`
+  (the default) injects a repairable tool-error message (carrying the
+  validation detail and the expected schema) and continues; `Fail` aborts the
+  turn and is no longer the default.
   `NormalizeThenReturnToolError` first repairs common object-schema transport
   shapes (a JSON object encoded as a string, including markdown fences, or a
   non-object for an object schema with no required fields), then returns any
@@ -291,12 +305,21 @@ are handled separately:
 - **Unparseable** (malformed JSON the provider could not parse into arguments at
   all) is surfaced by the provider as a `ToolCall` with `invalid: Some(reason)`
   and the raw string preserved in `arguments`. Small local models (Ollama, LM
-  Studio, llama.cpp, vLLM) emit this occasionally. The agent loop **always**
-  recovers here — independent of `InvalidArgsPolicy`, since an unparseable
-  payload is a transport-level defect, not a schema violation — by injecting the
-  parse `reason` back to the model as an error tool result so it can retry. The
-  recovery emits `AgentEvent::InvalidToolArgs { call_id, tool_name, arguments,
-  error, recovery: "tool_error" }` and consumes one tool-call budget slot, so
+  Studio, llama.cpp, vLLM) emit this occasionally. Before giving up, admission
+  first tries `relaxed_json::recover_relaxed_object` on the raw string —
+  conservative, meaning-preserving repairs for the shapes those gateways
+  actually produce (unquoted object keys, redundant wrapping braces, leaked
+  chat-template quote tokens; see that module's doc comment). On success the
+  call's `invalid` flag is cleared, its `arguments` become the repaired
+  object, `AgentEvent::InvalidToolArgs { recovery: "repaired" }` is emitted,
+  and the call proceeds through normal (schema) validation as if the provider
+  had sent it clean. Only when the repair also fails does the agent loop fall
+  back to its **always**-on recovery — independent of `InvalidArgsPolicy`,
+  since an unparseable payload is a transport-level defect, not a schema
+  violation — injecting the parse `reason` back to the model as an error tool
+  result so it can retry. That fallback recovery emits
+  `AgentEvent::InvalidToolArgs { call_id, tool_name, arguments, error,
+  recovery: "tool_error" }` and consumes one tool-call budget slot, so
   `RunLimits::max_tool_calls` bounds the retry loop. Because the call always
   resolves, a malformed argument blob can never become a never-resolving tool
   call that stalls the loop. See the OpenAI provider README for how the wire

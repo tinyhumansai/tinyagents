@@ -22,7 +22,7 @@ pub fn read_transcript_legacy_md(path: &Path) -> Result<SessionTranscript> {
     let messages = parse_legacy_messages(&raw)
         .with_context(|| format!("parse legacy transcript messages in {}", path.display()))?;
 
-    log::debug!(
+    tracing::debug!(
         "[transcript] loaded {} messages (legacy md) from {}",
         messages.len(),
         path.display()

@@ -12,18 +12,39 @@ adapter subgraph
 parent State -> child Input -> child Output -> parent Update
 ```
 
-Subgraph requirements:
+Subgraph requirements (implemented unless marked target; verified against
+`crates/tinyagents-graph/src/subgraph/`):
 
 - namespace checkpoint ids
 - preserve `root_run_id`
 - set child `parent_run_id`
 - propagate thread id by default
-- allow isolated child thread ids by explicit configuration
-- inherit, override, or disable the parent checkpointer
+- **Target (not implemented):** allow isolated child thread ids by explicit
+  configuration — today an embedded child always runs on the parent's thread
+  when one is set, or unthreaded (no checkpoints) when it is not; there is no
+  opt-in for a child to have its own independent thread id
+- **Target (not implemented):** inherit, override, or disable the parent
+  checkpointer per subgraph — today the child always inherits the parent's
+  checkpointer
 - emit nested events with parent node id and namespace
 - stream child values, updates, messages, tasks, and checkpoints when requested
-- allow `Command::Parent` handoff from child graph to parent graph
-- expose child state in parent checkpoint task metadata
+- **Target (not implemented):** allow `Command::Parent` handoff from child
+  graph to parent graph — no `Parent` variant exists on `Command`
+- each `ChildRun` entry (the `child_runs` array embedded in the parent's
+  boundary-checkpoint metadata) carries the child's latest checkpoint id
+  alongside its run id and node, so the association between a parent
+  activation and the exact child checkpoint it drove is explicit
+- a `Send` fan-out of the same subgraph node — several concurrent
+  activations of one node within a step (map-reduce over a subgraph) —
+  namespaces each activation's child under `[node_id, task_id]` instead of
+  every activation sharing one `[node_id]` namespace; a node activated only
+  once keeps the plain `[node_id]` namespace, so existing checkpoints stay
+  readable
+- a subgraph child that failed (or is interrupted with a resume value
+  already in hand) is continued through the parent rather than restarted:
+  `retry()`/`resume()` on the parent detects the child's own resumable
+  checkpoint and retries/resumes it in place, instead of re-running the
+  child's already-completed nodes from scratch
 
 Subgraph persistence must be explicit. Inherited checkpointing is convenient for
 shared-state subgraphs; isolated checkpointing is safer for reusable child

@@ -17,7 +17,7 @@ use crate::events::AgentEvent;
 use crate::runtime::AgentHarness;
 use crate::steering::{
     SteeringCommand, SteeringCommandKind, SteeringHandle, SteeringOutcome, SteeringPolicy,
-    apply_pending_steering,
+    SteeringTarget, apply_pending_steering,
 };
 use crate::testkit::{EventRecorder, Trajectory};
 use tinyinference_llm::message::Message;
@@ -237,7 +237,7 @@ fn cancel_wins_over_later_commands() {
 }
 
 #[test]
-fn disallowed_command_is_rejected_with_steering_error_and_event() {
+fn disallowed_command_is_rejected_with_steered_event_and_the_run_continues() {
     let recorder = EventRecorder::new();
     // Policy permits Pause but not Cancel.
     let handle = SteeringHandle::new(SteeringPolicy::new().allow(SteeringCommandKind::Pause));
@@ -247,8 +247,10 @@ fn disallowed_command_is_rejected_with_steering_error_and_event() {
         .with_steering(handle);
     let mut messages = Vec::new();
 
-    let err = apply_pending_steering(&mut ctx, &mut messages).unwrap_err();
-    assert!(matches!(err, TinyAgentsError::Steering(_)), "got {err:?}");
+    // A disallowed command is rejected on its own; it no longer fails the
+    // checkpoint (I-5/M-7).
+    let outcome = apply_pending_steering(&mut ctx, &mut messages).unwrap();
+    assert_eq!(outcome, SteeringOutcome::Continue);
     assert_eq!(
         recorder.events(),
         vec![AgentEvent::Steered {
@@ -356,25 +358,27 @@ async fn cancel_terminates_the_run() {
 }
 
 #[tokio::test]
-async fn disallowed_command_fails_the_run() {
+async fn disallowed_command_is_skipped_and_the_run_still_completes() {
     let recorder = EventRecorder::new();
     // Empty policy: every command is rejected.
     let handle = SteeringHandle::new(SteeringPolicy::new());
     handle.send(SteeringCommand::InjectMessage(Message::user("nope")));
 
     let mut harness: AgentHarness<()> = AgentHarness::new();
-    harness.register_model("mock", Arc::new(MockModel::constant("never reached")));
+    harness.register_model("mock", Arc::new(MockModel::constant("reached")));
 
     let ctx: RunContext = RunContext::new(RunConfig::new("run-reject"), ())
         .with_events(recorder.sink())
         .with_steering(handle);
 
-    let err = harness
+    // A disallowed steering command no longer kills the run (I-5/M-7); it is
+    // rejected individually and the loop continues.
+    let run = harness
         .invoke_in_context(&(), ctx, vec![Message::user("start")])
         .await
-        .expect_err("run should fail on disallowed steering");
+        .expect("run should complete despite the rejected steering command");
+    assert_eq!(run.text(), Some("reached".to_string()));
 
-    assert!(matches!(err, TinyAgentsError::Steering(_)), "got {err:?}");
     assert!(recorder.events().iter().any(|e| matches!(
         e,
         AgentEvent::Steered { command_kind, accepted: false } if command_kind == "inject_message"
@@ -405,15 +409,16 @@ fn steering_queue_recovers_from_poisoned_lock() {
     assert!(handle.is_empty());
 }
 
-// ── LOOP-8(a): the batch is validated before anything is applied ──────────────
+// ── I-5/M-7: a disallowed command in a batch is rejected individually ─────────
 
 #[test]
-fn a_rejected_command_leaves_no_earlier_command_applied() {
-    // Regression test (LOOP-8a): `apply_pending_steering` drained the whole
-    // batch up front and then validated lazily *while applying*, so a policy
-    // violation at position 2 left commands 0 and 1 already in the transcript,
-    // command 3 silently dropped, and the run erroring. The checkpoint must be
-    // atomic: reject the batch, change nothing.
+fn a_rejected_command_in_a_batch_does_not_drop_the_allowed_ones() {
+    // Regression test (I-5/M-7): `apply_pending_steering` used to validate
+    // the whole drained batch up front and refuse it entirely — including
+    // commands the policy *did* permit — the moment one command in it was
+    // disallowed, and the caller's `?` then killed the run. A command the
+    // policy disallows must be rejected on its own; every allowed command in
+    // the same batch still applies, and the checkpoint does not error.
     let recorder = EventRecorder::new();
     let handle = SteeringHandle::new(
         SteeringPolicy::new()
@@ -424,7 +429,7 @@ fn a_rejected_command_leaves_no_earlier_command_applied() {
     handle.send(SteeringCommand::SetMetadata {
         metadata: serde_json::json!({"tag": "applied"}),
     });
-    // Not allowed → the whole batch must be refused.
+    // Not allowed → rejected individually, the rest of the batch still runs.
     handle.send(SteeringCommand::Cancel);
     handle.send(SteeringCommand::InjectMessage(Message::user("last")));
 
@@ -433,25 +438,40 @@ fn a_rejected_command_leaves_no_earlier_command_applied() {
         .with_steering(handle);
     let mut messages = Vec::new();
 
-    let err = apply_pending_steering(&mut ctx, &mut messages).unwrap_err();
-    assert!(matches!(err, TinyAgentsError::Steering(_)), "got {err:?}");
+    let outcome = apply_pending_steering(&mut ctx, &mut messages).unwrap();
+    assert_eq!(outcome, SteeringOutcome::Continue);
 
-    assert!(
-        messages.is_empty(),
-        "an earlier command in a rejected batch was applied: {messages:?}"
+    assert_eq!(
+        messages,
+        vec![Message::user("first"), Message::user("last")],
+        "allowed commands in the batch should still have applied"
     );
     assert_eq!(
         ctx.config.metadata,
-        serde_json::Value::Null,
-        "metadata was mutated by a rejected batch"
+        serde_json::json!({"tag": "applied"}),
+        "the allowed SetMetadata command should still have applied"
     );
-    // Exactly one event, for the offending command.
+    // Every command gets its own event: accepted, accepted, rejected, accepted.
     assert_eq!(
         recorder.events(),
-        vec![AgentEvent::Steered {
-            command_kind: "cancel".to_string(),
-            accepted: false,
-        }]
+        vec![
+            AgentEvent::Steered {
+                command_kind: "inject_message".to_string(),
+                accepted: true,
+            },
+            AgentEvent::Steered {
+                command_kind: "set_metadata".to_string(),
+                accepted: true,
+            },
+            AgentEvent::Steered {
+                command_kind: "cancel".to_string(),
+                accepted: false,
+            },
+            AgentEvent::Steered {
+                command_kind: "inject_message".to_string(),
+                accepted: true,
+            },
+        ]
     );
 }
 
@@ -565,14 +585,18 @@ fn pause_with_is_gated_by_the_same_policy_kind_as_pause() {
         SteeringCommandKind::Pause
     );
 
-    // A policy that forbids Pause forbids PauseWith too.
+    // A policy that forbids Pause forbids PauseWith too: rejected
+    // individually, and the checkpoint continues rather than the run dying.
     let handle = SteeringHandle::new(SteeringPolicy::new().allow(SteeringCommandKind::Resume));
     handle.send(SteeringCommand::PauseWith {
         reason: "why".into(),
     });
     let mut ctx: RunContext = RunContext::new(RunConfig::new("r"), ()).with_steering(handle);
     let mut messages = Vec::new();
-    assert!(apply_pending_steering(&mut ctx, &mut messages).is_err());
+    assert_eq!(
+        apply_pending_steering(&mut ctx, &mut messages).unwrap(),
+        SteeringOutcome::Continue
+    );
 }
 
 #[test]
@@ -603,4 +627,87 @@ fn pause_with_round_trips_through_json() {
     let json = serde_json::to_value(&command).expect("serialize");
     let back: SteeringCommand = serde_json::from_value(json).expect("deserialize");
     assert_eq!(back, command);
+}
+
+// ── I-5: a child run only drains commands addressed to it ─────────────────────
+
+#[test]
+fn root_addressed_command_is_not_consumed_by_a_child() {
+    // Regression test (I-5): `RunContext::child` used to hand the child a bare
+    // clone of the parent's `SteeringHandle`, so a command an orchestrator
+    // addressed to the parent (the default target) could be drained and
+    // applied by whichever sub-agent reached its checkpoint first.
+    let handle = SteeringHandle::allow_all();
+    let mut parent: RunContext =
+        RunContext::new(RunConfig::new("parent"), ()).with_steering(handle.clone());
+    let child_config = RunConfig::new("child");
+    let mut child: RunContext = parent.child(child_config, ()).unwrap();
+
+    // Addressed to the default target (Root == the parent).
+    handle.send(SteeringCommand::InjectMessage(Message::user(
+        "for the parent",
+    )));
+
+    let mut child_messages = Vec::new();
+    let outcome = apply_pending_steering(&mut child, &mut child_messages).unwrap();
+    assert_eq!(outcome, SteeringOutcome::Continue);
+    assert!(
+        child_messages.is_empty(),
+        "child drained a command addressed to the root: {child_messages:?}"
+    );
+
+    // The parent's own checkpoint still sees it.
+    let mut parent_messages = Vec::new();
+    apply_pending_steering(&mut parent, &mut parent_messages).unwrap();
+    assert_eq!(parent_messages, vec![Message::user("for the parent")]);
+}
+
+#[test]
+fn run_addressed_command_reaches_only_that_run() {
+    let handle = SteeringHandle::allow_all();
+    let parent: RunContext =
+        RunContext::new(RunConfig::new("parent"), ()).with_steering(handle.clone());
+    let mut child_a: RunContext = parent.child(RunConfig::new("child-a"), ()).unwrap();
+    let mut child_b: RunContext = parent.child(RunConfig::new("child-b"), ()).unwrap();
+
+    handle.send_to(
+        SteeringTarget::Run(child_a.run_id().clone()),
+        SteeringCommand::InjectMessage(Message::user("for child-a only")),
+    );
+
+    let mut a_messages = Vec::new();
+    apply_pending_steering(&mut child_a, &mut a_messages).unwrap();
+    assert_eq!(a_messages, vec![Message::user("for child-a only")]);
+
+    let mut b_messages = Vec::new();
+    apply_pending_steering(&mut child_b, &mut b_messages).unwrap();
+    assert!(
+        b_messages.is_empty(),
+        "a command addressed to child-a leaked into child-b: {b_messages:?}"
+    );
+}
+
+#[test]
+fn all_addressed_command_is_drained_by_whichever_run_checkpoints_first() {
+    // `SteeringTarget::All` matches any handle sharing the queue, but delivery
+    // is still pull-and-consume-once: whichever run reaches its checkpoint
+    // first drains it, exactly like the pre-routing behaviour for every
+    // command. It is documented that way (see `SteeringTarget::All`), unlike
+    // `Root`/`Run(id)` which are exclusive to one run by construction.
+    let handle = SteeringHandle::allow_all();
+    let parent: RunContext =
+        RunContext::new(RunConfig::new("parent"), ()).with_steering(handle.clone());
+    let mut child: RunContext = parent.child(RunConfig::new("child"), ()).unwrap();
+    let mut parent = parent;
+
+    handle.send_all(SteeringCommand::InjectMessage(Message::user("broadcast")));
+
+    let mut child_messages = Vec::new();
+    apply_pending_steering(&mut child, &mut child_messages).unwrap();
+    assert_eq!(child_messages, vec![Message::user("broadcast")]);
+
+    // Already drained by the child; the parent's checkpoint sees nothing.
+    let mut parent_messages = Vec::new();
+    apply_pending_steering(&mut parent, &mut parent_messages).unwrap();
+    assert!(parent_messages.is_empty());
 }

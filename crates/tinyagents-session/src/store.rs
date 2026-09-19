@@ -9,7 +9,9 @@
 //! ([`prepare_connection`]) are applied uniformly on every path into the
 //! database.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use rusqlite::Connection;
@@ -17,6 +19,29 @@ use rusqlite::Connection;
 use super::context::StorageContext;
 use super::migrations;
 use tinyagents_harness::error::Result;
+
+/// A connection handle shared by every caller for one database path.
+///
+/// `rusqlite::Connection` is `Send` but not `Sync`, so a `Mutex` is the
+/// minimum needed to hand the same handle to concurrent callers; it also
+/// gives operations on one database path the same autocommit serialization
+/// they had before, when each call opened (and implicitly serialized behind)
+/// its own file handle.
+type ConnectionHandle = Arc<Mutex<Connection>>;
+
+/// Process-wide cache of open session-database connections, keyed by the
+/// resolved database file path.
+///
+/// A `Connection::open` per operation was measured as the dominant cost of
+/// session-store calls under load: each open re-parses pragmas, re-checks
+/// migrations, and pays SQLite's own connection setup. Caching by path
+/// reuses one connection for the lifetime of the process (or until nothing
+/// references it — entries are never evicted, matching the small, bounded
+/// number of distinct workspaces a single process actually opens).
+fn connection_cache() -> &'static Mutex<HashMap<PathBuf, ConnectionHandle>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, ConnectionHandle>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Subdirectory of the workspace holding the session database.
 const DB_SUBDIR: &str = "session_db";
@@ -55,17 +80,20 @@ pub fn db_path(workspace_dir: &Path) -> PathBuf {
     workspace_dir.join(DB_SUBDIR).join(DB_FILE)
 }
 
-/// Opens the workspace's session database, applying schema migrations, and
-/// runs `f` against the connection.
+/// Returns the cached connection for `db_path`, opening and preparing one
+/// (pragmas, then migrations) the first time this path is seen.
 ///
-/// A connection is opened per call rather than pooled: these operations are
-/// short, infrequent relative to a run's model calls, and SQLite in WAL mode
-/// handles concurrent readers without a shared handle to synchronize.
-pub fn with_connection<T>(
-    workspace_dir: &Path,
-    f: impl FnOnce(&Connection) -> Result<T>,
-) -> Result<T> {
-    let db_path = db_path(workspace_dir);
+/// Pragma setup and migrations run exactly once per path, when the
+/// connection is created — not on every call — since both are properties of
+/// the connection/database, not of an individual operation.
+fn cached_connection(db_path: &Path) -> Result<ConnectionHandle> {
+    let mut cache = connection_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(existing) = cache.get(db_path) {
+        return Ok(existing.clone());
+    }
+
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).storage_context(&format!(
             "failed to create session_db directory: {}",
@@ -73,14 +101,34 @@ pub fn with_connection<T>(
         ))?;
     }
 
-    let conn = Connection::open(&db_path)
+    let conn = Connection::open(db_path)
         .storage_context(&format!("failed to open session DB: {}", db_path.display()))?;
     prepare_connection(&conn)?;
-
-    // Migrations are idempotent, and checking on every fresh connection also
-    // handles a database atomically replaced at this same path.
     migrations::apply(&conn)?;
 
+    let handle: ConnectionHandle = Arc::new(Mutex::new(conn));
+    cache.insert(db_path.to_path_buf(), handle.clone());
+    Ok(handle)
+}
+
+/// Opens (or reuses) the workspace's session database connection, applying
+/// schema migrations on first use, and runs `f` against the connection.
+///
+/// A single connection per database path is cached for the process and
+/// reused across calls, guarded by a `Mutex` so operations on the same path
+/// still serialize the way they did when every call opened its own file
+/// handle. Note that because the connection is cached rather than reopened,
+/// a database file atomically replaced at this same path after the first
+/// call will *not* be picked up — the process keeps its original handle.
+pub fn with_connection<T>(
+    workspace_dir: &Path,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    let db_path = db_path(workspace_dir);
+    let handle = cached_connection(&db_path)?;
+    let conn = handle
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     f(&conn)
 }
 
@@ -131,7 +179,7 @@ pub fn with_transaction<T>(
                 // reporting, and a failed rollback (connection already gone)
                 // must not mask it.
                 if let Err(rollback_err) = conn.execute_batch("ROLLBACK") {
-                    tinyagents_tracing::warn!(
+                    tracing::warn!(
                         "[session] rollback after error failed: {rollback_err} (original: {err})"
                     );
                 }

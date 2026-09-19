@@ -41,14 +41,36 @@ use tinytools::{ToolPolicy, ToolSideEffects};
 /// the configured [`RetryPolicy`][crate::retry::RetryPolicy] still
 /// permits another attempt, retries. Each scheduled retry emits an
 /// [`AgentEvent::RetryScheduled`][crate::events::AgentEvent::RetryScheduled]
-/// with a [`CallId`][crate::ids::CallId] derived from the run id.
+/// with the same [`CallId`][crate::ids::CallId] the agent loop is using for
+/// the in-flight call (mirrored onto
+/// [`RunContext::active_model_call`][crate::context::RunContext::active_model_call]),
+/// falling back to a run-scoped id only when this middleware runs outside the
+/// agent loop.
+///
+/// # An alternative to `RunPolicy::retry`, not a companion
+///
+/// This middleware and the loop's own [`RunPolicy::retry`][crate::runtime::RunPolicy::retry]
+/// are two implementations of the same idea. Registering both does not
+/// compose them: [`crate::middleware::MiddlewareStack::has_retry_override`]
+/// tells the loop's base call to skip its own retry loop whenever any
+/// `ModelMiddleware` reports [`ModelMiddleware::overrides_retry`][crate::middleware::ModelMiddleware::overrides_retry]
+/// (this middleware always does), so only this middleware's `RetryPolicy`
+/// governs the attempt count — `RunPolicy::retry` is ignored for the base
+/// call while it is registered. Without that guard the two layers would
+/// multiply attempts (`mw.max_attempts x policy.retry.max_attempts x
+/// |fallback|` provider calls for one logical failure); see I-7. Prefer
+/// `RunPolicy::retry` for the common case (it also drives the fallback
+/// chain) and reach for this middleware only when retry needs to run at a
+/// specific point in the wrap onion (e.g. after a guardrail middleware has
+/// already inspected the request). Full unification into one retry engine is
+/// tracked as a later phase.
 ///
 /// # Sleeping
 ///
-/// Like the agent loop's own retry path, this middleware *computes* the backoff
-/// from the policy but does **not** sleep, keeping the loop fast and tests
-/// deterministic. A production integration may sleep for
-/// [`RetryMiddleware::backoff_for_attempt`] before each retry.
+/// This middleware sleeps for the policy's computed backoff between attempts
+/// only when the policy opts in via
+/// [`RetryPolicy::with_backoff_sleep`][crate::retry::RetryPolicy::with_backoff_sleep];
+/// otherwise it retries back-to-back, keeping tests fast and deterministic.
 ///
 /// # Failure mode
 ///

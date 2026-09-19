@@ -24,12 +24,14 @@
 
 use std::fmt::Write as _;
 
+use serde::{Deserialize, Serialize};
+
 use crate::source::SourceFile;
 use crate::span::Span;
-use tinyagents_harness::error::TinyAgentsError;
+use tinyagents_harness::error::{RenderedDiagnostic, TinyAgentsError};
 
 /// The severity of a [`Diagnostic`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Severity {
     /// A hard error: compilation cannot proceed.
     Error,
@@ -51,7 +53,7 @@ impl Severity {
 }
 
 /// A labelled secondary span attached to a [`Diagnostic`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Label {
     /// The span this label points at.
     pub span: Span,
@@ -75,7 +77,7 @@ impl Label {
 /// drawn beneath its caret. Additional `labels` annotate related secondary
 /// spans, and `help` carries an optional suggestion line. `code` is an optional
 /// stable identifier rendered as `severity[code]:`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnostic {
     /// The diagnostic severity.
     pub severity: Severity,
@@ -208,6 +210,33 @@ impl Diagnostic {
         }
     }
 
+    /// Converts this diagnostic into a [`RenderedDiagnostic`] — the
+    /// crate-boundary-safe payload of [`TinyAgentsError::Diagnostics`].
+    ///
+    /// `tinyagents_harness::error::TinyAgentsError` cannot hold this crate's
+    /// [`Diagnostic`] directly (this crate depends on `tinyagents-harness` for
+    /// `Result`/`TinyAgentsError`, so the reverse dependency would cycle), so
+    /// this renders the diagnostic down to its message, code, resolved
+    /// `line`/`column`, and (when `source` is available) the caret-underline
+    /// presentation instead.
+    pub fn to_rendered(&self, source: Option<&SourceFile>) -> RenderedDiagnostic {
+        let has_offsets = self.primary.start != 0 || self.primary.end != 0;
+        let (line, column, rendered) = match source {
+            Some(file) if has_offsets => {
+                let (line, column) = file.location(self.primary.start);
+                (line, column, self.render(file))
+            }
+            _ => (self.primary.line, self.primary.column, self.render_plain()),
+        };
+        RenderedDiagnostic {
+            code: self.code.clone(),
+            message: self.message.clone(),
+            line,
+            column,
+            rendered,
+        }
+    }
+
     fn write_header(&self, out: &mut String) {
         match &self.code {
             Some(code) => {
@@ -228,6 +257,30 @@ impl Diagnostic {
         }
         max_line.to_string().len()
     }
+}
+
+/// Folds one or more diagnostics into a single [`TinyAgentsError`].
+///
+/// An empty `diagnostics` panics in debug builds via `unwrap`-free defensive
+/// handling below is deliberately avoided: callers must not invoke this with
+/// no diagnostics to report. A single diagnostic still goes through
+/// [`TinyAgentsError::Diagnostics`] (not [`Diagnostic::into_parse_error`]) so
+/// every caller of this function gets one uniform error shape regardless of
+/// how many diagnostics were collected.
+///
+/// # Panics
+///
+/// Panics if `diagnostics` is empty.
+pub fn into_diagnostics_error(
+    diagnostics: Vec<Diagnostic>,
+    source: Option<&SourceFile>,
+) -> TinyAgentsError {
+    assert!(
+        !diagnostics.is_empty(),
+        "into_diagnostics_error requires at least one diagnostic"
+    );
+    let rendered = diagnostics.iter().map(|d| d.to_rendered(source)).collect();
+    TinyAgentsError::Diagnostics(rendered)
 }
 
 /// Renders one labelled span as a `-->`/source-line/caret block.

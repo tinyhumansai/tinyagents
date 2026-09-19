@@ -399,6 +399,21 @@ pub trait ModelMiddleware<State: Send + Sync, Ctx: Send + Sync = ()>: Send + Syn
     /// `MiddlewareStarted`/`MiddlewareCompleted` events.
     fn name(&self) -> &str;
 
+    /// Whether this middleware already retries the model call itself (as
+    /// [`crate::middleware::library::RetryMiddleware`] does).
+    ///
+    /// [`MiddlewareStack::has_retry_override`] uses this to tell the loop's
+    /// base call to skip its own [`crate::runtime::RunPolicy::retry`] loop
+    /// when one is registered — otherwise the two retry layers compose
+    /// multiplicatively (`mw.max_attempts × policy.retry.max_attempts ×
+    /// |fallback|` provider calls for one logical failure) instead of
+    /// replacing each other. See I-7; full unification into one engine is a
+    /// later phase. Defaults to `false` so an ordinary middleware is
+    /// unaffected.
+    fn overrides_retry(&self) -> bool {
+        false
+    }
+
     /// Wraps the inner model pipeline. Call `next.run(ctx, state, request)` to
     /// proceed (zero or more times), or return a [`MiddlewareModelOutcome`]
     /// without calling it to short-circuit.

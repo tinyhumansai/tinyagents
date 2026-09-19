@@ -74,7 +74,7 @@ pub fn strip_injected_arguments(arguments: &mut Value, injected: &[&str]) -> Vec
     }
 
     if !removed.is_empty() {
-        tinyagents_tracing::warn!(
+        tracing::warn!(
             "[tool::injected] discarded model-supplied value(s) for host-injected argument(s): {}",
             removed.join(", ")
         );
@@ -106,7 +106,7 @@ pub fn project_injected_arguments(mut schema: ToolSchema, injected: &[&str]) -> 
         required.retain(|value| value.as_str().is_none_or(|name| !injected.contains(&name)));
     }
 
-    tinyagents_tracing::trace!(
+    tracing::trace!(
         "[tool::injected] projected {} hidden argument(s) out of `{}`",
         injected.len(),
         schema.name

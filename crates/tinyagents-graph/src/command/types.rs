@@ -10,7 +10,7 @@
 //! - [`NodeResult::Interrupt`]: an [`Interrupt`] that pauses the run for
 //!   human-in-the-loop input.
 
-use tinyagents_harness::ids::NodeId;
+use tinyagents_harness::ids::{NodeId, TaskId};
 
 /// The outcome of running a durable graph node.
 #[derive(Clone, Debug)]
@@ -32,7 +32,7 @@ pub enum NodeResult<Update> {
 /// pointing at the *same* target node — and each scheduled invocation receives
 /// its own `arg`. Distinct from a plain `goto`, which simply activates a node
 /// against the shared state with no per-activation input.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Send {
     /// The node to schedule.
     pub node: NodeId,
@@ -53,7 +53,13 @@ impl Send {
 /// A single routing target produced by a [`Command`]: either a plain node
 /// activation ([`RouteTarget::Node`]) or a [`Send`] packet carrying
 /// per-invocation input ([`RouteTarget::Send`]).
-#[derive(Clone, Debug)]
+///
+/// Serializable (R1 in `docs/runtime-comparison/code-review-graph.md`): a
+/// completed sibling's explicit `Command::goto` is persisted alongside
+/// `Checkpoint::completed_tasks` (see [`crate::Checkpoint::completed_routes`])
+/// so it survives a resume instead of being re-resolved via
+/// static/conditional edges only.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RouteTarget {
     /// Activate the node against the shared committed state.
     Node(NodeId),
@@ -95,7 +101,17 @@ pub struct Command<Update> {
     /// plain node activation or a [`Send`] packet (see [`RouteTarget`]).
     pub goto: Vec<RouteTarget>,
     /// Resume value for an interrupted node (used by `CompiledGraph::resume`).
+    ///
+    /// Applies to every interrupted task when `resume_by_task` is empty. When
+    /// a `Send` fan-out of the same node produced several concurrent
+    /// interrupted tasks (I1), prefer `resume_by_task` so each gets its own
+    /// value; this field alone cannot distinguish them.
     pub resume: Option<serde_json::Value>,
+    /// Per-task resume values (R5/I1), keyed by the interrupted task's
+    /// [`TaskId`] (see [`crate::builder::NodeContext::task_id`]). Consulted
+    /// before `resume`: a task named here gets its own value; every other
+    /// pending task falls back to `resume` (if set).
+    pub resume_by_task: std::collections::HashMap<TaskId, serde_json::Value>,
 }
 
 /// A human-in-the-loop pause point.
@@ -111,4 +127,15 @@ pub struct Interrupt {
     pub node: NodeId,
     /// Arbitrary payload presented to the human/approver.
     pub payload: serde_json::Value,
+    /// The scheduled task this interrupt paused, when known (R5/I1).
+    ///
+    /// Stamped by the interrupt boundary from the pausing branch's
+    /// [`crate::compiled` activation task id — distinct fan-out activations
+    /// of the same node (a `Send` `[node_id, task_id]`-scoped subgraph, for
+    /// example) each get their own interrupt/resume identity instead of
+    /// sharing the node's. `None` for a hand-built interrupt or one recorded
+    /// before task identity was tracked; `#[serde(default)]` keeps legacy
+    /// checkpoint JSON without this field decoding.
+    #[serde(default)]
+    pub task_id: Option<TaskId>,
 }

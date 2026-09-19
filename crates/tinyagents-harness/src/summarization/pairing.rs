@@ -105,14 +105,14 @@ pub fn find_safe_cutoff_point(messages: &[Message], cutoff_index: usize) -> usiz
     for index in (0..cutoff_index).rev() {
         let declared = declared_call_ids(&messages[index]);
         if !declared.is_empty() && declared.intersection(&orphan_ids).next().is_some() {
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 "[summarization::pairing] cutoff {cutoff_index} split a tool pair; moving back to {index} to keep the assistant tool-call turn"
             );
             return index;
         }
     }
 
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "[summarization::pairing] cutoff {cutoff_index} has no matching assistant tool-call turn; advancing to {past_run} to drop unpairable tool results"
     );
     past_run
@@ -132,7 +132,7 @@ pub fn advance_past_orphan_tools(messages: &[Message], cutoff_index: usize) -> u
         index += 1;
     }
     if index != cutoff_index {
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "[summarization::pairing] dropped {} leading orphan tool result(s) at cutoff {cutoff_index}",
             index - cutoff_index
         );
@@ -155,7 +155,7 @@ pub fn retract_orphan_tool_calls(messages: &[Message], end_index: usize) -> usiz
         end -= 1;
     }
     if end != end_index.min(messages.len()) {
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "[summarization::pairing] retracted retained prefix end from {end_index} to {end} to drop unanswered assistant tool call(s)"
         );
     }

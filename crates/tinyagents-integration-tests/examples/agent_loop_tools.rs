@@ -7,7 +7,7 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run --example agent_loop_tools
+//! cargo run -p tinyagents-integration-tests --example agent_loop_tools
 //! ```
 
 use std::sync::Arc;

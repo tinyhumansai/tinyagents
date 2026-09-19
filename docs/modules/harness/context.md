@@ -162,6 +162,17 @@ Nested calls inherit:
 Nested calls may add local tags and metadata. They must not mutate parent config
 in place. This keeps traces and tests deterministic.
 
+`RunContext` exposes two child constructors with different authority
+propagation, not one: `child(&self, config, data: Ctx)` keeps the same `Ctx`
+type and propagates the parent's hosted authority (the type-erased bundle a
+host invocation installed), while `child_with_data(&self, config, data:
+ChildCtx)` may change the child's data type and never propagates that
+authority. This is a soundness boundary, not just an API convenience: hosted
+authority is keyed to the exact `(State, Ctx)` pair it was installed for, and
+`child_with_data` is the only primitive that can produce a `RunContext` with
+a different `Ctx`, so it starts unhosted rather than guessing whether the
+parent's authority would still apply.
+
 ## Runtime Injection
 
 Tools and middleware may receive runtime-only values such as stores,

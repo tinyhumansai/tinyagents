@@ -159,11 +159,30 @@ Forked child tasks participate in normal checkpointing:
 
 - task start appears in checkpoint task metadata
 - completed child writes can be persisted as pending writes
-- failed sibling tasks do not force successful child agents to rerun once
-  pending writes are saved
 - child checkpoints include namespace and parent checkpoint config
-- resuming from interrupt restarts the interrupted child task, not unrelated
-  completed siblings
+
+"Failed sibling tasks do not force successful child agents to rerun once
+pending writes are saved" and "resuming from interrupt restarts the
+interrupted child task, not unrelated completed siblings" hold today (fixed
+per `code-review-graph.md` Critical C1/C2; see
+`crates/tinyagents-graph/src/compiled/step.rs::fold_step` and
+`crates/tinyagents-graph/src/compiled/boundary.rs::advance`). When a parallel
+step interrupts or fails at branch index `i`, every branch that completed —
+regardless of whether its index is above or below `i` — is folded into
+committed state and is **not** re-run on resume/retry; only the
+interrupted/failed branch(es) become the resumed run's pending set. A
+completed branch's own routing is deferred (not resolved at the interrupt/
+failure boundary itself) rather than dropped: it is carried forward in the
+checkpoint's `completed_tasks` and routed together with the rest of that
+step's results once the pending branches finish, so a downstream node sees
+the same merged state an uninterrupted run would have produced. One caveat: a
+carried-forward branch's routing is re-resolved via static/conditional edges
+only — an explicit `Command::goto` it returned is not itself persisted across
+the boundary. Regression coverage:
+`higher_index_completed_sibling_not_rerun_after_interrupt_then_resume`,
+`higher_index_completed_sibling_not_rerun_after_failure_then_retry`, and
+`interrupted_and_uninterrupted_runs_reach_the_same_state`
+(`crates/tinyagents-graph/src/compiled/test.rs`).
 
 If a forked sub-agent interrupts, the parent run should surface the interrupt
 with enough namespace information to resume the correct child.

@@ -1,5 +1,11 @@
 # Registry Events And Persistence
 
+> **Design proposal, not implemented.** `RegistryEvent`, `EventBus`, and the
+> other types this document describes do not exist in
+> `crates/tinyagents-registry/src` today. See
+> [`implementation-status.md`](implementation-status.md) for what is actually
+> shipped.
+
 Continues from [`design.md`](design.md): store and checkpointer
 registration, listener registration, the event model, event bus, and
 event filters.

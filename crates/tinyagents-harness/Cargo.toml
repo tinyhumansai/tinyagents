@@ -5,48 +5,59 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 description = "Provider-neutral model, tool, middleware, and agent-loop runtime."
 
 [dependencies]
-anyhow = "1"
-async-trait = "0.1"
+anyhow = { workspace = true }
+async-trait = { workspace = true }
 # Keep this aligned with reqwest's transitive version. Claude Code request
 # rendering and multimodal data URIs both require it.
 base64 = "0.22"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { workspace = true }
 chrono-tz = { version = "0.10", optional = true }
+dirs = { version = "6", optional = true }
 flate2 = { version = "1", optional = true }
-futures = "0.3"
-dirs = "6"
-log = "0.4"
+futures = { workspace = true }
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "http2"] }
-rusqlite = { version = "0.40", features = ["bundled"], optional = true }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+reqwest = { workspace = true, features = ["stream", "http2"], optional = true }
+rusqlite = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = "0.11"
 thiserror = "2"
-tinyagents-tracing = { path = "../tinyagents-tracing", version = "2.1.2", default-features = false }
+tracing = { workspace = true }
 tinyagents-definition = { path = "../tinyagents-definition", version = "2.1.2" }
 tinytools-agent = { path = "../../vendor/tinytools/crates/tinytools-agent", version = "0.2.0", default-features = false }
 tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.3.0" }
 tinyinference-embeddings = { path = "../../vendor/tinyinference/crates/tinyinference-embeddings", version = "0.3.0" }
 tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.2.0" }
-tokio = { version = "1", default-features = false, features = ["sync", "time", "macros", "rt", "rt-multi-thread", "fs", "io-util", "process"] }
-tempfile = "3"
-wait-timeout = "0.2"
-uuid = { version = "1", features = ["v4"] }
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt", "rt-multi-thread", "fs", "io-util", "process"] }
+tempfile = { workspace = true }
+wait-timeout = { version = "0.2", optional = true }
+uuid = { workspace = true, optional = true }
 
 [features]
-default = []
+default = ["claude-code", "langfuse"]
 sqlite = ["dep:rusqlite"]
-tools = ["dep:chrono-tz"]
-multimodal = ["dep:flate2"]
-tracing = ["tinyagents-tracing/tracing", "tinytools-agent/tracing"]
+# `tools` is a deprecated alias kept so downstream feature forwards that
+# still spell out the old name keep compiling.
+tools = ["builtin-tools"]
+builtin-tools = ["dep:chrono-tz"]
+multimodal = ["dep:flate2", "dep:reqwest"]
+# Gates the Claude Code CLI and Claude Agent SDK provider adapters, which are
+# the only consumers of `uuid`, `tempfile` beyond the artifact tests, `dirs`,
+# and `wait-timeout` in this crate.
+claude-code = ["dep:uuid", "dep:wait-timeout", "dep:dirs"]
+# Gates the Langfuse observability exporter and its `reqwest` transport.
+langfuse = ["dep:reqwest"]
+# Tracing instrumentation is now always compiled in (via the `tracing` crate
+# dependency above). This feature is retained as a no-op so downstream
+# feature forwards keep compiling.
+tracing = ["tinytools-agent/tracing"]
 
 [dev-dependencies]
-tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
+tokio = { workspace = true, default-features = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 
 [lints]
 workspace = true

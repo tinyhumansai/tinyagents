@@ -38,6 +38,7 @@ impl<State: Send + Sync> CapabilityRegistry<State> {
     pub fn new() -> Self {
         Self {
             models: std::collections::HashMap::new(),
+            model_order: Vec::new(),
             tools: std::collections::HashMap::new(),
             graphs: std::collections::HashMap::new(),
             agents: std::collections::HashMap::new(),
@@ -68,6 +69,76 @@ impl<State: Send + Sync> CapabilityRegistry<State> {
             .or_insert_with(|| ComponentMetadata::new(name, kind));
     }
 
+    /// Replaces the [`ComponentMetadata`] recorded for `(kind, name)`.
+    ///
+    /// Unlike [`record_meta`](Self::record_meta) (which only fills in a
+    /// default the first time a name is registered), this overwrites whatever
+    /// metadata is already there — so `with_description`/`with_tag` builders
+    /// (`crate::component::ComponentMetadata`) actually reach a registered
+    /// component instead of being dead on arrival for anything registered
+    /// through `register_*`/`replace_*` (see W-I8 in
+    /// `docs/runtime-comparison/code-review-workspace.md`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TinyAgentsError::Capability`] if `(kind, name)` is not a
+    /// registered component: setting metadata on a name nothing registered
+    /// would create a "component" with metadata but no backing value.
+    pub fn set_metadata(
+        &mut self,
+        kind: ComponentKind,
+        name: &str,
+        metadata: ComponentMetadata,
+    ) -> Result<&mut Self> {
+        if !self.meta.contains_key(&(kind, name.to_owned())) {
+            return Err(TinyAgentsError::Capability(format!(
+                "cannot set metadata for {kind} `{name}`: not registered"
+            )));
+        }
+        self.meta.insert((kind, name.to_owned()), metadata);
+        Ok(self)
+    }
+
+    /// Removes a registered component (and its metadata) by `(kind, name)`.
+    ///
+    /// Removing a component that other names alias makes those aliases
+    /// dangling, which [`Self::diagnostics`]'s `dangling_alias` check then
+    /// reports — this is the operation that makes that diagnostic reachable
+    /// through the public API (see W-I8). Aliases of `name` are left in place
+    /// (not cascaded), matching [`Self::alias`]'s "one alias hop" model:
+    /// callers that want a clean removal should also drop the alias entries
+    /// they know about.
+    ///
+    /// Returns `true` if a component was present and removed, `false` if
+    /// `(kind, name)` was not registered (a no-op, not an error).
+    pub fn remove(&mut self, kind: ComponentKind, name: &str) -> bool {
+        let key = (kind, name.to_owned());
+        if self.meta.remove(&key).is_none() {
+            return false;
+        }
+        match kind {
+            ComponentKind::Model => {
+                self.models.remove(name);
+                self.model_order.retain(|n| n != name);
+            }
+            ComponentKind::Tool => {
+                self.tools.remove(name);
+            }
+            ComponentKind::Graph => {
+                self.graphs.remove(name);
+            }
+            ComponentKind::Agent => {
+                self.agents.remove(name);
+            }
+            _ => {
+                // Router/Reducer/Store/Script/Middleware/Checkpointer/
+                // TaskStore/Listener are name-only descriptors: `meta`
+                // removal above is the whole registration.
+            }
+        }
+        true
+    }
+
     // -----------------------------------------------------------------------
     // Registration: models
     // -----------------------------------------------------------------------
@@ -87,6 +158,7 @@ impl<State: Send + Sync> CapabilityRegistry<State> {
         let name = name.into();
         self.ensure_absent(ComponentKind::Model, &name)?;
         self.record_meta(ComponentKind::Model, &name);
+        self.remember_model_order(&name);
         self.models.insert(name, model);
         Ok(self)
     }
@@ -100,8 +172,43 @@ impl<State: Send + Sync> CapabilityRegistry<State> {
     ) -> &mut Self {
         let name = name.into();
         self.record_meta(ComponentKind::Model, &name);
+        self.remember_model_order(&name);
         self.models.insert(name, model);
         self
+    }
+
+    /// Appends `name` to [`Self::model_order`] the first time it is
+    /// registered. Re-registering an existing name (via
+    /// [`replace_model`](Self::replace_model)) keeps its original position.
+    fn remember_model_order(&mut self, name: &str) {
+        if !self.models.contains_key(name) {
+            self.model_order.push(name.to_owned());
+        }
+    }
+
+    /// Registers a model under `name` with explicit [`ComponentMetadata`]
+    /// instead of the bare default [`record_meta`](Self::record_meta) would
+    /// attach, so a description/tags are attached atomically with
+    /// registration rather than needing a follow-up
+    /// [`set_metadata`](Self::set_metadata) call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TinyAgentsError::DuplicateComponent`] if a model is already
+    /// registered under `name`.
+    pub fn register_model_with(
+        &mut self,
+        name: impl Into<String>,
+        model: Arc<dyn ChatModel<State>>,
+        metadata: ComponentMetadata,
+    ) -> Result<&mut Self> {
+        let name = name.into();
+        self.ensure_absent(ComponentKind::Model, &name)?;
+        self.meta
+            .insert((ComponentKind::Model, name.clone()), metadata);
+        self.remember_model_order(&name);
+        self.models.insert(name, model);
+        Ok(self)
     }
 
     // -----------------------------------------------------------------------
@@ -119,6 +226,27 @@ impl<State: Send + Sync> CapabilityRegistry<State> {
         let name = tool.name().to_owned();
         self.ensure_absent(ComponentKind::Tool, &name)?;
         self.record_meta(ComponentKind::Tool, &name);
+        self.tools.insert(name, tool);
+        Ok(self)
+    }
+
+    /// Registers a tool under its [`Tool::name`] with explicit
+    /// [`ComponentMetadata`], atomically instead of a follow-up
+    /// [`set_metadata`](Self::set_metadata) call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TinyAgentsError::DuplicateComponent`] if a tool with the same
+    /// name is already registered.
+    pub fn register_tool_with(
+        &mut self,
+        tool: Arc<dyn Tool>,
+        metadata: ComponentMetadata,
+    ) -> Result<&mut Self> {
+        let name = tool.name().to_owned();
+        self.ensure_absent(ComponentKind::Tool, &name)?;
+        self.meta
+            .insert((ComponentKind::Tool, name.clone()), metadata);
         self.tools.insert(name, tool);
         Ok(self)
     }
@@ -394,22 +522,52 @@ impl<State: Send + Sync> CapabilityRegistry<State> {
     /// Builds a harness [`ModelRegistry`] from the registered models, including
     /// alias names bound to the same model handle.
     ///
-    /// The harness registry's default-model selection follows its own first-
-    /// registered rule; since registration order here is unspecified, callers
-    /// who need a specific default should set it explicitly on the result.
+    /// Models are registered onto the result in [`Self::model_order`] — the
+    /// order `register_model`/`replace_model` first saw each name in — so the
+    /// harness registry's "first-registered model becomes the default" rule
+    /// ([`ModelRegistry::register`]) is deterministic and reproducible across
+    /// runs, rather than following `HashMap` iteration order. That default is
+    /// still whichever model happened to be registered first; callers who
+    /// need a specific default regardless of registration order should use
+    /// [`Self::to_model_registry_with_default`] or call `set_default`
+    /// explicitly on the result.
     pub fn to_model_registry(&self) -> ModelRegistry<State> {
         let mut registry = ModelRegistry::new();
-        for (name, model) in &self.models {
-            registry.register(name.clone(), model.clone());
+        for name in &self.model_order {
+            if let Some(model) = self.models.get(name) {
+                registry.register(name.clone(), model.clone());
+            }
         }
-        for ((kind, alias), target) in &self.aliases {
-            if *kind == ComponentKind::Model
-                && let Some(model) = self.models.get(target)
-            {
+        let mut aliases: Vec<(&String, &String)> = self
+            .aliases
+            .iter()
+            .filter(|((kind, _), _)| *kind == ComponentKind::Model)
+            .map(|((_, alias), target)| (alias, target))
+            .collect();
+        aliases.sort();
+        for (alias, target) in aliases {
+            if let Some(model) = self.models.get(target) {
                 registry.register(alias.clone(), model.clone());
             }
         }
         registry
+    }
+
+    /// Builds a harness [`ModelRegistry`] exactly like [`Self::to_model_registry`],
+    /// but with the default model explicitly set to `name` instead of
+    /// whichever model was registered first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TinyAgentsError::ModelNotFound`] if `name` (or an alias of
+    /// it) is not a registered model.
+    pub fn to_model_registry_with_default(&self, name: &str) -> Result<ModelRegistry<State>> {
+        if self.model(name).is_none() {
+            return Err(TinyAgentsError::ModelNotFound(name.to_string()));
+        }
+        let mut registry = self.to_model_registry();
+        registry.set_default(name);
+        Ok(registry)
     }
 
     /// Builds a harness [`ToolRegistry`] from the registered tools.
@@ -508,6 +666,90 @@ impl<State: Send + Sync> CapabilityRegistry<State> {
 impl<State: Send + Sync> Default for CapabilityRegistry<State> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ===========================================================================
+// tinyagents_definition::DefinitionRegistry bridge
+// ===========================================================================
+//
+// `HostCapabilities.definitions: Arc<dyn DefinitionRegistry>` is a required
+// async host capability, while `CapabilityRegistry::register_agent` stores
+// the same `AgentDefinition` synchronously — before this bridge, nothing
+// implemented `DefinitionRegistry` for `CapabilityRegistry`, so a host that
+// registered agents in the registry had to build a second, separately
+// populated `InMemoryDefinitionRegistry` by hand (see W-I9 in
+// `docs/runtime-comparison/code-review-workspace.md`).
+//
+// This is written out by hand, matching the exact signature the
+// `#[async_trait]` macro in `tinyagents-definition` expands
+// `DefinitionRegistry`'s methods to, instead of applying `#[async_trait]`
+// here: `tinyagents-registry` only has `async-trait` as a *dev*-dependency
+// (used by its own tests), so the macro is unavailable to non-test library
+// code without adding it as a normal dependency — a `Cargo.toml` edit outside
+// this change's file boundary while other in-flight work owns the manifests.
+impl<State: Send + Sync> tinyagents_definition::DefinitionRegistry for CapabilityRegistry<State> {
+    fn resolve<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        id: &'life1 str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = tinyagents_definition::Result<
+                        Option<tinyagents_definition::AgentDefinition>,
+                    >,
+                > + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { Ok(self.agent(id).cloned()) })
+    }
+
+    fn list<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = tinyagents_definition::Result<
+                        Vec<tinyagents_definition::AgentDefinition>,
+                    >,
+                > + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { Ok(self.agents.values().cloned().collect()) })
+    }
+
+    fn delegates_for<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        id: &'life1 str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = tinyagents_definition::Result<Vec<String>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            Ok(self
+                .agent(id)
+                .map(|definition| definition.subagents.clone())
+                .unwrap_or_default())
+        })
     }
 }
 

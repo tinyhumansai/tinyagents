@@ -270,6 +270,7 @@ where
                     )),
                     root_run_id,
                     usage,
+                    checkpoint_id: None,
                 });
             }
             Ok(NodeResult::Update(update))

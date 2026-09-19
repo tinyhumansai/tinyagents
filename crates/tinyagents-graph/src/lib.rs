@@ -22,11 +22,6 @@
 //! Each concern lives in its own submodule with `types.rs` (definitions),
 //! `mod.rs` (implementations), and `test.rs` (unit tests).
 
-#![cfg_attr(
-    not(feature = "tracing"),
-    allow(dead_code, unused_imports, unused_variables)
-)]
-
 pub mod builder;
 pub mod channel;
 pub mod checkpoint;
@@ -69,7 +64,9 @@ pub use checkpoint::{
     PendingActivation, PendingWrite,
 };
 pub use command::{Command, Interrupt, NodeResult, RouteTarget, Send};
-pub use compiled::{CompiledGraph, GraphExecution, GraphInput, ResumeTarget, StateSnapshot};
+pub use compiled::{
+    CompiledGraph, GraphExecution, GraphInput, ResumeTarget, RunOptions, StateSnapshot,
+};
 pub use dag::{DagIssue, DagNode};
 pub use delegation::{
     CURRENT_SCHEMA_VERSION as DELEGATION_SCHEMA_VERSION, DelegationConfig, DelegationOutcome,

@@ -21,6 +21,12 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         input: Vec<Message>,
         streaming: bool,
     ) -> Result<()> {
+        // The tracker's wall-clock start is stamped when the context is
+        // constructed (`RunContext::new`), not necessarily when the run
+        // actually begins doing work — a context built ahead of time and
+        // queued would otherwise burn down its deadline before the first
+        // model call. Restart it here, at the true top of the run (M-8).
+        ctx.limits.restart();
         let mut messages = input;
         // The body borrows the working transcript rather than owning it so the
         // transcript survives **every** exit path, not just the successful one.
@@ -35,7 +41,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         let exit = match outcome {
             Ok(exit) => exit,
             Err(error) => {
-                tinyagents_tracing::debug!(
+                tracing::debug!(
                     target: "tinyagents::agent_loop",
                     run_id = %ctx.run_id(),
                     messages = run.messages.len(),
@@ -51,7 +57,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         match exit {
             LoopExit::Finished | LoopExit::LimitStop(_) => {
                 if let LoopExit::LimitStop(kind) = &exit {
-                    tinyagents_tracing::debug!(
+                    tracing::debug!(
                         target: "tinyagents::agent_loop",
                         run_id = %ctx.run_id(),
                         limit_kind = ?kind,
@@ -77,7 +83,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     }),
                 });
                 status.set_last_event(record.id);
-                tinyagents_tracing::debug!(
+                tracing::debug!(
                     target: "tinyagents::agent_loop",
                     run_id = %ctx.run_id(),
                     checkpoint = pause.paused_at_checkpoint,
@@ -128,7 +134,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         );
         let effective_tool_calls =
             resolve_call_cap(ctx.config.max_tool_calls, self.policy.limits.max_tool_calls);
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             target: "tinyagents::agent_loop",
             run_id = %ctx.run_id(),
             config_model_calls = ?ctx.config.max_model_calls,
@@ -156,13 +162,15 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // `tool_call` bridge, whose two schemas are appended *after* the
         // name-sorted direct set so the cached prefix is unchanged by them.
         // The same host allow-list gates both halves: deferral only ever
-        // subtracts from what the host admitted.
-        let allowed_tools = crate::runtime::host_invocation_binding::<State, Ctx>(ctx)?
-            .map(|binding| binding.allowed_tools);
+        // subtracts from what the host admitted. `resolve_tool_allowlist`
+        // (not a raw read of `binding.allowed_tools`) is what applies I-9's
+        // fail-closed default, so an empty declared list denies every tool
+        // here exactly as it does for the direct set below.
+        let allowed_tools = self.resolve_tool_allowlist(ctx)?;
         let host_allows = |name: &str| {
             allowed_tools
                 .as_ref()
-                .is_none_or(|allowed| allowed.is_empty() || allowed.contains(name))
+                .is_none_or(|allowed| allowed.contains(name))
         };
         let mut tool_schemas = self
             .tools
@@ -301,7 +309,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // `after_tool`/`wrap_tool` was honored one full model call late —
             // an extra billable provider round trip after a guardrail, or a
             // human gate, had already said stop.
-            if let Some(exit) = self.apply_pending_control(ctx, run, status)? {
+            if let Some(exit) = self.apply_pending_control(ctx, run, status, messages)? {
                 return Ok(exit);
             }
 
@@ -327,7 +335,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     ctx.emit(AgentEvent::LimitReached {
                         kind: LimitKind::ModelCalls,
                     });
-                    tinyagents_tracing::debug!(
+                    tracing::debug!(
                         target: "tinyagents::agent_loop",
                         run_id = %ctx.run_id(),
                         "[agent_loop] model-call cap reached; stopping with the partial run"
@@ -347,7 +355,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                         self.policy.limits.behavior,
                         crate::limits::LimitBehavior::StopWithPartial
                     ) {
-                        tinyagents_tracing::debug!(
+                        tracing::debug!(
                             target: "tinyagents::agent_loop",
                             run_id = %ctx.run_id(),
                             "[agent_loop] model-call cap reached; policy asks to stop with the \
@@ -499,7 +507,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                                 if tool_schemas.is_empty() {
                                     request.tool_choice = ToolChoice::Tool(name.clone());
                                 } else {
-                                    tinyagents_tracing::debug!(
+                                    tracing::debug!(
                                         target: "tinyagents::agent_loop",
                                         run_id = %ctx.run_id(),
                                         schema_name = %name,
@@ -541,10 +549,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     };
                     let hint = budget.compression_hint(&context_state);
                     if hint.is_advised() {
-                        tinyagents_tracing::debug!(
-                            ?hint,
-                            "[host] budget gate advised context compression"
-                        );
+                        tracing::debug!(?hint, "[host] budget gate advised context compression");
                         apply_host_budget_compression(ctx, &mut request.messages, hint)?;
                     }
                     let estimate = crate::host::CallEstimate::new(
@@ -552,7 +557,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                         crate::token_estimation::estimate_slice_tokens(&request.messages),
                         request.max_tokens.unwrap_or_default() as u64,
                     )
-                    .with_agent(host_run.agent_id)
+                    .with_agent(host_run.agent_id.clone())
                     .with_thread(
                         ctx.thread_id()
                             .cloned()
@@ -592,6 +597,11 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             let call_id = CallId::new(format!("{}-model-{}", ctx.run_id(), run.model_calls + 1));
             status.mark_running(HarnessPhase::Model);
             status.active_model_call = Some(call_id.clone());
+            // Mirrored onto the context so `ModelMiddleware` (e.g.
+            // `RetryMiddleware`) can correlate its own events with the exact
+            // call id the loop uses instead of deriving an uncorrelated one
+            // (I-7). Cleared right after the wrap onion returns, below.
+            ctx.active_model_call = Some(call_id.clone());
             // Captured here (where the call actually starts) so the completed
             // event carries a real start time for duration-aware exporters.
             let model_started_at_ms = crate::ids::now_ms();
@@ -600,6 +610,19 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 model: model_name.clone(),
             });
             status.set_last_event(record.id);
+
+            // Captured before `binding.model` moves into `base` below: decides
+            // whether text-dialect recovery should even be attempted for this
+            // call's response (see the call site after the model returns).
+            let text_dialect_recovery_enabled = match self.policy.text_dialect_recovery {
+                crate::runtime::TextDialectRecovery::Off => false,
+                crate::runtime::TextDialectRecovery::On => true,
+                crate::runtime::TextDialectRecovery::Auto => !binding
+                    .model
+                    .profile()
+                    .map(|profile| profile.tool_calling)
+                    .unwrap_or(false),
+            };
 
             // The real model call (cache + retry + fallback core) is the
             // innermost base of the model-wrap onion. Lifecycle `before_model`
@@ -636,8 +659,16 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // content even when a native tool channel was offered. Use the
             // canonical TinyTools-Agent parser rather than the retired
             // harness prompt parser, and only recover when the provider did
-            // not already supply structured calls.
-            recover_text_dialect_calls(&mut response, &call_id, request_has_tools);
+            // not already supply structured calls. Gated by
+            // `RunPolicy::text_dialect_recovery` (computed above, before the
+            // resolved model moved into the wrap onion).
+            recover_text_dialect_calls(
+                ctx,
+                &mut response,
+                &call_id,
+                request_has_tools,
+                text_dialect_recovery_enabled,
+            );
 
             // Account for the completed provider response before fallible
             // response middleware. A middleware rejection must not erase
@@ -647,13 +678,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             run.steps += 1;
             status.model_calls = run.model_calls;
             status.active_model_call = None;
+            ctx.active_model_call = None;
             // A cache replay consumed no provider tokens, so folding its usage
             // into the run's totals reports spend that never happened. The
             // saving is surfaced through the cache-hit event instead of being
             // buried in the spend total.
             if let Some(usage) = response.usage {
                 if response.served_from_cache {
-                    tinyagents_tracing::debug!(
+                    tracing::debug!(
                         target: "tinyagents::agent_loop",
                         run_id = %ctx.run_id(),
                         call_id = %call_id,
@@ -710,7 +742,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // Safe checkpoint: honor any control outcome a middleware requested
             // during this turn (for example an early-exit tool or a budget stop
             // hook), before executing further tools.
-            if let Some(exit) = self.apply_pending_control(ctx, run, status)? {
+            if let Some(exit) = self.apply_pending_control(ctx, run, status, messages)? {
                 return Ok(exit);
             }
 
@@ -746,7 +778,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                         StructuredExtractor::new(*strategy, name.clone(), schema.clone());
                     match extractor.extract(&response) {
                         Ok(output) => run.structured = Some(output.value),
-                        Err(error) => tinyagents_tracing::debug!(
+                        Err(error) => tracing::debug!(
                             target: "tinyagents::agent_loop",
                             run_id = %ctx.run_id(),
                             %error,
@@ -786,7 +818,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
 
                 // Safe checkpoint: a control requested from `after_tool` /
                 // `wrap_tool` is honored here, at the edge it was raised on.
-                if let Some(exit) = self.apply_pending_control(ctx, run, status)? {
+                if let Some(exit) = self.apply_pending_control(ctx, run, status, messages)? {
                     return Ok(exit);
                 }
                 continue;
@@ -906,7 +938,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // Safe checkpoint: honor a control requested from `after_tool` /
             // `wrap_tool` at the edge it was raised on, rather than a model
             // call later.
-            if let Some(exit) = self.apply_pending_control(ctx, run, status)? {
+            if let Some(exit) = self.apply_pending_control(ctx, run, status, messages)? {
                 return Ok(exit);
             }
         }
@@ -925,6 +957,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         ctx: &mut RunContext<Ctx>,
         run: &mut AgentRun,
         status: &mut HarnessRunStatus,
+        messages: &mut Vec<Message>,
     ) -> Result<Option<LoopExit>> {
         let Some(control) = ctx.take_control() else {
             return Ok(None);
@@ -939,6 +972,19 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         status.set_last_event(record.id);
         match control {
             MiddlewareControl::StopWithFinal(text) => {
+                // The most recently appended assistant row may carry
+                // `tool_calls` that were never answered — e.g. a middleware
+                // requesting `StopWithFinal` right after the model turn that
+                // requested them, before `execute_tools` ever ran. Left as
+                // is, `run.messages`/`messages` end with an assistant row
+                // whose tool calls have no matching tool message, which a
+                // provider rejects (400) if the transcript is ever replayed
+                // (M-1). Append a synthetic tool result for each unanswered
+                // call so the transcript stays replayable.
+                Self::close_unanswered_tool_calls(
+                    messages,
+                    "run stopped before this tool call was executed",
+                );
                 run.final_response = Some(ModelResponse::assistant(text));
                 Ok(Some(LoopExit::Finished))
             }
@@ -946,6 +992,27 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 Err(TinyAgentsError::Interrupted { node, message })
             }
         }
+    }
+
+    /// Appends a synthetic [`Message::tool`] result for every tool call on
+    /// the last message that is still unanswered, so the transcript stays
+    /// replayable through a provider that requires every `tool_calls` entry
+    /// on an assistant message to have a matching tool result before the next
+    /// turn (M-1). A no-op when the last message is not an unanswered
+    /// assistant tool-call row.
+    fn close_unanswered_tool_calls(messages: &mut Vec<Message>, reason: &str) {
+        let Some(Message::Assistant(last)) = messages.last() else {
+            return;
+        };
+        if last.tool_calls.is_empty() {
+            return;
+        }
+        let synthetic: Vec<Message> = last
+            .tool_calls
+            .iter()
+            .map(|call| Message::tool(call.id.clone(), reason))
+            .collect();
+        messages.extend(synthetic);
     }
 
     /// Resolves the effective response-cache decision for `request`.
@@ -1147,27 +1214,74 @@ fn apply_host_budget_compression<Ctx>(
     Ok(())
 }
 
+/// Whether `recover_text_dialect_calls` should even attempt to parse `text`.
+///
+/// Fenced code blocks are always skipped regardless of
+/// [`crate::runtime::TextDialectRecovery`]: a model demonstrating
+/// `<tool_call>` syntax inside a ``` fence — explaining the format, echoing a
+/// worked example — is manifestly not making a call, and recovering it would
+/// silently execute quoted documentation as a real action.
+fn text_dialect_markup_only_in_fenced_code(text: &str) -> bool {
+    let mut in_fence = false;
+    let mut saw_marker_outside_fence = false;
+    let mut saw_marker_anywhere = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if line.contains("<tool_call") {
+            saw_marker_anywhere = true;
+            if !in_fence {
+                saw_marker_outside_fence = true;
+            }
+        }
+    }
+    saw_marker_anywhere && !saw_marker_outside_fence
+}
+
 /// Recovers XML/text-dialect calls through `tinytools-agent` while preserving
 /// every non-text provider content block (notably reasoning blocks).
-fn recover_text_dialect_calls(
+///
+/// Gated by [`crate::runtime::RunPolicy::text_dialect_recovery`] (`enabled`
+/// is the caller's resolved decision from that policy — see the call site in
+/// `run_loop_body`) and always skips markup that appears only inside a fenced
+/// code block. Emits [`AgentEvent::ControlApplied`] when it actually rewrites
+/// the response, so the recovery is auditable rather than a silent transform.
+fn recover_text_dialect_calls<Ctx>(
+    ctx: &RunContext<Ctx>,
     response: &mut tinyinference_llm::model::ModelResponse,
     model_call_id: &CallId,
     has_tools: bool,
+    enabled: bool,
 ) {
-    if !has_tools || !response.message.tool_calls.is_empty() {
+    if !enabled || !has_tools || !response.message.tool_calls.is_empty() {
         return;
     }
 
     use tinytools_agent::dialect::{DialectResponse, ToolDialect, XmlDialect};
 
+    let text = response.text();
+    if text_dialect_markup_only_in_fenced_code(&text) {
+        return;
+    }
+
     let dialect_response = DialectResponse {
-        text: Some(response.text()),
+        text: Some(text),
         tool_calls: Vec::new(),
     };
     let (cleaned, parsed) = XmlDialect.parse_response(&dialect_response);
     if parsed.is_empty() {
         return;
     }
+
+    ctx.emit(AgentEvent::ControlApplied {
+        control: "text_dialect_recovered".to_string(),
+        detail: format!(
+            "recovered {} text-dialect tool call(s) from model call `{model_call_id}`",
+            parsed.len()
+        ),
+    });
 
     response.message.tool_calls = parsed
         .into_iter()
@@ -1237,18 +1351,71 @@ fn reset_truncated_empty_recovery(
 #[cfg(test)]
 mod recovery_tests {
     use super::recover_text_dialect_calls;
+    use crate::context::{RunConfig, RunContext};
     use crate::ids::CallId;
     use tinyinference_llm::model::ModelResponse;
 
     #[test]
     fn text_dialect_markup_is_not_recovered_when_the_request_offered_no_tools() {
+        let ctx: RunContext<()> = RunContext::new(RunConfig::new("recovery-test"), ());
         let mut response = ModelResponse::assistant(
             "<tool_call><name>shell</name><arguments>{\"command\":\"id\"}</arguments></tool_call>",
         );
 
-        recover_text_dialect_calls(&mut response, &CallId::new("model-1"), false);
+        recover_text_dialect_calls(&ctx, &mut response, &CallId::new("model-1"), false, true);
 
         assert!(response.message.tool_calls.is_empty());
         assert!(response.text().contains("<tool_call>"));
+    }
+
+    /// I-2 regression: even when tools were offered, `enabled = false`
+    /// (what `RunPolicy::text_dialect_recovery` resolves to for a model whose
+    /// profile reports native tool calling, under the default `Auto` policy)
+    /// must not execute `<tool_call>` markup the model merely quoted.
+    #[test]
+    fn text_dialect_markup_is_not_recovered_when_the_policy_disables_it() {
+        let ctx: RunContext<()> = RunContext::new(RunConfig::new("recovery-test"), ());
+        let mut response = ModelResponse::assistant(
+            r#"<tool_call>{"name": "shell", "arguments": {"command": "id"}}</tool_call>"#,
+        );
+
+        recover_text_dialect_calls(&ctx, &mut response, &CallId::new("model-1"), true, false);
+
+        assert!(response.message.tool_calls.is_empty());
+        assert!(response.text().contains("<tool_call>"));
+    }
+
+    /// I-2 regression: a final answer that quotes `<tool_call>` markup inside
+    /// a fenced code block must never be executed, even when recovery is
+    /// otherwise enabled and tools were offered.
+    #[test]
+    fn text_dialect_markup_inside_a_fenced_code_block_is_never_recovered() {
+        let ctx: RunContext<()> = RunContext::new(RunConfig::new("recovery-test"), ());
+        let mut response = ModelResponse::assistant(
+            "Here is the format:\n```\n<tool_call>{\"name\": \"shell\", \"arguments\": {}}</tool_call>\n```\n",
+        );
+
+        recover_text_dialect_calls(&ctx, &mut response, &CallId::new("model-1"), true, true);
+
+        assert!(
+            response.message.tool_calls.is_empty(),
+            "markup quoted inside a fenced code block must not become a real call"
+        );
+        assert!(response.text().contains("<tool_call>"));
+    }
+
+    /// Sanity check for the fenced-code-block guard: markup outside any fence
+    /// is still recovered when the policy and tool offer both allow it.
+    #[test]
+    fn text_dialect_markup_outside_a_fenced_code_block_is_recovered() {
+        let ctx: RunContext<()> = RunContext::new(RunConfig::new("recovery-test"), ());
+        let mut response = ModelResponse::assistant(
+            r#"<tool_call>{"name": "shell", "arguments": {"command": "id"}}</tool_call>"#,
+        );
+
+        recover_text_dialect_calls(&ctx, &mut response, &CallId::new("model-1"), true, true);
+
+        assert_eq!(response.message.tool_calls.len(), 1);
+        assert_eq!(response.message.tool_calls[0].name, "shell");
     }
 }

@@ -55,6 +55,35 @@ fn blueprint_round_trips_through_serde() {
 }
 
 #[test]
+fn blueprint_deserializes_a_stored_shape_missing_newer_fields() {
+    // M5: every `Blueprint`/`NodeSpec` field is `#[serde(default)]`, and
+    // `schema_version` defaults to 1, so a blueprint stored before either
+    // field existed (missing `schema_version`, missing `model`/`tools` on a
+    // node) still deserializes instead of failing.
+    let stored = serde_json::json!({
+        "graph_id": "g",
+        "start": "a",
+        "nodes": [
+            { "name": "a", "kind": "model", "routing": { "kind": "terminal" } }
+        ]
+    });
+    let bp: crate::types::Blueprint = serde_json::from_value(stored).unwrap();
+    assert_eq!(bp.schema_version, 1);
+    assert_eq!(bp.nodes[0].model, None);
+    assert!(bp.nodes[0].tools.is_empty());
+    assert_eq!(bp.channels, Vec::new());
+}
+
+#[test]
+fn router_item_folds_into_model_at_compile_time() {
+    // M4: `router "name"` is the dedicated item; `NodeSpec` keeps using
+    // `model` (unchanged shape) once compiled.
+    let src = r#"graph g { start a node a { kind router router "classify" next END } }"#;
+    let bp = compile(&parse_str(src).unwrap()).unwrap().remove(0);
+    assert_eq!(bp.nodes[0].model.as_deref(), Some("classify"));
+}
+
+#[test]
 fn missing_start_is_a_compile_error() {
     let src = "graph g { node a { kind model } }";
     let err = compile(&parse_str(src).unwrap()).unwrap_err();

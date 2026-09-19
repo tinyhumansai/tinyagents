@@ -81,17 +81,21 @@ carrier only.
 
 ## Error Policy
 
-```rust
-pub enum StructuredOutputErrorPolicy {
-    ReturnError,
-    RetryWithDefaultMessage,
-    RetryWithMessage(String),
-    RetryWithFormatter(Arc<dyn StructuredErrorFormatter>),
-}
-```
-
-Validation retries must count against model-call limits and retry budgets. Every
-retry should emit an event containing the schema name, error kind, and attempt.
+**Planned (see [`docs/runtime-comparison/plan.md`](../../runtime-comparison/plan.md)
+Phase 2, "Output-validation retry loop").** No `StructuredOutputErrorPolicy`
+type, retry loop, or structured-output retry events exist yet. What exists
+today is one-shot extraction: `StructuredExtractor::extract(&response)`
+(`crates/tinyagents-harness/src/structured/mod.rs`) parses and validates a
+single completed `ModelResponse` and returns `Result<StructuredOutput>` —
+climbing a local repair ladder (code fence, prose slice, relaxed JSON,
+truncation close) and validating against the declared schema, but never
+re-asking the model. `StructuredExtractor::extract_outcome` is the
+non-fatal sibling: it returns a `StructuredOutcome` recording a failure as
+data instead of an `Err`, so a caller can inspect and decide what to do, but
+it still does not issue another model call. The planned retry loop
+(`OutputRetryPolicy`, `OutputValidator`, `AgentEvent::OutputRetry`,
+`run.structured_as::<T>()`) would add that re-ask behavior on top of this
+one-shot extractor.
 
 ## Return Shape
 

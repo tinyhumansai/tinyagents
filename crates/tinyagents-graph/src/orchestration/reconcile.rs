@@ -141,7 +141,7 @@ pub fn reconcile_orphaned_tasks(
         };
 
         if let ReconcileOutcome::Error(detail) = &outcome {
-            tinyagents_tracing::warn!(
+            tracing::warn!(
                 task_id = %task_id.as_str(),
                 prior_status = task_status_label(prior_status),
                 error = %detail,

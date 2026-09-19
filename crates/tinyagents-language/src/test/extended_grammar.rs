@@ -45,7 +45,7 @@ graph orchestrator {
   node fanout {
     kind model
     sends [
-      send worker_a "split_a"
+      send worker_a "split_a",
       send worker_b "split_b"
     ]
     next worker_a

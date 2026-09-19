@@ -20,7 +20,7 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run --example resilient_graph
+//! cargo run -p tinyagents-integration-tests --example resilient_graph
 //! ```
 
 use std::sync::Arc;

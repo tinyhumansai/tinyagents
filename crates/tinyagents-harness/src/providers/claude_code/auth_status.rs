@@ -159,7 +159,7 @@ pub fn parse_auth_status_json(raw: &str) -> AuthSource {
 /// `OPENHUMAN_CLAUDE_CLI` override via [`version_check::resolve_binary`].
 fn probe_via_cli() -> AuthSource {
     let Some(bin) = version_check::resolve_binary() else {
-        log::debug!("[claude-code][auth] no `claude` binary on PATH; auth state unknown");
+        tracing::debug!("[claude-code][auth] no `claude` binary on PATH; auth state unknown");
         return AuthSource::Unknown {
             reason: Some("`claude` CLI not found on PATH".to_string()),
         };
@@ -176,7 +176,7 @@ fn probe_via_cli() -> AuthSource {
     {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("[claude-code][auth] spawn failed bin={bin_str} err={e}");
+            tracing::warn!("[claude-code][auth] spawn failed bin={bin_str} err={e}");
             return AuthSource::Unknown {
                 reason: Some(format!("spawn failed: {e}")),
             };
@@ -189,7 +189,7 @@ fn probe_via_cli() -> AuthSource {
     let status = match child.wait_timeout(AUTH_STATUS_TIMEOUT) {
         Ok(Some(s)) => s,
         Ok(None) => {
-            log::warn!(
+            tracing::warn!(
                 "[claude-code][auth] `claude auth status` timed out after {}s; killing bin={bin_str}",
                 AUTH_STATUS_TIMEOUT.as_secs()
             );
@@ -203,7 +203,7 @@ fn probe_via_cli() -> AuthSource {
             };
         }
         Err(e) => {
-            log::warn!("[claude-code][auth] wait failed bin={bin_str} err={e}");
+            tracing::warn!("[claude-code][auth] wait failed bin={bin_str} err={e}");
             let _ = child.kill();
             let _ = child.wait();
             return AuthSource::Unknown {
@@ -219,7 +219,7 @@ fn probe_via_cli() -> AuthSource {
         if let Some(mut s) = child.stderr.take() {
             let _ = s.read_to_string(&mut stderr);
         }
-        log::debug!(
+        tracing::debug!(
             "[claude-code][auth] `claude auth status` exit={} stderr={}",
             status,
             stderr.trim()
@@ -234,7 +234,7 @@ fn probe_via_cli() -> AuthSource {
         let _ = s.read_to_string(&mut stdout);
     }
     let source = parse_auth_status_json(stdout.trim());
-    log::debug!(
+    tracing::debug!(
         "[claude-code][auth] probe classified source={}",
         match &source {
             AuthSource::Subscription { .. } => "subscription",
@@ -258,7 +258,7 @@ pub fn probe() -> AuthStatus {
     if let Ok(k) = std::env::var("ANTHROPIC_API_KEY")
         && !k.trim().is_empty()
     {
-        log::debug!("[claude-code][auth] ANTHROPIC_API_KEY present → api_key_env");
+        tracing::debug!("[claude-code][auth] ANTHROPIC_API_KEY present → api_key_env");
         return AuthStatus {
             source: AuthSource::ApiKeyEnv,
             last_checked,

@@ -26,6 +26,23 @@ working unchanged.
 `to` activates only once *all* of its registered predecessors have completed,
 even across supersteps.
 
+`add_edge`/`add_waiting_edge` accumulate: calling `add_edge("a", "b")` then
+`add_edge("a", "c")` schedules **both** `b` and `c` as static fan-out targets
+of `a` (deduplicated — adding the same edge twice does not schedule the
+target twice), matching the "one or more node names" routing contract. This
+is a change from earlier versions, where a second `add_edge` call from the
+same source silently overwrote the first.
+
+`add_conditional_edges_checked(from, router, all_labels)` is
+`add_conditional_edges` plus an exhaustive `all_labels` list tied to the
+router's own return type. `compile()` cross-checks every declared label
+against the node's route table and rejects a mismatch with
+`TinyAgentsError::MissingRoute` **at build time**, instead of only at run
+time when the router happens to return the mistyped label. Plain
+`add_conditional_edges` (no exhaustive label list) still only fails at run
+time, since an opaque closure's possible outputs can't be enumerated ahead of
+time.
+
 Graph defaults are settable in one call:
 
 ```rust

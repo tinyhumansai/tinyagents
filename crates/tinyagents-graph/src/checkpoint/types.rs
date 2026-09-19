@@ -14,8 +14,23 @@
 
 use std::fmt;
 
-use crate::command::Interrupt;
-use tinyagents_harness::ids::NodeId;
+use crate::command::{Interrupt, RouteTarget};
+use tinyagents_harness::ids::{NodeId, TaskId};
+
+/// Default value for a `TaskId` field carrying `#[serde(default = "..")]`:
+/// `TaskId` is a foreign newtype (from `tinyagents_harness`), so it cannot
+/// implement `Default` here (orphan rule) — this free function stands in for
+/// it. An empty task id is exactly what a checkpoint written before task
+/// identities existed decodes to.
+fn empty_task_id() -> TaskId {
+    TaskId::from(String::new())
+}
+
+/// `#[serde(skip_serializing_if = "..")]` predicate pairing with
+/// [`empty_task_id`].
+fn task_id_is_empty(id: &TaskId) -> bool {
+    id.as_str().is_empty()
+}
 
 /// Why a checkpoint was written.
 ///
@@ -169,6 +184,21 @@ pub struct Checkpoint<State> {
     pub next_nodes: Vec<NodeId>,
     /// Nodes that completed in the step that produced this checkpoint.
     pub completed_tasks: Vec<NodeId>,
+    /// The explicit `Command::goto` routing each entry of
+    /// [`completed_tasks`](Self::completed_tasks) returned, positionally
+    /// aligned with it (index `i` here is `completed_tasks[i]`'s routing).
+    ///
+    /// A carried-forward completed sibling's routing is otherwise re-resolved
+    /// via static/conditional edges only once its step finally routes (see
+    /// `compiled::boundary::advance`'s `carried_completed` handling) — this
+    /// is what lets an explicit `goto` survive that round trip. An empty
+    /// inner `Vec` means "no explicit goto; use static/conditional edges",
+    /// matching a node that never returned a `Command::goto`.
+    /// `#[serde(default)]` keeps checkpoints written before this field
+    /// existed loadable: they decode to an empty `Vec`, which the resume
+    /// path pads with empty routing (the pre-field behavior).
+    #[serde(default)]
+    pub completed_routes: Vec<Vec<RouteTarget>>,
     /// Per-task partial writes preserved when a step partially completes.
     pub pending_writes: Vec<PendingWrite>,
     /// Interrupts that paused the run at this boundary.
@@ -213,9 +243,11 @@ pub struct PendingActivation {
     ///
     /// Unlike `node`, this distinguishes repeated `Send` fan-out activations
     /// targeting the same node. Empty on checkpoints written before task
-    /// identities were persisted.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub task_id: String,
+    /// identities were persisted. Serializes transparently as the underlying
+    /// string, so on-disk records are unaffected by the `String` -> `TaskId`
+    /// type change (R5).
+    #[serde(default = "empty_task_id", skip_serializing_if = "task_id_is_empty")]
+    pub task_id: TaskId,
 }
 
 /// The persisted arrivals recorded against one barrier (waiting-edge) join node:
@@ -323,8 +355,8 @@ pub struct PendingWrite {
     /// A plain node id is not enough on its own: a fan-out step runs the same
     /// node several times with different [`Send`](crate::Send) args, and
     /// each of those is a separately resumable task.
-    #[serde(default)]
-    pub task_id: String,
+    #[serde(default = "empty_task_id")]
+    pub task_id: TaskId,
     /// Position of this write within its task's emission order, or one of the
     /// `WRITES_IDX_*` constants for a control-plane write.
     #[serde(default)]
@@ -351,7 +383,7 @@ impl PendingWrite {
     /// Builds an ordinary data write for `task_id` at position `idx`.
     pub fn data(
         node: impl Into<NodeId>,
-        task_id: impl Into<String>,
+        task_id: impl Into<TaskId>,
         idx: i64,
         channel: impl Into<String>,
         payload: serde_json::Value,
@@ -367,7 +399,7 @@ impl PendingWrite {
 
     /// Builds a completion marker: a data write at index `0` whose payload is
     /// `null`, recording only that `task_id` ran to completion.
-    pub fn completion_marker(node: impl Into<NodeId>, task_id: impl Into<String>) -> Self {
+    pub fn completion_marker(node: impl Into<NodeId>, task_id: impl Into<TaskId>) -> Self {
         let node = node.into();
         let channel = node.as_str().to_string();
         Self {

@@ -98,3 +98,78 @@ fn parse_rejects_token_stream_missing_eof_sentinel_instead_of_hanging() {
         other => panic!("expected parse error, got {other:?}"),
     }
 }
+
+#[test]
+fn duplicate_node_item_is_a_parse_error() {
+    // M1: duplicate single-value node items are a diagnostic, not last-wins.
+    let src = r#"graph g { start a node a { model "one" model "two" next END } }"#;
+    let err = parse_str(src).unwrap_err();
+    match err {
+        tinyagents_harness::error::TinyAgentsError::Parse { message, .. } => {
+            assert!(message.contains("duplicate `model`"), "{message}");
+        }
+        other => panic!("expected parse error, got {other:?}"),
+    }
+}
+
+#[test]
+fn duplicate_graph_start_is_a_parse_error() {
+    let src = "graph g { start a start b node a { next END } }";
+    let err = parse_str(src).unwrap_err();
+    match err {
+        tinyagents_harness::error::TinyAgentsError::Parse { message, .. } => {
+            assert!(message.contains("duplicate `start`"), "{message}");
+        }
+        other => panic!("expected parse error, got {other:?}"),
+    }
+}
+
+#[test]
+fn prompt_and_system_alias_still_count_as_the_same_duplicate_field() {
+    let src = r#"graph g { start a node a { prompt "one" system "two" next END } }"#;
+    let err = parse_str(src).unwrap_err();
+    match err {
+        tinyagents_harness::error::TinyAgentsError::Parse { message, .. } => {
+            assert!(message.contains("duplicate `prompt`"), "{message}");
+        }
+        other => panic!("expected parse error, got {other:?}"),
+    }
+}
+
+#[test]
+fn sends_block_requires_a_comma_between_entries() {
+    // M2: `sends` now shares the "comma-separated, optional trailing comma"
+    // rule with `parse_ident_list`/`parse_string_list`, instead of making the
+    // separator optional even between entries.
+    let src = r#"graph g { start a node a { sends [ send b "x" send c "y" ] next END } node b { next END } node c { next END } }"#;
+    assert!(parse_str(src).is_err());
+
+    let with_comma = r#"graph g { start a node a { sends [ send b "x", send c "y" ] next END } node b { next END } node c { next END } }"#;
+    assert!(parse_str(with_comma).is_ok());
+
+    // A trailing comma after the last entry is still allowed.
+    let trailing =
+        r#"graph g { start a node a { sends [ send b "x", ] next END } node b { next END } }"#;
+    assert!(parse_str(trailing).is_ok());
+}
+
+#[test]
+fn parses_a_dedicated_router_item() {
+    // M4: `router "name"` is a dedicated item, parallel to `agent`/`graph`/`script`.
+    let src = r#"graph g { start a node a { kind router router "classify" } }"#;
+    let program = parse_str(src).unwrap();
+    let node = &program.graphs[0].nodes[0];
+    assert_eq!(node.router.as_deref(), Some("classify"));
+    assert!(node.model.is_none());
+}
+
+#[test]
+fn parses_true_and_false_as_boolean_literals() {
+    // M9: `Literal::Bool`, not `Literal::Ident("true"/"false")`.
+    let src = "graph g { start a defaults { streaming true retryable false } node a { next END } }";
+    let program = parse_str(src).unwrap();
+    let defaults = &program.graphs[0].defaults;
+    assert_eq!(defaults[0], ("streaming".to_string(), Literal::Bool(true)));
+    assert_eq!(defaults[1], ("retryable".to_string(), Literal::Bool(false)));
+    assert_eq!(Literal::Bool(true).as_display(), "true");
+}

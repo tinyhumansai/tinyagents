@@ -98,7 +98,7 @@ pub fn trim_messages_with(
 
     let mut result = retained_system;
     result.extend(retained);
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "[summarization::trim] strategy={strategy:?} input={} retained={}",
         messages.len(),
         result.len()

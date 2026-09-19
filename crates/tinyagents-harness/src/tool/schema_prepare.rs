@@ -151,7 +151,7 @@ fn empty_object_schema() -> Value {
 /// unambiguously what it meant.
 pub fn normalize_parameters(parameters: &Value) -> Value {
     let Some(object) = parameters.as_object() else {
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "[tool::schema] non-object tool parameters ({}) replaced with an empty object schema",
             parameters_kind(parameters)
         );
@@ -285,7 +285,7 @@ pub fn prepare_tool_schema(schema: &ToolSchema, preparation: &SchemaPreparation)
     } else {
         compact_tool_schema(&cleaned, &preparation.compaction)
     };
-    tinyagents_tracing::trace!(
+    tracing::trace!(
         "[tool::schema] prepared `{}` for {:?} (strict={})",
         schema.name,
         preparation.strategy,
@@ -299,7 +299,7 @@ pub fn prepare_tool_schemas(
     schemas: &[ToolSchema],
     preparation: &SchemaPreparation,
 ) -> Vec<ToolSchema> {
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "[tool::schema] preparing {} tool declaration(s) for {:?} (strict={})",
         schemas.len(),
         preparation.strategy,

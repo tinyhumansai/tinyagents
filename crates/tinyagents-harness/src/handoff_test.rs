@@ -68,7 +68,15 @@ fn eviction_is_fifo_and_bounded() {
 #[test]
 fn a_small_result_passes_through_untouched_and_is_not_cached() {
     let c = cache();
-    let out = apply_handoff(&c, "search", "task-1", "agent-1", "small".to_string(), 10);
+    let out = apply_handoff(
+        &c,
+        &HandoffConfig::default(),
+        "search",
+        "task-1",
+        "agent-1",
+        "small".to_string(),
+        10,
+    );
     assert_eq!(out, "small");
     assert!(
         c.get("res_1").is_none(),
@@ -80,7 +88,15 @@ fn a_small_result_passes_through_untouched_and_is_not_cached() {
 fn an_oversized_result_is_stashed_and_replaced_by_a_placeholder() {
     let c = cache();
     let raw = big(4_000); // ~1000 tokens at the 4-chars/token heuristic
-    let out = apply_handoff(&c, "gmail_list", "task-1", "agent-1", raw.clone(), 10);
+    let out = apply_handoff(
+        &c,
+        &HandoffConfig::default(),
+        "gmail_list",
+        "task-1",
+        "agent-1",
+        raw.clone(),
+        10,
+    );
 
     assert_ne!(out, raw, "the raw payload must not reach history");
     assert!(out.contains("oversized tool output"));
@@ -105,8 +121,24 @@ fn the_threshold_is_honoured_in_both_directions() {
     // Same payload, two thresholds: this is the parameter that replaced the
     // env-var backdoor, so it has to actually decide the outcome.
     let raw = big(400); // ~100 tokens
-    let below = apply_handoff(&cache(), "t", "task", "agent", raw.clone(), 10);
-    let above = apply_handoff(&cache(), "t", "task", "agent", raw.clone(), 10_000);
+    let below = apply_handoff(
+        &cache(),
+        &HandoffConfig::default(),
+        "t",
+        "task",
+        "agent",
+        raw.clone(),
+        10,
+    );
+    let above = apply_handoff(
+        &cache(),
+        &HandoffConfig::default(),
+        "t",
+        "task",
+        "agent",
+        raw.clone(),
+        10_000,
+    );
     assert!(below.contains("oversized tool output"));
     assert_eq!(above, raw);
 }
@@ -117,8 +149,71 @@ fn an_error_result_passes_through_however_large() {
     // behind an extraction call would hide the failure it needs to react to.
     let c = cache();
     let err = format!("Error: {}", big(8_000));
-    let out = apply_handoff(&c, "gmail_list", "task", "agent", err.clone(), 1);
+    let out = apply_handoff(
+        &c,
+        &HandoffConfig::default(),
+        "gmail_list",
+        "task",
+        "agent",
+        err.clone(),
+        1,
+    );
     assert_eq!(out, err);
+}
+
+/// M-9 regression: the extractor tool name and the "already an error"
+/// prefix used to be hardcoded (`extract_from_result`, a bare
+/// `starts_with("Error")`). A host with different conventions must be able
+/// to configure both instead of forking the module.
+#[test]
+fn a_host_can_configure_its_own_extractor_name_and_error_prefix() {
+    let config = HandoffConfig {
+        extractor_tool_name: "fetch_full_result".to_string(),
+        error_prefixes: vec!["FAILED:".to_string()],
+    };
+
+    // The custom extractor's own output is never re-stashed.
+    let c = cache();
+    let raw = big(8_000);
+    let out = apply_handoff(
+        &c,
+        &config,
+        "fetch_full_result",
+        "task",
+        "agent",
+        raw.clone(),
+        1,
+    );
+    assert_eq!(out, raw);
+
+    // A result whose custom error prefix matches passes through unstashed,
+    // even though it does not start with the historical "Error".
+    let c = cache();
+    let err = format!("FAILED: {}", big(8_000));
+    let out = apply_handoff(&c, &config, "gmail_list", "task", "agent", err.clone(), 1);
+    assert_eq!(out, err);
+
+    // A result starting with the *historical* "Error" prefix is NOT treated
+    // as an error under this custom config, and is stashed like any other
+    // oversized payload — the heuristic is fully replaced, not merged.
+    let c = cache();
+    let historical_error = format!("Error: {}", big(8_000));
+    let out = apply_handoff(
+        &c,
+        &config,
+        "gmail_list",
+        "task",
+        "agent",
+        historical_error.clone(),
+        1,
+    );
+    assert_ne!(out, historical_error);
+    assert!(out.contains("oversized tool output"));
+
+    // The placeholder advertises the configured extractor tool name.
+    let placeholder = build_handoff_placeholder(&config, "gmail_list", "res_1", "payload");
+    assert!(placeholder.contains("fetch_full_result"));
+    assert!(!placeholder.contains("extract_from_result"));
 }
 
 #[test]
@@ -128,7 +223,15 @@ fn an_extraction_result_is_never_re_stashed() {
     // model another placeholder — a loop that never converges.
     let c = cache();
     let raw = big(8_000);
-    let out = apply_handoff(&c, "extract_from_result", "task", "agent", raw.clone(), 1);
+    let out = apply_handoff(
+        &c,
+        &HandoffConfig::default(),
+        "extract_from_result",
+        "task",
+        "agent",
+        raw.clone(),
+        1,
+    );
     assert_eq!(out, raw);
 }
 
@@ -137,7 +240,7 @@ fn an_extraction_result_is_never_re_stashed() {
 #[test]
 fn the_placeholder_reports_size_and_previews_the_head() {
     let raw = format!("HEAD-MARKER{}", big(5_000));
-    let text = build_handoff_placeholder("gmail_list", "res_1", &raw);
+    let text = build_handoff_placeholder(&HandoffConfig::default(), "gmail_list", "res_1", &raw);
 
     assert!(text.contains("res_1"));
     assert!(text.contains("gmail_list"));
@@ -157,7 +260,7 @@ fn the_placeholder_reports_size_and_previews_the_head() {
 
 #[test]
 fn a_short_payload_previews_whole_without_padding() {
-    let text = build_handoff_placeholder("t", "res_1", "tiny");
+    let text = build_handoff_placeholder(&HandoffConfig::default(), "t", "res_1", "tiny");
     assert!(text.contains("tiny"));
     // The preview length is reported to the model; claiming the full budget
     // for a 4-char payload would misdescribe what it is looking at.
@@ -167,7 +270,7 @@ fn a_short_payload_previews_whole_without_padding() {
 #[test]
 fn the_preview_is_capped_for_a_large_payload() {
     let raw = big(HANDOFF_PREVIEW_CHARS * 4);
-    let text = build_handoff_placeholder("t", "res_1", &raw);
+    let text = build_handoff_placeholder(&HandoffConfig::default(), "t", "res_1", &raw);
     assert!(text.contains(&format!("first {HANDOFF_PREVIEW_CHARS} chars")));
 }
 
@@ -176,6 +279,6 @@ fn the_preview_never_splits_a_multibyte_character() {
     // Taken by chars, not bytes — a byte-indexed cut here would panic rather
     // than merely misformat.
     let raw = "é".repeat(HANDOFF_PREVIEW_CHARS * 2);
-    let text = build_handoff_placeholder("t", "res_1", &raw);
+    let text = build_handoff_placeholder(&HandoffConfig::default(), "t", "res_1", &raw);
     assert!(text.is_char_boundary(text.len()));
 }

@@ -11,11 +11,37 @@
 
 use std::collections::HashSet;
 
+use crate::diagnostic::{Diagnostic, into_diagnostics_error};
+use crate::span::Span;
 use crate::types::Blueprint;
 use tinyagents_harness::error::{Result, TinyAgentsError};
 // ===========================================================================
 // Capability binding
 // ===========================================================================
+
+// Stable diagnostic codes for capability-binding failures. Canonical home for
+// these codes: `crate::resolver::Resolver` re-exports/reuses them so the
+// spanned (AST-level) and spanless (blueprint-level) binding gates report the
+// same codes for the same mistake.
+pub(crate) const CODE_UNKNOWN_MODEL: &str = "E-rag-unknown-model";
+pub(crate) const CODE_UNKNOWN_TOOL: &str = "E-rag-unknown-tool";
+pub(crate) const CODE_UNKNOWN_SUBGRAPH: &str = "E-rag-unknown-subgraph";
+pub(crate) const CODE_UNKNOWN_ROUTER: &str = "E-rag-unknown-router";
+pub(crate) const CODE_UNKNOWN_AGENT: &str = "E-rag-unknown-agent";
+pub(crate) const CODE_UNKNOWN_SCRIPT: &str = "E-rag-unknown-script";
+pub(crate) const CODE_UNKNOWN_REDUCER: &str = "E-rag-unknown-reducer";
+pub(crate) const CODE_INVALID_NODE_KIND: &str = "E-rag-invalid-node-kind";
+
+/// Maps a [`ReferenceClass`] to its stable diagnostic code.
+pub(crate) fn code_for(class: ReferenceClass) -> &'static str {
+    match class {
+        ReferenceClass::Model => CODE_UNKNOWN_MODEL,
+        ReferenceClass::Subgraph => CODE_UNKNOWN_SUBGRAPH,
+        ReferenceClass::Router => CODE_UNKNOWN_ROUTER,
+        ReferenceClass::Agent => CODE_UNKNOWN_AGENT,
+        ReferenceClass::Script => CODE_UNKNOWN_SCRIPT,
+    }
+}
 
 /// The node `kind` values the registry-backed binding path recognises.
 ///
@@ -296,6 +322,12 @@ impl CapabilityResolver {
     /// against — or `None` when the node declares no primary reference. The
     /// `subgraph` argument is the caller's already-resolved subgraph target
     /// (the dedicated graph field falling back to the legacy `model` field).
+    /// A `router` node has no dedicated field at this level: a source-level
+    /// `router "name"` item (M4 in
+    /// `docs/runtime-comparison/code-review-workspace.md`) is folded into
+    /// `model` when a [`Blueprint`] is compiled
+    /// (`crate::compiler::compile_graph`), so `model` alone is still correct
+    /// here regardless of which source item produced it.
     ///
     /// Centralising this mapping is what keeps
     /// [`bind_blueprint`](Self::bind_blueprint) and both
@@ -389,18 +421,83 @@ impl CapabilityResolver {
     ///
     /// Returns [`TinyAgentsError::Compile`] for an unknown node kind, and
     /// [`TinyAgentsError::Capability`] for the first unregistered model, tool,
-    /// subgraph, router, agent, script, or reducer reference.
+    /// subgraph, router, agent, script, or reducer reference — the same
+    /// variants and message text this method has always returned, folded from
+    /// the first entry of [`Self::bind_blueprint_diagnostics`]. Callers that
+    /// want every offending reference at once (not just the first) should call
+    /// [`Self::bind_blueprint_diagnostics`] directly, or fold the result
+    /// through [`crate::diagnostic::into_diagnostics_error`] themselves.
     pub fn bind_blueprint(&self, blueprint: &Blueprint) -> Result<()> {
+        let diagnostics = self.bind_blueprint_diagnostics(blueprint);
+        match diagnostics.into_iter().next() {
+            None => Ok(()),
+            Some(first) if first.code.as_deref() == Some(CODE_INVALID_NODE_KIND) => {
+                Err(TinyAgentsError::Compile(first.message))
+            }
+            Some(first) => Err(TinyAgentsError::Capability(first.message)),
+        }
+    }
+
+    /// Runs the same checks as [`bind_blueprint`](Self::bind_blueprint), but
+    /// returns [`TinyAgentsError::Diagnostics`] carrying *every* offending
+    /// reference and node kind at once instead of folding to just the first.
+    ///
+    /// Prefer this over [`bind_blueprint`](Self::bind_blueprint) for a
+    /// self-authored plan a model may revise repeatedly: reporting every
+    /// problem in one pass lets the model fix them all before recompiling,
+    /// instead of playing error whack-a-mole one fix per attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TinyAgentsError::Diagnostics`] (never empty) if any reference
+    /// or node kind fails to resolve.
+    pub fn bind_blueprint_all(&self, blueprint: &Blueprint) -> Result<()> {
+        let diagnostics = self.bind_blueprint_diagnostics(blueprint);
+        if diagnostics.is_empty() {
+            Ok(())
+        } else {
+            Err(into_diagnostics_error(diagnostics, None))
+        }
+    }
+
+    /// Runs the same checks as [`bind_blueprint`](Self::bind_blueprint), but
+    /// collects *every* offending reference and node kind instead of stopping
+    /// at the first, so a caller (or `bind_blueprint`/`bind_blueprint_all`
+    /// themselves) can surface them together.
+    ///
+    /// An empty result means every reference resolves and every node kind is
+    /// allowed.
+    pub fn bind_blueprint_diagnostics(&self, blueprint: &Blueprint) -> Vec<Diagnostic> {
+        let span_for = |name: &str| -> Span {
+            blueprint
+                .provenance()
+                .and_then(|p| p.node_span(name))
+                .unwrap_or_else(|| Span::new(0, 0))
+        };
+        let mut out = Vec::new();
+
         for node in &blueprint.nodes {
             if !self.node_kind_allowed(&node.kind) {
-                return Err(TinyAgentsError::Compile(format!(
-                    "node `{}` has unknown kind `{}`",
-                    node.name, node.kind
-                )));
+                out.push(
+                    Diagnostic::error(
+                        format!("node `{}` has unknown kind `{}`", node.name, node.kind),
+                        span_for(&node.name),
+                    )
+                    .with_code(CODE_INVALID_NODE_KIND)
+                    .with_primary_label("not an allowed node kind"),
+                );
+                // The kind drives which reference is checked below; an
+                // unknown kind falls through to a model check, mirroring the
+                // compiler default, so the loop still validates whatever
+                // reference the node otherwise carries instead of skipping it.
             }
 
-            // Prefer the dedicated `graph "name"` reference, falling back to the
-            // legacy `model` field for back-compatibility.
+            // Prefer the dedicated `graph "name"` reference, falling back to
+            // the legacy `model` field for back-compatibility. (A `router`
+            // node has no dedicated field at the `NodeSpec` level; a
+            // source-level `router "name"` item is already folded into
+            // `model` by `crate::compiler::compile_graph` — see
+            // `classify_reference`'s docs.)
             let subgraph_target = node.subgraph.as_deref().or(node.model.as_deref());
             if let Some(reference) = Self::classify_reference(
                 &node.kind,
@@ -410,12 +507,22 @@ impl CapabilityResolver {
                 node.script.as_deref(),
             ) && !self.reference_allowed(reference.class, reference.target)
             {
-                return Err(TinyAgentsError::Capability(format!(
-                    "node `{}` references unknown {} `{}`",
-                    node.name,
-                    reference.class.word(),
-                    reference.target
-                )));
+                out.push(
+                    Diagnostic::error(
+                        format!(
+                            "node `{}` references unknown {} `{}`",
+                            node.name,
+                            reference.class.word(),
+                            reference.target
+                        ),
+                        span_for(&node.name),
+                    )
+                    .with_code(code_for(reference.class))
+                    .with_primary_label(format!(
+                        "{} not registered or not allowed",
+                        reference.class.word()
+                    )),
+                );
             }
 
             if let Some(model) = Self::secondary_model_reference(
@@ -424,32 +531,50 @@ impl CapabilityResolver {
                 node.subgraph.is_some(),
             ) && !self.model_allowed(model)
             {
-                return Err(TinyAgentsError::Capability(format!(
-                    "node `{}` references unknown model `{}`",
-                    node.name, model
-                )));
+                out.push(
+                    Diagnostic::error(
+                        format!("node `{}` references unknown model `{}`", node.name, model),
+                        span_for(&node.name),
+                    )
+                    .with_code(CODE_UNKNOWN_MODEL)
+                    .with_primary_label("model not registered or not allowed"),
+                );
             }
 
             for tool in &node.tools {
                 if !self.tool_allowed(tool) {
-                    return Err(TinyAgentsError::Capability(format!(
-                        "node `{}` references unknown tool `{tool}`",
-                        node.name
-                    )));
+                    out.push(
+                        Diagnostic::error(
+                            format!("node `{}` references unknown tool `{tool}`", node.name),
+                            span_for(&node.name),
+                        )
+                        .with_code(CODE_UNKNOWN_TOOL)
+                        .with_primary_label("tool not registered or not allowed"),
+                    );
                 }
             }
         }
 
         for channel in &blueprint.channels {
             if !self.reducer_allowed(&channel.reducer) {
-                return Err(TinyAgentsError::Capability(format!(
-                    "channel `{}` references unknown reducer `{}`",
-                    channel.name, channel.reducer
-                )));
+                out.push(
+                    Diagnostic::error(
+                        format!(
+                            "channel `{}` references unknown reducer `{}`",
+                            channel.name, channel.reducer
+                        ),
+                        blueprint
+                            .provenance()
+                            .and_then(|p| p.channel_span(&channel.name))
+                            .unwrap_or_else(|| Span::new(0, 0)),
+                    )
+                    .with_code(CODE_UNKNOWN_REDUCER)
+                    .with_primary_label("reducer not registered or not allowed"),
+                );
             }
         }
 
-        Ok(())
+        out
     }
 }
 

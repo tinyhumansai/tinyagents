@@ -257,7 +257,7 @@ impl StructuredExtractor {
             },
             Err(error) => {
                 let error = error.to_string();
-                tinyagents_tracing::debug!(
+                tracing::debug!(
                     "[structured] extraction failed for schema '{}': {error}",
                     self.schema_name
                 );
@@ -323,7 +323,7 @@ impl StructuredExtractor {
             )));
         };
         if repair.is_repaired() {
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 "[structured] schema '{}': recovered the value with repair `{}`",
                 self.schema_name,
                 repair.as_str()
@@ -359,7 +359,7 @@ impl StructuredExtractor {
             && let Some((value, repair)) = repair::parse_lenient(raw)
         {
             if repair.is_repaired() {
-                tinyagents_tracing::debug!(
+                tracing::debug!(
                     "[structured] schema '{}': recovered tool-call arguments with repair `{}`",
                     self.schema_name,
                     repair.as_str()

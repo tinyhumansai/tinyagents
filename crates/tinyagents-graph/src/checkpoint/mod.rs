@@ -126,8 +126,9 @@ where
     /// returned (last-write-wins, consistent with [`Checkpointer::get`]).
     ///
     /// Composed from [`Checkpointer::list`] + [`Checkpointer::get`] so every
-    /// backend inherits it; override for a cheaper scoped query — both durable
-    /// backends do, because the default costs a full thread scan per call and
+    /// backend inherits it; override for a cheaper scoped query — both
+    /// [`FileCheckpointer`] and [`SqliteCheckpointer`](crate::SqliteCheckpointer)
+    /// do, because the default costs a full thread scan per call and
     /// [`Checkpointer::state_history`] issues one per lineage hop.
     async fn get_scoped(
         &self,
@@ -186,6 +187,35 @@ where
         Ok(())
     }
 
+    /// Persists `checkpoint` and its `writes` together, at a superstep
+    /// boundary where both are produced at once.
+    ///
+    /// The default body is composed from [`Checkpointer::put`] followed by
+    /// [`Checkpointer::put_writes`] — two independent calls, so a crash
+    /// between them can leave the checkpoint durable with its writes lost.
+    /// That is no worse than calling the two methods separately (which is
+    /// what every caller did before this method existed), so every backend
+    /// keeps compiling and behaving exactly as before without overriding it.
+    ///
+    /// A backend that can share one transaction across both statements
+    /// should override this to do so — [`SqliteCheckpointer`] does, so a
+    /// crash between the two writes is impossible rather than merely
+    /// unlikely: either both are durable or neither is.
+    async fn put_with_writes(
+        &self,
+        checkpoint: Checkpoint<State>,
+        writes: &[PendingWrite],
+    ) -> Result<CheckpointId> {
+        let config = CheckpointConfig {
+            thread_id: checkpoint.thread_id.clone(),
+            checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
+            namespace: checkpoint.namespace.clone(),
+        };
+        let id = self.put(checkpoint).await?;
+        self.put_writes(&config, writes).await?;
+        Ok(id)
+    }
+
     /// Reads back the writes recorded against the checkpoint addressed by
     /// `config`, in insertion order.
     ///
@@ -196,6 +226,60 @@ where
     /// The default body returns an empty vec.
     async fn get_writes(&self, _config: &CheckpointConfig) -> Result<Vec<PendingWrite>> {
         Ok(Vec::new())
+    }
+
+    // ---- Thread execution lease (C3/R4) ------------------------------------
+    //
+    // The durable half of the per-thread execution lock. The executor
+    // (`compiled::executor::execute`) already holds an in-process
+    // `ThreadLockMap` guard for a run's whole lifetime, which is sufficient
+    // to serialize concurrent calls *within one process*. This lease closes
+    // the cross-process gap: two different processes (or two restarts of the
+    // same host) racing `run_with_thread`/`resume` on the same thread id
+    // have no shared in-process lock to serialize on. A backend that
+    // implements this lets a dead owner's lease be reclaimed once it expires
+    // instead of stranding the thread forever, while a live owner's lease
+    // refuses a competing claim.
+    //
+    // Every method carries a default no-op body so an out-of-tree
+    // `Checkpointer` (and the in-memory backend, which has no cross-process
+    // audience to protect against) keeps compiling and behaves exactly as it
+    // did before this lease existed — `try_claim` always succeeds.
+
+    /// Attempts to claim the execution lease for `thread`, naming `owner`
+    /// (the run id) and expiring after `ttl`.
+    ///
+    /// Returns `Ok(true)` when the lease is unclaimed, already expired, or
+    /// already held by `owner` (idempotent re-claim); `Ok(false)` when a
+    /// different owner holds a still-live lease.
+    ///
+    /// The default body always returns `Ok(true)`.
+    async fn try_claim(
+        &self,
+        _thread: &str,
+        _owner: &str,
+        _ttl: std::time::Duration,
+    ) -> Result<bool> {
+        Ok(true)
+    }
+
+    /// Extends `owner`'s already-held lease on `thread` by `ttl` from now.
+    ///
+    /// Returns `Ok(false)` when `owner` does not currently hold the lease
+    /// (it expired and was reclaimed, or was never claimed).
+    ///
+    /// The default body always returns `Ok(true)`.
+    async fn renew(&self, _thread: &str, _owner: &str, _ttl: std::time::Duration) -> Result<bool> {
+        Ok(true)
+    }
+
+    /// Releases `owner`'s lease on `thread`, when it holds one.
+    ///
+    /// A no-op (not an error) when `owner` does not hold the lease.
+    ///
+    /// The default body is a no-op.
+    async fn release(&self, _thread: &str, _owner: &str) -> Result<()> {
+        Ok(())
     }
 
     /// Resolves the checkpoint id a **read** of writes addresses.
@@ -346,7 +430,7 @@ where
                 break;
             };
             if !visited.insert(tuple.checkpoint.checkpoint_id.clone()) {
-                tinyagents_tracing::warn!(
+                tracing::warn!(
                     "[checkpoint] state_history: lineage cycle at checkpoint `{}` \
                      (thread `{thread_id}`); truncating the walk",
                     tuple.checkpoint.checkpoint_id
@@ -688,7 +772,7 @@ where
         let mut map = self.writes.lock().map_err(|_| lock_err())?;
         let slot = map.entry(key).or_default();
         let changed = merge_writes(slot, writes);
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "[checkpoint:memory] put_writes thread={} checkpoint={:?} offered={} stored={}",
             config.thread_id,
             config.checkpoint_id,

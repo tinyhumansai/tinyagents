@@ -52,10 +52,26 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo test
+        run: cargo test --workspace
+
+      # TODO: drop `continue-on-error` once the existing ~160 broken
+      # intra-doc link warnings across the workspace are fixed and this can
+      # block merges instead of only reporting.
+      - name: Doc lints
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+        run: cargo doc --workspace --no-deps
+        continue-on-error: true
+
+      # TODO: drop `continue-on-error` once the existing unused-dependency
+      # findings across the workspace are cleaned up and this can block
+      # merges instead of only reporting.
+      - name: Unused dependencies
+        uses: bnjbvr/cargo-machete@main
+        continue-on-error: true
 
       - name: Compute next version
         id: version

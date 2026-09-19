@@ -4,6 +4,17 @@
 //! the queued payload. TinyAgents owns the reusable FIFO mechanics for the
 //! three lanes an agent runtime can consume at safe iteration boundaries:
 //! immediate steering, deferred follow-up work, and collected context.
+//!
+//! # Not on the agent loop path (M-10)
+//!
+//! [`RunQueue`] is exported for hosts to use, but the built-in
+//! [`crate::agent_loop`] does not drain it at any checkpoint today — a host
+//! that wants queued input to actually reach a running agent must poll
+//! `RunQueue` itself (typically between turns) and feed what it dequeues into
+//! [`crate::steering::SteeringHandle::send`] or the next `invoke` call. Wiring
+//! `RunQueue` directly into the loop (a `QueueMode` the loop drains after tool
+//! results and before returning) is tracked as future work in the runtime
+//! comparison plan's Phase 2.
 
 mod types;
 

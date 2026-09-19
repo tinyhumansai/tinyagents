@@ -5,20 +5,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 description = "Host-neutral composition primitives for TinyAgents work."
 
 [dependencies]
-anyhow = "1"
-async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
 parking_lot = "0.12"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 tinyagents-graph = { path = "../tinyagents-graph", version = "2.1.2", default-features = false }
 tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.2", default-features = false }
 tinyagents-session = { path = "../tinyagents-session", version = "2.1.2", default-features = false }
-tokio = { version = "1", default-features = false, features = ["sync", "rt", "macros"] }
-uuid = { version = "1", features = ["v4"] }
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
+uuid = { workspace = true }
 
 [features]
 default = []
@@ -29,8 +30,8 @@ tracing = [
 ]
 
 [dev-dependencies]
-tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, default-features = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

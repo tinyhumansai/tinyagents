@@ -188,6 +188,7 @@ fn record_child_run(ctx: &NodeContext, agent: &str, output: &SubAgentOutput) {
         run_id: RunId::new(format!("subagent-{}", next_seq())),
         root_run_id,
         usage: output.usage,
+        checkpoint_id: None,
     });
 }
 

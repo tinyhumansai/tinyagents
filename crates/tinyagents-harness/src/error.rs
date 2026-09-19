@@ -18,6 +18,7 @@ pub type Result<T> = std::result::Result<T, TinyAgentsError>;
 /// execution, model/tool invocation, run limits and policy, graph durability,
 /// and `.rag` language processing.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum TinyAgentsError {
     /// A graph was compiled or run without a configured `START` edge, so there
     /// is no entry node to begin execution from.
@@ -164,8 +165,25 @@ pub enum TinyAgentsError {
     EmptyResponse,
 
     /// The run exceeded its wall-clock deadline.
+    ///
+    /// Terminal: the run itself is out of time, so retrying or falling back
+    /// to another model would just spin until the next deadline check fails
+    /// identically. See [`TinyAgentsError::CallTimeout`] for the per-call
+    /// counterpart, which *is* retryable.
     #[error("run timed out: {0}")]
     Timeout(String),
+
+    /// A single call (currently: a model call bounded by
+    /// [`crate::limits::RunLimits::max_model_call_ms`]) ran past its own
+    /// ceiling while the run still has wall-clock budget left.
+    ///
+    /// Unlike [`TinyAgentsError::Timeout`], this does not mean the run is out
+    /// of time — it means *this one call* wedged. [`crate::retry::is_retryable`]
+    /// treats it as transient, and the model-resolution retry/fallback loop
+    /// (`invoke_model_resolving`) does not treat it as a reason to skip the
+    /// fallback chain the way it does a run-deadline `Timeout`.
+    #[error("call timed out: {0}")]
+    CallTimeout(String),
 
     /// The run was cancelled before completion.
     #[error("run cancelled")]
@@ -263,6 +281,57 @@ pub enum TinyAgentsError {
     /// underlying driver message.
     #[error("storage error: {0}")]
     Storage(String),
+
+    /// One or more `.rag` language diagnostics, collected together instead of
+    /// stopping at the first offending reference or construct.
+    ///
+    /// The payload is [`RenderedDiagnostic`], not
+    /// `tinyagents_language::Diagnostic`, because `tinyagents-language`
+    /// depends on this crate for [`Result`]/`TinyAgentsError`; holding the
+    /// language crate's structured type here would create an import cycle.
+    /// `tinyagents_language::diagnostic::into_diagnostics_error` builds this
+    /// variant from a `Vec<tinyagents_language::Diagnostic>` by rendering each
+    /// one down to its message, code, and resolved position. Never
+    /// constructed with an empty vector.
+    #[error("{}", render_diagnostics_summary(.0))]
+    Diagnostics(Vec<RenderedDiagnostic>),
+}
+
+/// One `.rag` language diagnostic, rendered to a crate-boundary-safe,
+/// serializable payload for [`TinyAgentsError::Diagnostics`].
+///
+/// See that variant's docs for why this mirrors (rather than reuses)
+/// `tinyagents_language::Diagnostic`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RenderedDiagnostic {
+    /// The diagnostic's stable code (e.g. `E-rag-unknown-model`), if any.
+    pub code: Option<String>,
+    /// The headline message, without source context.
+    pub message: String,
+    /// The 1-based line the diagnostic's primary span begins at.
+    pub line: usize,
+    /// The 1-based column the diagnostic's primary span begins at.
+    pub column: usize,
+    /// The full presentation: the caret-underline rendering against source
+    /// when it was available at construction time, otherwise the
+    /// source-free `message` plus a `-->` position anchor.
+    pub rendered: String,
+}
+
+/// Renders the [`TinyAgentsError::Diagnostics`] `Display` text: the first
+/// diagnostic's full rendering, plus a `(and N more)` suffix when there is
+/// more than one.
+fn render_diagnostics_summary(diagnostics: &[RenderedDiagnostic]) -> String {
+    match diagnostics.split_first() {
+        Some((first, [])) => first.rendered.clone(),
+        Some((first, rest)) => format!(
+            "{} (and {} more diagnostic{})",
+            first.rendered,
+            rest.len(),
+            if rest.len() == 1 { "" } else { "s" }
+        ),
+        None => "no diagnostics".to_string(),
+    }
 }
 
 impl From<tinyinference_llm::Error> for TinyAgentsError {
@@ -306,7 +375,7 @@ impl TinyAgentsError {
         if error.code.as_deref()
             == Some(tinyinference_llm::providers::openai::CONTEXT_OVERFLOW_CODE)
         {
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 "[error] promoting provider `{}` context-overflow code to a typed error",
                 error.provider
             );

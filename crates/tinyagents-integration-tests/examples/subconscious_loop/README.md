@@ -8,7 +8,7 @@ keeping every step deterministic enough for normal `cargo test` coverage.
 Run it with:
 
 ```text
-cargo run --example subconscious_loop
+cargo run -p tinyagents-integration-tests --example subconscious_loop
 ```
 
 Run the integration coverage with:

@@ -14,22 +14,55 @@
 //! `crate::context` directly. Implementations and tests live in the
 //! sibling `mod.rs` and `test.rs`.
 
-use std::any::Any;
-
 use serde::{Deserialize, Serialize};
 
 use crate::cancel::CancellationToken;
 use crate::events::EventSink;
-use crate::ids::{RunId, ThreadId};
+use crate::ids::{CallId, RunId, ThreadId};
 use crate::limits::LimitTracker;
 use crate::steering::SteeringHandle;
 use crate::store::StoreRegistry;
 
-/// One-shot observer invoked with the exact accumulated run when a driver
-/// completes or is dropped. Kept crate-private: it is runtime lifecycle glue,
-/// not a host policy extension point.
+/// One-shot observer invoked with a cheap summary of the accumulated run when
+/// a driver completes or is dropped. Kept crate-private: it is runtime
+/// lifecycle glue, not a host policy extension point.
+///
+/// Takes [`TerminalRunSummary`], not the full [`crate::middleware::AgentRun`]
+/// (M-6): every installed observer only ever reads the final text, usage, and
+/// executed-tool names, never the full transcript, and the observer needs an
+/// *owned* value (the hosted path moves it into a spawned task that can
+/// outlive the caller's stack frame) — so `&AgentRun` will not do either. The
+/// summary is `Clone` and carries none of `AgentRun::messages`, which can be
+/// the largest field by far on a long-running conversation.
 pub(crate) type TerminalObserver =
-    Box<dyn FnOnce(crate::middleware::AgentRun, bool, Option<String>) + Send + Sync + 'static>;
+    Box<dyn FnOnce(TerminalRunSummary, bool, Option<String>) + Send + Sync + 'static>;
+
+/// Cheap, owned summary of an [`crate::middleware::AgentRun`] for
+/// [`TerminalObserver`] — see that type's docs for why this exists instead of
+/// the full run.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TerminalRunSummary {
+    /// The final response text, if the run produced one. Mirrors
+    /// [`crate::middleware::AgentRun::text`].
+    pub(crate) text: Option<String>,
+    /// Cumulative token usage across the run. `Copy`, so cloning this summary
+    /// is not where any cost lives.
+    pub(crate) usage: tinyinference_llm::usage::UsageTotals,
+    /// Names of calls that reached a tool executor, in execution order.
+    /// Mirrors [`crate::middleware::AgentRun::executed_tools`].
+    pub(crate) executed_tools: Vec<String>,
+}
+
+impl TerminalRunSummary {
+    /// Builds a summary from a live run without cloning its transcript.
+    pub(crate) fn from_run(run: &crate::middleware::AgentRun) -> Self {
+        Self {
+            text: run.text(),
+            usage: run.usage,
+            executed_tools: run.executed_tools.clone(),
+        }
+    }
+}
 
 /// The immutable ancestry of a run in a recursive harness invocation tree.
 ///
@@ -264,8 +297,40 @@ pub struct RunContext<Ctx = ()> {
     /// is deliberately not serializable or public: it keeps a hosted parent
     /// from accidentally delegating through a child's unrelated (or absent)
     /// capability bundle.
-    pub(crate) host_authority: Option<std::sync::Arc<dyn Any + Send + Sync>>,
+    ///
+    /// Erased through [`crate::runtime::ErasedHostAuthority`] rather than
+    /// `dyn Any`: the generic explicit-model loop must stay callable with a
+    /// borrowed (non-`'static`) `State`/`Ctx`, and `Any::downcast_ref`
+    /// requires `'static` at the *read* site, which such a caller can never
+    /// prove. The custom trait instead exposes a type-name check that needs
+    /// no `'static` bound on either side; see
+    /// [`crate::runtime::host_invocation_binding`] for how the read side
+    /// uses it to fail closed on a mismatch.
+    pub(crate) host_authority: Option<std::sync::Arc<dyn crate::runtime::ErasedHostAuthority>>,
     /// Runtime-owned terminal lifecycle callback, consumed exactly once by the
     /// agent-loop guard even when the driving future is cancelled or dropped.
     pub(crate) terminal_observer: Option<TerminalObserver>,
+    /// The [`CallId`] the agent loop minted for the model call currently in
+    /// flight through the model-wrap middleware onion, mirroring
+    /// [`crate::events::HarnessRunStatus::active_model_call`].
+    ///
+    /// Set by the loop immediately before invoking
+    /// [`crate::middleware::MiddlewareStack::run_wrapped_model`] and cleared
+    /// right after, so a `ModelMiddleware` such as
+    /// [`crate::middleware::library::RetryMiddleware`] can correlate its own
+    /// `RetryScheduled` events with the same call id the loop uses, instead of
+    /// deriving an uncorrelated one from `ctx.run_id()` alone (see I-7).
+    /// `None` outside that window, and always `None` for a caller that never
+    /// goes through the agent loop.
+    pub active_model_call: Option<CallId>,
+    /// Monotonic, per-context (not process-global) counter handed out by
+    /// [`RunContext::next_child_ordinal`], used to derive deterministic child
+    /// run ids (e.g. [`crate::subagent::SubAgent`]'s `{name}-d{depth}-{parent
+    /// run id}-{ordinal}`) instead of a process-global sequence (M-2). Starts
+    /// at `0` for every freshly constructed context — including a child
+    /// context, which gets its own fresh counter rather than inheriting the
+    /// parent's — so two processes that call the same parent context's child
+    /// spawner in the same order derive identical ordinals, and therefore
+    /// identical child run ids.
+    pub(crate) child_ordinal: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }

@@ -79,6 +79,7 @@ where
             nodes: HashMap::new(),
             edges: HashMap::new(),
             branches: HashMap::new(),
+            route_label_checks: HashMap::new(),
             command_nodes: HashSet::new(),
             waiting: HashMap::new(),
             barrier_reliefs: Vec::new(),
@@ -179,11 +180,9 @@ where
         F: Fn(State, NodeContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<NodeResult<Update>>> + Send + 'static,
     {
-        let id = id.into();
         self.nodes.insert(
-            id.clone(),
+            id.into(),
             BuilderNode {
-                id,
                 handler: Arc::new(move |state, ctx| Box::pin(handler(state, ctx))),
             },
         );
@@ -192,8 +191,14 @@ where
 
     /// Adds a direct edge `from -> to`. Use [`START`]/[`END`] for the virtual
     /// entry/terminal nodes.
+    ///
+    /// Calling this more than once for the same `from` accumulates a static
+    /// **fan-out**: every registered `to` activates (not just the last one
+    /// registered), matching the documented "one or more node names" routing
+    /// contract. Adding the exact same `(from, to)` edge twice is a no-op —
+    /// the target is not scheduled twice.
     pub fn add_edge(mut self, from: impl Into<NodeId>, to: impl Into<NodeId>) -> Self {
-        self.edges.insert(from.into(), to.into());
+        Self::push_edge(&mut self.edges, from.into(), to.into());
         self
     }
 
@@ -208,9 +213,18 @@ where
     {
         let nodes: Vec<NodeId> = nodes.into_iter().map(Into::into).collect();
         for pair in nodes.windows(2) {
-            self.edges.insert(pair[0].clone(), pair[1].clone());
+            Self::push_edge(&mut self.edges, pair[0].clone(), pair[1].clone());
         }
         self
+    }
+
+    /// Appends `to` to `from`'s static successor list, deduplicating so the
+    /// same target is never scheduled twice from one static fan-out.
+    fn push_edge(edges: &mut HashMap<NodeId, Vec<NodeId>>, from: NodeId, to: NodeId) {
+        let targets = edges.entry(from).or_default();
+        if !targets.contains(&to) {
+            targets.push(to);
+        }
     }
 
     /// Adds a barrier/waiting edge `from -> to`: like [`Self::add_edge`] but `to`
@@ -223,7 +237,7 @@ where
     pub fn add_waiting_edge(mut self, from: impl Into<NodeId>, to: impl Into<NodeId>) -> Self {
         let from = from.into();
         let to = to.into();
-        self.edges.insert(from.clone(), to.clone());
+        Self::push_edge(&mut self.edges, from.clone(), to.clone());
         self.waiting.entry(to).or_default().insert(from);
         self
     }
@@ -295,11 +309,70 @@ where
         self.branches.insert(
             from.into(),
             Branch {
-                router: Arc::new(move |state| router(state).to_string()),
+                router: Arc::new(move |state| Route::new(router(state))),
                 routes,
             },
         );
         self
+    }
+
+    /// Like [`Self::add_conditional_edges`], but additionally declares the
+    /// **exhaustive** set of labels `router` can ever return.
+    ///
+    /// [`Self::compile`] (via [`Self::validate_routes`]) cross-checks
+    /// `all_labels` against `routes`'s keys and rejects the build if a
+    /// declared label has no route — catching a typo'd route label (e.g. the
+    /// router returns `AgentRoute::Toool` because `Toool`/`Tool` are both
+    /// wired but one is missing from `routes`) before the graph ever runs,
+    /// instead of only failing at run time with
+    /// [`crate::TinyAgentsError::MissingRoute`] on whichever branch happens
+    /// to be taken.
+    ///
+    /// `all_labels` shares `router`'s return type `R`, so the compiler (not
+    /// just this check) ties the declared label set to what the router can
+    /// actually produce — a typed enum with, e.g., a `strum::EnumIter`-style
+    /// listing of its own variants is the natural `all_labels` source.
+    pub fn add_conditional_edges_checked<F, R, I, K, V, L>(
+        mut self,
+        from: impl Into<NodeId>,
+        router: F,
+        routes: I,
+        all_labels: L,
+    ) -> Self
+    where
+        F: Fn(&State) -> R + Send + Sync + 'static,
+        R: ToString,
+        I: IntoIterator<Item = (K, V)>,
+        K: ToString,
+        V: Into<NodeId>,
+        L: IntoIterator<Item = R>,
+    {
+        let from = from.into();
+        let labels: Vec<String> = all_labels.into_iter().map(|l| l.to_string()).collect();
+        self = self.add_conditional_edges(from.clone(), router, routes);
+        self.route_label_checks.insert(from, labels);
+        self
+    }
+
+    /// Cross-checks every [`Self::add_conditional_edges_checked`] declaration
+    /// against its node's actual route table, returning
+    /// [`crate::TinyAgentsError::MissingRoute`] for the first declared label
+    /// with no matching route. Called automatically by [`Self::compile`].
+    fn validate_routes(&self) -> Result<()> {
+        for (node, labels) in &self.route_label_checks {
+            let Some(branch) = self.branches.get(node) else {
+                continue;
+            };
+            for label in labels {
+                if !branch.routes.contains_key(label) {
+                    return Err(TinyAgentsError::MissingRoute {
+                        node: node.to_string(),
+                        route: label.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Declares that `node` routes exclusively via [`crate::Command`]
@@ -382,11 +455,26 @@ where
             ));
         }
 
-        // entry must exist
-        let entry = self
+        // entry must exist, and be exactly one node: START does not fan out.
+        let start_targets = self
             .edges
             .get(&NodeId::from(START))
             .cloned()
+            .unwrap_or_default();
+        if start_targets.len() > 1 {
+            return Err(TinyAgentsError::Validation(format!(
+                "START must route to exactly one entry node, got {}: {}",
+                start_targets.len(),
+                start_targets
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        let entry = start_targets
+            .into_iter()
+            .next()
             .ok_or(TinyAgentsError::MissingStart)?;
         if entry.as_str() == END {
             return Err(TinyAgentsError::Validation(
@@ -396,24 +484,29 @@ where
         self.require_node(&entry)?;
 
         // static edges
-        for (from, to) in &self.edges {
+        for (from, targets) in &self.edges {
             if from.as_str() != START {
                 self.require_node(from)?;
-            }
-            if to.as_str() != END {
-                self.require_node(to)?;
-            }
-            if to.as_str() == START {
-                return Err(TinyAgentsError::Validation(
-                    "START cannot be an edge target".to_string(),
-                ));
             }
             if from.as_str() == END {
                 return Err(TinyAgentsError::Validation(
                     "END cannot be an edge source".to_string(),
                 ));
             }
+            for to in targets {
+                if to.as_str() != END {
+                    self.require_node(to)?;
+                }
+                if to.as_str() == START {
+                    return Err(TinyAgentsError::Validation(
+                        "START cannot be an edge target".to_string(),
+                    ));
+                }
+            }
         }
+
+        // conditional route labels declared exhaustive must all have a route
+        self.validate_routes()?;
 
         // conditional edges
         for (from, branch) in &self.branches {
@@ -454,6 +547,7 @@ where
             nodes,
             edges,
             branches,
+            route_label_checks: _,
             command_nodes,
             waiting,
             reducer,

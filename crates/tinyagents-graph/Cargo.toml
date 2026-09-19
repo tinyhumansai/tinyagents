@@ -5,30 +5,36 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 description = "Durable typed state graphs for TinyAgents."
 
 [dependencies]
-anyhow = "1"
-async-trait = "0.1"
-futures = "0.3"
-rusqlite = { version = "0.40", features = ["bundled"], optional = true }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.2", default-features = false }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+rusqlite = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.2", default-features = false, features = [
+    "langfuse",
+] }
 tinyagents-language = { path = "../tinyagents-language", version = "2.1.2" }
-tinyagents-tracing = { path = "../tinyagents-tracing", version = "2.1.2", default-features = false }
 tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.3.0" }
 tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.2.0" }
-tokio = { version = "1", default-features = false, features = ["sync", "time", "macros", "rt", "rt-multi-thread", "fs"] }
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt", "rt-multi-thread", "fs"] }
+tracing = { workspace = true }
 
 [features]
 default = []
 sqlite = ["dep:rusqlite"]
-tracing = ["tinyagents-harness/tracing", "tinyagents-tracing/tracing"]
+# Tracing instrumentation is now always compiled in (via the `tracing` crate
+# dependency above). This feature is retained as a no-op so downstream
+# feature forwards keep compiling.
+tracing = ["tinyagents-harness/tracing"]
 
 [dev-dependencies]
-tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, default-features = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 
 [lints]
 workspace = true

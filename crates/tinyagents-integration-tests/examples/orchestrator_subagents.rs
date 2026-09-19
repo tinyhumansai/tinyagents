@@ -26,7 +26,7 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run --example orchestrator_subagents
+//! cargo run -p tinyagents-integration-tests --example orchestrator_subagents
 //! ```
 
 use std::collections::HashMap;

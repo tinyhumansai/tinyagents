@@ -1,7 +1,7 @@
 //! Runs the autonomous subconscious-loop graph example.
 //!
 //! ```text
-//! cargo run --example subconscious_loop
+//! cargo run -p tinyagents-integration-tests --example subconscious_loop
 //! ```
 
 mod autonomous_loop;

@@ -8,10 +8,14 @@
 //!
 //! # Skips gracefully
 //!
-//! The test returns early (after an `eprintln!`) when `OPENAI_API_KEY` is
-//! unset, so `cargo test` passes with no key configured.
+//! This test is `#[ignore]`d and only runs opted in via
+//! `tests/common/live.rs::require_live`, so `cargo test` passes with no key
+//! configured and never dials a real provider by accident.
+
+mod common;
 
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn live_openai_streams_deltas_and_final_text() {
     use futures::StreamExt;
 
@@ -19,10 +23,7 @@ async fn live_openai_streams_deltas_and_final_text() {
     use tinyinference_llm::model::{ChatModel, ModelRequest, ModelStreamItem, StreamAccumulator};
     use tinyinference_llm::providers::openai::OpenAiModel;
 
-    // Load .env so `cargo test` picks up local credentials.
-    let _ = dotenvy::dotenv();
-    if std::env::var("OPENAI_API_KEY").is_err() {
-        eprintln!("skipping live_openai_streams_deltas_and_final_text: OPENAI_API_KEY is not set");
+    if !common::live::require_live(&["OPENAI_API_KEY"]) {
         return;
     }
 

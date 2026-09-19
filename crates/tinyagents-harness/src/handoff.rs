@@ -19,6 +19,15 @@
 //! * the [`ResultHandoffCache`] store itself (FIFO-evicting, `Arc`-shared);
 //! * the [`build_handoff_placeholder`] renderer used when rewriting tool
 //!   results into history.
+//!
+//! # Not on the agent loop path (M-10)
+//!
+//! This is a host utility, not something [`crate::agent_loop`] calls on its
+//! own: nothing in the built-in loop invokes [`apply_handoff`] or registers
+//! the extraction tool it references. A host wires this in itself — calling
+//! `apply_handoff` on each tool result before it is appended to history, and
+//! registering an extraction tool (named per [`HandoffConfig::extractor_tool_name`])
+//! that reads from the same [`ResultHandoffCache`].
 
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
@@ -47,6 +56,49 @@ pub const HANDOFF_PREVIEW_CHARS: usize = 1500;
 /// result" for evicted ids and can either re-run the tool or ask the
 /// user/orchestrator to narrow the request.
 pub const HANDOFF_MAX_ENTRIES: usize = 8;
+
+// ── Host configuration ───────────────────────────────────────────────────────
+
+/// Host-specific naming this module needs but does not own: which tool name
+/// is the extractor (so its own output passes through uncleaned/unstashed),
+/// and which literal prefixes mark a result as already an error.
+///
+/// Both were previously hardcoded to one particular host's conventions
+/// (`extract_from_result`, a bare `result_text.starts_with("Error")`) even
+/// though the rest of this module is host-agnostic (M-9). A different host
+/// — a different extractor tool name, or error-carrying results that do not
+/// start with the literal word "Error" — could not use this cache without
+/// forking the module. [`HandoffConfig::default`] reproduces the historical
+/// behaviour exactly, so existing callers are unaffected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandoffConfig {
+    /// The tool name whose own output skips cleaning/stashing (it is already
+    /// a narrowed, host-curated response to a targeted query).
+    pub extractor_tool_name: String,
+    /// Literal prefixes that mark `result_text` as already an error, which
+    /// also skips cleaning/stashing (an error message should reach the model
+    /// verbatim, not truncated or placeholder-replaced).
+    pub error_prefixes: Vec<String>,
+}
+
+impl Default for HandoffConfig {
+    fn default() -> Self {
+        Self {
+            extractor_tool_name: "extract_from_result".to_string(),
+            error_prefixes: vec!["Error".to_string()],
+        }
+    }
+}
+
+impl HandoffConfig {
+    /// `true` when `result_text` starts with any of
+    /// [`HandoffConfig::error_prefixes`].
+    fn is_error_result(&self, result_text: &str) -> bool {
+        self.error_prefixes
+            .iter()
+            .any(|prefix| result_text.starts_with(prefix.as_str()))
+    }
+}
 
 // ── Store ──────────────────────────────────────────────────────────────────
 
@@ -127,22 +179,28 @@ impl ResultHandoffCache {
 /// the path in tests — and because the alternative this replaced was an
 /// environment-variable backdoor named after one particular host. Pass
 /// [`HANDOFF_OVERSIZE_THRESHOLD_TOKENS`] for the default.
+///
+/// `config` supplies the host's extractor tool name and error-prefix
+/// heuristics (M-9); pass [`HandoffConfig::default`] to reproduce the
+/// historical hardcoded behaviour.
 pub fn apply_handoff(
     cache: &ResultHandoffCache,
+    config: &HandoffConfig,
     tool_name: &str,
     task_id: &str,
     agent_id: &str,
     result_text: String,
     threshold_tokens: usize,
 ) -> String {
-    let skip_cleaning = tool_name == "extract_from_result" || result_text.starts_with("Error");
+    let skip_cleaning =
+        tool_name == config.extractor_tool_name || config.is_error_result(&result_text);
     let cleaned = if skip_cleaning {
         result_text
     } else {
         let pre_len = result_text.len();
         let cleaned = clean_tool_output(&result_text);
         if cleaned.len() < pre_len {
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 tool = %tool_name,
                 before_bytes = pre_len,
                 after_bytes = cleaned.len(),
@@ -155,8 +213,8 @@ pub fn apply_handoff(
     let tokens = cleaned.len().div_ceil(4);
     if !skip_cleaning && tokens > threshold_tokens {
         let id = cache.store(tool_name.to_string(), cleaned.clone());
-        let placeholder = build_handoff_placeholder(tool_name, &id, &cleaned);
-        tinyagents_tracing::info!(
+        let placeholder = build_handoff_placeholder(config, tool_name, &id, &cleaned);
+        tracing::info!(
             task_id = %task_id,
             agent_id = %agent_id,
             tool = %tool_name,
@@ -176,22 +234,28 @@ pub fn apply_handoff(
 
 /// Build the placeholder text that replaces an oversized tool result in
 /// the sub-agent's history. Shows the payload size (estimated tokens and
-/// raw bytes), a preview, and a call shape for the `extract_from_result`
-/// tool. The sub-agent decides whether to answer from the preview or
-/// dispatch the extractor.
+/// raw bytes), a preview, and a call shape for the configured extractor
+/// tool ([`HandoffConfig::extractor_tool_name`]). The sub-agent decides
+/// whether to answer from the preview or dispatch the extractor.
 ///
 /// Token count is estimated at ~4 chars/token (same heuristic as the
 /// trigger threshold in [`HANDOFF_OVERSIZE_THRESHOLD_TOKENS`]), so the
 /// unit the sub-agent sees matches the unit the runtime used to decide
 /// to hand off in the first place.
-pub fn build_handoff_placeholder(tool_name: &str, result_id: &str, raw: &str) -> String {
+pub fn build_handoff_placeholder(
+    config: &HandoffConfig,
+    tool_name: &str,
+    result_id: &str,
+    raw: &str,
+) -> String {
     let preview: String = raw.chars().take(HANDOFF_PREVIEW_CHARS).collect();
     let raw_tokens = raw.len().div_ceil(4);
+    let extractor = &config.extractor_tool_name;
     format!(
         "[oversized tool output: {raw_tokens} tokens ({raw_bytes} bytes) — stashed as result_id=\"{result_id}\"]\n\
          Preview (first {preview_chars} chars):\n{preview}\n\n\
          If the preview does not answer your task, call:\n\
-         extract_from_result(result_id=\"{result_id}\", query=\"<specific question>\")\n\
+         {extractor}(result_id=\"{result_id}\", query=\"<specific question>\")\n\
          Good queries name the exact fields/identifiers you need \
          (e.g. \"subject and sender of the 5 most recent messages\"). \
          Tool: {tool_name}",

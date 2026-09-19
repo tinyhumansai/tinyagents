@@ -46,9 +46,17 @@ pub(crate) struct HostInvocationBinding<State: Send + Sync, Ctx: Send + Sync> {
     pub(crate) model_pin: Option<String>,
     pub(crate) role: Option<String>,
     /// Canonical names the resolved definition authorizes for this exact run.
-    /// An empty list retains the legacy unrestricted catalogue; a non-empty
-    /// list is a host boundary enforced for schemas and dispatch alike.
-    pub(crate) allowed_tools: HashSet<String>,
+    ///
+    /// `None` means the definition declared no tools at all (an empty or
+    /// absent list) — [`crate::agent_loop`]'s `resolve_tool_allowlist` treats
+    /// that as fail-closed (deny every tool) by default, controlled by
+    /// [`HostCapabilities::fail_closed_tool_allowlist`]. `Some(set)` is
+    /// always the declared set, checked by plain membership: an empty
+    /// `HashSet` is never stored here (a declared-but-empty list is
+    /// collapsed to `None` at construction, so "nothing declared" and
+    /// "declared empty" share one fail-closed code path instead of an empty
+    /// set silently meaning "unrestricted", as it used to (I-9)).
+    pub(crate) allowed_tools: Option<HashSet<String>>,
     /// Per-turn ordered, nonblocking projection to the optional progress sink.
     pub(crate) progress: Option<super::agent::ProgressSender>,
     /// The exact invocation-local runtime inherited by authorized children.
@@ -271,6 +279,50 @@ pub struct RunPolicy {
     /// to. Admission still validates arguments against the *declared* schema,
     /// which is never looser than the projected one.
     pub tool_schemas: Option<crate::tool::SchemaPreparation>,
+    /// Whether the loop parses `<tool_call>`-style text-dialect markup out of
+    /// an assistant's visible text when the provider returned no native tool
+    /// calls.
+    ///
+    /// Defaults to [`TextDialectRecovery::Auto`], which only attempts
+    /// recovery when the resolved model's
+    /// [`ModelProfile::tool_calling`][tinyinference_llm::model::ModelProfile::tool_calling]
+    /// is not reported (a model that *does* report native tool calling and
+    /// still answered in prose was not making a tool call — it was
+    /// explaining, quoting, or documenting the format, and executing that
+    /// text as a real call would silently strip visible text the caller
+    /// asked to see). See [`TextDialectRecovery`].
+    pub text_dialect_recovery: TextDialectRecovery,
+}
+
+/// Policy for recovering `<tool_call>`-style text-dialect tool calls from an
+/// assistant's visible text.
+///
+/// Some providers/models emit tool calls as XML-ish markup inside ordinary
+/// text instead of (or in addition to failing to populate) the provider's
+/// native tool-call channel. Recovering that markup lets such a model still
+/// drive tools through the same loop as a model with native tool calling.
+///
+/// Left unconditional, this is a real correctness hazard: any assistant text
+/// that merely *quotes* `<tool_call>` markup — explaining the format to a
+/// user, echoing a worked example, or showing it in a fenced code block —
+/// gets executed as a real tool call, with the visible text silently
+/// stripped and replaced. [`TextDialectRecovery::Auto`] (the default) closes
+/// the common case of that hazard by skipping recovery for any model whose
+/// resolved profile reports native tool calling; recovery inside fenced code
+/// blocks is always skipped regardless of this policy, since a model
+/// demonstrating the syntax in a code fence is manifestly not making a call.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextDialectRecovery {
+    /// Never parse text-dialect tool calls.
+    Off,
+    /// Always attempt recovery when the provider returned no native tool
+    /// calls, regardless of the resolved model's advertised capabilities.
+    On,
+    /// Attempt recovery only when the resolved model's profile does not
+    /// report native tool calling (or the profile is unknown). This is the
+    /// default.
+    #[default]
+    Auto,
 }
 
 impl Default for RunPolicy {
@@ -296,6 +348,7 @@ impl Default for RunPolicy {
             // caller, so one stochastic-failure retry is strictly better than a
             // blank final.
             truncated_empty_retries: 1,
+            text_dialect_recovery: TextDialectRecovery::default(),
             discovery: crate::tool::discover::ToolDiscoveryPolicy::default(),
             tool_schemas: None,
         }

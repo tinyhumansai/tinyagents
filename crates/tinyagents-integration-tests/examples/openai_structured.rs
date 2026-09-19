@@ -8,7 +8,7 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run --example openai_structured
+//! cargo run -p tinyagents-integration-tests --example openai_structured
 //! ```
 
 use std::sync::Arc;

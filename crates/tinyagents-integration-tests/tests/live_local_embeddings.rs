@@ -44,6 +44,8 @@
 //! LOCAL_MODEL_TESTS=1 cargo test --test live_local_embeddings -- --nocapture
 //! ```
 
+mod common;
+
 use std::sync::Arc;
 
 use serde_json::json;
@@ -182,14 +184,16 @@ fn env_or(name: &str, default: &str) -> String {
 
 /// Every local embedding backend that is reachable and usable right now.
 async fn reachable_embedders() -> Vec<LocalEmbedder> {
-    if std::env::var("LOCAL_MODEL_TESTS")
-        .ok()
-        .filter(|v| !v.trim().is_empty() && v != "0")
-        .is_none()
+    // Local servers need no credential, so `require_live`'s "is this key
+    // present" check does not apply here; the opt-in is `LOCAL_MODEL_TESTS=1`,
+    // kept in addition to the shared `TINYAGENTS_LIVE=1` so either one works.
+    if !(common::live::is_flag_on("LOCAL_MODEL_TESTS")
+        || common::live::is_flag_on("TINYAGENTS_LIVE"))
     {
         eprintln!(
-            "skipping live local-embedding tests: set LOCAL_MODEL_TESTS=1 to dial local servers \
-             (LOCAL_MODEL_TESTS=1 cargo test --test live_local_embeddings -- --nocapture)"
+            "skipping live local-embedding tests: set LOCAL_MODEL_TESTS=1 (or TINYAGENTS_LIVE=1) \
+             to dial local servers (LOCAL_MODEL_TESTS=1 cargo test --test live_local_embeddings \
+             -- --ignored --nocapture)"
         );
         return Vec::new();
     }
@@ -235,6 +239,7 @@ async fn reachable_embedders() -> Vec<LocalEmbedder> {
 /// partitions persisted vectors between embedding spaces. A model whose
 /// declared width disagrees with its output silently corrupts both.
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn local_embedders_report_the_width_they_actually_produce() {
     for embedder in reachable_embedders().await {
         let declared = embedder.model.dimensions();
@@ -288,6 +293,7 @@ async fn local_embedders_report_the_width_they_actually_produce() {
 /// *count*, so counting alone cannot catch it — and a silent reorder poisons an
 /// index in a way that only shows up later as bad retrieval.
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn local_embedders_return_one_vector_per_input_in_order() {
     let texts: Vec<String> = [
         "the cat sat on the mat",
@@ -339,6 +345,7 @@ async fn local_embedders_return_one_vector_per_input_in_order() {
 /// Without this every other assertion here would still pass for a backend that
 /// returned constant or random vectors of the right shape.
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn local_embedders_place_paraphrases_closer_than_unrelated_text() {
     for embedder in reachable_embedders().await {
         let vectors = embedder
@@ -370,6 +377,7 @@ async fn local_embedders_place_paraphrases_closer_than_unrelated_text() {
 /// nothing here can be satisfied by lexical overlap or by the exact-text
 /// shortcut that makes the mock-backed test tautological.
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn local_embedders_rank_the_right_document_first() {
     for embedder in reachable_embedders().await {
         let retriever = Retriever::new(
@@ -457,6 +465,7 @@ async fn local_embedders_rank_the_right_document_first() {
 /// any OpenAI-compatible endpoint, including a local LM Studio. Callers must
 /// filter blanks themselves rather than rely on either behaviour.
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn blank_input_is_position_safe_on_both_adapters() {
     let blanks = ["   ".to_string(), "\n".to_string()];
 
@@ -500,6 +509,7 @@ async fn blank_input_is_position_safe_on_both_adapters() {
 /// operator simply has not pulled it — so the error is expected to name the
 /// remedy rather than surface a bare 404.
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn ollama_reports_a_missing_embedding_model_with_remediation() {
     if reachable_embedders()
         .await
@@ -583,6 +593,7 @@ fn the_openai_embedding_adapter_can_be_pointed_at_a_local_server() {
 /// Blank-only batches short-circuit without dialling, so the positional
 /// guarantee holds even with no server running.
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn blank_batches_are_answered_without_a_server() {
     let model = OllamaEmbeddingModel::new("http://127.0.0.1:9", "nomic-embed-text", 768);
     let vectors = model

@@ -78,6 +78,7 @@ observability, or test contracts.
   - [Design](../modules/registry/design.md)
   - [Model catalog and local snapshots](../modules/registry/model-catalog.md)
 - [Expressive language module](../modules/expressive-language/README.md)
+- [Runtime comparison and execution plan](../runtime-comparison/README.md)
 
 Docs should follow the module layout. Do not place standalone specification
 files directly in `docs/` or `docs/modules/`; each high-level topic should have
@@ -157,21 +158,26 @@ they use. Shared runtime errors live in `tinyagents-harness`.
 
 ```text
 crates/
-  tinyagents-harness/           # models, tools, middleware, providers, runtime
+  tinyagents-harness/           # models, tools, middleware, runtime, Claude Code/Agent SDK adapters
   tinyagents-language/          # .rag lexer, parser, compiler, and resolver
   tinyagents-graph/             # durable typed state graphs
   tinyagents-registry/          # named capabilities and model catalog
   tinyagents-session/           # durable session history and run ledger
-  tinyagents-tracing/           # shared opt-in tracing macros
+  tinyagents-definition/        # host-owned agent definition vocabulary
+  tinyagents-orchestration/     # host-neutral team/workflow composition over graph+harness+session
   tinyagents-integration-tests/ # cross-crate tests and runnable examples
 ```
 
-Provider implementations (OpenAI and the OpenAI-compatible endpoints for
-Anthropic, Ollama, DeepSeek, Groq, xAI, OpenRouter, Together, and Mistral)
-live inside `crates/tinyagents-harness/src/providers/` and are compiled in
-unconditionally. Optional features are owned by their packages. Tracing calls
-and the direct `tracing` dependency are disabled unless a package's `tracing`
-feature is enabled.
+`crates/tinyagents-harness/src/providers/` holds only the `claude_agent_sdk/`
+and `claude_code/` adapters. The OpenAI, Anthropic, and local-model (Ollama,
+LM Studio, etc.) providers are not in this crate at all: they live in
+`vendor/tinyinference/crates/tinyinference-llm/src/providers/` (`openai/`,
+`anthropic/`), which `tinyagents-harness` depends on. OpenAI-compatible
+endpoints (DeepSeek, Groq, xAI, OpenRouter, Together, Mistral) reuse the
+OpenAI adapter by base URL rather than shipping separate provider code.
+Optional features are owned by their packages. Tracing calls and the direct
+`tracing` dependency are disabled unless a package's `tracing` feature is
+enabled.
 
 ## Milestones
 

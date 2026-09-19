@@ -166,3 +166,76 @@ fn resolver_blueprint_path_matches_registry_binding() {
     assert!(matches!(err, tinyagents_harness::error::TinyAgentsError::Capability(_)));
     assert!(err.to_string().contains("unknown subgraph"), "{err}");
 }
+
+#[test]
+fn bind_blueprint_diagnostics_collects_every_offending_reference() {
+    use crate::capability_resolver::CapabilityResolver;
+
+    let caps = CapabilityResolver::new()
+        .with_node_kinds(crate::capability_resolver::DEFAULT_NODE_KINDS.iter().copied())
+        .allow_model("good_model")
+        .allow_reducer("append");
+
+    let src = r#"
+graph g {
+  start a
+  channel facts madeup_reducer
+  node a {
+    model "ghost_model"
+    tools ["ghost_tool"]
+    next END
+  }
+  node b {
+    kind wizard
+    next END
+  }
+}
+"#;
+    let bp = compile(&parse_str(src).unwrap()).unwrap().remove(0);
+
+    // Full collection: every offending reference/kind at once, not just the
+    // first — unlike the legacy `bind_blueprint`, which still folds to one.
+    let diagnostics = caps.bind_blueprint_diagnostics(&bp);
+    assert_eq!(diagnostics.len(), 4, "{diagnostics:#?}");
+    let codes: Vec<&str> = diagnostics.iter().filter_map(|d| d.code.as_deref()).collect();
+    assert!(codes.contains(&"E-rag-unknown-model"), "{codes:?}");
+    assert!(codes.contains(&"E-rag-unknown-tool"), "{codes:?}");
+    assert!(codes.contains(&"E-rag-invalid-node-kind"), "{codes:?}");
+    assert!(codes.contains(&"E-rag-unknown-reducer"), "{codes:?}");
+
+    // `bind_blueprint_all` surfaces all four through one
+    // `TinyAgentsError::Diagnostics`, unlike `bind_blueprint`'s fold-to-first.
+    let err = caps.bind_blueprint_all(&bp).unwrap_err();
+    match err {
+        tinyagents_harness::error::TinyAgentsError::Diagnostics(rendered) => {
+            assert_eq!(rendered.len(), 4, "{rendered:#?}");
+        }
+        other => panic!("expected TinyAgentsError::Diagnostics, got {other:?}"),
+    }
+
+    // The legacy single-error gate still folds to just the first, preserving
+    // its historical `Result<()>` shape for existing callers.
+    let err = caps.bind_blueprint(&bp).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            tinyagents_harness::error::TinyAgentsError::Capability(_)
+                | tinyagents_harness::error::TinyAgentsError::Compile(_)
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn diagnostic_round_trips_through_serde_json() {
+    let src = r#"graph g { start a node a { kind wizard next END } }"#;
+    let program = parse_str(src).unwrap();
+    let reg = full_registry();
+    let diagnostics = Resolver::from_registry(&reg).resolve_program(&program);
+    assert_eq!(diagnostics.len(), 1);
+
+    let json = serde_json::to_string(&diagnostics[0]).expect("diagnostic serializes");
+    let round_tripped: crate::diagnostic::Diagnostic =
+        serde_json::from_str(&json).expect("diagnostic deserializes");
+    assert_eq!(round_tripped, diagnostics[0]);
+}

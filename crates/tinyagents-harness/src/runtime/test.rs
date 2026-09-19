@@ -1,6 +1,5 @@
 //! Tests for the [`AgentHarness`] builder and [`RunPolicy`].
 
-use std::collections::HashSet;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -1031,7 +1030,7 @@ async fn initial_host_model_resolution_is_cancelled_while_the_resolver_is_pendin
         }
         result = &mut invocation => panic!("pending resolver unexpectedly finished: {result:?}"),
     };
-    assert!(matches!(error, crate::error::TinyAgentsError::Cancelled));
+    assert_eq!(error.kind, crate::runtime::HostedErrorKind::Cancelled);
 }
 
 #[tokio::test]
@@ -1067,11 +1066,11 @@ async fn policy_only_deadline_bounds_initial_host_resolution_with_a_timeout_erro
         )
         .await
         .expect_err("policy deadline must bound a host resolver without a RunConfig timeout");
-    assert!(matches!(error, crate::error::TinyAgentsError::Timeout(_)));
-    assert!(
-        error.to_string().contains("host model resolution for run `policy-host-resolve-timeout` exceeded its remaining wall-clock budget"),
-        "timeout must retain its host-resolution and policy-budget shape: {error}"
-    );
+    // `HostedError` intentionally sanitizes the message to a fixed string per
+    // `kind` (I-6) — the detailed "exceeded its remaining wall-clock budget"
+    // text is still available on the run's internal `TinyAgentsError` (see
+    // the non-hosted equivalents of this test), just not leaked here.
+    assert_eq!(error.kind, crate::runtime::HostedErrorKind::Timeout);
 }
 
 #[tokio::test]
@@ -1108,8 +1107,7 @@ async fn per_model_call_limit_bounds_initial_host_resolution() {
         )
         .await
         .expect_err("per-model-call cap must bound host resolution");
-    assert!(matches!(error, crate::error::TinyAgentsError::Timeout(_)));
-    assert!(error.to_string().contains("per-model-call ceiling"));
+    assert_eq!(error.kind, crate::runtime::HostedErrorKind::Timeout);
 }
 
 async fn assert_rebound_host_resolution_stops(
@@ -1166,6 +1164,7 @@ async fn assert_rebound_host_resolution_stops(
                 .await
                 .expect("rebound resolver must not hang")
                 .expect_err("the rebinding resolver remains pending")
+                .into()
         }
         result = &mut invocation => panic!("rebind resolver unexpectedly finished: {result:?}"),
     }
@@ -1180,10 +1179,15 @@ async fn middleware_rebinding_cancels_a_pending_host_resolver() {
 
 #[tokio::test]
 async fn middleware_rebinding_applies_the_host_resolution_deadline() {
+    // `assert_rebound_host_resolution_stops` round-trips through the hosted
+    // entry point (`AgentHarness::invoke_agent`), which now classifies and
+    // sanitizes via `HostedError` (I-6) before converting back to
+    // `TinyAgentsError` for this helper's declared return type — so the
+    // detailed "host model resolution ... remaining wall-clock budget" text
+    // is intentionally no longer observable here; only the `Timeout`
+    // classification survives the round trip.
     let error = assert_rebound_host_resolution_stops(None, Some(5)).await;
     assert!(matches!(error, crate::error::TinyAgentsError::Timeout(_)));
-    assert!(error.to_string().contains("host model resolution"));
-    assert!(error.to_string().contains("remaining wall-clock budget"));
 }
 
 #[tokio::test]
@@ -1419,9 +1423,10 @@ async fn hosted_turn_blocks_provider_extension_user_blocks_before_model_submissi
         )
         .await
         .expect_err("blocked extensions must not reach the provider");
+    assert_eq!(error.kind, crate::runtime::HostedErrorKind::Policy);
     assert_eq!(
         error.to_string(),
-        "model error: hosted agent invocation failed"
+        "hosted agent invocation was rejected by policy"
     );
     assert!(!error.to_string().contains("secret"));
     assert!(model.requests().is_empty());
@@ -1487,6 +1492,107 @@ async fn hosted_model_resolution_marks_only_root_contexts_as_team_leads() {
     );
 }
 
+/// I-6 regression: a hosted invocation that exhausts a configured run limit
+/// must classify as `HostedErrorKind::LimitExceeded`, distinguishable from
+/// other hosted failure modes (here, a policy rejection) rather than every
+/// non-cancel/timeout failure collapsing into one generic
+/// `Model("hosted agent invocation failed")`.
+#[tokio::test]
+async fn hosted_limit_exceeded_is_distinguishable_from_other_hosted_errors() {
+    // A model that always requests the same tool call, so the run never
+    // finishes on its own and must hit `max_model_calls`.
+    let looping_model = Arc::new(ScriptedModel::new(
+        std::iter::repeat_with(|| {
+            let mut response = ModelResponse::assistant("");
+            response
+                .message
+                .tool_calls
+                .push(tinyinference_llm::tool::ToolCall::new(
+                    "call",
+                    "noop",
+                    json!({}),
+                ));
+            response
+        })
+        .take(8)
+        .collect(),
+    ));
+    let definition = AgentDefinition::new("helper", "Helper", "test helper").with_tools(["noop"]);
+    let host = crate::host::HostCapabilities::new(
+        Arc::new(StaticContextComposer::empty()),
+        Arc::new(InMemoryDefinitionRegistry::new(vec![definition])),
+        Arc::new(AllowAllSecurityGate),
+        Arc::new(FixedModelResolver::new(looping_model)),
+    );
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_tool(Arc::new(NoopTool));
+
+    let limit_error = harness
+        .invoke_agent(
+            AgentInvocation::new(
+                host,
+                AgentTurnRequest::new(
+                    "helper",
+                    vec![tinyinference_llm::message::Message::user("go")],
+                ),
+                RunContext::new(RunConfig::new("limit-exceeded").with_max_model_calls(1), ()),
+            ),
+            &(),
+        )
+        .await
+        .expect_err("the model-call cap must eventually fail the run");
+    assert_eq!(
+        limit_error.kind,
+        crate::runtime::HostedErrorKind::LimitExceeded
+    );
+    // The run accumulated before failing is still available.
+    assert!(limit_error.run.is_some());
+
+    // A different hosted failure mode (a security-gate denial of the user's
+    // input) classifies differently, proving `kind` genuinely discriminates
+    // rather than every non-cancel/timeout error collapsing together.
+    let denied_definition =
+        AgentDefinition::new("helper", "Helper", "test helper").with_tools(["noop"]);
+    let denied_host = crate::host::HostCapabilities::new(
+        Arc::new(StaticContextComposer::empty()),
+        Arc::new(InMemoryDefinitionRegistry::new(vec![denied_definition])),
+        Arc::new(BlockExtensionGate),
+        Arc::new(FixedModelResolver::new(Arc::new(ScriptedModel::replies(
+            vec!["unused"],
+        )))),
+    );
+    let mut denied_harness: AgentHarness<()> = AgentHarness::new();
+    denied_harness.register_tool(Arc::new(NoopTool));
+    let policy_error = denied_harness
+        .invoke_agent(
+            AgentInvocation::new(
+                denied_host,
+                AgentTurnRequest::new(
+                    "helper",
+                    vec![tinyinference_llm::message::Message::User(
+                        tinyinference_llm::message::UserMessage {
+                            content: vec![
+                                tinyinference_llm::message::ContentBlock::ProviderExtension(
+                                    json!({"secret": "block me"}),
+                                ),
+                            ],
+                        },
+                    )],
+                ),
+                RunContext::new(RunConfig::new("policy-denied"), ()),
+            ),
+            &(),
+        )
+        .await
+        .expect_err("the security gate must deny this input");
+    assert_eq!(policy_error.kind, crate::runtime::HostedErrorKind::Policy);
+
+    assert_ne!(
+        limit_error.kind, policy_error.kind,
+        "distinct hosted failure modes must classify to distinct kinds"
+    );
+}
+
 #[tokio::test]
 async fn hosted_definition_tool_allowlist_filters_schemas_and_rejects_fabricated_calls() {
     let mut blocked_call = ModelResponse::assistant("");
@@ -1545,6 +1651,65 @@ async fn hosted_definition_tool_allowlist_filters_schemas_and_rejects_fabricated
     );
 }
 
+/// I-9 regression: a definition that declares **no** tools (an empty list —
+/// `AgentDefinition::new` without `with_tools`) must deny every registered
+/// tool, not grant the whole catalogue. Before the fix, `HashSet::is_empty()`
+/// was read as "unrestricted" instead of "nothing authorized", so a
+/// definition whose author simply forgot to declare tools (or a host that
+/// failed to populate the field) silently ran with every tool available.
+#[tokio::test]
+async fn hosted_definition_with_no_declared_tools_denies_every_tool() {
+    let mut fabricated_call = ModelResponse::assistant("");
+    fabricated_call
+        .message
+        .tool_calls
+        .push(tinyinference_llm::tool::ToolCall::new(
+            "call-1",
+            "noop",
+            json!({}),
+        ));
+    let model = Arc::new(ScriptedModel::new(vec![
+        fabricated_call,
+        ModelResponse::assistant("recovered"),
+    ]));
+    // No `.with_tools(...)`: the definition declares nothing.
+    let definition = AgentDefinition::new("helper", "Helper", "test helper");
+    let host = crate::host::HostCapabilities::new(
+        Arc::new(StaticContextComposer::empty()),
+        Arc::new(InMemoryDefinitionRegistry::new(vec![definition])),
+        Arc::new(AllowAllSecurityGate),
+        Arc::new(FixedModelResolver::new(model.clone())),
+    );
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_tool(Arc::new(NoopTool));
+
+    let run = harness
+        .invoke_agent(
+            AgentInvocation::new(
+                host,
+                AgentTurnRequest::new(
+                    "helper",
+                    vec![tinyinference_llm::message::Message::user("go")],
+                ),
+                RunContext::new(RunConfig::new("empty-allowlist"), ()),
+            ),
+            &(),
+        )
+        .await
+        .expect("the model recovers after its denied call");
+
+    assert_eq!(run.text().as_deref(), Some("recovered"));
+    assert!(
+        run.messages
+            .iter()
+            .any(|message| message.text().contains("unknown tool `noop`")),
+        "a registered tool the definition never declared must be rejected, not silently run"
+    );
+    // No tool schema at all is offered to the provider — the registered
+    // catalogue is not leaked to a definition that declared nothing.
+    assert!(model.requests()[0].tools.is_empty());
+}
+
 #[tokio::test]
 async fn hosted_structured_schema_rejects_hidden_registered_tool_collision() {
     // `answer` is registered globally but deliberately not allowed for this
@@ -1585,9 +1750,10 @@ async fn hosted_structured_schema_rejects_hidden_registered_tool_collision() {
         .await
         .expect_err("a hidden registered tool still collides with the schema");
 
+    assert_eq!(error.kind, crate::runtime::HostedErrorKind::Policy);
     assert_eq!(
         error.to_string(),
-        "model error: hosted agent invocation failed"
+        "hosted agent invocation was rejected by policy"
     );
     assert!(model.requests().is_empty(), "provider was not contacted");
 }
@@ -1609,11 +1775,9 @@ async fn host_security_denial_returns_a_tool_message_without_executing_the_tool(
     ]));
     let host = crate::host::HostCapabilities::new(
         Arc::new(StaticContextComposer::empty()),
-        Arc::new(InMemoryDefinitionRegistry::new(vec![AgentDefinition::new(
-            "helper",
-            "Helper",
-            "test helper",
-        )])),
+        Arc::new(InMemoryDefinitionRegistry::new(vec![
+            AgentDefinition::new("helper", "Helper", "test helper").with_tools(["noop"]),
+        ])),
         Arc::new(DenyToolGate),
         Arc::new(FixedModelResolver::new(model)),
     );
@@ -1664,11 +1828,9 @@ async fn security_gate_sees_raw_provider_arguments_while_tools_receive_prepared_
     let executed = Arc::new(Mutex::new(Vec::new()));
     let host = crate::host::HostCapabilities::new(
         Arc::new(StaticContextComposer::empty()),
-        Arc::new(InMemoryDefinitionRegistry::new(vec![AgentDefinition::new(
-            "helper",
-            "Helper",
-            "test helper",
-        )])),
+        Arc::new(InMemoryDefinitionRegistry::new(vec![
+            AgentDefinition::new("helper", "Helper", "test helper").with_tools(["injected"]),
+        ])),
         gate.clone(),
         Arc::new(FixedModelResolver::new(model)),
     );
@@ -1763,11 +1925,9 @@ async fn security_gate_sees_unwrapped_arguments_for_a_bridged_deferred_call() {
     });
     let host = crate::host::HostCapabilities::new(
         Arc::new(StaticContextComposer::empty()),
-        Arc::new(InMemoryDefinitionRegistry::new(vec![AgentDefinition::new(
-            "helper",
-            "Helper",
-            "test helper",
-        )])),
+        Arc::new(InMemoryDefinitionRegistry::new(vec![
+            AgentDefinition::new("helper", "Helper", "test helper").with_tools(["quote"]),
+        ])),
         gate.clone(),
         Arc::new(FixedModelResolver::new(model)),
     );
@@ -1820,11 +1980,9 @@ async fn denied_tool_calls_release_their_reserved_limit_for_a_later_approval() {
     ]));
     let host = crate::host::HostCapabilities::new(
         Arc::new(StaticContextComposer::empty()),
-        Arc::new(InMemoryDefinitionRegistry::new(vec![AgentDefinition::new(
-            "helper",
-            "Helper",
-            "test helper",
-        )])),
+        Arc::new(InMemoryDefinitionRegistry::new(vec![
+            AgentDefinition::new("helper", "Helper", "test helper").with_tools(["noop"]),
+        ])),
         Arc::new(DenyThenAllowGate {
             denials_remaining: AtomicUsize::new(2),
         }),
@@ -1996,11 +2154,9 @@ async fn dropped_host_invocations_finalize_the_actual_partial_run_once() {
         let progress = Arc::new(RecordingProgressSink::new());
         let host = crate::host::HostCapabilities::new(
             Arc::new(StaticContextComposer::empty()),
-            Arc::new(InMemoryDefinitionRegistry::new(vec![AgentDefinition::new(
-                "helper",
-                "Helper",
-                "test helper",
-            )])),
+            Arc::new(InMemoryDefinitionRegistry::new(vec![
+                AgentDefinition::new("helper", "Helper", "test helper").with_tools(["noop"]),
+            ])),
             Arc::new(AllowAllSecurityGate),
             Arc::new(FixedModelResolver::new(model)),
         )
@@ -2135,11 +2291,9 @@ async fn denied_tool_calls_do_not_enter_terminal_executed_tool_summary() {
     let learning = Arc::new(RecordingLearning::default());
     let host = crate::host::HostCapabilities::new(
         Arc::new(StaticContextComposer::empty()),
-        Arc::new(InMemoryDefinitionRegistry::new(vec![AgentDefinition::new(
-            "helper",
-            "Helper",
-            "test helper",
-        )])),
+        Arc::new(InMemoryDefinitionRegistry::new(vec![
+            AgentDefinition::new("helper", "Helper", "test helper").with_tools(["noop"]),
+        ])),
         Arc::new(DenyToolGate),
         Arc::new(FixedModelResolver::new(Arc::new(ScriptedModel::new(vec![
             tool_response,
@@ -2299,11 +2453,9 @@ async fn concurrent_roots_keep_every_invocation_capability_bundle_isolated() {
             }),
             Arc::new(TaggedDefinitions {
                 trace: trace.clone(),
-                inner: InMemoryDefinitionRegistry::new(vec![AgentDefinition::new(
-                    "helper",
-                    "Helper",
-                    "test helper",
-                )]),
+                inner: InMemoryDefinitionRegistry::new(vec![
+                    AgentDefinition::new("helper", "Helper", "test helper").with_tools(["noop"]),
+                ]),
             }),
             Arc::new(TaggedSecurity {
                 trace: trace.clone(),
@@ -2661,9 +2813,10 @@ async fn hard_budget_compression_fails_closed_when_only_system_instructions_rema
         )
         .await
         .expect_err("hard pressure cannot discard sole system instructions");
+    assert_eq!(error.kind, crate::runtime::HostedErrorKind::Policy);
     assert_eq!(
         error.to_string(),
-        "model error: hosted agent invocation failed",
+        "hosted agent invocation was rejected by policy",
         "hosted callers receive no internal budget diagnostic"
     );
     assert!(model.requests().is_empty(), "provider was never called");
@@ -2875,6 +3028,7 @@ async fn host_delegate_registry_authorizes_recursive_children() {
     ]));
     let mut parent = AgentDefinition::new("parent", "Parent", "delegates");
     parent.subagents.push("worker".into());
+    parent.tools.push("worker".into());
     let definitions = Arc::new(InMemoryDefinitionRegistry::new(vec![
         parent,
         AgentDefinition::new("worker", "Worker", "child"),
@@ -2936,6 +3090,7 @@ async fn hosted_streaming_child_keeps_model_deltas_in_the_parent_stream() {
     ]));
     let mut parent = AgentDefinition::new("parent", "Parent", "delegates");
     parent.subagents.push("worker".into());
+    parent.tools.push("worker".into());
     let host = crate::host::HostCapabilities::new(
         Arc::new(StaticContextComposer::empty()),
         Arc::new(InMemoryDefinitionRegistry::new(vec![
@@ -3008,15 +3163,15 @@ async fn direct_parent_subagent_entry_fails_closed_for_hosted_authority() {
         context.host_agent_id = Some("parent".to_string());
         context.host_authority = Some(Arc::new(
             crate::runtime::HostInvocationAuthority::<(), ()> {
-                binding: crate::runtime::HostInvocationBinding {
+                binding: Arc::new(crate::runtime::HostInvocationBinding {
                     host,
                     agent_id: "parent".to_string(),
                     model_pin: None,
                     role: None,
-                    allowed_tools: HashSet::new(),
+                    allowed_tools: None,
                     progress: None,
                     runtime: None,
-                },
+                }),
             },
         ));
         context
@@ -3117,6 +3272,114 @@ async fn direct_parent_subagent_entry_fails_closed_for_hosted_authority() {
     ));
 }
 
+/// C-1 regression: `host_invocation_binding` must fail closed, never
+/// reinterpret memory, when a hosted `RunContext` is read by a harness whose
+/// `State` differs from the one that installed the authority.
+///
+/// This is the reachable repro from the code review: nothing about
+/// `RunContext<Ctx>` tracks `State` at all, so a context built for one
+/// `State` type-checks fine against `host_invocation_binding::<OtherState,
+/// _>`. Before this fix that call cast the erased authority through an
+/// unchecked raw pointer, reading a `HostInvocationBinding<OtherState, _>`
+/// out of memory that actually held a `HostInvocationBinding<State, _>` —
+/// wrong `Arc<HostCapabilities<_>>` vtable and all. The fix (a `type_name`
+/// guard in front of the cast — see `ErasedHostAuthority`) turns that into a
+/// typed `Validation` error instead.
+#[test]
+fn host_invocation_binding_fails_closed_on_a_state_mismatch() {
+    struct OtherState;
+
+    let host = Arc::new(crate::host::HostCapabilities::new(
+        Arc::new(StaticContextComposer::empty()),
+        Arc::new(InMemoryDefinitionRegistry::new(vec![AgentDefinition::new(
+            "parent", "Parent", "hosted",
+        )])),
+        Arc::new(AllowAllSecurityGate),
+        Arc::new(FixedModelResolver::new(Arc::new(ScriptedModel::replies(
+            vec!["unused"],
+        )))),
+    ));
+    let mut context: RunContext<()> = RunContext::new(RunConfig::new("state-mismatch"), ());
+    context.host_agent_id = Some("parent".to_string());
+    context.host_authority = Some(Arc::new(
+        crate::runtime::HostInvocationAuthority::<(), ()> {
+            binding: Arc::new(crate::runtime::HostInvocationBinding {
+                host,
+                agent_id: "parent".to_string(),
+                model_pin: None,
+                role: None,
+                allowed_tools: None,
+                progress: None,
+                runtime: None,
+            }),
+        },
+    ));
+
+    // Reading it back with the *same* `State`/`Ctx` the authority was
+    // installed for succeeds.
+    assert!(
+        crate::runtime::host_invocation_binding::<(), ()>(&context)
+            .expect("matching State/Ctx must not be rejected")
+            .is_some()
+    );
+
+    // Reading the same context with a *different* `State` must fail closed
+    // rather than transmute the wrong `HostInvocationBinding<_>` out of the
+    // erased authority.
+    let mismatched = crate::runtime::host_invocation_binding::<OtherState, ()>(&context);
+    assert!(
+        matches!(
+            mismatched,
+            Err(crate::error::TinyAgentsError::Validation(_))
+        ),
+        "expected a fail-closed Validation error"
+    );
+}
+
+/// C-1 regression: `RunContext::child_with_data` (the only primitive that
+/// changes `Ctx`) must never propagate host authority, closing the other
+/// half of the C-1 repro (a child built with a different `Ctx` type
+/// inheriting a parent's hosted authority for the wrong `Ctx`).
+#[test]
+fn child_with_data_never_propagates_host_authority() {
+    let host = Arc::new(crate::host::HostCapabilities::new(
+        Arc::new(StaticContextComposer::empty()),
+        Arc::new(InMemoryDefinitionRegistry::new(vec![AgentDefinition::new(
+            "parent", "Parent", "hosted",
+        )])),
+        Arc::new(AllowAllSecurityGate),
+        Arc::new(FixedModelResolver::new(Arc::new(ScriptedModel::replies(
+            vec!["unused"],
+        )))),
+    ));
+    let mut parent: RunContext<()> = RunContext::new(RunConfig::new("ctx-change-parent"), ());
+    parent.host_authority = Some(Arc::new(
+        crate::runtime::HostInvocationAuthority::<(), ()> {
+            binding: Arc::new(crate::runtime::HostInvocationBinding {
+                host,
+                agent_id: "parent".to_string(),
+                model_pin: None,
+                role: None,
+                allowed_tools: None,
+                progress: None,
+                runtime: None,
+            }),
+        },
+    ));
+    assert!(parent.host_authority.is_some());
+
+    // Same-`Ctx` `child` propagates authority.
+    let same_ctx_child = parent.child(RunConfig::new("same-ctx"), ()).unwrap();
+    assert!(same_ctx_child.host_authority.is_some());
+
+    // Different-`Ctx` `child_with_data` never does, regardless of the
+    // authority the parent carries.
+    let different_ctx_child = parent
+        .child_with_data(RunConfig::new("different-ctx"), "child-data")
+        .unwrap();
+    assert!(different_ctx_child.host_authority.is_none());
+}
+
 #[tokio::test]
 async fn hosted_streaming_child_inherits_its_parents_bundle_and_cancellation() {
     let mut delegate = ModelResponse::assistant("");
@@ -3137,6 +3400,7 @@ async fn hosted_streaming_child_inherits_its_parents_bundle_and_cancellation() {
     });
     let mut parent = AgentDefinition::new("parent", "Parent", "delegates");
     parent.subagents.push("worker".into());
+    parent.tools.push("worker".into());
     let host = crate::host::HostCapabilities::new(
         Arc::new(StaticContextComposer::empty()),
         Arc::new(InMemoryDefinitionRegistry::new(vec![
@@ -3227,7 +3491,11 @@ async fn hosted_parent_denial_cannot_be_bypassed_by_a_childs_local_harness() {
     ]));
     let child_model = Arc::new(ScriptedModel::replies(vec!["must never run"]));
     let parent_definitions = Arc::new(InMemoryDefinitionRegistry::new(vec![
-        AgentDefinition::new("parent", "Parent", "does not delegate"),
+        // Declares the "worker" tool (so dispatch reaches the delegate
+        // boundary) but no subagents (so the delegate-authorization check
+        // itself still denies it) — the assertion under test is about that
+        // authorization, not the tool allow-list (I-9).
+        AgentDefinition::new("parent", "Parent", "does not delegate").with_tools(["worker"]),
         AgentDefinition::new("worker", "Worker", "child"),
     ]));
     let parent_host = crate::host::HostCapabilities::new(
@@ -3260,10 +3528,8 @@ async fn hosted_parent_denial_cannot_be_bypassed_by_a_childs_local_harness() {
         )
         .await
         .expect_err("parent policy denies the child before its host can run");
-    assert_eq!(
-        error.to_string(),
-        "model error: hosted agent invocation failed"
-    );
+    assert_eq!(error.kind, crate::runtime::HostedErrorKind::Internal);
+    assert_eq!(error.to_string(), "hosted agent invocation failed");
     assert!(
         child_model.requests().is_empty(),
         "the child harness's local model was never allowed to select its own policy"

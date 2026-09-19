@@ -296,7 +296,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for BudgetMidd
         // on a budget it never actually touched. The reservation is still
         // released above — that part is real bookkeeping.
         if response.served_from_cache {
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 target: "tinyagents::middleware",
                 label = self.label,
                 "[budget] skipping accounting for a cache-served response"

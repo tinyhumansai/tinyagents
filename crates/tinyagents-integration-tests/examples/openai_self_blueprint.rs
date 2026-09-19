@@ -19,7 +19,7 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run --example openai_self_blueprint
+//! cargo run -p tinyagents-integration-tests --example openai_self_blueprint
 //! ```
 
 use std::sync::Arc;

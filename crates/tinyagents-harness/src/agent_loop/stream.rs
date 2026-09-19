@@ -31,10 +31,36 @@ use std::sync::Arc;
 use crate::context::{RunConfig, RunContext};
 use crate::events::{EventListener, EventRecord, EventSink};
 use crate::middleware::AgentRun;
-use crate::runtime::AgentHarness;
+use crate::runtime::{AgentHarness, InvocationRuntime};
 use tinyinference_llm::message::Message;
 
 use super::PartialRunOutcome;
+
+/// The concrete driver behind a caller-consumable stream: either the
+/// durable harness borrowed for the caller's lifetime (the ordinary SDK
+/// path), or an invocation-local runtime owned outright (the hosted path,
+/// where the runtime is only alive as a local variable at the call site).
+///
+/// Moving the `Owned` variant into the driving future (see
+/// [`invoke_stream_with_runner`]) is what lets the hosted stream avoid both
+/// an unsound lifetime extension and depending on field drop order: the
+/// runtime's lifetime becomes exactly the future's, which the stream already
+/// owns.
+pub(crate) enum StreamRunner<'a, State: Send + Sync, Ctx: Send + Sync> {
+    Borrowed(&'a AgentHarness<State, Ctx>),
+    Owned(Arc<InvocationRuntime<State, Ctx>>),
+}
+
+impl<State: Send + Sync, Ctx: Send + Sync> std::ops::Deref for StreamRunner<'_, State, Ctx> {
+    type Target = AgentHarness<State, Ctx>;
+
+    fn deref(&self) -> &AgentHarness<State, Ctx> {
+        match self {
+            StreamRunner::Borrowed(harness) => harness,
+            StreamRunner::Owned(runtime) => runtime.harness(),
+        }
+    }
+}
 
 /// One item yielded by [`AgentHarness::invoke_stream`].
 ///
@@ -156,110 +182,142 @@ impl<State: Send + Sync, Ctx: Send + Sync + 'static> AgentHarness<State, Ctx> {
         ctx: RunContext<Ctx>,
         input: Vec<Message>,
     ) -> impl futures::Stream<Item = AgentStreamItem> + Send + 'a {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        // Subscribe before driving so no event (starting with `RunStarted`) is
-        // missed. The listener rides the run's `EventSink`, which sub-agents
-        // clone, so their lifecycle events reach this stream too.
-        let listener: Arc<dyn EventListener> = Arc::new(ChannelListener { tx });
-        ctx.events.subscribe(listener.clone());
-        let listener_guard = ChannelListenerGuard {
-            events: ctx.events.clone(),
-            listener,
-        };
+        invoke_stream_with_runner(StreamRunner::Borrowed(self), state, ctx, input)
+    }
+}
 
-        // Preserve partial work for a failed streamed run. The event stream
-        // remains unchanged, but terminal host capabilities need honest usage
-        // and executed-tool summaries for error and cancellation paths too.
-        let run_fut: Pin<Box<dyn Future<Output = PartialRunOutcome> + Send + 'a>> =
-            Box::pin(self.invoke_streaming_in_context_collecting_partial(state, ctx, input));
+/// Builds the caller-consumable event stream for either an ordinary
+/// (borrowed-harness) or a hosted (owned-runtime) invocation.
+///
+/// `runner` is moved into the driving future itself rather than dereferenced
+/// up front, so an owned [`InvocationRuntime`] carried by `runner` lives
+/// exactly as long as the future that needs it — no separate field, drop
+/// order, or lifetime extension required on the caller's stream wrapper.
+pub(crate) fn invoke_stream_with_runner<'a, State, Ctx>(
+    runner: StreamRunner<'a, State, Ctx>,
+    state: &'a State,
+    ctx: RunContext<Ctx>,
+    input: Vec<Message>,
+) -> impl futures::Stream<Item = AgentStreamItem> + Send + 'a
+where
+    State: Send + Sync,
+    Ctx: Send + Sync + 'static,
+{
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    // Subscribe before driving so no event (starting with `RunStarted`) is
+    // missed. The listener rides the run's `EventSink`, which sub-agents
+    // clone, so their lifecycle events reach this stream too.
+    let listener: Arc<dyn EventListener> = Arc::new(ChannelListener { tx });
+    ctx.events.subscribe(listener.clone());
+    let listener_guard = ChannelListenerGuard {
+        events: ctx.events.clone(),
+        listener,
+    };
 
-        futures::stream::unfold(
-            (
+    // Preserve partial work for a failed streamed run. The event stream
+    // remains unchanged, but terminal host capabilities need honest usage
+    // and executed-tool summaries for error and cancellation paths too.
+    //
+    // `runner` is moved into this async block rather than dereferenced
+    // beforehand: the generated state machine owns it (and, for the hosted
+    // `Owned` variant, the `Arc<InvocationRuntime>` inside it) for exactly as
+    // long as the future borrows from it across the `.await` below, which is
+    // what async/await's normal self-referential generator lowering makes
+    // sound without any unsafe code.
+    let run_fut: Pin<Box<dyn Future<Output = PartialRunOutcome> + Send + 'a>> =
+        Box::pin(async move {
+            let runner = runner;
+            runner
+                .invoke_streaming_in_context_collecting_partial(state, ctx, input)
+                .await
+        });
+
+    futures::stream::unfold(
+        (
+            Phase::Running {
+                run_fut,
+                listener_guard,
+            },
+            rx,
+        ),
+        |(phase, mut rx)| async move {
+            match phase {
                 Phase::Running {
-                    run_fut,
+                    mut run_fut,
                     listener_guard,
-                },
-                rx,
-            ),
-            |(phase, mut rx)| async move {
-                match phase {
-                    Phase::Running {
-                        mut run_fut,
-                        listener_guard,
-                    } => {
-                        tokio::select! {
-                            biased;
-                            // Prefer draining ready events so the consumer sees
-                            // fine-grained progress rather than a late burst.
-                            maybe = rx.recv() => match maybe {
-                                Some(record) => {
-                                    Some((
-                                        AgentStreamItem::Event(record),
-                                        (
-                                            Phase::Running {
-                                                run_fut,
-                                                listener_guard,
-                                            },
-                                            rx,
-                                        ),
-                                    ))
-                                }
-                                None => {
-                                    // All senders dropped (the run's context —
-                                    // and every sub-agent clone of the sink —
-                                    // is gone): the run is finishing. Await it
-                                    // for the terminal item.
-                                    let terminal = terminal_item(run_fut.await);
+                } => {
+                    tokio::select! {
+                        biased;
+                        // Prefer draining ready events so the consumer sees
+                        // fine-grained progress rather than a late burst.
+                        maybe = rx.recv() => match maybe {
+                            Some(record) => {
+                                Some((
+                                    AgentStreamItem::Event(record),
+                                    (
+                                        Phase::Running {
+                                            run_fut,
+                                            listener_guard,
+                                        },
+                                        rx,
+                                    ),
+                                ))
+                            }
+                            None => {
+                                // All senders dropped (the run's context —
+                                // and every sub-agent clone of the sink —
+                                // is gone): the run is finishing. Await it
+                                // for the terminal item.
+                                let terminal = terminal_item(run_fut.await);
+                                drop(listener_guard);
+                                Some((terminal, (Phase::Done, rx)))
+                            }
+                        },
+                        result = &mut run_fut => {
+                            // The run finished. Events emitted during this
+                            // final poll may still be buffered; drain them
+                            // ahead of the terminal item.
+                            let terminal = terminal_item(result);
+                            match rx.try_recv() {
+                                Ok(record) => Some((
+                                    AgentStreamItem::Event(record),
+                                    (
+                                        Phase::Draining {
+                                            terminal: Box::new(terminal),
+                                            listener_guard,
+                                        },
+                                        rx,
+                                    ),
+                                )),
+                                Err(_) => {
                                     drop(listener_guard);
                                     Some((terminal, (Phase::Done, rx)))
-                                }
-                            },
-                            result = &mut run_fut => {
-                                // The run finished. Events emitted during this
-                                // final poll may still be buffered; drain them
-                                // ahead of the terminal item.
-                                let terminal = terminal_item(result);
-                                match rx.try_recv() {
-                                    Ok(record) => Some((
-                                        AgentStreamItem::Event(record),
-                                        (
-                                            Phase::Draining {
-                                                terminal: Box::new(terminal),
-                                                listener_guard,
-                                            },
-                                            rx,
-                                        ),
-                                    )),
-                                    Err(_) => {
-                                        drop(listener_guard);
-                                        Some((terminal, (Phase::Done, rx)))
-                                    }
                                 }
                             }
                         }
                     }
-                    Phase::Draining {
-                        terminal,
-                        listener_guard,
-                    } => match rx.try_recv() {
-                        Ok(record) => Some((
-                            AgentStreamItem::Event(record),
-                            (
-                                Phase::Draining {
-                                    terminal,
-                                    listener_guard,
-                                },
-                                rx,
-                            ),
-                        )),
-                        Err(_) => {
-                            drop(listener_guard);
-                            Some((*terminal, (Phase::Done, rx)))
-                        }
-                    },
-                    Phase::Done => None,
                 }
-            },
-        )
-    }
+                Phase::Draining {
+                    terminal,
+                    listener_guard,
+                } => match rx.try_recv() {
+                    Ok(record) => Some((
+                        AgentStreamItem::Event(record),
+                        (
+                            Phase::Draining {
+                                terminal,
+                                listener_guard,
+                            },
+                            rx,
+                        ),
+                    )),
+                    Err(_) => {
+                        drop(listener_guard);
+                        Some((*terminal, (Phase::Done, rx)))
+                    }
+                },
+                Phase::Done => None,
+            }
+        },
+    )
 }

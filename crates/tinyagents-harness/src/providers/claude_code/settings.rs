@@ -40,14 +40,14 @@ pub fn load(workspace_dir: &Path) -> ClaudeCodeSettings {
     let path = settings_path(workspace_dir);
     match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            log::warn!(
+            tracing::warn!(
                 "[claude-code][settings] corrupt {} ({e}); using safe defaults",
                 path.display()
             );
             ClaudeCodeSettings::default()
         }),
         Err(e) => {
-            log::debug!(
+            tracing::debug!(
                 "[claude-code][settings] no settings at {} ({e}); using defaults",
                 path.display()
             );
@@ -64,7 +64,7 @@ pub fn save(workspace_dir: &Path, settings: &ClaudeCodeSettings) -> std::io::Res
     }
     let json = serde_json::to_vec_pretty(settings).map_err(std::io::Error::other)?;
     std::fs::write(&path, json)?;
-    log::debug!(
+    tracing::debug!(
         "[claude-code][settings] saved full_access={} → {}",
         settings.full_access,
         path.display()

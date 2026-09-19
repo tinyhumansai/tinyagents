@@ -22,24 +22,36 @@ where
     /// (see [`Self::route`]); `barrier_arrivals` is mutated in place as
     /// waiting-node predecessors arrive, so a barrier can still be pending
     /// across supersteps.
+    ///
+    /// `completed` pairs each branch with its *original* active-set index
+    /// (not necessarily `0..completed.len()` in order — see
+    /// [`crate::compiled::step::StepRun::completed`] and
+    /// [`crate::compiled::boundary::CompiledGraph::advance`]'s
+    /// `carried_completed` handling, both of which can hand this a
+    /// non-contiguous or reordered set spanning more than one step's
+    /// original indices). That original index is what `goto_map` is keyed
+    /// by, so it is threaded through explicitly rather than re-derived from
+    /// `completed`'s own position.
     pub(super) fn route_completed(
         &self,
-        completed: &[Activation],
+        completed: &[(usize, Activation)],
         goto_map: &HashMap<usize, Vec<RouteTarget>>,
         state: &State,
         barrier_arrivals: &mut HashMap<NodeId, HashSet<NodeId>>,
     ) -> Result<Vec<Activation>> {
         let mut next: Vec<Activation> = Vec::new();
         let mut next_seen: HashSet<NodeId> = HashSet::new();
-        // Resolved targets per activation index, captured once here and
-        // reused by the barrier-relief pass below instead of calling
-        // `self.route` a second time — a router closure is only guaranteed
-        // pure/idempotent per the `route`/`add_conditional_edges` contract,
-        // not safe to invoke twice for the same activation.
+        // Resolved targets per completed-slice position (not original
+        // index), captured once here and reused by the barrier-relief pass
+        // below instead of calling `self.route` a second time — a router
+        // closure is only guaranteed pure/idempotent per the
+        // `route`/`add_conditional_edges` contract, not safe to invoke
+        // twice for the same activation.
         let mut resolved: Vec<Vec<RouteTarget>> = Vec::with_capacity(completed.len());
-        for (index, activation) in completed.iter().enumerate() {
+        for (orig_index, activation) in completed.iter() {
             let node_id = &activation.node;
-            let targets = self.route(node_id, goto_map.get(&index).map(Vec::as_slice), state)?;
+            let targets =
+                self.route(node_id, goto_map.get(orig_index).map(Vec::as_slice), state)?;
             resolved.push(targets.clone());
             for target in targets {
                 let tnode = target.node().clone();
@@ -67,13 +79,13 @@ where
                     next.push(Activation {
                         node: tnode,
                         send_arg,
-                        task_id: String::new(),
+                        task_id: TaskId::from(String::new()),
                     });
                 } else if next_seen.insert(tnode.clone()) {
                     next.push(Activation {
                         node: tnode,
                         send_arg: None,
-                        task_id: String::new(),
+                        task_id: TaskId::from(String::new()),
                     });
                 }
             }
@@ -107,7 +119,7 @@ where
             let source_indices: Vec<usize> = completed
                 .iter()
                 .enumerate()
-                .filter(|(_, activation)| activation.node == relief.source)
+                .filter(|(_, (_, activation))| activation.node == relief.source)
                 .map(|(index, _)| index)
                 .collect();
             if source_indices.is_empty() {
@@ -144,7 +156,7 @@ where
                 next.push(Activation {
                     node: relief.barrier_node.clone(),
                     send_arg: None,
-                    task_id: String::new(),
+                    task_id: TaskId::from(String::new()),
                 });
             }
         }
@@ -171,16 +183,29 @@ where
         if from == to {
             return true;
         }
-        let mut current = from;
+        // A static fan-out (`self.edges` mapping to more than one target) is
+        // still fully deterministic — every target in the list unconditionally
+        // activates, unlike a conditional branch — so this walks every static
+        // successor of `from`, not just a single chain, tracking visited nodes
+        // to stay finite over a cycle.
+        let mut stack: Vec<&NodeId> = vec![from];
         let mut seen: HashSet<&NodeId> = HashSet::new();
-        while let Some(next) = self.edges.get(current) {
-            if next == to {
-                return true;
+        while let Some(current) = stack.pop() {
+            if !seen.insert(current) {
+                continue;
             }
-            if next == stop || !seen.insert(next) {
-                return false;
+            let Some(targets) = self.edges.get(current) else {
+                continue;
+            };
+            for next in targets {
+                if next == to {
+                    return true;
+                }
+                if next == stop {
+                    continue;
+                }
+                stack.push(next);
             }
-            current = next;
         }
         false
     }
@@ -203,11 +228,14 @@ where
             self.validate_route_targets(node_id, targets)?;
             return Ok(targets.to_vec());
         }
-        if let Some(target) = self.edges.get(node_id) {
-            return Ok(vec![RouteTarget::Node(target.clone())]);
+        if let Some(targets) = self.edges.get(node_id) {
+            return Ok(targets
+                .iter()
+                .map(|target| RouteTarget::Node(target.clone()))
+                .collect());
         }
         if let Some(branch) = self.branches.get(node_id) {
-            let route = (branch.router)(state);
+            let route = (branch.router)(state).to_string();
             let target = branch.routes.get(&route).cloned().ok_or_else(|| {
                 TinyAgentsError::MissingRoute {
                     node: node_id.to_string(),

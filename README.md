@@ -29,7 +29,9 @@ TinyAgents is a Cargo workspace, not one crate. Depend on the pieces you need:
   middleware, structured output, streaming, usage/cost accounting, retries,
   caching, memory, and a Claude Code CLI model adapter with stream-json,
   session, authentication, and MCP endpoint support. Features: `sqlite`,
-  `tools`, `multimodal`, `tracing`.
+  `builtin-tools` (`tools` kept as a deprecated alias), `multimodal`,
+  `claude-code`, `langfuse`, `tracing`. `claude-code` and `langfuse` are
+  enabled by default.
 - **`tinyagents-graph`** — a LangGraph-style durable, typed state graph:
   `START`/`END`, nodes, conditional edges, `Send` fanout, reducers/channels,
   checkpoints, interrupts, subgraphs, and time travel. Features: `sqlite`,
@@ -42,8 +44,13 @@ TinyAgents is a Cargo workspace, not one crate. Depend on the pieces you need:
   name, plus an offline model price/capability catalog.
 - **`tinyagents-session`** — a SQLite-backed store for session history,
   messages, tool calls, cost, and run lineage.
-- **`tinyagents-tracing`** — the `tracing` macros the other crates gate behind
-  their `tracing` feature. Compiled out by default.
+- **`tinyagents-definition`** — the host-owned agent definition vocabulary:
+  identity, description, declared model/tools/delegates, and a read-only
+  catalogue seam. Authorization, prompt construction, and execution stay with
+  the host and harness.
+- **`tinyagents-orchestration`** — host-neutral composition of durable
+  multi-agent work (teams and workflows) over the graph, harness, and session
+  layers; depends one-way on those crates and stays host-free.
 - **`tinyagents-integration-tests`** — cross-crate tests and the runnable
   examples referenced below (not published, workspace-internal).
 
@@ -58,10 +65,20 @@ tinyagents-harness = { git = "https://github.com/tinyhumansai/tinyagents", packa
 tinyagents-graph = { git = "https://github.com/tinyhumansai/tinyagents", package = "tinyagents-graph" }
 tinyagents-language = { git = "https://github.com/tinyhumansai/tinyagents", package = "tinyagents-language" }
 tinyagents-registry = { git = "https://github.com/tinyhumansai/tinyagents", package = "tinyagents-registry" }
-# The code samples below build `Message` and provider types directly from
-# TinyInference, the message/model crate TinyAgents is built on. It is a
-# separate git dependency, not re-exported by the crates above.
-tinyinference-llm = { git = "https://github.com/tinyhumansai/tinyinference", package = "tinyinference-llm" }
+```
+
+The code samples below build `Message` and provider types from TinyInference,
+the message/model crate TinyAgents is built on. Do not add `tinyinference-llm`
+(or `tinytools` / `tinytools-agent`) as a separate git dependency: `harness`
+pins an exact vendor commit and re-exports those crates as
+`tinyagents_harness::tinyinference_llm`, `tinyagents_harness::tinytools`, and
+`tinyagents_harness::tinytools_agent`. Adding your own dependency on the
+vendor crate would resolve to a second, independent copy of the same types
+(e.g. two distinct `Message` types that the compiler treats as unrelated), so
+always reach them through the re-export instead:
+
+```rust
+use tinyagents_harness::tinyinference_llm::message::Message;
 ```
 
 A minimal typed graph — a whole-state agent/tool loop (trimmed from
@@ -69,7 +86,7 @@ A minimal typed graph — a whole-state agent/tool loop (trimmed from
 
 ```rust
 use tinyagents_graph::*;
-use tinyinference_llm::message::Message;
+use tinyagents_harness::tinyinference_llm::message::Message;
 
 #[derive(Clone, Debug)]
 struct AgentState {
@@ -113,8 +130,8 @@ A one-shot model call through the harness (`export OPENAI_API_KEY=...` then
 ```rust
 use std::sync::Arc;
 use tinyagents_harness::runtime::AgentHarness;
-use tinyinference_llm::message::Message;
-use tinyinference_llm::providers::openai::OpenAiModel;
+use tinyagents_harness::tinyinference_llm::message::Message;
+use tinyagents_harness::tinyinference_llm::providers::openai::OpenAiModel;
 
 let model = OpenAiModel::from_env()?;
 let mut harness: AgentHarness<()> = AgentHarness::new();

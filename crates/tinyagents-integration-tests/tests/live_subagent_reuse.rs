@@ -7,10 +7,14 @@
 //!
 //! # Skips gracefully
 //!
-//! Returns early (after an `eprintln!`) when `OPENAI_API_KEY` is unset, so the
-//! default `cargo test` passes with no key configured.
+//! This test is `#[ignore]`d and only runs opted in via
+//! `tests/common/live.rs::require_live`, so the default `cargo test` passes
+//! with no key configured and never dials a real provider by accident.
+
+mod common;
 
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn live_openai_subagent_reused_with_carried_context() {
     use std::sync::Arc;
 
@@ -23,11 +27,7 @@ async fn live_openai_subagent_reused_with_carried_context() {
     use tinyinference_llm::message::Message;
     use tinyinference_llm::providers::openai::OpenAiModel;
 
-    let _ = dotenvy::dotenv();
-    if std::env::var("OPENAI_API_KEY").is_err() {
-        eprintln!(
-            "skipping live_openai_subagent_reused_with_carried_context: OPENAI_API_KEY is not set"
-        );
+    if !common::live::require_live(&["OPENAI_API_KEY"]) {
         return;
     }
 

@@ -178,7 +178,7 @@ impl<T: Send + 'static> AppendWorker<T> {
                             Msg::Item(item) => match append(item).await {
                                 Ok(()) => {
                                     if failure_run > 0 {
-                                        tinyagents_tracing::warn!(
+                                        tracing::warn!(
                                             target: "tinyagents::observability",
                                             sink = name,
                                             lost = failure_run,
@@ -194,7 +194,7 @@ impl<T: Send + 'static> AppendWorker<T> {
                                     let now = Instant::now();
                                     if failure_run == 1 {
                                         last_report = Some(now);
-                                        tinyagents_tracing::error!(
+                                        tracing::error!(
                                             target: "tinyagents::observability",
                                             sink = name,
                                             error = %error,
@@ -202,7 +202,7 @@ impl<T: Send + 'static> AppendWorker<T> {
                                         );
                                     } else if should_report(last_report, now, cooldown) {
                                         last_report = Some(now);
-                                        tinyagents_tracing::warn!(
+                                        tracing::warn!(
                                             target: "tinyagents::observability",
                                             sink = name,
                                             error = %error,
@@ -220,7 +220,7 @@ impl<T: Send + 'static> AppendWorker<T> {
                     // The channel closed mid-failure: report once on the way out
                     // so a run that never recovered is not silently quiet.
                     if failure_run > 0 {
-                        tinyagents_tracing::warn!(
+                        tracing::warn!(
                             target: "tinyagents::observability",
                             sink = name,
                             lost = failure_run,

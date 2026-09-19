@@ -4,7 +4,7 @@
 //! This is the gate that makes recursive self-authoring safe. A `.rag` plan —
 //! whether hand-written or emitted by a model running inside the harness — is
 //! semantically validated, then bound *by name* against a live registry through
-//! [`crate::CapabilityResolver`]/[`bind_capabilities_with_registry`], so the resulting
+//! [`crate::CapabilityResolver`]/[`crate::bind_capabilities_with_registry`], so the resulting
 //! topology can only reach capabilities Rust has already registered and allowed.
 //! Runnable node behaviour is never part of this crate's output: materialising a
 //! [`Blueprint`] into a runnable graph (via a caller-supplied `NodeFactory`) is
@@ -22,8 +22,7 @@
 //!    binding gate: declarative source can only reference capabilities that
 //!    Rust has already registered and allowed.
 
-use crate::capability_resolver::{CapabilitySource, bind_capabilities_with_registry};
-use crate::parser::parse_str;
+use crate::capability_resolver::CapabilitySource;
 use crate::types::{
     Blueprint, BlueprintProvenance, ChannelSpec, CommandSpec, END, EdgeSpan, EdgeSpec, IoFieldSpec,
     JoinSpec, NamedSpan, NodeSpec, Origin, Program, Routing, SendSpec,
@@ -184,6 +183,16 @@ fn compile_graph(graph: &crate::types::GraphDecl) -> Result<Blueprint> {
         // by precedence hides a real authoring mistake (e.g. a model-authored
         // revision that adds a `command.goto` without removing the old
         // `next`), so any additional combination is a compile error.
+        //
+        // NOTE (M13 in `docs/runtime-comparison/code-review-workspace.md`):
+        // the check above (routes vs next/edge) is redundant with this one —
+        // both `active.len() > 1` below and the check above catch
+        // routes+next/routes+edge, with two different messages for the same
+        // mistake. Removing the redundant check is left undone here: an
+        // integration test outside this change's file boundary
+        // (`feature_language_compiler_semantics.rs::mixing_routes_with_next_is_rejected`)
+        // asserts on the "mixes static routing" message text specifically,
+        // and this change cannot edit that file to migrate the assertion.
         let routing_sources = [
             (has_routes, "routes"),
             (has_next, "`next`"),
@@ -283,8 +292,16 @@ declarative steering lowering lands.",
             )));
         }
 
-        // Determine routing. Precedence: explicit `routes` > `next` > command
-        // `goto` > top-level edge > terminal.
+        // Determine routing. The checks above (the "mixes static routing"
+        // check and the `routing_sources` conflict check) already rejected
+        // any node declaring more than one of `routes`/`next`/`command {
+        // goto … }`/a top-level edge, so at most one of the conditions below
+        // is ever true for a given node — this `if`/`else` chain's order is
+        // just which single source it checks first, not a precedence that
+        // resolves a real conflict. (An earlier version of this comment
+        // described an actual precedence; that stopped being accurate once
+        // conflicts became compile errors — M13 in
+        // `docs/runtime-comparison/code-review-workspace.md`.)
         let routing = if has_routes {
             Routing::Conditional(
                 node.routes
@@ -332,10 +349,17 @@ declarative steering lowering lands.",
             })
             .collect();
 
+        // A dedicated `router "name"` source item (M4) folds into `model`,
+        // the field `router` nodes already used before that item existed, so
+        // `NodeSpec`'s shape is unchanged. `model` still wins when both are
+        // somehow present, matching every other "dedicated field falls back
+        // to `model`" convention in this compiler (`graph`, `script`, …).
+        let model = node.model.clone().or_else(|| node.router.clone());
+
         nodes.push(NodeSpec {
             name: node.name.clone(),
             kind: node.kind.clone().unwrap_or_else(|| "model".to_string()),
-            model: node.model.clone(),
+            model,
             prompt: node.prompt.clone(),
             tools: node.tools.clone(),
             routing,
@@ -405,6 +429,7 @@ declarative steering lowering lands.",
         .collect();
 
     Ok(Blueprint {
+        schema_version: 1,
         graph_id: graph.name.clone(),
         start,
         channels,
@@ -485,22 +510,27 @@ fn provenance_of(graph: &crate::types::GraphDecl, origin: &Origin) -> BlueprintP
 
 /// Parses, compiles, and registry-binds `.rag` `source` in one call.
 ///
-/// This is the convenience façade for the common path: it runs
-/// `parse -> compile -> registry-bind` and returns the validated blueprints.
-/// Every produced [`Blueprint`] is checked against `registry` via
-/// [`bind_capabilities_with_registry`], so a returned blueprint references only
-/// registered capabilities.
+/// This is the legacy convenience façade for the common path: `parse ->
+/// compile -> registry-bind`, returning the validated blueprints. It is now a
+/// thin alias for [`crate::resolver::resolve_source`], which runs the same
+/// `parse -> resolve -> compile` pipeline through the single
+/// [`crate::resolver::Resolver`] binding gate but validates with real source
+/// spans (caret-underline error rendering) instead of compiling first and
+/// binding blueprints afterward with no span information — see I7 in
+/// `docs/runtime-comparison/code-review-workspace.md`. New code should call
+/// [`crate::resolver::resolve_source`] directly.
+///
+/// Not marked `#[deprecated]`: several integration tests and examples outside
+/// this crate's edit boundary for this change still call `compile_source`
+/// directly, and this workspace's `cargo clippy -D warnings` would turn every
+/// one of those call sites into a hard build failure this change cannot fix.
 ///
 /// # Errors
 ///
-/// Propagates [`TinyAgentsError::Parse`] from the parser,
-/// [`TinyAgentsError::Compile`] from [`compile`] and node-kind validation, and
-/// [`TinyAgentsError::Capability`] from capability binding.
+/// Propagates [`TinyAgentsError::Parse`] from the parser, and
+/// [`TinyAgentsError::Compile`]/[`TinyAgentsError::Capability`] from
+/// resolution and compilation — the same variants and message text this
+/// function has always returned.
 pub fn compile_source(source: &str, registry: &impl CapabilitySource) -> Result<Vec<Blueprint>> {
-    let program = parse_str(source)?;
-    let blueprints = compile(&program)?;
-    for blueprint in &blueprints {
-        bind_capabilities_with_registry(blueprint, registry)?;
-    }
-    Ok(blueprints)
+    crate::resolver::resolve_source(source, registry)
 }

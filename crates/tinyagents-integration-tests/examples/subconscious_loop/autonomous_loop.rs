@@ -14,7 +14,7 @@
 //!   directive while resetting escalation state.
 //!
 //! The implementation uses deterministic functions instead of live LLM calls so
-//! `cargo run --example subconscious_loop` and the integration tests stay
+//! `cargo run -p tinyagents-integration-tests --example subconscious_loop` and the integration tests stay
 //! offline and reproducible.
 
 use tinyagents_graph::ClosureStateReducer;

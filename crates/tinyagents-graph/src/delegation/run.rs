@@ -117,7 +117,7 @@ where
         graph = graph.with_checkpointer(cp);
     }
 
-    tinyagents_tracing::info!(
+    tracing::info!(
         max_revisions = config.max_revisions,
         durable = thread_id.is_some(),
         human_gated = config.require_review_approval,
@@ -200,7 +200,7 @@ where
     }
 
     let approved = decision_is_approve(&decision);
-    tinyagents_tracing::info!(
+    tracing::info!(
         approved,
         "[interrupt] resuming durable delegation graph with approval decision"
     );
@@ -273,7 +273,7 @@ where
         // guard must treat any version it does not explicitly recognize as
         // incompatible, not merely an older one.
         Ok(Some(checkpoint)) if checkpoint.state.schema_version != CURRENT_SCHEMA_VERSION => {
-            tinyagents_tracing::warn!(
+            tracing::warn!(
                 thread_id = %tid,
                 schema_version = checkpoint.state.schema_version,
                 current = CURRENT_SCHEMA_VERSION,
@@ -283,7 +283,7 @@ where
             run_delegation_durable(config, run_stage).await
         }
         Ok(Some(checkpoint)) if checkpoint_is_resumable(&checkpoint) => {
-            tinyagents_tracing::info!(
+            tracing::info!(
                 thread_id = %tid,
                 "[delegation] resuming durable delegation from its last checkpoint boundary"
             );
@@ -305,12 +305,12 @@ where
                 thread_id: tid.clone(),
             });
             if pending.is_some() {
-                tinyagents_tracing::warn!(
+                tracing::warn!(
                     thread_id = %tid,
                     "[delegation] terminal-classified checkpoint carried a pending interrupt; surfacing it"
                 );
             } else {
-                tinyagents_tracing::info!(
+                tracing::info!(
                     thread_id = %tid,
                     "[delegation] thread already terminal; returning finalized state without re-running"
                 );
@@ -321,7 +321,7 @@ where
             })
         }
         Ok(None) => {
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 thread_id = %tid,
                 "[delegation] no checkpoint for thread; starting a fresh durable run"
             );
@@ -332,7 +332,7 @@ where
         // must NOT silently restart a valid resumable run — it is propagated so
         // durable work is retried by the caller, not dropped.
         Err(e) if is_incompatible_checkpoint_error(&e) => {
-            tinyagents_tracing::warn!(
+            tracing::warn!(
                 thread_id = %tid,
                 error = %e,
                 "[delegation] undecodable/incompatible checkpoint; pruning and starting fresh"
@@ -341,7 +341,7 @@ where
             run_delegation_durable(config, run_stage).await
         }
         Err(e) => {
-            tinyagents_tracing::error!(
+            tracing::error!(
                 thread_id = %tid,
                 error = %e,
                 "[delegation] checkpoint read failed (operational); not restarting — propagating error"
@@ -357,7 +357,7 @@ where
 /// forever. Failure to prune is non-fatal (logged at debug).
 async fn prune_thread(cp: &dyn Checkpointer<DelegationState>, thread_id: &str) {
     if let Err(e) = cp.delete_thread(thread_id).await {
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             thread_id = %thread_id,
             error = %e,
             "[delegation] could not prune checkpoint thread (non-fatal)"
@@ -460,7 +460,7 @@ fn into_outcome(
     thread_id: Option<String>,
 ) -> DelegationOutcome {
     let pending = execution.interrupts.first().map(|i| {
-        tinyagents_tracing::info!(
+        tracing::info!(
             interrupt_id = %i.id,
             node = %i.node.as_str(),
             "[interrupt] delegation run parked on durable human-approval interrupt"

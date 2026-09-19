@@ -245,6 +245,69 @@ async fn builds_harness_registries_with_model_aliases() {
     assert_eq!(tools.names(), vec!["lookup_user"]);
 }
 
+/// Builds a registry with `charlie`, `alpha`, `bravo` registered in that
+/// exact order (deliberately not alphabetical, so a name-sorted iteration
+/// would pick a different "first" model than registration order does).
+fn registry_with_three_models_in_order() -> CapabilityRegistry<()> {
+    let mut reg = CapabilityRegistry::<()>::new();
+    reg.register_model("charlie", Arc::new(FakeModel("c")))
+        .unwrap();
+    reg.register_model("alpha", Arc::new(FakeModel("a")))
+        .unwrap();
+    reg.register_model("bravo", Arc::new(FakeModel("b")))
+        .unwrap();
+    reg
+}
+
+#[test]
+fn to_model_registry_default_is_the_first_registered_model_every_time() {
+    // Build the same registry several times over; a `HashMap`-order default
+    // would vary run to run (or construction to construction within a
+    // process, depending on hash-seed timing), while first-registration
+    // order should not.
+    for _ in 0..5 {
+        let reg = registry_with_three_models_in_order();
+        let models = reg.to_model_registry();
+        assert_eq!(
+            models.default_name(),
+            Some("charlie"),
+            "default model should always be the first one registered"
+        );
+        assert!(models.get("charlie").is_some());
+        assert!(models.get("alpha").is_some());
+        assert!(models.get("bravo").is_some());
+    }
+}
+
+#[test]
+fn replace_model_does_not_move_an_existing_name_in_registration_order() {
+    let mut reg = registry_with_three_models_in_order();
+    // Re-registering "bravo" (already registered second) must not make it
+    // the new first-registered name.
+    reg.replace_model("bravo", Arc::new(FakeModel("b2")));
+    reg.register_model("delta", Arc::new(FakeModel("d")))
+        .unwrap();
+
+    let models = reg.to_model_registry();
+    assert_eq!(models.default_name(), Some("charlie"));
+}
+
+#[test]
+fn to_model_registry_with_default_overrides_first_registered() {
+    let reg = registry_with_three_models_in_order();
+
+    let models = reg
+        .to_model_registry_with_default("bravo")
+        .expect("bravo is registered");
+    assert_eq!(models.default_name(), Some("bravo"));
+    assert!(models.get("charlie").is_some());
+
+    let err = reg
+        .to_model_registry_with_default("not-registered")
+        .unwrap_err();
+    assert!(matches!(err, TinyAgentsError::ModelNotFound(name) if name == "not-registered"));
+}
+
 #[test]
 fn capability_resolver_includes_names_and_aliases() {
     let mut reg = CapabilityRegistry::<()>::new();
@@ -327,4 +390,171 @@ fn diagnostics_are_clean_for_a_healthy_registry() {
     reg.alias(ComponentKind::Model, "default", "gpt-4o")
         .unwrap();
     assert!(reg.diagnostics().is_empty());
+}
+
+#[test]
+fn set_metadata_replaces_the_recorded_description_and_tags() {
+    let mut reg = CapabilityRegistry::<()>::new();
+    reg.register_model("gpt-4o", Arc::new(FakeModel("m")))
+        .unwrap();
+
+    // Before `set_metadata`, registration only ever attached the bare
+    // default `ComponentMetadata::new` — no description or tags.
+    let before = reg.metadata(ComponentKind::Model, "gpt-4o").unwrap();
+    assert!(before.description.is_none());
+    assert!(before.tags.is_empty());
+
+    let richer = crate::component::ComponentMetadata::new("gpt-4o", ComponentKind::Model)
+        .with_description("OpenAI's flagship chat model")
+        .with_tag("openai");
+    reg.set_metadata(ComponentKind::Model, "gpt-4o", richer)
+        .unwrap();
+
+    let after = reg.metadata(ComponentKind::Model, "gpt-4o").unwrap();
+    assert_eq!(
+        after.description.as_deref(),
+        Some("OpenAI's flagship chat model")
+    );
+    assert_eq!(after.tags, vec!["openai".to_string()]);
+}
+
+#[test]
+fn set_metadata_rejects_an_unregistered_component() {
+    let mut reg = CapabilityRegistry::<()>::new();
+    let meta = crate::component::ComponentMetadata::new("ghost", ComponentKind::Model);
+    let err = reg
+        .set_metadata(ComponentKind::Model, "ghost", meta)
+        .unwrap_err();
+    assert!(matches!(err, TinyAgentsError::Capability(_)));
+}
+
+#[test]
+fn register_model_with_and_register_tool_with_attach_metadata_atomically() {
+    let mut reg = CapabilityRegistry::<()>::new();
+    reg.register_model_with(
+        "gpt-4o",
+        Arc::new(FakeModel("m")),
+        crate::component::ComponentMetadata::new("gpt-4o", ComponentKind::Model)
+            .with_description("flagship"),
+    )
+    .unwrap();
+    reg.register_tool_with(
+        Arc::new(FakeTool("lookup_user")),
+        crate::component::ComponentMetadata::new("lookup_user", ComponentKind::Tool)
+            .with_tag("crm"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        reg.metadata(ComponentKind::Model, "gpt-4o")
+            .unwrap()
+            .description
+            .as_deref(),
+        Some("flagship")
+    );
+    assert_eq!(
+        reg.metadata(ComponentKind::Tool, "lookup_user")
+            .unwrap()
+            .tags,
+        vec!["crm".to_string()]
+    );
+    // Registering the same name again is still rejected, exactly like the
+    // bare `register_model`/`register_tool`.
+    assert!(matches!(
+        reg.register_model_with(
+            "gpt-4o",
+            Arc::new(FakeModel("m2")),
+            crate::component::ComponentMetadata::new("gpt-4o", ComponentKind::Model),
+        )
+        .unwrap_err(),
+        TinyAgentsError::DuplicateComponent(_)
+    ));
+}
+
+#[test]
+fn remove_makes_alias_shadows_component_and_dangling_alias_reachable() {
+    // Before `remove`, `alias()`'s fail-closed checks make these two
+    // diagnostics unreachable through the public API (only
+    // `name_reused_across_kinds` could fire) — see W-I8.
+    let mut reg = CapabilityRegistry::<()>::new();
+    reg.register_model("gpt-4o", Arc::new(FakeModel("m")))
+        .unwrap();
+    reg.alias(ComponentKind::Model, "default", "gpt-4o")
+        .unwrap();
+
+    // Removing the alias's target leaves a dangling alias.
+    assert!(reg.remove(ComponentKind::Model, "gpt-4o"));
+    let diags = reg.diagnostics();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.name == "default" && d.message.contains("not a registered")),
+        "{diags:#?}"
+    );
+
+    // Removing something never registered is a no-op, not an error.
+    assert!(!reg.remove(ComponentKind::Tool, "never-registered"));
+}
+
+#[test]
+fn remove_drops_the_component_and_its_metadata() {
+    let mut reg = CapabilityRegistry::<()>::new();
+    reg.register_model("gpt-4o", Arc::new(FakeModel("m")))
+        .unwrap();
+    assert!(reg.has(ComponentKind::Model, "gpt-4o"));
+
+    assert!(reg.remove(ComponentKind::Model, "gpt-4o"));
+    assert!(!reg.has(ComponentKind::Model, "gpt-4o"));
+    assert!(reg.metadata(ComponentKind::Model, "gpt-4o").is_none());
+    assert!(reg.model("gpt-4o").is_none());
+
+    // The name can be freely re-registered afterward.
+    reg.register_model("gpt-4o", Arc::new(FakeModel("m2")))
+        .unwrap();
+    assert!(reg.has(ComponentKind::Model, "gpt-4o"));
+}
+
+#[tokio::test]
+async fn capability_registry_implements_definition_registry() {
+    use tinyagents_definition::{AgentDefinition, DefinitionRegistry};
+
+    let mut reg = CapabilityRegistry::<()>::new();
+    let parent = AgentDefinition::new("parent", "Parent", "delegates work")
+        .with_subagents(["researcher", "writer"]);
+    reg.register_agent(parent).unwrap();
+    reg.register_agent(AgentDefinition::new(
+        "researcher",
+        "Researcher",
+        "looks things up",
+    ))
+    .unwrap();
+
+    // `resolve`.
+    let found = DefinitionRegistry::resolve(&reg, "parent").await.unwrap();
+    assert_eq!(found.unwrap().id, "parent");
+    assert!(
+        DefinitionRegistry::resolve(&reg, "ghost")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // `list`.
+    let all = DefinitionRegistry::list(&reg).await.unwrap();
+    assert_eq!(all.len(), 2);
+
+    // `delegates_for`.
+    let delegates = DefinitionRegistry::delegates_for(&reg, "parent")
+        .await
+        .unwrap();
+    assert_eq!(
+        delegates,
+        vec!["researcher".to_string(), "writer".to_string()]
+    );
+    assert!(
+        DefinitionRegistry::delegates_for(&reg, "researcher")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

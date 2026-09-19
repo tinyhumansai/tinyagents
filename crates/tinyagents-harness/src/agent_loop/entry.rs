@@ -27,7 +27,16 @@ impl TerminalRunGuard {
 
     fn complete(mut self, succeeded: bool, error: Option<String>) -> AgentRun {
         if let Some(observer) = self.observer.take() {
-            observer(self.run.clone(), succeeded, error);
+            // A cheap summary (M-6), not a clone of the whole run: the
+            // observer only ever reads text/usage/executed-tools, and cloning
+            // `self.run` here duplicated the entire transcript just to throw
+            // it away after the observer call — `mem::take` below is the only
+            // place that needs to move the real run out.
+            observer(
+                crate::context::TerminalRunSummary::from_run(&self.run),
+                succeeded,
+                error,
+            );
         }
         std::mem::take(&mut self.run)
     }
@@ -37,7 +46,7 @@ impl Drop for TerminalRunGuard {
     fn drop(&mut self) {
         if let Some(observer) = self.observer.take() {
             observer(
-                self.run.clone(),
+                crate::context::TerminalRunSummary::from_run(&self.run),
                 false,
                 Some("hosted invocation cancelled by caller".to_string()),
             );

@@ -8,7 +8,7 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run --example rag_blueprint
+//! cargo run -p tinyagents-integration-tests --example rag_blueprint
 //! ```
 
 use tinyagents_harness::Result;

@@ -208,7 +208,7 @@ where
                             "executions": s.executions_texts(),
                             "revisions": s.revisions,
                         });
-                        tinyagents_tracing::info!(
+                        tracing::info!(
                             revisions = s.revisions,
                             "[interrupt] delegation review reached durable human-approval gate; pausing"
                         );
@@ -220,7 +220,7 @@ where
                     }
                     Some(decision) => {
                         let approved = decision_is_approve(&decision);
-                        tinyagents_tracing::info!(
+                        tracing::info!(
                             approved,
                             "[interrupt] delegation review resumed with human decision"
                         );

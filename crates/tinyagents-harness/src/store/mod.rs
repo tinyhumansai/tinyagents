@@ -156,54 +156,67 @@ impl Store for FileStore {
         Self::sanitize(namespace)?;
         Self::sanitize(key)?;
         let path = self.key_path(namespace, key);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let bytes = fs::read(&path)
-            .map_err(|e| TinyAgentsError::Validation(format!("store read error: {e}")))?;
-        let value: Value = serde_json::from_slice(&bytes)?;
-        Ok(Some(value))
+        // Blocking file I/O; offload it via the shared `spawn_blocking`
+        // helper so a store read never stalls a tokio worker (see I-4).
+        crate::blocking::run_blocking(move || -> Result<Option<Value>> {
+            if !path.exists() {
+                return Ok(None);
+            }
+            let bytes = fs::read(&path)
+                .map_err(|e| TinyAgentsError::Validation(format!("store read error: {e}")))?;
+            let value: Value = serde_json::from_slice(&bytes)?;
+            Ok(Some(value))
+        })
+        .await
     }
 
     async fn put(&self, namespace: &str, key: &str, value: Value) -> Result<()> {
         Self::sanitize(namespace)?;
         Self::sanitize(key)?;
         let dir = self.root_dir.join(namespace);
-        fs::create_dir_all(&dir)
-            .map_err(|e| TinyAgentsError::Validation(format!("store mkdir error: {e}")))?;
-        let path = dir.join(format!("{key}.json"));
-        let bytes = serde_json::to_vec_pretty(&value)?;
-        // Write to a uniquely named temp file in the same directory, then rename
-        // over the destination. Rename is atomic on POSIX/Windows for same-dir
-        // paths, so a reader never observes a partially written file and a crash
-        // mid-write leaves the previous value intact (as the type docs promise).
-        let tmp = dir.join(format!(
-            "{key}.json.tmp.{}.{}",
-            std::process::id(),
-            TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        fs::write(&tmp, &bytes)
-            .map_err(|e| TinyAgentsError::Validation(format!("store write error: {e}")))?;
-        if let Err(e) = fs::rename(&tmp, &path) {
-            // Best-effort cleanup of the temp file so a failed rename does not
-            // leak partial files into the namespace directory.
-            let _ = fs::remove_file(&tmp);
-            return Err(TinyAgentsError::Validation(format!(
-                "store rename error: {e}"
-            )));
-        }
-        Ok(())
+        let key = key.to_string();
+        crate::blocking::run_blocking(move || -> Result<()> {
+            fs::create_dir_all(&dir)
+                .map_err(|e| TinyAgentsError::Validation(format!("store mkdir error: {e}")))?;
+            let path = dir.join(format!("{key}.json"));
+            let bytes = serde_json::to_vec_pretty(&value)?;
+            // Write to a uniquely named temp file in the same directory, then
+            // rename over the destination. Rename is atomic on POSIX/Windows
+            // for same-dir paths, so a reader never observes a partially
+            // written file and a crash mid-write leaves the previous value
+            // intact (as the type docs promise).
+            let tmp = dir.join(format!(
+                "{key}.json.tmp.{}.{}",
+                std::process::id(),
+                TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::write(&tmp, &bytes)
+                .map_err(|e| TinyAgentsError::Validation(format!("store write error: {e}")))?;
+            if let Err(e) = fs::rename(&tmp, &path) {
+                // Best-effort cleanup of the temp file so a failed rename does
+                // not leak partial files into the namespace directory.
+                let _ = fs::remove_file(&tmp);
+                return Err(TinyAgentsError::Validation(format!(
+                    "store rename error: {e}"
+                )));
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
         Self::sanitize(namespace)?;
         Self::sanitize(key)?;
         let path = self.key_path(namespace, key);
-        if path.exists() {
-            fs::remove_file(&path)
-                .map_err(|e| TinyAgentsError::Validation(format!("store delete error: {e}")))?;
-        }
-        Ok(())
+        crate::blocking::run_blocking(move || -> Result<()> {
+            if path.exists() {
+                fs::remove_file(&path)
+                    .map_err(|e| TinyAgentsError::Validation(format!("store delete error: {e}")))?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn list(&self, namespace: &str) -> Result<Vec<String>> {
@@ -513,12 +526,7 @@ impl AppendStore for JsonlAppendStore {
             Ok(offset)
         };
 
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => handle.spawn_blocking(work).await.map_err(|e| {
-                TinyAgentsError::Validation(format!("append store task error: {e}"))
-            })?,
-            Err(_) => work(),
-        }
+        crate::blocking::run_blocking(work).await
     }
 
     async fn read_from(&self, stream: &str, offset: u64) -> Result<Vec<(u64, Value)>> {

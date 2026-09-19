@@ -62,7 +62,7 @@ pub fn upsert_agent_run(workspace_dir: &Path, upsert: AgentRunUpsert) -> Result<
         .transpose()
         .storage_context("serialize agent run checkpoint")?;
 
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} upsert_agent_run id={} kind={} status={} parent={} thread={}",
         upsert.id,
         upsert.kind.as_str(),
@@ -499,7 +499,7 @@ pub fn transition_agent_run_status(
     completed_at: Option<DateTime<Utc>>,
 ) -> Result<Option<AgentRun>> {
     let now = Utc::now();
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} transition_agent_run_status id={id} status={} has_error={} has_completed_at={}",
         status.as_str(),
         error.is_some(),
@@ -522,7 +522,7 @@ pub fn transition_agent_run_status(
             )
             .storage_context("transition agent run status")?;
         if rows_affected == 0 {
-            tinyagents_tracing::debug!("{LOG_PREFIX} transition_agent_run_status.miss id={id}");
+            tracing::debug!("{LOG_PREFIX} transition_agent_run_status.miss id={id}");
             return Ok(None);
         }
         get_agent_run_inner(conn, id)
@@ -557,7 +557,7 @@ pub fn interrupt_orphaned_agent_runs(workspace_dir: &Path) -> Result<usize> {
             )
             .storage_context("interrupt orphaned agent runs")?;
         if rows_affected > 0 {
-            tinyagents_tracing::info!(
+            tracing::info!(
                 "{LOG_PREFIX} interrupted {rows_affected} orphaned agent run(s) on startup"
             );
         }
@@ -690,11 +690,11 @@ fn get_workflow_run_inner(conn: &Connection, id: &str) -> Result<Option<Workflow
 
 /// Fetches a single [`WorkflowRun`] by id, or `None` if no row matches.
 pub fn get_workflow_run(workspace_dir: &Path, id: &str) -> Result<Option<WorkflowRun>> {
-    tinyagents_tracing::debug!("{LOG_PREFIX} get_workflow_run.entry id={id}");
+    tracing::debug!("{LOG_PREFIX} get_workflow_run.entry id={id}");
     crate::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let run = get_workflow_run_inner(conn, id)?;
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "{LOG_PREFIX} get_workflow_run.exit id={id} found={}",
             run.is_some()
         );
@@ -709,7 +709,7 @@ pub fn list_workflow_runs(
     workspace_dir: &Path,
     request: &WorkflowRunListRequest,
 ) -> Result<WorkflowRunListResponse> {
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} list_workflow_runs.entry definition={:?} status={:?} parent_thread={:?} limit={:?} offset={:?}",
         request.definition_id,
         request.status,
@@ -781,7 +781,7 @@ pub fn list_workflow_runs(
         for row in rows {
             runs.push(row?);
         }
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "{LOG_PREFIX} list_workflow_runs.exit count={count} returned={}",
             runs.len()
         );
@@ -797,7 +797,7 @@ pub fn list_workflow_runs(
 pub fn upsert_agent_team(workspace_dir: &Path, upsert: AgentTeamUpsert) -> Result<AgentTeam> {
     let now = Utc::now();
     let created_at = upsert.created_at.unwrap_or(now);
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} upsert_agent_team.entry id={} lead={} status={}",
         upsert.id,
         upsert.lead_agent_id,
@@ -835,17 +835,17 @@ pub fn upsert_agent_team(workspace_dir: &Path, upsert: AgentTeamUpsert) -> Resul
         .storage_context("upsert agent team")?;
         get_agent_team_inner(conn, &upsert.id)?.storage_context("agent team missing after upsert")
     })?;
-    tinyagents_tracing::debug!("{LOG_PREFIX} upsert_agent_team.exit id={}", team.id);
+    tracing::debug!("{LOG_PREFIX} upsert_agent_team.exit id={}", team.id);
     Ok(team)
 }
 
 /// Fetch a single team by id.
 pub fn get_agent_team(workspace_dir: &Path, id: &str) -> Result<Option<AgentTeam>> {
-    tinyagents_tracing::debug!("{LOG_PREFIX} get_agent_team.entry id={id}");
+    tracing::debug!("{LOG_PREFIX} get_agent_team.entry id={id}");
     crate::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let team = get_agent_team_inner(conn, id)?;
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "{LOG_PREFIX} get_agent_team.exit id={id} found={}",
             team.is_some()
         );
@@ -858,7 +858,7 @@ pub fn list_agent_teams(
     workspace_dir: &Path,
     request: &AgentTeamListRequest,
 ) -> Result<AgentTeamListResponse> {
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} list_agent_teams.entry parent_thread={:?} status={:?} limit={:?} offset={:?}",
         request.parent_thread_id,
         request.status,
@@ -920,7 +920,7 @@ pub fn list_agent_teams(
         for row in rows {
             teams.push(row?);
         }
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "{LOG_PREFIX} list_agent_teams.exit count={count} returned={}",
             teams.len()
         );
@@ -935,7 +935,7 @@ pub fn upsert_agent_team_member(
 ) -> Result<AgentTeamMember> {
     let now = Utc::now();
     let created_at = upsert.created_at.unwrap_or(now);
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} upsert_agent_team_member.entry id={} team={} name={} status={}",
         upsert.id,
         upsert.team_id,
@@ -978,7 +978,7 @@ pub fn upsert_agent_team_member(
         get_agent_team_member_inner(conn, &upsert.id)?
             .storage_context("agent team member missing after upsert")
     })?;
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} upsert_agent_team_member.exit id={}",
         member.id
     );
@@ -987,11 +987,11 @@ pub fn upsert_agent_team_member(
 
 /// Fetch a single member by id.
 pub fn get_agent_team_member(workspace_dir: &Path, id: &str) -> Result<Option<AgentTeamMember>> {
-    tinyagents_tracing::debug!("{LOG_PREFIX} get_agent_team_member.entry id={id}");
+    tracing::debug!("{LOG_PREFIX} get_agent_team_member.entry id={id}");
     crate::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let member = get_agent_team_member_inner(conn, id)?;
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "{LOG_PREFIX} get_agent_team_member.exit id={id} found={}",
             member.is_some()
         );
@@ -1004,7 +1004,7 @@ pub fn list_agent_team_members(
     workspace_dir: &Path,
     team_id: &str,
 ) -> Result<Vec<AgentTeamMember>> {
-    tinyagents_tracing::debug!("{LOG_PREFIX} list_agent_team_members.entry team={team_id}");
+    tracing::debug!("{LOG_PREFIX} list_agent_team_members.entry team={team_id}");
     crate::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let mut stmt = conn.prepare(
@@ -1018,7 +1018,7 @@ pub fn list_agent_team_members(
         for row in rows {
             members.push(row?);
         }
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "{LOG_PREFIX} list_agent_team_members.exit team={team_id} count={}",
             members.len()
         );
@@ -1038,7 +1038,7 @@ pub fn upsert_agent_team_task(
     let evidence_json =
         serde_json::to_string(&upsert.evidence).storage_context("serialize task evidence")?;
     let gate_status = upsert.gate_status.unwrap_or_else(|| "pending".to_string());
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} upsert_agent_team_task.entry id={} team={} status={} deps={}",
         upsert.id,
         upsert.team_id,
@@ -1106,17 +1106,17 @@ pub fn upsert_agent_team_task(
         get_agent_team_task_inner(conn, &upsert.id)?
             .storage_context("agent team task missing after upsert")
     })?;
-    tinyagents_tracing::debug!("{LOG_PREFIX} upsert_agent_team_task.exit id={}", task.id);
+    tracing::debug!("{LOG_PREFIX} upsert_agent_team_task.exit id={}", task.id);
     Ok(task)
 }
 
 /// Fetch a single task by id.
 pub fn get_agent_team_task(workspace_dir: &Path, id: &str) -> Result<Option<AgentTeamTask>> {
-    tinyagents_tracing::debug!("{LOG_PREFIX} get_agent_team_task.entry id={id}");
+    tracing::debug!("{LOG_PREFIX} get_agent_team_task.entry id={id}");
     crate::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let task = get_agent_team_task_inner(conn, id)?;
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "{LOG_PREFIX} get_agent_team_task.exit id={id} found={}",
             task.is_some()
         );
@@ -1126,7 +1126,7 @@ pub fn get_agent_team_task(workspace_dir: &Path, id: &str) -> Result<Option<Agen
 
 /// List all tasks of a team, by `order_index` then creation order.
 pub fn list_agent_team_tasks(workspace_dir: &Path, team_id: &str) -> Result<Vec<AgentTeamTask>> {
-    tinyagents_tracing::debug!("{LOG_PREFIX} list_agent_team_tasks.entry team={team_id}");
+    tracing::debug!("{LOG_PREFIX} list_agent_team_tasks.entry team={team_id}");
     crate::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let mut stmt = conn.prepare(
@@ -1142,7 +1142,7 @@ pub fn list_agent_team_tasks(workspace_dir: &Path, team_id: &str) -> Result<Vec<
         for row in rows {
             tasks.push(row?);
         }
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "{LOG_PREFIX} list_agent_team_tasks.exit team={team_id} count={}",
             tasks.len()
         );
@@ -1169,7 +1169,7 @@ pub fn claim_agent_team_task(
     member_id: &str,
     claim_token: &str,
 ) -> Result<ClaimOutcome> {
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} claim_agent_team_task.entry team={team_id} task={task_id} member={member_id}"
     );
     let outcome = crate::store::with_transaction(workspace_dir, |conn| {
@@ -1179,7 +1179,7 @@ pub fn claim_agent_team_task(
         let task = match get_agent_team_task_inner(conn, task_id)? {
             Some(task) if task.team_id == team_id => task,
             _ => {
-                tinyagents_tracing::debug!(
+                tracing::debug!(
                     "{LOG_PREFIX} claim_agent_team_task.unknown team={team_id} task={task_id}"
                 );
                 return Ok(ClaimOutcome::UnknownTask);
@@ -1202,7 +1202,7 @@ pub fn claim_agent_team_task(
             }
         }
         if !unmet.is_empty() {
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 "{LOG_PREFIX} claim_agent_team_task.blocked team={team_id} task={task_id} unmet={}",
                 unmet.len()
             );
@@ -1230,7 +1230,7 @@ pub fn claim_agent_team_task(
             )
             .storage_context("compare-and-swap claim agent team task")?;
         if rows_affected == 0 {
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 "{LOG_PREFIX} claim_agent_team_task.already_claimed team={team_id} task={task_id} \
                  status={}",
                 task.status.as_str()
@@ -1242,7 +1242,7 @@ pub fn claim_agent_team_task(
             .storage_context("claimed task missing after compare-and-swap")?;
         Ok(ClaimOutcome::Claimed(Box::new(claimed)))
     })?;
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} claim_agent_team_task.exit team={team_id} task={task_id} outcome={}",
         match &outcome {
             ClaimOutcome::Claimed(_) => "claimed",
@@ -1275,7 +1275,7 @@ pub fn complete_agent_team_task(
     evidence: &[String],
     require_evidence: bool,
 ) -> Result<CompletionOutcome> {
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} complete_agent_team_task.entry team={team_id} task={task_id} member={member_id}"
     );
     let outcome = crate::store::with_transaction(workspace_dir, |conn| {
@@ -1285,7 +1285,7 @@ pub fn complete_agent_team_task(
         let task = match get_agent_team_task_inner(conn, task_id)? {
             Some(task) if task.team_id == team_id => task,
             _ => {
-                tinyagents_tracing::debug!(
+                tracing::debug!(
                     "{LOG_PREFIX} complete_agent_team_task.unknown team={team_id} task={task_id}"
                 );
                 return Ok(CompletionOutcome::UnknownTask);
@@ -1296,7 +1296,7 @@ pub fn complete_agent_team_task(
         let is_claimant = task.claimed_by_member_id.as_deref() == Some(member_id);
         let in_progress = task.status == AgentTeamTaskStatus::InProgress;
         if !is_claimant || !in_progress {
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 "{LOG_PREFIX} complete_agent_team_task.not_claimed team={team_id} task={task_id} claimant={is_claimant} in_progress={in_progress}"
             );
             return Ok(CompletionOutcome::NotClaimed);
@@ -1334,7 +1334,7 @@ pub fn complete_agent_team_task(
                 params![joined, evidence_json, now.to_rfc3339(), task_id, team_id],
             )
             .storage_context("record failed completion gate")?;
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 "{LOG_PREFIX} complete_agent_team_task.gate_failed team={team_id} task={task_id} reasons={}",
                 reasons.len()
             );
@@ -1360,7 +1360,7 @@ pub fn complete_agent_team_task(
             )
             .storage_context("complete agent team task")?;
         if rows_affected == 0 {
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 "{LOG_PREFIX} complete_agent_team_task.lost_claim team={team_id} task={task_id}"
             );
             return Ok(CompletionOutcome::NotClaimed);
@@ -1370,7 +1370,7 @@ pub fn complete_agent_team_task(
             .storage_context("completed task missing after update")?;
         Ok(CompletionOutcome::Completed(Box::new(done)))
     })?;
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} complete_agent_team_task.exit team={team_id} task={task_id} outcome={}",
         match &outcome {
             CompletionOutcome::Completed(_) => "completed",
@@ -1440,7 +1440,7 @@ pub fn shutdown_agent_team_member(
     team_id: &str,
     member_id: &str,
 ) -> Result<Option<(AgentTeamMember, Vec<String>)>> {
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} shutdown_agent_team_member.entry team={team_id} member={member_id}"
     );
     let result = crate::store::with_transaction(workspace_dir, |conn| {
@@ -1452,7 +1452,7 @@ pub fn shutdown_agent_team_member(
         match get_agent_team_member_inner(conn, member_id)? {
             Some(found) if found.team_id == team_id => {}
             _ => {
-                tinyagents_tracing::debug!(
+                tracing::debug!(
                     "{LOG_PREFIX} shutdown_agent_team_member.unknown team={team_id} member={member_id}"
                 );
                 return Ok(None);
@@ -1493,7 +1493,7 @@ pub fn shutdown_agent_team_member(
             .storage_context("member missing after shutdown")?;
         Ok(Some((member, released)))
     })?;
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} shutdown_agent_team_member.exit team={team_id} member={member_id} released={}",
         result.as_ref().map(|(_, r)| r.len()).unwrap_or(0)
     );
@@ -1512,7 +1512,7 @@ pub fn mark_agent_team_member_running(
     worker_thread_id: &str,
     run_id: &str,
 ) -> Result<Option<AgentTeamMember>> {
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} mark_agent_team_member_running.entry team={team_id} member={member_id} task={task_id} run={run_id}"
     );
     crate::store::with_connection(workspace_dir, |conn| {
@@ -1551,7 +1551,7 @@ pub fn mark_agent_team_member_idle(
     team_id: &str,
     member_id: &str,
 ) -> Result<Option<AgentTeamMember>> {
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} mark_agent_team_member_idle.entry team={team_id} member={member_id}"
     );
     crate::store::with_connection(workspace_dir, |conn| {
@@ -1579,9 +1579,7 @@ pub fn mark_agent_team_member_idle(
 /// another teammate — the per-task analogue of the bulk release in
 /// `shutdown_agent_team_member`.
 pub fn release_agent_team_task(workspace_dir: &Path, team_id: &str, task_id: &str) -> Result<bool> {
-    tinyagents_tracing::debug!(
-        "{LOG_PREFIX} release_agent_team_task.entry team={team_id} task={task_id}"
-    );
+    tracing::debug!("{LOG_PREFIX} release_agent_team_task.entry team={team_id} task={task_id}");
     crate::store::with_connection(workspace_dir, |conn| {
         init_run_ledger_schema(conn)?;
         let now = Utc::now();
@@ -1594,7 +1592,7 @@ pub fn release_agent_team_task(workspace_dir: &Path, team_id: &str, task_id: &st
                 params![now.to_rfc3339(), task_id, team_id],
             )
             .storage_context("release agent team task")?;
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "{LOG_PREFIX} release_agent_team_task.exit team={team_id} task={task_id} released={}",
             changed > 0
         );

@@ -126,22 +126,20 @@ impl SingleFlight {
         let Some(claim) = claim else {
             // A poisoned map must never take the run down: fall back to simply
             // making the call, which is the un-collapsed behaviour.
-            tinyagents_tracing::warn!(
-                "[cache] single-flight map poisoned; issuing the model call directly"
-            );
+            tracing::warn!("[cache] single-flight map poisoned; issuing the model call directly");
             return call().await.map(|response| (response, false));
         };
         let mut receiver = claim;
 
         // Follower: wait for the leader rather than duplicating the call.
         if let Some(receiver) = receiver.as_mut() {
-            tinyagents_tracing::debug!(key = %key, "[cache] joining an in-flight identical model call");
+            tracing::debug!(key = %key, "[cache] joining an in-flight identical model call");
             match receiver.recv().await {
                 Ok(Outcome::Ready(response)) => return Ok((*response, true)),
                 // Leader failed, or dropped the channel without sending (a
                 // cancelled or panicking leader). Either way, run it ourselves.
                 Ok(Outcome::Failed) | Err(_) => {
-                    tinyagents_tracing::debug!(
+                    tracing::debug!(
                         key = %key,
                         "[cache] in-flight leader did not produce a response; issuing our own call"
                     );

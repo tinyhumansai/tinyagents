@@ -18,7 +18,7 @@ use crate::error::TinyAgentsError;
 use crate::events::{AgentEvent, EventSink, RecordingListener};
 use crate::limits::RunLimits;
 use crate::runtime::{AgentHarness, RunPolicy};
-use crate::tool::ToolRegistry;
+use crate::tool::{ToolDispatch, ToolRegistry};
 use tinyinference_llm::message::Message;
 use tinyinference_llm::providers::MockModel;
 
@@ -283,6 +283,99 @@ async fn invoke_in_parent_shares_events_cancellation_and_child_lifecycle() {
             .await,
         Err(TinyAgentsError::Cancelled)
     ));
+}
+
+/// M-2 regression: child run ids used to be suffixed with
+/// `ids::next_seq()`, a process-global counter that restarts at a different
+/// value every process — so two processes replaying the identical call
+/// sequence against an identically-named parent run diverged on the child's
+/// run id, breaking journal replay. The id is now a pure function of the
+/// parent run id and a per-context ordinal
+/// ([`crate::context::RunContext::next_child_ordinal`]), so two entirely
+/// separate `RunContext` instances that share a run id and call the same
+/// sub-agent in the same order derive **identical** child run ids.
+#[tokio::test]
+async fn child_run_ids_are_deterministic_from_the_parent_run_id_and_call_order() {
+    let child = SubAgent::new(
+        "worker",
+        "works",
+        Arc::new(child_harness::<NonDefaultContext>("done")),
+    );
+
+    let run_ids_for = |parent: &RunContext<NonDefaultContext>| {
+        let recorder = Arc::new(RecordingListener::new());
+        parent.events.subscribe(recorder.clone());
+        recorder
+    };
+
+    // Two independent parent contexts (standing in for two separate
+    // processes), sharing only the same run id and thread id.
+    let parent_a = RunContext::new(
+        RunConfig::new("parent").with_thread("thread"),
+        NonDefaultContext { value: "a".into() },
+    );
+    let recorder_a = run_ids_for(&parent_a);
+    let parent_b = RunContext::new(
+        RunConfig::new("parent").with_thread("thread"),
+        NonDefaultContext { value: "b".into() },
+    );
+    let recorder_b = run_ids_for(&parent_b);
+
+    for parent in [&parent_a, &parent_b] {
+        for value in ["one", "two"] {
+            child
+                .invoke_in_parent(
+                    &(),
+                    NonDefaultContext {
+                        value: value.into(),
+                    },
+                    parent,
+                    value,
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    let child_run_ids = |recorder: &RecordingListener| -> Vec<String> {
+        recorder
+            .events()
+            .into_iter()
+            .filter_map(|record| match record.event {
+                AgentEvent::RunStarted { run_id, .. } => Some(run_id.to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let ids_a = child_run_ids(&recorder_a);
+    let ids_b = child_run_ids(&recorder_b);
+    assert_eq!(ids_a.len(), 2);
+    assert_eq!(
+        ids_a, ids_b,
+        "two independent parent contexts with the same run id, calling the \
+         same sub-agent in the same order, must derive identical child run ids"
+    );
+    // And the two calls within one parent must still be distinct from each other.
+    assert_ne!(ids_a[0], ids_a[1]);
+}
+
+/// M-4 regression: `SubAgentTool::tool()` used to build a fresh
+/// `Arc<SubAgentToolDeclaration>` (with a cloned `parameters` JSON `Value`)
+/// on every call, even though it is invoked several times per admitted call
+/// plus once per tool per run for `schemas()`. It must now cache and return
+/// the *same* declaration `Arc` across calls.
+#[test]
+fn tool_declaration_is_cached_across_calls() {
+    let child = SubAgent::new("worker", "works", Arc::new(child_harness::<()>("unused")));
+    let dispatch: SubAgentTool<(), ()> =
+        SubAgentTool::new(Arc::new(child), ChildDataPolicy::new(|_: &()| ()));
+
+    let first = dispatch.tool();
+    let second = dispatch.tool();
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "tool() should return the same cached Arc on repeated calls"
+    );
 }
 
 #[tokio::test]

@@ -17,6 +17,7 @@ use tinyagents_session::run_ledger::{
     WorkflowLeaseClaim, WorkflowRun, WorkflowRunStatus, WorkflowRunUpsert,
 };
 
+use super::engine::PhaseRegistration;
 use super::state::set_phase_status;
 use super::*;
 
@@ -850,4 +851,94 @@ async fn output_wire_shape_remains_compatible_while_json_stays_lossless() {
     assert!(output["output"].is_string());
     assert_eq!(output["metadata"]["version"], json!(2));
     assert_eq!(output["metadata"]["rawOutput"], json!("only output"));
+}
+
+/// M11 regression: `PhaseRegistration::register` no longer holds its
+/// `parking_lot::Mutex` across the blocking DB CAS (see `engine.rs`'s
+/// `WorkflowChildRegistration for PhaseRegistration` impl). This exercises
+/// the CAS semantics that guarded property depends on, from a real tokio
+/// async context (tasks actually spawned onto the runtime, not just
+/// sequential `.await`s), so a reintroduced deadlock or a lost write under
+/// contention would show up here rather than only in production.
+#[tokio::test]
+async fn phase_registration_register_is_idempotent_and_survives_concurrent_registration() {
+    let store = Arc::new(MemoryStore::default());
+    let seed = store
+        .upsert(WorkflowRunUpsert {
+            id: "run-1".into(),
+            definition_id: "test".into(),
+            parent_thread_id: None,
+            input: json!({}),
+            phase_states: json!({}),
+            child_run_ids: vec![],
+            status: WorkflowRunStatus::Running,
+            summary: None,
+            started_at: None,
+            completed_at: None,
+        })
+        .unwrap();
+    let owner = "owner-1".to_owned();
+    let claimed = match store
+        .claim(&seed.id, &owner, Duration::from_secs(60))
+        .unwrap()
+    {
+        WorkflowLeaseClaim::Acquired(run) => run,
+        other => panic!("expected to acquire the lease, got {other:?}"),
+    };
+
+    let registration = Arc::new(PhaseRegistration::new(
+        store.clone(),
+        owner,
+        claimed,
+        json!({}),
+        Duration::from_secs(60),
+    ));
+
+    // Double registration of the same id must stay idempotent: no error, no
+    // duplicate entry — this is the pre-existing contract `register`'s
+    // duplicate check preserves.
+    registration.register("child-a".into()).unwrap();
+    registration.register("child-a".into()).unwrap();
+
+    // Concurrent registrations of *distinct* ids from spawned tokio tasks
+    // race the same CAS loop this refactor changed. None may be lost, none
+    // may deadlock (the test's own timeout — the harness default — is the
+    // deadlock detector: a regression here hangs instead of failing fast).
+    const CONCURRENT: usize = 16;
+    let mut handles = Vec::with_capacity(CONCURRENT);
+    for index in 0..CONCURRENT {
+        let registration = registration.clone();
+        handles.push(tokio::spawn(async move {
+            registration.register(format!("child-concurrent-{index}"))
+        }));
+    }
+    for handle in handles {
+        handle.await.unwrap().unwrap();
+    }
+
+    let final_run = store.load("run-1").unwrap().expect("run still present");
+    let mut unique_ids = final_run.child_run_ids.clone();
+    unique_ids.sort();
+    unique_ids.dedup();
+    assert_eq!(
+        final_run.child_run_ids.len(),
+        unique_ids.len(),
+        "concurrent registration must not duplicate a child id: {:?}",
+        final_run.child_run_ids
+    );
+    assert_eq!(
+        final_run.child_run_ids.len(),
+        1 + CONCURRENT,
+        "every registration (the duplicate `child-a` call collapses to one) \
+         must land durably: {:?}",
+        final_run.child_run_ids
+    );
+    assert!(final_run.child_run_ids.contains(&"child-a".to_owned()));
+    for index in 0..CONCURRENT {
+        assert!(
+            final_run
+                .child_run_ids
+                .contains(&format!("child-concurrent-{index}"))
+        );
+    }
 }

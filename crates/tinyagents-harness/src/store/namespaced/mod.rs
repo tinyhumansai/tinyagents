@@ -249,7 +249,7 @@ impl NamespacedStore for InMemoryNamespacedStore {
         items.retain(|_, item| !item.is_expired(now));
         let reclaimed = before - items.len();
         if reclaimed > 0 {
-            tinyagents_tracing::debug!("[store:namespaced] sweep_expired reclaimed={reclaimed}");
+            tracing::debug!("[store:namespaced] sweep_expired reclaimed={reclaimed}");
         }
         Ok(reclaimed)
     }

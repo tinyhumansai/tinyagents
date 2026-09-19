@@ -26,6 +26,13 @@ pub enum Literal {
     Str(String),
     /// A numeric literal (`50`, `1.5`).
     Num(f64),
+    /// A boolean literal (`true`, `false`).
+    ///
+    /// Parsed in preference to [`Literal::Ident`] for exactly the bare
+    /// identifiers `true`/`false` (see [`crate::parser::Parser::parse_literal`]),
+    /// so a value like `defaults { streaming true }` lowers to a real boolean
+    /// instead of the identifier string `"true"`.
+    Bool(bool),
     /// A bare identifier literal (`inherit`, `exponential`).
     Ident(String),
 }
@@ -36,6 +43,7 @@ impl Literal {
     pub fn as_display(&self) -> String {
         match self {
             Literal::Str(s) | Literal::Ident(s) => s.clone(),
+            Literal::Bool(b) => b.to_string(),
             Literal::Num(n) => {
                 if n.fract() == 0.0
                     && n.is_finite()
@@ -138,6 +146,15 @@ pub struct NodeDecl {
     /// A registered REPL script name (`script "triage"`) for a `repl_agent`
     /// node. Names a script capability; it never inlines executable code.
     pub script: Option<String>,
+    /// A registered router-function name (`router "classify"`) for a
+    /// `router` node, parallel to `agent`/`graph`/`script`.
+    ///
+    /// `router` nodes previously had no dedicated item and named their route
+    /// function through the overloaded `model` field (M4 in
+    /// `docs/runtime-comparison/code-review-workspace.md`); `model` is still
+    /// read as a deprecated fallback when `router` is absent, so existing
+    /// `.rag` source keeps compiling.
+    pub router: Option<String>,
     /// An input-mapping name (`input "split_a"`) for sub-agent / subgraph nodes.
     pub input: Option<String>,
     /// A `command { goto … update { … } }` declaration.
@@ -205,6 +222,7 @@ impl NodeDecl {
             agent: None,
             graph: None,
             script: None,
+            router: None,
             input: None,
             command: None,
             sends: Vec::new(),

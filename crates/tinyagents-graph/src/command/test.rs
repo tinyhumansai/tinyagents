@@ -47,3 +47,27 @@ fn interrupt_ids_are_unique() {
     let fixed = Interrupt::with_id("fixed", "n", json!(null));
     assert_eq!(fixed.id, "fixed");
 }
+
+/// I7 regression: interrupt ids are minted with the same restart-safe
+/// process-nonce scheme `tinyagents_harness::ids::new_checkpoint_id` uses,
+/// not a bare process-local counter that restarts at `0` every process (see
+/// `docs/runtime-comparison/code-review-graph.md`). Asserts the id embeds
+/// the process nonce and that a large batch of mints never collides.
+#[test]
+fn interrupt_ids_embed_the_process_nonce_and_never_collide() {
+    let nonce = tinyagents_harness::ids::process_nonce().to_string();
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..1000 {
+        let interrupt = Interrupt::new("n", json!(null));
+        assert!(
+            interrupt.id.contains(&nonce),
+            "interrupt id `{}` must embed the process nonce `{nonce}`",
+            interrupt.id
+        );
+        assert!(
+            seen.insert(interrupt.id.clone()),
+            "interrupt id `{}` was minted twice",
+            interrupt.id
+        );
+    }
+}

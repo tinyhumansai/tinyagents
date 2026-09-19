@@ -1,5 +1,12 @@
 # Registry Module Specification
 
+> **Design proposal, not implemented.** Much of what follows (`RegistryEvent`,
+> `EventBus`, `SharedRegistry`, and related machinery) describes a target
+> design and does not exist in `crates/tinyagents-registry/src` today. See
+> [`implementation-status.md`](implementation-status.md) for what is actually
+> shipped: `CapabilityRegistry<State>`, `ModelCatalog`, `ModelRouter`, and
+> `RegistrySnapshot`/`RegistryDiagnostic`.
+
 Parent module: [Registry](README.md).
 
 The registry module is the coordination layer for TinyAgents. It registers

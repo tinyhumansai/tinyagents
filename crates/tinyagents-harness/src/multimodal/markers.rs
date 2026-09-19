@@ -150,7 +150,7 @@ pub fn extract_ollama_image_payload(image_ref: &str) -> Option<String> {
         return None;
     }
     if !is_data_uri && looks_like_absolute_path(payload) {
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "[multimodal] image reference is shaped like a filesystem path, not image bytes"
         );
         return None;
@@ -172,7 +172,7 @@ pub fn extract_ollama_image_payload(image_ref: &str) -> Option<String> {
         STANDARD_NO_PAD.decode(payload).is_ok()
     };
     if !is_base64 {
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "[multimodal] image reference is not base64 (a filesystem path is not accepted here)"
         );
         return None;

@@ -52,7 +52,7 @@ pub fn record_session_start(
     transcript_path: Option<&str>,
 ) -> Result<SessionRecord> {
     let now = Utc::now();
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "[session_db] record_session_start id={id} agent={agent_definition_id} \
          parent={} thread={} channel={}",
         parent_session_id.unwrap_or("-"),
@@ -112,7 +112,7 @@ pub fn record_session_end(
     cost_usd: f64,
 ) -> Result<SessionRecord> {
     let now = Utc::now();
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "[session_db] record_session_end id={id} status={} turns={turn_count} \
          tokens_in={input_tokens} tokens_out={output_tokens} cost=${cost_usd:.6}",
         status.as_str(),
@@ -190,7 +190,7 @@ pub fn record_message_with_reasoning(
     cost_usd: Option<f64>,
 ) -> Result<i64> {
     let now = Utc::now();
-    tinyagents_tracing::trace!(
+    tracing::trace!(
         "[session_db] record_message session={session_id} role={role} len={}",
         content.len()
     );
@@ -251,7 +251,7 @@ pub fn record_tool_call(
     duration_ms: Option<i64>,
 ) -> Result<i64> {
     let now = Utc::now();
-    tinyagents_tracing::trace!(
+    tracing::trace!(
         "[session_db] record_tool_call session={session_id} tool={tool_name} status={status}"
     );
 
@@ -344,7 +344,7 @@ pub fn list_sessions(
     status: Option<&str>,
     parent_id: Option<&str>,
 ) -> Result<SessionSearchResult> {
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "[session_db] list_sessions limit={} offset={} status={} parent={}",
         limit.unwrap_or(50),
         offset.unwrap_or(0),
@@ -420,7 +420,7 @@ pub fn search_sessions(
     workspace_dir: &Path,
     params: &SessionSearchParams,
 ) -> Result<SessionSearchResult> {
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "[session_db] search_sessions query={} agent={} tool={} channel={} thread={}",
         params.query.as_deref().unwrap_or("-"),
         params.agent_id.as_deref().unwrap_or("-"),
@@ -644,9 +644,7 @@ pub fn list_children(workspace_dir: &Path, session_id: &str) -> Result<Vec<Sessi
 /// database belongs to a process that is gone, so its status is stale by
 /// definition.
 pub fn mark_interrupted(workspace_dir: &Path) -> Result<usize> {
-    tinyagents_tracing::debug!(
-        "[session_db] mark_interrupted — marking all running sessions as interrupted"
-    );
+    tracing::debug!("[session_db] mark_interrupted — marking all running sessions as interrupted");
     with_connection(workspace_dir, |conn| {
         let now = Utc::now();
         let changed = conn.execute(
@@ -655,9 +653,7 @@ pub fn mark_interrupted(workspace_dir: &Path) -> Result<usize> {
             params![now.to_rfc3339()],
         )?;
         if changed > 0 {
-            tinyagents_tracing::info!(
-                "[session_db] marked {changed} running session(s) as interrupted"
-            );
+            tracing::info!("[session_db] marked {changed} running session(s) as interrupted");
         }
         Ok(changed)
     })
@@ -723,7 +719,7 @@ pub fn fts_snippet_bytes() -> usize {
 /// raising it does not retroactively widen what is already indexed. Pair it
 /// with [`super::retention::reindex_fts`] to rebuild the index at the new cap.
 pub fn set_fts_snippet_bytes(bytes: usize) {
-    tinyagents_tracing::debug!("[session_db] fts snippet cap set to {bytes} bytes");
+    tracing::debug!("[session_db] fts snippet cap set to {bytes} bytes");
     FTS_SNIPPET_BYTES.store(bytes, std::sync::atomic::Ordering::Relaxed);
 }
 

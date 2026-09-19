@@ -1459,6 +1459,7 @@ version = "2.1.2"
 dependencies = [
  "async-trait",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -1475,10 +1476,10 @@ dependencies = [
  "tempfile",
  "tinyagents-harness",
  "tinyagents-language",
- "tinyagents-tracing",
  "tinyinference-llm",
  "tinytools",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1493,7 +1494,6 @@ dependencies = [
  "dirs",
  "flate2",
  "futures",
- "log",
  "regex",
  "reqwest",
  "rusqlite",
@@ -1503,12 +1503,12 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tinyagents-definition",
- "tinyagents-tracing",
  "tinyinference-embeddings",
  "tinyinference-llm",
  "tinytools",
  "tinytools-agent",
  "tokio",
+ "tracing",
  "uuid",
  "wait-timeout",
 ]
@@ -1589,19 +1589,11 @@ version = "2.1.2"
 dependencies = [
  "anyhow",
  "chrono",
- "log",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "tinyagents-harness",
- "tinyagents-tracing",
-]
-
-[[package]]
-name = "tinyagents-tracing"
-version = "2.1.2"
-dependencies = [
  "tracing",
 ]
 

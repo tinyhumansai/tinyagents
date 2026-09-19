@@ -37,16 +37,20 @@
 //!
 //! # Skips gracefully
 //!
-//! Dialling is **opt-in** via `PROVIDER_MATRIX=1`, so a bare `cargo test` never
-//! touches the network even with a fully configured `providers.env`. A provider
-//! whose API key is blank in `providers.env`, in the process environment, and in
-//! the preset's own key variable (e.g. `OPENAI_API_KEY`) is reported as `SKIP`
-//! and never dialled.
+//! This test is `#[ignore]`d, so a bare `cargo test` never touches the
+//! network even with a fully configured `providers.env`. Running it at all
+//! additionally requires the **opt-in** `PROVIDER_MATRIX=1` (kept as this
+//! file's own switch, since — unlike every other `live_*.rs` test — a
+//! configured matrix has keys by definition, so it cannot key its gate off a
+//! single missing env var the way `tests/common/live.rs::require_live` does).
+//! A provider whose API key is blank in `providers.env`, in the process
+//! environment, and in the preset's own key variable (e.g. `OPENAI_API_KEY`)
+//! is reported as `SKIP` and never dialled.
 //!
 //! # Run
 //!
 //! ```text
-//! PROVIDER_MATRIX=1 cargo test --test live_provider_matrix -- --nocapture
+//! PROVIDER_MATRIX=1 cargo test --test live_provider_matrix -- --ignored --nocapture
 //! ```
 //!
 //! `--nocapture` is required to see the table. Set
@@ -54,6 +58,8 @@
 //! test when a provider is down — useful when the matrix runs as a dashboard
 //! rather than a gate, and the normal choice when providers can fail for
 //! account reasons (quota, billing) rather than code reasons.
+
+mod common;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -555,21 +561,21 @@ fn merge_env_overrides(
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn live_provider_matrix() {
     // Dialling is opt-in. Without this the matrix would make real network calls
     // (and could fail on a provider's billing or quota, not on our code) during
     // a bare `cargo test` on any machine that has a populated providers.env.
-    // Every other `tests/live_*.rs` skips itself the same way; they can key off
-    // a missing OPENAI_API_KEY, whereas a configured matrix has keys by
-    // definition, so it needs an explicit switch.
-    if std::env::var("PROVIDER_MATRIX")
-        .ok()
-        .filter(|v| !v.trim().is_empty() && v != "0")
-        .is_none()
+    // Every other `tests/live_*.rs` skips itself via `require_live`, keyed off
+    // a missing env var like `OPENAI_API_KEY`; a configured matrix has keys by
+    // definition, so it needs its own explicit switch, `PROVIDER_MATRIX=1` —
+    // kept in addition to the shared `TINYAGENTS_LIVE=1` so either one works.
+    if !(common::live::is_flag_on("PROVIDER_MATRIX") || common::live::is_flag_on("TINYAGENTS_LIVE"))
     {
         eprintln!(
-            "skipping live_provider_matrix: set PROVIDER_MATRIX=1 to dial configured providers \
-             (PROVIDER_MATRIX=1 cargo test --test live_provider_matrix -- --nocapture)"
+            "skipping live_provider_matrix: set PROVIDER_MATRIX=1 (or TINYAGENTS_LIVE=1) to dial \
+             configured providers (PROVIDER_MATRIX=1 cargo test --test live_provider_matrix \
+             -- --ignored --nocapture)"
         );
         return;
     }

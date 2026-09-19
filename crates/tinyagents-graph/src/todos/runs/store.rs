@@ -122,7 +122,7 @@ pub async fn create_run(
     runs.push(run.clone());
     save(store, &thread_id, &runs).await?;
 
-    tinyagents_tracing::info!(
+    tracing::info!(
         thread_id = %thread_id,
         run_id = %run.run_id,
         card_id = %card_id,
@@ -207,7 +207,7 @@ pub async fn complete_run(
     let completed = run.clone();
     save(store, &thread_id, &runs).await?;
 
-    tinyagents_tracing::info!(
+    tracing::info!(
         thread_id = %thread_id,
         run_id = %run_id,
         outcome = ?completed.outcome,
@@ -314,7 +314,7 @@ pub async fn reclaim_stale(
         )
         .await
         {
-            tinyagents_tracing::warn!(
+            tracing::warn!(
                 thread_id = %thread_id,
                 run_id = %run.run_id,
                 %error,
@@ -356,7 +356,7 @@ pub async fn reclaim_stale(
                     reason: reason.clone(),
                     new_card_status: status.as_str().to_string(),
                 });
-                tinyagents_tracing::info!(
+                tracing::info!(
                     thread_id = %thread_id,
                     run_id = %run.run_id,
                     card_id = %run.card_id,
@@ -366,7 +366,7 @@ pub async fn reclaim_stale(
                     "[graph:todos:runs] card reclaimed"
                 );
             }
-            Err(error) => tinyagents_tracing::warn!(
+            Err(error) => tracing::warn!(
                 thread_id = %thread_id,
                 run_id = %run.run_id,
                 card_id = %run.card_id,
@@ -398,7 +398,7 @@ pub fn spawn_heartbeat_task(
             tokio::select! {
                 _ = ticker.tick() => {
                     if let Err(error) = update_heartbeat(&store, &thread_id, &run_id).await {
-                        tinyagents_tracing::debug!(
+                        tracing::debug!(
                             thread_id = %thread_id,
                             run_id = %run_id,
                             %error,
@@ -408,7 +408,7 @@ pub fn spawn_heartbeat_task(
                     }
                 }
                 _ = cancel.changed() => {
-                    tinyagents_tracing::debug!(
+                    tracing::debug!(
                         thread_id = %thread_id,
                         run_id = %run_id,
                         "[graph:todos:runs] heartbeat cancelled"

@@ -14,11 +14,7 @@ mod types;
 
 pub use types::{Command, Interrupt, NodeResult, RouteTarget, Send};
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use tinyagents_harness::ids::NodeId;
-
-static INTERRUPT_SEQ: AtomicU64 = AtomicU64::new(0);
+use tinyagents_harness::ids::{NodeId, TaskId};
 
 impl<Update> Command<Update> {
     /// Creates an empty command (no update, no routing, no resume).
@@ -27,6 +23,7 @@ impl<Update> Command<Update> {
             update: None,
             goto: Vec::new(),
             resume: None,
+            resume_by_task: std::collections::HashMap::new(),
         }
     }
 
@@ -39,6 +36,7 @@ impl<Update> Command<Update> {
                 .map(|t| RouteTarget::Node(t.into()))
                 .collect(),
             resume: None,
+            resume_by_task: std::collections::HashMap::new(),
         }
     }
 
@@ -50,6 +48,7 @@ impl<Update> Command<Update> {
             update: None,
             goto: sends.into_iter().map(RouteTarget::Send).collect(),
             resume: None,
+            resume_by_task: std::collections::HashMap::new(),
         }
     }
 
@@ -59,6 +58,7 @@ impl<Update> Command<Update> {
             update: Some(update),
             goto: Vec::new(),
             resume: None,
+            resume_by_task: std::collections::HashMap::new(),
         }
     }
 
@@ -68,6 +68,21 @@ impl<Update> Command<Update> {
             update: None,
             goto: Vec::new(),
             resume: Some(value),
+            resume_by_task: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Creates a resume command carrying a distinct value per interrupted
+    /// task (I1): a `Send` fan-out of the same node produces several
+    /// concurrently-interrupted tasks, and this is how a caller delivers each
+    /// its own resume value in one call, keyed by
+    /// [`crate::builder::NodeContext::task_id`].
+    pub fn resume_tasks(values: impl IntoIterator<Item = (TaskId, serde_json::Value)>) -> Self {
+        Self {
+            update: None,
+            goto: Vec::new(),
+            resume: None,
+            resume_by_task: values.into_iter().collect(),
         }
     }
 
@@ -105,13 +120,27 @@ impl<Update> Default for Command<Update> {
 
 impl Interrupt {
     /// Creates an interrupt with an auto-generated unique id.
+    ///
+    /// I7 (`docs/runtime-comparison/code-review-graph.md`): built from
+    /// [`tinyagents_harness::ids::process_nonce`] +
+    /// [`tinyagents_harness::ids::next_seq`] — the same restart-safe scheme
+    /// [`tinyagents_harness::ids::new_checkpoint_id`] uses — rather than a
+    /// bare process-local counter. A bare counter restarts at `0` in every
+    /// new process, so two pauses minted in different process lifetimes
+    /// could collide on `(node, seq)` and conflate two distinct interrupts
+    /// in `GraphRunStatus::pending_interrupts` or a UI keyed on interrupt id.
     pub fn new(node: impl Into<NodeId>, payload: serde_json::Value) -> Self {
         let node = node.into();
-        let seq = INTERRUPT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let id = format!(
+            "interrupt-{node}-{}-{}",
+            tinyagents_harness::ids::process_nonce(),
+            tinyagents_harness::ids::next_seq()
+        );
         Self {
-            id: format!("interrupt-{node}-{seq}"),
+            id,
             node,
             payload,
+            task_id: None,
         }
     }
 
@@ -125,7 +154,19 @@ impl Interrupt {
             id: id.into(),
             node: node.into(),
             payload,
+            task_id: None,
         }
+    }
+
+    /// Returns this interrupt with its scheduled task id set (R5/I1).
+    ///
+    /// The interrupt boundary calls this on the emitted interrupt before
+    /// persisting/returning it, so a `Send` fan-out of the same node (or a
+    /// re-emitted subgraph interrupt) is resumable by its own task rather
+    /// than sharing the node's identity with its siblings.
+    pub fn with_task_id(mut self, task_id: tinyagents_harness::ids::TaskId) -> Self {
+        self.task_id = Some(task_id);
+        self
     }
 }
 

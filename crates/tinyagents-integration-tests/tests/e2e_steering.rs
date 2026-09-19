@@ -130,11 +130,14 @@ async fn disallowed_command_is_rejected_by_policy() {
         .invoke_in_context(&(), ctx, vec![Message::user("Hi")])
         .await;
 
+    // I-5/M-7: a disallowed command is now rejected individually (a Steered
+    // event with accepted = false) rather than killing the whole run — the
+    // run completes normally since Cancel was the only queued command.
     assert!(
-        matches!(result, Err(TinyAgentsError::Steering(_))),
-        "a command outside the policy allowlist is rejected, got {result:?}"
+        result.is_ok(),
+        "a disallowed command must not fail the run, got {result:?}"
     );
-    // The rejection is observable (a Steered event with accepted = false).
+    // The rejection is still observable (a Steered event with accepted = false).
     assert!(
         recorder.kinds().iter().any(|k| k.ends_with("steered")),
         "a Steered event was emitted for the rejected command"

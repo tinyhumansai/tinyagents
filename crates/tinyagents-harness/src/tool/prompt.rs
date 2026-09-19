@@ -598,7 +598,7 @@ pub const SYNTHETIC_CALL_ID_PREFIX: &str = "ptc";
 pub fn next_synthetic_call_id(slot: usize) -> String {
     let sequence = SYNTHETIC_CALL_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let id = format!("{SYNTHETIC_CALL_ID_PREFIX}_{sequence}_{slot}");
-    tinyagents_tracing::trace!("[tool::prompt] minted synthetic tool-call id {id}");
+    tracing::trace!("[tool::prompt] minted synthetic tool-call id {id}");
     id
 }
 

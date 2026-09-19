@@ -110,7 +110,7 @@ impl LruResponseMap {
             };
             self.remove(&victim);
             self.stats.evictions = self.stats.evictions.saturating_add(1);
-            tinyagents_tracing::trace!(key = %victim, "[cache] evicted least-recently-used entry");
+            tracing::trace!(key = %victim, "[cache] evicted least-recently-used entry");
         }
     }
 
@@ -136,7 +136,7 @@ impl ResponseCache for InMemoryResponseCache {
             inner.stats.expirations = inner.stats.expirations.saturating_add(1);
             inner.stats.misses = inner.stats.misses.saturating_add(1);
             inner.sync_size_stats();
-            tinyagents_tracing::debug!(key = %key, "[cache] entry expired; treating as miss");
+            tracing::debug!(key = %key, "[cache] entry expired; treating as miss");
             return Ok(None);
         }
         let hit = inner.data.get(key).map(|entry| entry.value.clone());
@@ -187,7 +187,7 @@ impl ResponseCache for InMemoryResponseCache {
         inner.order.clear();
         inner.bytes = 0;
         inner.sync_size_stats();
-        tinyagents_tracing::debug!(dropped, "[cache] cleared every in-memory response entry");
+        tracing::debug!(dropped, "[cache] cleared every in-memory response entry");
         Ok(())
     }
 

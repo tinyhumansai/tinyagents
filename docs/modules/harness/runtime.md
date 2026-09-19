@@ -100,11 +100,23 @@ Detailed lifecycle:
 11. Emit model events and append assistant message.
 12. If tool calls exist, validate name, schema, and limits.
 13. Run `before_tool` middleware per call.
-14. Execute tools — concurrently when the turn has two or more calls and no
-    tool-wrap (`ToolMiddleware`) middleware is registered (wrap middleware
-    holds `&mut RunContext` across each call, so it forces the serial path);
-    results always fold back in original call order.
-15. Run `on_tool_delta` middleware for tool progress streams.
+14. Execute tools — concurrently only when *all* of: the turn has two or more
+    calls, zero tool-wrap (`ToolMiddleware`) middleware is registered (wrap
+    middleware holds `&mut RunContext` across each call, so it forces the
+    serial path), and every call's tool reports `is_concurrency_safe() ==
+    true` (the trait default is `false`, so concurrency is opt-in per tool);
+    see `should_execute_tools_concurrently` in
+    `crates/tinyagents-harness/src/agent_loop/tools.rs`. Lifecycle middleware
+    no longer forces the serial path: every `before_tool` hook runs during
+    serial admission, which completes in full before any concurrent future is
+    built, so there is nothing left for it to mutate once execution starts.
+    When the concurrent path runs, it is bounded by
+    `RunLimits::max_tool_concurrency` (`futures::stream::iter(..)
+    .buffered(n)`; `None`, the default, is unbounded). Results always fold
+    back in original call order.
+15. `on_tool_delta` middleware exists on the `Middleware` trait and
+    `MiddlewareChain::run_on_tool_delta` is implemented, but the agent loop
+    does not call it yet — no tool progress stream is wired up today.
 16. Run `after_tool` middleware per result.
 17. Append tool messages.
 18. Repeat until no tool calls remain.
@@ -116,12 +128,26 @@ Hard limits:
 
 - `max_model_calls`
 - `max_tool_calls`
-- `max_concurrency`
 - wall-clock timeout
 - per-call timeout
 - retry budget
 
 The loop must fail closed when a limit is reached.
+
+A per-call ceiling (`RunLimits::max_model_call_ms`) firing raises
+`TinyAgentsError::CallTimeout`, distinct from a run-deadline
+`TinyAgentsError::Timeout`: `CallTimeout` is retryable and is still consulted
+against the fallback chain (the model wedged, not the run), while `Timeout`
+is terminal (the run itself is out of wall-clock budget).
+
+Step 12's text-dialect recovery (parsing `<tool_call>` markup out of an
+assistant's visible text when the provider returned no native tool calls) is
+gated by `RunPolicy::text_dialect_recovery` (`TextDialectRecovery::Off | On |
+Auto`, default `Auto`): it only runs when the resolved model's profile does
+not report native tool calling, and it always skips markup that appears only
+inside a fenced code block. A model that quotes the syntax while explaining
+it (or answers under a model that *does* support native tool calling) is
+never executed as a real call.
 
 ## Middleware
 

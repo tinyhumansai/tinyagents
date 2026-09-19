@@ -253,7 +253,7 @@ impl SummarizationPolicy {
         let requested_split = non_system.len() - self.keep_last;
         let split = find_safe_cutoff_point(&non_system, requested_split);
         if split != requested_split {
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 "[summarization::plan] keep_last={} moved split {requested_split} -> {split} to preserve tool-call pairing",
                 self.keep_last
             );

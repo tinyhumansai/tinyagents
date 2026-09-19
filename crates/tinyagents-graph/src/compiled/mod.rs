@@ -29,12 +29,29 @@
 //! - All active branches in a parallel step start before any is awaited, and all
 //!   are driven to completion (`join_all`) before the step boundary runs.
 //! - Branch results are then folded in active-set index order. The reducer is
-//!   the fan-in / join: lower-index branches' updates are applied first.
+//!   the fan-in / join: every branch's update is applied — **every** branch
+//!   that completed this step, not only the ones with a lower index than a
+//!   sibling that errored or interrupted (see the C1 fix in
+//!   `docs/runtime-comparison/code-review-graph.md`: a completed higher-index
+//!   branch is no longer discarded and silently re-run on resume).
 //! - The *lowest-index* branch that errors or interrupts is the step's terminal
-//!   outcome. Updates produced by lower-index successful branches are still
-//!   applied/persisted; an error persists a resumable failure boundary (see
-//!   below) and aborts, an interrupt persists a checkpoint whose pending nodes
-//!   are that branch and every later active node.
+//!   outcome; any other branch that also errored/interrupted is still recorded
+//!   (not dropped, not mistaken for completed) but does not become *the*
+//!   surfaced failure/interrupt. Every branch that completed is folded into
+//!   committed state, but its *routing* is deferred rather than resolved
+//!   immediately (the C2 fix): resolving a completed branch's successor before
+//!   its stalled siblings are known would let that successor observe a state
+//!   missing whatever those siblings eventually write, which is exactly the
+//!   ordering bug an uninterrupted run never has. The deferred branches'
+//!   node ids are persisted (`Checkpoint::completed_tasks`) and carried
+//!   forward across however many times this step interrupts/fails and gets
+//!   resumed/retried; only once every branch of the step has completed does
+//!   the executor route them all together, in one call, against one
+//!   committed state — see [`boundary::CompiledGraph::advance`]'s
+//!   `carried_completed` handling. One caveat: a deferred branch's routing
+//!   is re-resolved via static/conditional edges only (an explicit
+//!   `Command::goto` it returned is not itself persisted across the
+//!   boundary — see `StepRun::completed`).
 //! - Because branches run on cloned snapshots and never share mutable state,
 //!   concurrency is data-race free; the reducer alone resolves conflicting
 //!   writes (deterministically, by index).
@@ -64,12 +81,18 @@
 //!   [`CompiledGraph::update_state`] before resuming. Without a checkpointer the
 //!   run aborts immediately, exactly as before.
 
+mod boundary;
 mod executor;
+mod resume;
 mod routing;
+mod run_ctx;
 mod state_api;
+mod step;
 mod types;
 
-pub use types::{CompiledGraph, GraphExecution, GraphInput, ResumeTarget, StateSnapshot};
+pub use types::{
+    CompiledGraph, GraphExecution, GraphInput, ResumeTarget, RunOptions, StateSnapshot,
+};
 
 pub(crate) use types::AsyncCheckpointWrites;
 
@@ -92,7 +115,7 @@ use crate::status::GraphRunStatus;
 use crate::stream::{GraphEvent, GraphEventSink};
 use crate::{Result, TinyAgentsError};
 use tinyagents_harness::ids::{
-    CheckpointId, ExecutionStatus, GraphId, InterruptId, NodeId, RunId, ThreadId,
+    CheckpointId, ExecutionStatus, GraphId, InterruptId, NodeId, RunId, TaskId, ThreadId,
 };
 use tinyagents_harness::retry::is_retryable;
 
@@ -134,28 +157,6 @@ fn snapshot_from_tuple<State>(tuple: CheckpointTuple<State>) -> StateSnapshot<St
     }
 }
 
-/// The folded result of running a superstep's active node set, ready to apply
-/// at the step boundary.
-struct StepRun<Update> {
-    /// Branch updates in deterministic active-set index order.
-    updates: Vec<Update>,
-    /// Explicit routing (plain `goto` nodes and/or [`Send`] packets) keyed by the
-    /// producing branch's active-set index.
-    ///
-    /// Keyed by index rather than node id so repeated [`Send`] activations of
-    /// the *same* node within a step (map-reduce fanout) each keep their own
-    /// [`Command::goto`] — a node-keyed map would let a later activation's
-    /// command clobber an earlier one's routing.
-    goto_map: HashMap<usize, Vec<RouteTarget>>,
-    /// The lowest-index branch interrupt, if any (its active-set index + value).
-    interrupt: Option<(usize, Interrupt)>,
-    /// A node-handler failure that survived the node-retry policy, if any. When
-    /// set, `updates` still carries the updates of the branches that completed
-    /// *before* the failing branch, so the executor can fold that partial
-    /// progress into committed state and persist a resumable failure boundary.
-    failure: Option<StepFailure>,
-}
-
 /// A node-handler failure captured by a runner so the executor can persist a
 /// resumable failure-boundary checkpoint instead of discarding partial progress.
 struct StepFailure {
@@ -180,7 +181,7 @@ struct StepFailure {
 struct Activation {
     node: NodeId,
     send_arg: Option<serde_json::Value>,
-    task_id: String,
+    task_id: TaskId,
 }
 
 impl Activation {
@@ -188,7 +189,7 @@ impl Activation {
         Self {
             node,
             send_arg: None,
-            task_id: String::new(),
+            task_id: TaskId::from(String::new()),
         }
     }
 }
@@ -229,6 +230,20 @@ fn barriers_from_persisted(persisted: &[BarrierArrivals]) -> HashMap<NodeId, Has
         .iter()
         .map(|b| (b.node.clone(), b.arrived.iter().cloned().collect()))
         .collect()
+}
+
+/// Projects the live per-node visit-count map onto a JSON object for
+/// embedding into a checkpoint's `metadata` (see the I3 finding in
+/// `docs/runtime-comparison/code-review-graph.md`: without this, per-node
+/// visit caps reset on every resume instead of bounding the whole thread's
+/// lifetime). `NodeId` is not itself a valid `serde_json` map key type, so
+/// this builds the object directly rather than serializing the `HashMap`.
+fn node_visits_to_json(node_visits: &HashMap<NodeId, usize>) -> serde_json::Value {
+    node_visits
+        .iter()
+        .map(|(node, count)| (node.to_string(), serde_json::json!(count)))
+        .collect::<serde_json::Map<String, serde_json::Value>>()
+        .into()
 }
 
 /// Maps an [`Activation`] slice to its node ids (for events, status, and
@@ -283,7 +298,7 @@ impl<State, Update> CompiledGraph<State, Update> {
         graph_id: GraphId,
         name: Option<String>,
         nodes: HashMap<NodeId, BuilderNode<State, Update>>,
-        edges: HashMap<NodeId, NodeId>,
+        edges: HashMap<NodeId, Vec<NodeId>>,
         branches: HashMap<NodeId, Branch<State>>,
         command_nodes: HashSet<NodeId>,
         waiting: HashMap<NodeId, HashSet<NodeId>>,
@@ -486,7 +501,9 @@ impl<State, Update> CompiledGraph<State, Update> {
             // after the run returns sees a complete log.
             let terminal = matches!(
                 event,
-                GraphEvent::RunCompleted { .. } | GraphEvent::RunFailed { .. }
+                GraphEvent::RunCompleted { .. }
+                    | GraphEvent::RunFailed { .. }
+                    | GraphEvent::RunCancelled { .. }
             );
             sink.emit(event);
             if terminal {
@@ -496,5 +513,7 @@ impl<State, Update> CompiledGraph<State, Update> {
     }
 }
 
+#[cfg(test)]
+mod durable_test;
 #[cfg(test)]
 mod test;

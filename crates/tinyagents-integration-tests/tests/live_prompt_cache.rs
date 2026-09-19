@@ -1,9 +1,14 @@
 //! LIVE end-to-end proof for Anthropic prompt caching through the local ladder.
 //!
-//! The test is opt-in (`PROMPT_CACHE_LIVE=1`) and uses the loopback ladder's
-//! Anthropic Messages-compatible endpoint. It sends two different user turns
-//! under the same large cacheable system prefix, then requires the second
-//! response to report provider cache-read tokens. No credential is logged.
+//! The test is opt-in (`TINYAGENTS_LIVE=1`, or the `PROMPT_CACHE_LIVE=1` alias
+//! this file used before the shared `TINYAGENTS_LIVE` convention existed) and
+//! uses the loopback ladder's Anthropic Messages-compatible endpoint. It sends
+//! two different user turns under the same large cacheable system prefix,
+//! then requires the second response to report provider cache-read tokens. No
+//! credential is logged. It is also `#[ignore]`d, so `cargo test` never runs
+//! it by accident; see `tests/common/live.rs::require_live`.
+
+mod common;
 
 use tinyinference_llm::cache::CachePolicy;
 use tinyinference_llm::message::Message;
@@ -13,15 +18,12 @@ use tinyinference_llm::providers::anthropic::AnthropicModel;
 const LADDER_URL: &str = "http://127.0.0.1:6969/v1";
 
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn live_ladder_reuses_an_anthropic_prompt_cache_breakpoint() {
-    if std::env::var("PROMPT_CACHE_LIVE").as_deref() != Ok("1") {
-        eprintln!("skipping live prompt-cache check: set PROMPT_CACHE_LIVE=1");
+    if !common::live::require_live(&["LADDER_API_KEY"]) {
         return;
     }
-    let Ok(api_key) = std::env::var("LADDER_API_KEY") else {
-        eprintln!("skipping live prompt-cache check: LADDER_API_KEY is not set");
-        return;
-    };
+    let api_key = std::env::var("LADDER_API_KEY").expect("require_live checked LADDER_API_KEY");
 
     let model = AnthropicModel::with_base_url(api_key, LADDER_URL).with_model("flash");
     // Anthropic caches only prefixes above its provider-specific minimum. This

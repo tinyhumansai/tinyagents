@@ -155,7 +155,7 @@ impl CacheLayoutEvent {
         }
         event.violates_policy = policy.protect_prompt_prefix;
         if event.violates_policy {
-            tinyagents_tracing::warn!(
+            tracing::warn!(
                 content_only_change = event.content_only_change,
                 before = ?event.segment_ids_before,
                 after = ?event.segment_ids_after,

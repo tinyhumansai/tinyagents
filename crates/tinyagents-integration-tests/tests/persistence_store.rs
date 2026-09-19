@@ -19,6 +19,7 @@ fn checkpoint(thread: &str, id: &str) -> Checkpoint<i32> {
         state: 1,
         next_nodes: vec![NodeId::from("n")],
         completed_tasks: vec![],
+        completed_routes: vec![],
         pending_writes: vec![],
         interrupts: vec![],
         pending_activations: None,

@@ -1,5 +1,11 @@
 # Registry Operations And Lifecycle
 
+> **Design proposal, not implemented.** The static/dynamic component model,
+> `SharedRegistry`, and the other machinery this document describes do not
+> exist in `crates/tinyagents-registry/src` today. See
+> [`implementation-status.md`](implementation-status.md) for what is actually
+> shipped.
+
 Continues from [`design.md`](design.md) and [`events.md`](events.md):
 static/dynamic components, parallel agents, web UI integration, stream
 transformers, redaction, registration lifecycle, discovery, error model,

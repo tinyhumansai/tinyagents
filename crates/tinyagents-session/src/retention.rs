@@ -68,7 +68,7 @@ impl RetentionReport {
 /// has no foreign keys — so they are removed explicitly.
 pub fn prune_sessions_before(workspace_dir: &Path, older_than: DateTime<Utc>) -> Result<usize> {
     let cutoff = older_than.to_rfc3339();
-    tinyagents_tracing::debug!("{LOG_PREFIX} prune_sessions_before.entry cutoff={cutoff}");
+    tracing::debug!("{LOG_PREFIX} prune_sessions_before.entry cutoff={cutoff}");
     let removed = with_transaction(workspace_dir, |conn| {
         // Collect first so the FTS rows can be removed by session id.
         let ids: Vec<String> = {
@@ -96,7 +96,7 @@ pub fn prune_sessions_before(workspace_dir: &Path, older_than: DateTime<Utc>) ->
         }
         Ok(removed)
     })?;
-    tinyagents_tracing::debug!("{LOG_PREFIX} prune_sessions_before.exit removed={removed}");
+    tracing::debug!("{LOG_PREFIX} prune_sessions_before.exit removed={removed}");
     Ok(removed)
 }
 
@@ -112,7 +112,7 @@ pub fn trim_session_messages(
     session_id: &str,
     keep_last: usize,
 ) -> Result<usize> {
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} trim_session_messages.entry session={session_id} keep_last={keep_last}"
     );
     let removed = with_transaction(workspace_dir, |conn| {
@@ -128,14 +128,14 @@ pub fn trim_session_messages(
             .storage_context("trim session messages")?;
         Ok(removed)
     })?;
-    tinyagents_tracing::debug!("{LOG_PREFIX} trim_session_messages.exit removed={removed}");
+    tracing::debug!("{LOG_PREFIX} trim_session_messages.exit removed={removed}");
     Ok(removed)
 }
 
 /// Deletes tool-call rows created before `older_than`, returning how many.
 pub fn prune_tool_calls_before(workspace_dir: &Path, older_than: DateTime<Utc>) -> Result<usize> {
     let cutoff = older_than.to_rfc3339();
-    tinyagents_tracing::debug!("{LOG_PREFIX} prune_tool_calls_before.entry cutoff={cutoff}");
+    tracing::debug!("{LOG_PREFIX} prune_tool_calls_before.entry cutoff={cutoff}");
     let removed = with_transaction(workspace_dir, |conn| {
         conn.execute(
             "DELETE FROM session_tool_calls WHERE created_at < ?1",
@@ -143,7 +143,7 @@ pub fn prune_tool_calls_before(workspace_dir: &Path, older_than: DateTime<Utc>) 
         )
         .storage_context("prune tool calls")
     })?;
-    tinyagents_tracing::debug!("{LOG_PREFIX} prune_tool_calls_before.exit removed={removed}");
+    tracing::debug!("{LOG_PREFIX} prune_tool_calls_before.exit removed={removed}");
     Ok(removed)
 }
 
@@ -153,7 +153,7 @@ pub fn prune_tool_calls_before(workspace_dir: &Path, older_than: DateTime<Utc>) 
 /// the head of a run's log does not renumber or collide with later appends.
 pub fn prune_run_events_before(workspace_dir: &Path, older_than: DateTime<Utc>) -> Result<usize> {
     let cutoff = older_than.to_rfc3339();
-    tinyagents_tracing::debug!("{LOG_PREFIX} prune_run_events_before.entry cutoff={cutoff}");
+    tracing::debug!("{LOG_PREFIX} prune_run_events_before.entry cutoff={cutoff}");
     let removed = with_transaction(workspace_dir, |conn| {
         conn.execute(
             "DELETE FROM run_events WHERE timestamp < ?1",
@@ -161,7 +161,7 @@ pub fn prune_run_events_before(workspace_dir: &Path, older_than: DateTime<Utc>) 
         )
         .storage_context("prune run events")
     })?;
-    tinyagents_tracing::debug!("{LOG_PREFIX} prune_run_events_before.exit removed={removed}");
+    tracing::debug!("{LOG_PREFIX} prune_run_events_before.exit removed={removed}");
     Ok(removed)
 }
 
@@ -172,7 +172,7 @@ pub fn prune_run_telemetry_before(
     older_than: DateTime<Utc>,
 ) -> Result<usize> {
     let cutoff = older_than.to_rfc3339();
-    tinyagents_tracing::debug!("{LOG_PREFIX} prune_run_telemetry_before.entry cutoff={cutoff}");
+    tracing::debug!("{LOG_PREFIX} prune_run_telemetry_before.entry cutoff={cutoff}");
     let removed = with_transaction(workspace_dir, |conn| {
         conn.execute(
             "DELETE FROM run_telemetry WHERE updated_at < ?1",
@@ -180,7 +180,7 @@ pub fn prune_run_telemetry_before(
         )
         .storage_context("prune run telemetry")
     })?;
-    tinyagents_tracing::debug!("{LOG_PREFIX} prune_run_telemetry_before.exit removed={removed}");
+    tracing::debug!("{LOG_PREFIX} prune_run_telemetry_before.exit removed={removed}");
     Ok(removed)
 }
 
@@ -191,7 +191,7 @@ pub fn prune_run_telemetry_before(
 /// than being deleted twice; the remaining passes then catch orphaned rows that
 /// outlived their session or belong to the run ledger.
 pub fn apply_retention(workspace_dir: &Path, older_than: DateTime<Utc>) -> Result<RetentionReport> {
-    tinyagents_tracing::debug!(
+    tracing::debug!(
         "{LOG_PREFIX} apply_retention.entry cutoff={}",
         older_than.to_rfc3339()
     );
@@ -236,7 +236,7 @@ pub fn apply_retention(workspace_dir: &Path, older_than: DateTime<Utc>) -> Resul
                 .storage_context("prune run telemetry")?,
         })
     })?;
-    tinyagents_tracing::info!(
+    tracing::info!(
         "{LOG_PREFIX} apply_retention.exit removed total={} sessions={} tool_calls={} \
          run_events={} run_telemetry={}",
         report.total(),
@@ -258,7 +258,7 @@ pub fn apply_retention(workspace_dir: &Path, older_than: DateTime<Utc>) -> Resul
 /// The whole rebuild runs in one transaction, so search is never left with a
 /// half-built index.
 pub fn reindex_fts(workspace_dir: &Path) -> Result<usize> {
-    tinyagents_tracing::debug!("{LOG_PREFIX} reindex_fts.entry");
+    tracing::debug!("{LOG_PREFIX} reindex_fts.entry");
     let limit = fts_snippet_bytes();
     let written = with_transaction(workspace_dir, |conn| {
         conn.execute("DELETE FROM sessions_fts", [])
@@ -320,7 +320,7 @@ pub fn reindex_fts(workspace_dir: &Path) -> Result<usize> {
         }
         Ok(written)
     })?;
-    tinyagents_tracing::info!("{LOG_PREFIX} reindex_fts.exit rows={written}");
+    tracing::info!("{LOG_PREFIX} reindex_fts.exit rows={written}");
     Ok(written)
 }
 

@@ -16,6 +16,7 @@ fn checkpoint(thread: &str, id: &str, parent: Option<&str>, step: usize) -> Chec
         state: step as i32,
         next_nodes: vec![NodeId::from("n")],
         completed_tasks: vec![],
+        completed_routes: vec![],
         pending_writes: vec![],
         interrupts: vec![],
         pending_activations: None,
@@ -87,12 +88,13 @@ fn pending_activation_send_arg_roundtrips() {
         state: 1i32,
         next_nodes: vec![NodeId::from("w")],
         completed_tasks: vec![],
+        completed_routes: vec![],
         pending_writes: vec![],
         interrupts: vec![],
         pending_activations: Some(vec![super::PendingActivation {
             node: NodeId::from("w"),
             send_arg: Some(json!({ "item": 42 })),
-            task_id: "1:0:w".to_string(),
+            task_id: tinyagents_harness::ids::TaskId::from("1:0:w"),
         }]),
         barrier_arrivals: vec![super::BarrierArrivals {
             node: NodeId::from("join"),
@@ -380,6 +382,7 @@ async fn prune_keeps_a_window_per_namespace() {
 
 mod file_backend {
     use super::checkpoint;
+    use crate::Checkpoint;
     use crate::checkpoint::{CheckpointConfig, Checkpointer, FileCheckpointer};
     use std::path::PathBuf;
 
@@ -555,6 +558,89 @@ mod file_backend {
         assert_eq!(ids, vec!["c1", "c2"]);
         assert_eq!(records[1].state, 2);
         assert!(cp.get_thread("missing").await.unwrap().is_empty());
+    }
+
+    // ---- I9 regression: `list` must not decode full `State` -----------------
+
+    /// A `State` whose `Deserialize` impl counts every call it makes, so a
+    /// test can assert *how many times* something deserialized it rather than
+    /// just observing the (correct either way) return value.
+    #[derive(Clone, serde::Serialize)]
+    struct CountedState(i32);
+
+    /// Process-wide count of `CountedState` deserializations. `CountedState`
+    /// is private to this test module, so nothing outside these tests can
+    /// bump it — safe to share across the (OS-threaded) test binary without a
+    /// dedicated fixture.
+    static STATE_DECODE_COUNT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    impl<'de> serde::Deserialize<'de> for CountedState {
+        fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            STATE_DECODE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            i32::deserialize(deserializer).map(CountedState)
+        }
+    }
+
+    fn counted_checkpoint(
+        thread: &str,
+        id: &str,
+        parent: Option<&str>,
+        step: usize,
+    ) -> Checkpoint<CountedState> {
+        Checkpoint {
+            thread_id: thread.to_string(),
+            checkpoint_id: id.to_string(),
+            run_id: None,
+            parent_checkpoint_id: parent.map(|s| s.to_string()),
+            namespace: vec![],
+            state: CountedState(step as i32),
+            next_nodes: vec![tinyagents_harness::ids::NodeId::from("n")],
+            completed_tasks: vec![],
+            completed_routes: vec![],
+            pending_writes: vec![],
+            interrupts: vec![],
+            pending_activations: None,
+            barrier_arrivals: vec![],
+            metadata: serde_json::json!({ "source": "loop", "step": step }),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_on_a_large_thread_does_not_decode_full_state() {
+        let tmp = TempDir::new("list-header-only");
+        let cp = FileCheckpointer::<CountedState>::new(tmp.path());
+
+        let mut parent: Option<String> = None;
+        for step in 0..200usize {
+            let id = format!("c{step}");
+            cp.put(counted_checkpoint("t", &id, parent.as_deref(), step))
+                .await
+                .unwrap();
+            parent = Some(id);
+        }
+
+        // `put` only serializes, so the counter should already read 0 here;
+        // reset explicitly anyway so this assertion is about `list` alone,
+        // not an assumption about what came before it.
+        STATE_DECODE_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        let list = cp.list("t").await.unwrap();
+        assert_eq!(
+            list.len(),
+            200,
+            "list still returns every record's metadata"
+        );
+        assert_eq!(list[0].checkpoint_id, "c0");
+        assert_eq!(list[199].checkpoint_id, "c199");
+        assert_eq!(
+            STATE_DECODE_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "list on a 200-record thread must not deserialize any record's full State"
+        );
     }
 }
 
@@ -732,5 +818,212 @@ mod sqlite_backend {
         assert_eq!(ids, vec!["c1", "c2"]);
         assert_eq!(records[1].state, 2);
         assert!(cp.get_thread("missing").await.unwrap().is_empty());
+    }
+
+    // ---- C3/R4: durable per-thread execution lease -------------------------
+
+    #[tokio::test]
+    async fn a_live_lease_is_refused_to_a_different_owner() {
+        let cp = SqliteCheckpointer::<i32>::in_memory().unwrap();
+        assert!(
+            cp.try_claim("t", "owner-a", std::time::Duration::from_secs(60))
+                .await
+                .unwrap()
+        );
+        // A different owner is refused while the lease is still live.
+        assert!(
+            !cp.try_claim("t", "owner-b", std::time::Duration::from_secs(60))
+                .await
+                .unwrap()
+        );
+        // The same owner re-claiming (e.g. a renew-by-reclaim) succeeds.
+        assert!(
+            cp.try_claim("t", "owner-a", std::time::Duration::from_secs(60))
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_lease_past_its_ttl_is_reclaimable() {
+        let cp = SqliteCheckpointer::<i32>::in_memory().unwrap();
+        // Claim with a TTL of 0 - expires immediately (simulates a dead
+        // owner's lease that has aged out).
+        assert!(
+            cp.try_claim("t", "dead-owner", std::time::Duration::from_millis(0))
+                .await
+                .unwrap()
+        );
+        // A short sleep guarantees `now` has moved past the zero-TTL expiry.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        assert!(
+            cp.try_claim("t", "new-owner", std::time::Duration::from_secs(60))
+                .await
+                .unwrap(),
+            "an expired lease must be reclaimable by a different owner"
+        );
+        // The reclaim actually transferred ownership: the dead owner can no
+        // longer renew it.
+        assert!(
+            !cp.renew("t", "dead-owner", std::time::Duration::from_secs(60))
+                .await
+                .unwrap()
+        );
+        assert!(
+            cp.renew("t", "new-owner", std::time::Duration::from_secs(60))
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn release_frees_the_lease_for_another_owner() {
+        let cp = SqliteCheckpointer::<i32>::in_memory().unwrap();
+        assert!(
+            cp.try_claim("t", "owner-a", std::time::Duration::from_secs(60))
+                .await
+                .unwrap()
+        );
+        cp.release("t", "owner-a").await.unwrap();
+        assert!(
+            cp.try_claim("t", "owner-b", std::time::Duration::from_secs(60))
+                .await
+                .unwrap()
+        );
+    }
+
+    // ---- I8: pragmas, spawn_blocking, LIMIT-driven state_history -----------
+
+    /// `i32` wrapper whose [`serde::Deserialize`] impl counts every decode, so
+    /// tests can assert *how many* checkpoint records were actually
+    /// deserialized rather than just how many the call returned — the thing a
+    /// truncate-in-Rust `state_history` and a LIMIT-in-SQL one cannot be told
+    /// apart by from the returned `Vec`'s length alone.
+    #[derive(Clone, serde::Serialize)]
+    struct CountingState(i32);
+
+    static DECODE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    impl<'de> serde::Deserialize<'de> for CountingState {
+        fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let value = i32::deserialize(deserializer)?;
+            DECODE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(CountingState(value))
+        }
+    }
+
+    fn counting_checkpoint(
+        id: &str,
+        parent: Option<&str>,
+        step: usize,
+    ) -> crate::Checkpoint<CountingState> {
+        crate::Checkpoint {
+            thread_id: "t".to_string(),
+            checkpoint_id: id.to_string(),
+            run_id: None,
+            parent_checkpoint_id: parent.map(|s| s.to_string()),
+            namespace: vec![],
+            state: CountingState(step as i32),
+            next_nodes: vec![tinyagents_harness::ids::NodeId::from("n")],
+            completed_tasks: vec![],
+            completed_routes: vec![],
+            pending_writes: vec![],
+            interrupts: vec![],
+            pending_activations: None,
+            barrier_arrivals: vec![],
+            metadata: serde_json::json!({ "source": "loop", "step": step }),
+        }
+    }
+
+    #[tokio::test]
+    async fn state_history_with_limit_decodes_only_that_many_records() {
+        let cp = SqliteCheckpointer::<CountingState>::in_memory().unwrap();
+
+        // A 40-checkpoint chain: if `state_history(Some(1))` decoded the whole
+        // namespace and truncated in Rust (the pre-fix behavior), the decode
+        // count below would be 40, not 1.
+        let mut parent: Option<String> = None;
+        for step in 0..40 {
+            let id = format!("c{step}");
+            cp.put(counting_checkpoint(&id, parent.as_deref(), step))
+                .await
+                .unwrap();
+            parent = Some(id);
+        }
+
+        DECODE_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+        let history = cp.state_history("t", &[], Some(1)).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].checkpoint.checkpoint_id, "c39");
+        assert_eq!(
+            DECODE_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "state_history(Some(1)) must decode exactly one record via a \
+             LIMIT applied in SQL, not the whole namespace truncated in Rust"
+        );
+
+        // Sanity: an unlimited call still returns (and decodes) the whole
+        // chain, newest first.
+        DECODE_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+        let full = cp.state_history("t", &[], None).await.unwrap();
+        assert_eq!(full.len(), 40);
+        assert_eq!(full[0].checkpoint.checkpoint_id, "c39");
+        assert_eq!(full[39].checkpoint.checkpoint_id, "c0");
+        assert_eq!(DECODE_COUNT.load(std::sync::atomic::Ordering::SeqCst), 40);
+    }
+
+    #[tokio::test]
+    async fn wal_and_synchronous_pragmas_are_set_on_open() {
+        // `:memory:` databases always report `journal_mode = memory`
+        // regardless of the pragma, so this needs a real file — WAL mode is
+        // stored in the database file's header.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkpoints.db");
+        let cp = SqliteCheckpointer::<i32>::open(&path).unwrap();
+
+        let journal_mode = cp.journal_mode().unwrap();
+        assert_eq!(journal_mode.to_lowercase(), "wal");
+
+        // NORMAL == 1 (OFF = 0, FULL = 2, EXTRA = 3).
+        assert_eq!(cp.synchronous().unwrap(), 1);
+
+        // The pragmas don't just read back cleanly — the checkpointer still
+        // works normally under them.
+        cp.put(checkpoint("t", "c1", None, 1)).await.unwrap();
+        assert!(cp.get("t", None).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn put_with_writes_persists_both_in_one_call() {
+        use crate::checkpoint::PendingWrite;
+        use tinyagents_harness::ids::{NodeId, TaskId};
+
+        let cp = SqliteCheckpointer::<i32>::in_memory().unwrap();
+        let cfg = CheckpointConfig {
+            thread_id: "t".to_string(),
+            checkpoint_id: Some("c1".to_string()),
+            namespace: vec![],
+        };
+        let writes = vec![PendingWrite {
+            node: NodeId::from("n"),
+            task_id: TaskId::from("task-1"),
+            idx: 0,
+            channel: "out".to_string(),
+            payload: serde_json::json!("hi"),
+        }];
+
+        let id = cp
+            .put_with_writes(checkpoint("t", "c1", None, 1), &writes)
+            .await
+            .unwrap();
+        assert_eq!(id.as_str(), "c1");
+
+        assert!(cp.get("t", Some("c1")).await.unwrap().is_some());
+        let stored = cp.get_writes(&cfg).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].channel, "out");
     }
 }

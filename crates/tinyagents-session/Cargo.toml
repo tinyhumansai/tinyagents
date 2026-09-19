@@ -5,24 +5,27 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 description = "Durable TinyAgents session history and run ledger."
 
 [dependencies]
-chrono = { version = "0.4", features = ["serde"] }
-anyhow = "1"
-log = "0.4"
-rusqlite = { version = "0.40", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+chrono = { workspace = true }
+anyhow = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.2", default-features = false, features = ["sqlite"] }
-tinyagents-tracing = { path = "../tinyagents-tracing", version = "2.1.2", default-features = false }
+tracing = { workspace = true }
 
 [features]
 default = []
-tracing = ["tinyagents-harness/tracing", "tinyagents-tracing/tracing"]
+# Tracing instrumentation is now always compiled in (via the `tracing` crate
+# dependency above). This feature is retained as a no-op so downstream
+# feature forwards keep compiling.
+tracing = ["tinyagents-harness/tracing"]
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

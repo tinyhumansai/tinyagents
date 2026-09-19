@@ -158,7 +158,7 @@ pub fn open_jsonl_task_store_or_memory(path: &Path) -> Arc<dyn TaskStore> {
     if let Some(parent) = path.parent()
         && let Err(err) = std::fs::create_dir_all(parent)
     {
-        tinyagents_tracing::warn!(
+        tracing::warn!(
             dir = %parent.display(),
             error = %err,
             "[orchestration] task store directory unavailable; falling back to memory"
@@ -168,14 +168,14 @@ pub fn open_jsonl_task_store_or_memory(path: &Path) -> Arc<dyn TaskStore> {
 
     match JsonlTaskStore::open(path) {
         Ok(store) => {
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 path = %path.display(),
                 "[orchestration] opened durable task store"
             );
             Arc::new(store)
         }
         Err(err) => {
-            tinyagents_tracing::warn!(
+            tracing::warn!(
                 path = %path.display(),
                 error = %err,
                 "[orchestration] durable task store unavailable; falling back to memory"

@@ -118,10 +118,11 @@ use tinyinference_llm::tool::{ToolCall, ToolSchema};
 mod entry;
 mod model_call;
 mod run_loop;
-mod stream;
+pub(crate) mod stream;
 mod tools;
 
 pub use stream::AgentStreamItem;
+pub(crate) use stream::{StreamRunner, invoke_stream_with_runner};
 
 #[cfg(test)]
 mod test;

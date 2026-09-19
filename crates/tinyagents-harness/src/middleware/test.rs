@@ -240,6 +240,36 @@ async fn failing_hook_still_emits_balanced_completed_event() {
     );
 }
 
+/// I-3 regression: `run_stack_hook!` must emit `AgentEvent::MiddlewareFailed`
+/// for a hook that returns `Err`, not just fan `on_error` out privately. The
+/// variant existed but nothing in the stack emitted it before this fix.
+#[tokio::test]
+async fn failing_hook_emits_middleware_failed() {
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(FailingMiddleware));
+
+    let recorder = Arc::new(RecordingListener::new());
+    let mut c = ctx();
+    c.events.subscribe(recorder.clone());
+
+    let mut request = ModelRequest::default();
+    let _ = stack.run_before_model(&mut c, &(), &mut request).await;
+
+    let failed: Vec<AgentEvent> = recorder
+        .events()
+        .into_iter()
+        .map(|r| r.event)
+        .filter(|e| matches!(e, AgentEvent::MiddlewareFailed { .. }))
+        .collect();
+    assert_eq!(
+        failed,
+        vec![AgentEvent::MiddlewareFailed {
+            name: "failing".to_string(),
+            error: TinyAgentsError::Middleware("boom".to_string()).to_string(),
+        }],
+    );
+}
+
 #[tokio::test]
 async fn on_model_delta_hook_emits_no_bracketing_events() {
     // The per-delta hook runs on the streaming hot path, so it must NOT emit
@@ -277,6 +307,46 @@ async fn on_model_delta_hook_emits_no_bracketing_events() {
     assert_eq!(
         bracketing, 0,
         "the delta hook must not bracket middleware with events"
+    );
+}
+
+#[tokio::test]
+async fn on_tool_delta_hook_emits_no_bracketing_events() {
+    // M-12 regression: `run_on_tool_delta` was the one delta hook still
+    // routed through `run_stack_hook!`, so it emitted
+    // `MiddlewareStarted`/`MiddlewareCompleted` on every streamed
+    // tool-progress delta while `run_on_model_delta` (the sibling hook, same
+    // hot-path shape) did not. The two delta hooks must agree.
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push(Arc::new(LoggingMiddleware::new()));
+
+    let recorder = Arc::new(RecordingListener::new());
+    let mut c = ctx();
+    c.events.subscribe(recorder.clone());
+
+    let mut delta = tinyinference_llm::tool::ToolDelta {
+        call_id: "call-1".to_string(),
+        content: "partial args".to_string(),
+        tool_name: Some("search".to_string()),
+    };
+    stack
+        .run_on_tool_delta(&mut c, &(), &mut delta)
+        .await
+        .unwrap();
+
+    let bracketing = recorder
+        .events()
+        .into_iter()
+        .filter(|r| {
+            matches!(
+                r.event,
+                AgentEvent::MiddlewareStarted { .. } | AgentEvent::MiddlewareCompleted { .. }
+            )
+        })
+        .count();
+    assert_eq!(
+        bracketing, 0,
+        "the tool-delta hook must not bracket middleware with events"
     );
 }
 

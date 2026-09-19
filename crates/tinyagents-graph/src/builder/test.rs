@@ -81,6 +81,82 @@ fn compile_rejects_static_and_conditional_on_same_node() {
 }
 
 #[test]
+fn add_edge_accumulates_static_fan_out_without_duplicates() {
+    let builder = GraphBuilder::<S, S>::overwrite()
+        .add_node("a", |s: S, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s))
+        })
+        .add_node("b", |s: S, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s))
+        })
+        .add_node("c", |s: S, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s))
+        })
+        .set_entry("a")
+        .add_edge("a", "b")
+        .add_edge("a", "c")
+        .add_edge("a", "b"); // duplicate of an existing edge: must not double-schedule "b"
+
+    let targets = builder.edges.get(&NodeId::from("a")).cloned().unwrap();
+    assert_eq!(
+        targets,
+        vec![NodeId::from("b"), NodeId::from("c")],
+        "add_edge must accumulate a static fan-out list and dedupe repeats"
+    );
+}
+
+#[test]
+fn add_conditional_edges_checked_catches_route_typo_at_build_time() {
+    let err = GraphBuilder::<S, S>::overwrite()
+        .add_node("a", |s: S, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s))
+        })
+        .add_node("b", |s: S, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s))
+        })
+        .set_entry("a")
+        .add_conditional_edges_checked(
+            "a",
+            |_s: &S| "tool".to_string(),
+            // typo: the route table declares "tol", not "tool"
+            [("tol", "b")],
+            ["tool".to_string(), "final".to_string()],
+        )
+        .set_finish("b")
+        .compile()
+        .unwrap_err();
+
+    match err {
+        TinyAgentsError::MissingRoute { node, route } => {
+            assert_eq!(node, "a");
+            assert_eq!(route, "tool");
+        }
+        other => panic!("expected MissingRoute at build time, got {other:?}"),
+    }
+}
+
+#[test]
+fn add_conditional_edges_checked_accepts_matching_routes() {
+    let compiled = GraphBuilder::<S, S>::overwrite()
+        .add_node("a", |s: S, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s))
+        })
+        .add_node("b", |s: S, _c: NodeContext| async move {
+            Ok(NodeResult::Update(s))
+        })
+        .set_entry("a")
+        .add_conditional_edges_checked(
+            "a",
+            |_s: &S| "tool".to_string(),
+            [("tool", "b"), ("final", "b")],
+            ["tool".to_string(), "final".to_string()],
+        )
+        .set_finish("b")
+        .compile();
+    assert!(compiled.is_ok());
+}
+
+#[test]
 fn compile_succeeds_for_valid_graph() {
     let compiled = GraphBuilder::<S, S>::overwrite()
         .add_node("a", |s: S, _c: NodeContext| async move {

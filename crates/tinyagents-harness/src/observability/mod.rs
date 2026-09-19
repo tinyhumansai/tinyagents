@@ -24,6 +24,7 @@
 //! bounded queue drops rather than stalls; backend errors are reported, not
 //! propagated), and `flush` blocks until the durable log has caught up.
 
+#[cfg(feature = "langfuse")]
 mod langfuse;
 mod types;
 mod worker;
@@ -31,11 +32,13 @@ mod worker;
 #[doc(hidden)]
 pub use worker::{AppendWorker, DEFAULT_DRAIN_CAPACITY};
 
+#[cfg(feature = "langfuse")]
 pub use langfuse::{
     LangfuseAuth, LangfuseClient, LangfuseScore, LangfuseScoreValue, LangfuseTraceConfig,
 };
 // Shared Langfuse payload helpers reused by the graph observability exporter so
 // ISO-8601 timestamp formatting and null-field pruning live in one place.
+#[cfg(feature = "langfuse")]
 #[doc(hidden)]
 pub use langfuse::{clean_nulls, iso_ms};
 pub use types::*;

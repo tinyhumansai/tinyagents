@@ -42,6 +42,16 @@ where
     State: Send + Sync,
 {
     pub(crate) models: HashMap<String, Arc<dyn ChatModel<State>>>,
+    /// Canonical model names in first-registration order.
+    ///
+    /// `models` is a `HashMap`, whose iteration order is randomized per
+    /// process; without this, [`CapabilityRegistry::to_model_registry`]'s
+    /// "first-registered model becomes the default" choice
+    /// ([`tinyagents_harness::model_registry::ModelRegistry::register`])
+    /// would silently vary per run. `register_model`/`replace_model` append a
+    /// name here the first time it is registered; re-registering an existing
+    /// name (via `replace_model`) does not move it.
+    pub(crate) model_order: Vec<String>,
     pub(crate) tools: HashMap<String, Arc<dyn Tool>>,
     pub(crate) graphs: HashMap<String, Blueprint>,
     /// Declarative agent definitions keyed by their stable id. Execution is

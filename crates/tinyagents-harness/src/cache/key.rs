@@ -297,13 +297,13 @@ pub fn apply_prompt_cache_breakpoints(request: &mut ModelRequest) -> bool {
         .get(PROMPT_CACHE_KEY_OPTION)
         .is_some()
     {
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "[cache] prompt_cache_key already set by caller; leaving provider_options untouched"
         );
         return false;
     }
     let Some(derived) = prompt_cache_key(request) else {
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             "[cache] protect_prompt_prefix is on but the request declares no cacheable prefix; \
              no prompt_cache_key derived"
         );
@@ -318,6 +318,6 @@ pub fn apply_prompt_cache_breakpoints(request: &mut ModelRequest) -> bool {
             Value::String(derived.clone()),
         );
     }
-    tinyagents_tracing::debug!(prompt_cache_key = %derived, "[cache] injected provider prompt-cache breakpoint");
+    tracing::debug!(prompt_cache_key = %derived, "[cache] injected provider prompt-cache breakpoint");
     true
 }

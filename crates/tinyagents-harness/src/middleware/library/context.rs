@@ -369,7 +369,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for Microcompa
                 // of, a signature, a diff — so leave it intact and reclaim
                 // tokens elsewhere.
                 if t.trusted_verbatim {
-                    tinyagents_tracing::debug!(
+                    tracing::debug!(
                         target: "tinyagents::middleware",
                         tool_call_id = %t.tool_call_id,
                         "[microcompact] skipping a trusted_verbatim tool result"
@@ -462,7 +462,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> Middleware<State, Ctx> for PromptCach
             && prev_run == &run_id
             && !prev.is_prefix_stable_against(&layout)
         {
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 "[cache] prompt_cache_guard: prefix invalidated run={run_id} \
                  before={} after={}",
                 prev.fingerprint(),

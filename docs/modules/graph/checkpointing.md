@@ -60,26 +60,43 @@ pub struct CheckpointTuple {
 }
 ```
 
-Checkpoint fields:
+Checkpoint fields (verified against `crates/tinyagents-graph/src/checkpoint/types.rs`,
+`Checkpoint<State>` and `CheckpointMetadata`):
 
-- version
+Implemented today:
+
 - checkpoint id
 - thread id
 - checkpoint namespace
-- graph id
 - run id
-- timestamp
-- channel values
-- channel versions
-- versions seen by each node
-- updated channels
-- next active nodes
-- pending sends
+- committed state (`state: State`, not a per-channel value map)
+- next active nodes (`next_nodes`) and pending activations (`pending_activations`,
+  the richer `Send`-argument-carrying superset)
+- explicit routing for completed-but-not-yet-routed siblings (`completed_routes`,
+  positionally aligned with `completed_tasks`): persists a carried-forward
+  branch's `Command::goto` so it survives an interrupt/failure + resume
+  instead of re-resolving via static/conditional edges only
+- barrier (waiting-edge) arrivals (`barrier_arrivals`)
 - pending writes
-- task outcomes
 - interrupts
-- parent checkpoint config
-- metadata source: `input`, `loop`, `update`, or `fork`
+- parent checkpoint id
+- free-form `metadata: serde_json::Value`, including well-known keys the
+  executor itself reads back on resume: `source`, `step` (kept monotonic
+  across a resume — see `resume::resume_from_inner`'s `initial_steps`
+  seeding), `node_visits` (per-node visit counts, seeded from here on resume
+  so `RecursionPolicy::max_visits_per_node` bounds a thread's whole
+  lifetime, not just one run), `interrupted_nodes`, and (on a failure
+  boundary) `failed_node`/`error`
+- metadata source: `input`, `loop`, `update`, or `fork` (`CheckpointMetadata::source`)
+
+**Target (not implemented):** the following LangGraph-derived fields do not
+exist on `Checkpoint`/`CheckpointMetadata` today — there is no `version` or
+`timestamp` field, no per-channel `channel_values`/`channel_versions`, no
+`versions_seen` map, no `updated_channels` list, no `graph_id` field, and no
+`task_outcomes` list (task completion is tracked as a flat `completed_tasks:
+Vec<NodeId>`, not a structured per-task outcome record). Introducing these
+would require a channel-based state model this crate does not have (state
+here is a single typed `State`, not a set of named channels).
 
 Durability modes:
 
@@ -215,11 +232,21 @@ Two backends are bundled:
 - `FileCheckpointer` — a durable JSON/JSONL backend that survives process
   restarts. Each thread maps to one append-only `<thread>.jsonl` file under a
   base directory (one serialized `Checkpoint` per line, in insertion order).
-  `put` appends a line; `get`/`list` stream the thread file; `delete_*`/`prune`
-  rewrite it (and remove it once empty); `copy_thread` copies the file with the
-  `thread_id` rewritten on every record. Thread ids are percent-escaped into a
-  single safe filename component, and `list_threads` recovers each canonical
-  thread id from the first record rather than un-escaping the filename. The
+  `put` appends a line; `get`/`get_scoped`/`list` decode only the header
+  fields (thread/checkpoint/run ids, parent id, namespace, next nodes,
+  metadata) while scanning, and fully deserialize `State` only for the one
+  winning record — `list` never pays for a full-state decode of every row.
+  `delete_*`/`prune` rewrite the file (and remove it once empty); `copy_thread`
+  copies the file with the `thread_id` rewritten on every record. Thread ids
+  are percent-escaped into a single safe filename component, and
+  `list_threads` recovers each canonical thread id from the first record
+  rather than un-escaping the filename. Pending writes are stored in a
+  per-thread append-only sidecar keyed by checkpoint id: `put_writes` appends
+  only the new-or-changed entries instead of read-modify-rewriting the whole
+  sidecar, and reads replay the same reducer `put_writes` itself uses to fold
+  repeated entries for a checkpoint id into the final ledger (an identity can
+  legitimately appear on more than one line across supersteps). Every
+  filesystem operation runs inside `tokio::task::spawn_blocking`. The
   `Checkpointer` impl is bound by `State: Serialize + DeserializeOwned` (the
   trait itself stays bound-free, so non-serializable states still use the
   in-memory path). `Checkpoint<State>` derives serde's conditional
@@ -228,7 +255,12 @@ Two backends are bundled:
   `sqlite` cargo feature (`rusqlite` with the `bundled` SQLite). Open a file with
   `SqliteCheckpointer::open(path)` or an ephemeral database with
   `SqliteCheckpointer::in_memory()`; clones share one `Arc<Mutex<Connection>>`, so
-  in-memory clones share data. Each checkpoint is one row in a `checkpoints` table
+  in-memory clones share data. Opening a connection sets `PRAGMA busy_timeout`,
+  `journal_mode = WAL`, and `synchronous = NORMAL` (mirroring
+  `tinyagents-session`'s store setup) so concurrent readers/writers don't
+  immediately hit `SQLITE_BUSY`. Every trait method runs its query inside
+  `tokio::task::spawn_blocking` against a cloned `Arc<Mutex<Connection>>`.
+  Each checkpoint is one row in a `checkpoints` table
   keyed by `(thread_id, checkpoint_id)`: the full record is stored as JSON in a
   `record` column, while the parent id, namespace (json), next nodes (json),
   source, step, run id, and an interrupts flag are projected into their own
@@ -236,9 +268,21 @@ Two backends are bundled:
   (`idx_checkpoints_thread`, `idx_checkpoints_lookup`) without deserializing whole
   states. A monotonic `seq` primary key preserves insertion order, so `get(None)`
   returns the most recent row, `get(Some(id))` the latest row with that id, and
-  `list` walks rows in insertion order — matching the other backends. Like
-  `FileCheckpointer`, the impl is bound by `State: Serialize + DeserializeOwned`.
-  Postgres backends remain future work.
+  `list` walks rows in insertion order — matching the other backends.
+  `state_history(limit)` walks the `parent_checkpoint_id` chain with a
+  recursive SQL CTE bounded by `LIMIT`, so requesting a short history from a
+  long-lived thread decodes only that many rows rather than every checkpoint
+  in the namespace. Like `FileCheckpointer`, the impl is bound by
+  `State: Serialize + DeserializeOwned`. Postgres backends remain future work.
+
+### `put_with_writes`
+
+`Checkpointer::put_with_writes(checkpoint, writes)` is a default trait method
+(so every out-of-tree backend keeps compiling unchanged) composed from `put`
+followed by `put_writes`. `SqliteCheckpointer` overrides it to run both
+statements inside one SQL transaction, so a boundary that needs to persist
+both a checkpoint and its pending writes commits them atomically instead of
+as two independent writes.
 
 ### Thread operations
 

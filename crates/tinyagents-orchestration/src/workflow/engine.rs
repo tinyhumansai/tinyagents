@@ -208,7 +208,7 @@ struct PersistRequest {
     terminal: bool,
 }
 
-struct PhaseRegistration<S: WorkflowStore> {
+pub(crate) struct PhaseRegistration<S: WorkflowStore> {
     store: Arc<S>,
     owner: String,
     run: parking_lot::Mutex<WorkflowRun>,
@@ -217,43 +217,126 @@ struct PhaseRegistration<S: WorkflowStore> {
 }
 
 impl<S: WorkflowStore> PhaseRegistration<S> {
+    /// Exposed `pub(crate)` (test-only) so `workflow::tests` can exercise
+    /// [`WorkflowChildRegistration::register`]'s CAS semantics directly,
+    /// from a real tokio async context, without going through the whole
+    /// [`WorkflowEngine::drive`] loop.
+    #[cfg(test)]
+    pub(crate) fn new(
+        store: Arc<S>,
+        owner: String,
+        run: WorkflowRun,
+        phase_states: Value,
+        lease_for: Duration,
+    ) -> Self {
+        Self {
+            store,
+            owner,
+            run: parking_lot::Mutex::new(run),
+            phase_states,
+            lease_for,
+        }
+    }
+
     fn current(&self) -> WorkflowRun {
         self.run.lock().clone()
     }
 }
 
 impl<S: WorkflowStore + 'static> WorkflowChildRegistration for PhaseRegistration<S> {
+    /// Durably records `child_id` against this phase's run.
+    ///
+    /// `WorkflowChildRegistration` is a synchronous trait (host executors call
+    /// it from inside an `async fn execute`, not `.await` it), so the blocking
+    /// DB compare-and-swap this needs cannot be pushed onto a `spawn_blocking`
+    /// task without changing that public signature. Instead the
+    /// `parking_lot::Mutex` guarding the in-memory `run` is held only for the
+    /// brief bookkeeping around the CAS — the duplicate check and the
+    /// snapshot read before it, and the write-back after — never across the
+    /// blocking call itself (see M11 in the runtime-comparison review). That
+    /// means two concurrent `register` calls can now race the same CAS
+    /// (previously the lock alone serialized them), so a revision conflict is
+    /// treated as "retry against the latest state" rather than an immediate
+    /// failure; only a lease actually held by a different owner ends the
+    /// retry loop.
     fn register(&self, child_id: String) -> Result<(), OrchestrationError> {
-        let mut run = self.run.lock();
-        if run.child_run_ids.iter().any(|known| known == &child_id) {
-            return Ok(());
+        // Bounds the retry loop below. Each iteration only re-fires after a
+        // real CAS conflict (a concurrent registration or a genuine lease
+        // loss), so this is generous headroom rather than an expected depth.
+        const MAX_ATTEMPTS: u32 = 32;
+        for _attempt in 0..MAX_ATTEMPTS {
+            let (snapshot, children) = {
+                let run = self.run.lock();
+                if run.child_run_ids.iter().any(|known| known == &child_id) {
+                    return Ok(());
+                }
+                let mut children = run.child_run_ids.clone();
+                children.push(child_id.clone());
+                (run.clone(), children)
+            };
+
+            let cas_result = self.store.compare_and_swap(
+                WorkflowRunUpsert {
+                    id: snapshot.id.clone(),
+                    definition_id: snapshot.definition_id.clone(),
+                    parent_thread_id: snapshot.parent_thread_id.clone(),
+                    input: snapshot.input.clone(),
+                    phase_states: self.phase_states.clone(),
+                    child_run_ids: children,
+                    status: WorkflowRunStatus::Running,
+                    summary: None,
+                    started_at: Some(snapshot.started_at),
+                    completed_at: None,
+                },
+                snapshot.revision,
+                &self.owner,
+                self.lease_for,
+            )?;
+
+            match cas_result {
+                Some(updated) => {
+                    let mut run = self.run.lock();
+                    // A concurrent registration may already have installed a
+                    // newer snapshot while the lock was released for this
+                    // call's own CAS; never regress it with a stale result.
+                    if run.revision < updated.revision {
+                        *run = updated;
+                    }
+                    return Ok(());
+                }
+                None => {
+                    // The CAS lost either to a concurrent registration (the
+                    // revision moved under us) or to a genuine lease
+                    // takeover by another owner. The in-memory snapshot
+                    // cannot tell these apart — it is only ever written by a
+                    // *successful* CAS from this same struct, so it never
+                    // learns about an external takeover on its own — so a
+                    // fresh authoritative read decides: same owner means
+                    // retry against the now-current state, a different (or
+                    // absent) owner means the lease is really gone.
+                    match self.store.load(&snapshot.id)? {
+                        Some(current)
+                            if current.lease_owner.as_deref() == Some(self.owner.as_str()) =>
+                        {
+                            let mut run = self.run.lock();
+                            if run.revision < current.revision {
+                                *run = current;
+                            }
+                        }
+                        _ => {
+                            return Err(OrchestrationError(
+                                "workflow lease lost while registering child".into(),
+                            ));
+                        }
+                    }
+                }
+            }
         }
-        let mut children = run.child_run_ids.clone();
-        children.push(child_id);
-        let Some(updated) = self.store.compare_and_swap(
-            WorkflowRunUpsert {
-                id: run.id.clone(),
-                definition_id: run.definition_id.clone(),
-                parent_thread_id: run.parent_thread_id.clone(),
-                input: run.input.clone(),
-                phase_states: self.phase_states.clone(),
-                child_run_ids: children,
-                status: WorkflowRunStatus::Running,
-                summary: None,
-                started_at: Some(run.started_at),
-                completed_at: None,
-            },
-            run.revision,
-            &self.owner,
-            self.lease_for,
-        )?
-        else {
-            return Err(OrchestrationError(
-                "workflow lease lost while registering child".into(),
-            ));
-        };
-        *run = updated;
-        Ok(())
+        Err(OrchestrationError(
+            "workflow child registration exceeded its retry budget under sustained \
+             concurrent CAS contention"
+                .into(),
+        ))
     }
 }
 
@@ -282,6 +365,27 @@ where
     pub fn with_lease_duration(mut self, lease_for: Duration) -> Self {
         self.lease_for = lease_for.max(Duration::from_millis(3));
         self
+    }
+
+    /// Runs one blocking `WorkflowStore` call on the blocking-task pool
+    /// instead of on the calling tokio worker thread.
+    ///
+    /// `drive`'s loop and the phase heartbeat (M10 in the runtime-comparison
+    /// review) call into `tinyagents-session`'s synchronous SQLite store
+    /// directly from `async fn`s. Every such call in this file is routed
+    /// through here so the DB round-trip never occupies a worker thread that
+    /// other, unrelated async tasks on this runtime need to make progress.
+    async fn store_op<T, F>(&self, f: F) -> Result<T, OrchestrationError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&S) -> Result<T, OrchestrationError> + Send + 'static,
+    {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || f(&store))
+            .await
+            .map_err(|join_error| {
+                OrchestrationError(format!("workflow store task panicked: {join_error}"))
+            })?
     }
 
     /// Initialise a durable run before the host schedules [`Self::drive`].
@@ -319,7 +423,14 @@ where
         // resume can race in another process, and only the durable lease
         // prevents both drivers from spawning the same phase.
         let owner = uuid::Uuid::new_v4().to_string();
-        let mut run = match self.store.claim(run_id, &owner, self.lease_for)? {
+        let claim = {
+            let claim_run_id = run_id.to_owned();
+            let claim_owner = owner.clone();
+            let lease_for = self.lease_for;
+            self.store_op(move |store| store.claim(&claim_run_id, &claim_owner, lease_for))
+                .await?
+        };
+        let mut run = match claim {
             WorkflowLeaseClaim::Acquired(run) => run,
             WorkflowLeaseClaim::Busy(_) => return Ok(()),
             WorkflowLeaseClaim::Missing => {
@@ -343,17 +454,19 @@ where
                 &mut phase_states,
                 "workflow owner expired; phase will retry after lease takeover",
             );
-            run = self.persist(
-                &run,
-                PersistRequest {
-                    phase_states,
-                    child_run_ids: run.child_run_ids.clone(),
-                    status: WorkflowRunStatus::Running,
-                    summary: None,
-                    terminal: false,
-                },
-                &owner,
-            )?;
+            run = self
+                .persist(
+                    &run,
+                    PersistRequest {
+                        phase_states,
+                        child_run_ids: run.child_run_ids.clone(),
+                        status: WorkflowRunStatus::Running,
+                        summary: None,
+                        terminal: false,
+                    },
+                    &owner,
+                )
+                .await?;
         }
         self.emit(tinyagents_graph::GraphEvent::RunStarted {
             run_id: tinyagents_harness::ids::RunId::new(run_id),
@@ -368,19 +481,24 @@ where
                     &mut phase_states,
                     "workflow interrupted; phase will retry on resume",
                 );
-                if let Err(error) = self.persist(
-                    &run,
-                    PersistRequest {
-                        phase_states,
-                        child_run_ids: run.child_run_ids.clone(),
-                        status: WorkflowRunStatus::Interrupted,
-                        summary: None,
-                        terminal: false,
-                    },
-                    &owner,
-                ) {
-                    if self.owner_lost(run_id, &owner)
-                        || self.emit_recorded_terminal(run_id, total_spawned as usize)
+                if let Err(error) = self
+                    .persist(
+                        &run,
+                        PersistRequest {
+                            phase_states,
+                            child_run_ids: run.child_run_ids.clone(),
+                            status: WorkflowRunStatus::Interrupted,
+                            summary: None,
+                            terminal: false,
+                        },
+                        &owner,
+                    )
+                    .await
+                {
+                    if self.owner_lost(run_id, &owner).await
+                        || self
+                            .emit_recorded_terminal(run_id, total_spawned as usize)
+                            .await
                     {
                         return Ok(());
                     }
@@ -392,18 +510,21 @@ where
             }
             let Some(phase) = next_runnable_phase(definition, &run.phase_states).cloned() else {
                 if all_phases_completed(definition, &run.phase_states) {
-                    if let Err(error) = self.persist(
-                        &run,
-                        PersistRequest {
-                            phase_states: run.phase_states.clone(),
-                            child_run_ids: run.child_run_ids.clone(),
-                            status: WorkflowRunStatus::Completed,
-                            summary: synthesize_summary(definition, &run.phase_states),
-                            terminal: true,
-                        },
-                        &owner,
-                    ) {
-                        if self.owner_lost(run_id, &owner) {
+                    if let Err(error) = self
+                        .persist(
+                            &run,
+                            PersistRequest {
+                                phase_states: run.phase_states.clone(),
+                                child_run_ids: run.child_run_ids.clone(),
+                                status: WorkflowRunStatus::Completed,
+                                summary: synthesize_summary(definition, &run.phase_states),
+                                terminal: true,
+                            },
+                            &owner,
+                        )
+                        .await
+                    {
+                        if self.owner_lost(run_id, &owner).await {
                             return Ok(());
                         }
                         self.finish_failed(run_id, error.to_string());
@@ -412,18 +533,21 @@ where
                     self.finish_completed(run_id, total_spawned as usize);
                 } else {
                     let reason = "no runnable phase (dependency deadlock)".to_owned();
-                    if let Err(error) = self.persist(
-                        &run,
-                        PersistRequest {
-                            phase_states: run.phase_states.clone(),
-                            child_run_ids: run.child_run_ids.clone(),
-                            status: WorkflowRunStatus::Failed,
-                            summary: Some(reason.clone()),
-                            terminal: true,
-                        },
-                        &owner,
-                    ) {
-                        if self.owner_lost(run_id, &owner) {
+                    if let Err(error) = self
+                        .persist(
+                            &run,
+                            PersistRequest {
+                                phase_states: run.phase_states.clone(),
+                                child_run_ids: run.child_run_ids.clone(),
+                                status: WorkflowRunStatus::Failed,
+                                summary: Some(reason.clone()),
+                                terminal: true,
+                            },
+                            &owner,
+                        )
+                        .await
+                    {
+                        if self.owner_lost(run_id, &owner).await {
                             return Ok(());
                         }
                         self.finish_failed(run_id, error.to_string());
@@ -453,8 +577,10 @@ where
                     // A host stop/resume fences this owner with a revision CAS.
                     // Do not turn that intentional hand-off into a stale
                     // failure event or overwrite the newer durable state.
-                    if self.owner_lost(run_id, &owner)
-                        || self.emit_recorded_terminal(run_id, total_spawned as usize)
+                    if self.owner_lost(run_id, &owner).await
+                        || self
+                            .emit_recorded_terminal(run_id, total_spawned as usize)
+                            .await
                     {
                         return Ok(());
                     }
@@ -501,31 +627,35 @@ where
         let mut phase_states = run.phase_states.clone();
         let mut child_ids = run.child_run_ids.clone();
         set_phase_status(&mut phase_states, &phase.name, PhaseStatus::Running, None);
-        let running = self.persist(
-            run,
-            PersistRequest {
-                phase_states: phase_states.clone(),
-                child_run_ids: child_ids.clone(),
-                status: WorkflowRunStatus::Running,
-                summary: None,
-                terminal: false,
-            },
-            owner,
-        )?;
+        let running = self
+            .persist(
+                run,
+                PersistRequest {
+                    phase_states: phase_states.clone(),
+                    child_run_ids: child_ids.clone(),
+                    status: WorkflowRunStatus::Running,
+                    summary: None,
+                    terminal: false,
+                },
+                owner,
+            )
+            .await?;
 
         let budget = definition.max_children.saturating_sub(total_spawned) as usize;
         if budget == 0 {
-            return self.fail_phase(
-                &running,
-                &mut phase_states,
-                child_ids,
-                phase,
-                format!(
-                    "max_children cap ({}) reached before phase '{}' completed",
-                    definition.max_children, phase.name
-                ),
-                owner,
-            );
+            return self
+                .fail_phase(
+                    &running,
+                    &mut phase_states,
+                    child_ids,
+                    phase,
+                    format!(
+                        "max_children cap ({}) reached before phase '{}' completed",
+                        definition.max_children, phase.name
+                    ),
+                    owner,
+                )
+                .await;
         }
         let capacity = phase.agent_ids.len().min(budget);
         let capped = capacity != phase.agent_ids.len();
@@ -581,7 +711,14 @@ where
             tokio::select! {
                 outcomes = &mut outcomes => break outcomes,
                 _ = heartbeat.tick() => {
-                    if !self.store.renew(&run.id, owner, self.lease_for)? {
+                    let renewed = {
+                        let renew_run_id = run.id.clone();
+                        let renew_owner = owner.to_owned();
+                        let lease_for = self.lease_for;
+                        self.store_op(move |store| store.renew(&renew_run_id, &renew_owner, lease_for))
+                            .await?
+                    };
+                    if !renewed {
                         cancel.cancel();
                         let children = registration.current().child_run_ids;
                         self.executor.cancel_children(&children).await;
@@ -601,17 +738,19 @@ where
                     &mut phase_states,
                     "workflow interrupted; phase will retry on resume",
                 );
-                let updated = self.persist(
-                    &registration.current(),
-                    PersistRequest {
-                        phase_states,
-                        child_run_ids: children,
-                        status: WorkflowRunStatus::Interrupted,
-                        summary: None,
-                        terminal: false,
-                    },
-                    owner,
-                )?;
+                let updated = self
+                    .persist(
+                        &registration.current(),
+                        PersistRequest {
+                            phase_states,
+                            child_run_ids: children,
+                            status: WorkflowRunStatus::Interrupted,
+                            summary: None,
+                            terminal: false,
+                        },
+                        owner,
+                    )
+                    .await?;
                 return Ok((updated, 0));
             }
             Err(error) => return Err(OrchestrationError(error.to_string())),
@@ -649,17 +788,19 @@ where
                 &mut phase_states,
                 "workflow interrupted; phase will retry on resume",
             );
-            let updated = self.persist(
-                &registration.current(),
-                PersistRequest {
-                    phase_states,
-                    child_run_ids: children,
-                    status: WorkflowRunStatus::Interrupted,
-                    summary: None,
-                    terminal: false,
-                },
-                owner,
-            )?;
+            let updated = self
+                .persist(
+                    &registration.current(),
+                    PersistRequest {
+                        phase_states,
+                        child_run_ids: children,
+                        status: WorkflowRunStatus::Interrupted,
+                        summary: None,
+                        terminal: false,
+                    },
+                    owner,
+                )
+                .await?;
             return Ok((updated, 0));
         }
         if let Some(reason) = failure.or_else(|| {
@@ -670,14 +811,16 @@ where
                 )
             })
         }) {
-            return self.fail_phase(
-                &registration.current(),
-                &mut phase_states,
-                child_ids,
-                phase,
-                reason,
-                owner,
-            );
+            return self
+                .fail_phase(
+                    &registration.current(),
+                    &mut phase_states,
+                    child_ids,
+                    phase,
+                    reason,
+                    owner,
+                )
+                .await;
         }
         set_phase_status(
             &mut phase_states,
@@ -685,21 +828,23 @@ where
             PhaseStatus::Completed,
             Some(Value::Array(outputs)),
         );
-        let updated = self.persist(
-            &registration.current(),
-            PersistRequest {
-                phase_states,
-                child_run_ids: child_ids,
-                status: WorkflowRunStatus::Running,
-                summary: None,
-                terminal: false,
-            },
-            owner,
-        )?;
+        let updated = self
+            .persist(
+                &registration.current(),
+                PersistRequest {
+                    phase_states,
+                    child_run_ids: child_ids,
+                    status: WorkflowRunStatus::Running,
+                    summary: None,
+                    terminal: false,
+                },
+                owner,
+            )
+            .await?;
         Ok((updated, spawned))
     }
 
-    fn fail_phase(
+    async fn fail_phase(
         &self,
         run: &WorkflowRun,
         phase_states: &mut Value,
@@ -715,44 +860,45 @@ where
             Some(json!([])),
         );
         set_phase_reason(phase_states, &phase.name, &reason);
-        let updated = self.persist(
-            run,
-            PersistRequest {
-                phase_states: phase_states.clone(),
-                child_run_ids: child_ids,
-                status: WorkflowRunStatus::Failed,
-                summary: Some(reason),
-                terminal: true,
-            },
-            owner,
-        )?;
+        let updated = self
+            .persist(
+                run,
+                PersistRequest {
+                    phase_states: phase_states.clone(),
+                    child_run_ids: child_ids,
+                    status: WorkflowRunStatus::Failed,
+                    summary: Some(reason),
+                    terminal: true,
+                },
+                owner,
+            )
+            .await?;
         Ok((updated, 0))
     }
 
-    fn persist(
+    async fn persist(
         &self,
         run: &WorkflowRun,
         request: PersistRequest,
         owner: &str,
     ) -> Result<WorkflowRun, OrchestrationError> {
-        self.store
-            .compare_and_swap(
-                WorkflowRunUpsert {
-                    id: run.id.clone(),
-                    definition_id: run.definition_id.clone(),
-                    parent_thread_id: run.parent_thread_id.clone(),
-                    input: run.input.clone(),
-                    phase_states: request.phase_states,
-                    child_run_ids: request.child_run_ids,
-                    status: request.status,
-                    summary: request.summary,
-                    started_at: Some(run.started_at),
-                    completed_at: request.terminal.then(Utc::now),
-                },
-                run.revision,
-                owner,
-                self.lease_for,
-            )?
+        let upsert = WorkflowRunUpsert {
+            id: run.id.clone(),
+            definition_id: run.definition_id.clone(),
+            parent_thread_id: run.parent_thread_id.clone(),
+            input: run.input.clone(),
+            phase_states: request.phase_states,
+            child_run_ids: request.child_run_ids,
+            status: request.status,
+            summary: request.summary,
+            started_at: Some(run.started_at),
+            completed_at: request.terminal.then(Utc::now),
+        };
+        let revision = run.revision;
+        let owner = owner.to_owned();
+        let lease_for = self.lease_for;
+        self.store_op(move |store| store.compare_and_swap(upsert, revision, &owner, lease_for))
+            .await?
             .ok_or_else(|| {
                 OrchestrationError("workflow lease lost before durable state transition".to_owned())
             })
@@ -795,19 +941,22 @@ where
 
     /// A lifecycle hand-off or lease takeover has fenced this driver. It must
     /// not manufacture a terminal graph event for the replacement owner.
-    fn owner_lost(&self, run_id: &str, owner: &str) -> bool {
-        self.store
-            .load(run_id)
+    async fn owner_lost(&self, run_id: &str, owner: &str) -> bool {
+        let run_id = run_id.to_owned();
+        let owner = owner.to_owned();
+        self.store_op(move |store| store.load(&run_id))
+            .await
             .ok()
             .flatten()
-            .is_some_and(|current| current.lease_owner.as_deref() != Some(owner))
+            .is_some_and(|current| current.lease_owner.as_deref() != Some(owner.as_str()))
     }
 
     /// Returns true after emitting the terminal event already committed by a
     /// newer lifecycle owner. This is the stale-driver escape hatch: it never
     /// writes, so a stop/resume hand-off cannot be overwritten by its loser.
-    fn emit_recorded_terminal(&self, run_id: &str, steps: usize) -> bool {
-        let Ok(Some(current)) = self.store.load(run_id) else {
+    async fn emit_recorded_terminal(&self, run_id: &str, steps: usize) -> bool {
+        let owned_run_id = run_id.to_owned();
+        let Ok(Some(current)) = self.store_op(move |store| store.load(&owned_run_id)).await else {
             return false;
         };
         if !current.status.is_terminal() {

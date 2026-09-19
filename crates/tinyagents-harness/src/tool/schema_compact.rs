@@ -79,7 +79,7 @@ pub fn compact_tool_schema(schema: &ToolSchema, compaction: &SchemaCompaction) -
         Some(max) => {
             let compacted = compact_parameters(schema.parameters.clone(), max);
             if serialized_len(&compacted) > max {
-                tinyagents_tracing::warn!(
+                tracing::warn!(
                     "[tool::schema] `{}`'s parameters still exceed the {max}-byte compaction \
                      budget after the full ladder; advertising an open object schema instead of \
                      sending an over-budget request",

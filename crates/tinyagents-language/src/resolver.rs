@@ -33,7 +33,8 @@
 
 use crate::ast::{ChannelDecl, GraphDecl, NodeDecl, Program};
 use crate::capability_resolver::{
-    CapabilityResolver, CapabilitySource, DEFAULT_NODE_KINDS, ReferenceClass,
+    CODE_INVALID_NODE_KIND, CODE_UNKNOWN_MODEL, CODE_UNKNOWN_REDUCER, CODE_UNKNOWN_TOOL,
+    CapabilityResolver, CapabilitySource, DEFAULT_NODE_KINDS, code_for,
 };
 use crate::compiler::compile;
 use crate::diagnostic::Diagnostic;
@@ -42,16 +43,6 @@ use crate::source::SourceFile;
 use crate::span::Span;
 use crate::types::Blueprint;
 use tinyagents_harness::error::{Result, TinyAgentsError};
-
-// Stable diagnostic codes for resolution failures.
-const CODE_UNKNOWN_MODEL: &str = "E-rag-unknown-model";
-const CODE_UNKNOWN_TOOL: &str = "E-rag-unknown-tool";
-const CODE_UNKNOWN_SUBGRAPH: &str = "E-rag-unknown-subgraph";
-const CODE_UNKNOWN_ROUTER: &str = "E-rag-unknown-router";
-const CODE_UNKNOWN_AGENT: &str = "E-rag-unknown-agent";
-const CODE_UNKNOWN_SCRIPT: &str = "E-rag-unknown-script";
-const CODE_UNKNOWN_REDUCER: &str = "E-rag-unknown-reducer";
-const CODE_INVALID_NODE_KIND: &str = "E-rag-invalid-node-kind";
 
 /// The single registry-backed binding gate for `.rag` source.
 ///
@@ -150,10 +141,17 @@ impl Resolver {
         // 2. The kind-specific primary reference, routed through the one shared
         //    classification policy so this path cannot drift from the blueprint
         //    gates.
-        let subgraph_target = node.graph.as_deref().or(node.model.as_deref());
+        // A dedicated `router "name"` item (M4) has no separate parameter in
+        // `classify_reference`: it folds into the effective `model` value
+        // here, the same way `crate::compiler::compile_graph` folds it into
+        // `NodeSpec.model` when the blueprint is compiled, so the spanned
+        // (AST-level) and spanless (blueprint-level) binding gates validate
+        // the same value.
+        let model = node.model.as_deref().or(node.router.as_deref());
+        let subgraph_target = node.graph.as_deref().or(model);
         if let Some(reference) = CapabilityResolver::classify_reference(
             kind,
-            node.model.as_deref(),
+            model,
             subgraph_target,
             node.agent.as_deref(),
             node.script.as_deref(),
@@ -271,64 +269,17 @@ impl Resolver {
 
     /// Resolves a compiled [`Blueprint`] that no longer carries source spans.
     ///
-    /// This is the span-less counterpart to [`resolve_program`](Self::resolve_program):
-    /// it returns the same [`TinyAgentsError`] variants and messages as the
-    /// legacy [`CapabilityResolver::bind_blueprint`] gate — [`TinyAgentsError::Compile`]
-    /// for an unknown node kind, [`TinyAgentsError::Capability`] for the first
-    /// unregistered model, tool, agent, subgraph, router, or reducer — extended
-    /// with the agent reference check.
+    /// This is the span-less counterpart to [`resolve_program`](Self::resolve_program).
+    /// It delegates entirely to [`CapabilityResolver::bind_blueprint`] (the one
+    /// binding gate both this resolver and the compiler's capability check
+    /// route through — see the module docs) so the two paths cannot drift.
     ///
     /// # Errors
     ///
-    /// Returns the first resolution failure.
+    /// Returns [`TinyAgentsError::Diagnostics`] carrying every unresolved
+    /// reference and unknown node kind, not just the first.
     pub fn resolve_blueprint(&self, blueprint: &Blueprint) -> Result<()> {
-        for node in &blueprint.nodes {
-            if !self.caps.node_kind_allowed(&node.kind) {
-                return Err(TinyAgentsError::Compile(format!(
-                    "node `{}` has unknown kind `{}`",
-                    node.name, node.kind
-                )));
-            }
-            let subgraph_target = node.subgraph.as_deref().or(node.model.as_deref());
-            if let Some(reference) = CapabilityResolver::classify_reference(
-                &node.kind,
-                node.model.as_deref(),
-                subgraph_target,
-                node.agent.as_deref(),
-                node.script.as_deref(),
-            ) && !self
-                .caps
-                .reference_allowed(reference.class, reference.target)
-            {
-                return Err(unregistered(
-                    reference.class.word(),
-                    &node.name,
-                    reference.target,
-                ));
-            }
-            if let Some(model) = CapabilityResolver::secondary_model_reference(
-                &node.kind,
-                node.model.as_deref(),
-                node.subgraph.is_some(),
-            ) && !self.caps.model_allowed(model)
-            {
-                return Err(unregistered("model", &node.name, model));
-            }
-            for tool in &node.tools {
-                if !self.caps.tool_allowed(tool) {
-                    return Err(unregistered("tool", &node.name, tool));
-                }
-            }
-        }
-        for channel in &blueprint.channels {
-            if !self.caps.reducer_allowed(&channel.reducer) {
-                return Err(TinyAgentsError::Capability(format!(
-                    "channel `{}` references unknown reducer `{}`",
-                    channel.name, channel.reducer
-                )));
-            }
-        }
-        Ok(())
+        self.caps.bind_blueprint(blueprint)
     }
 }
 
@@ -349,25 +300,6 @@ fn fold_diagnostic(diagnostic: Diagnostic, source: Option<&SourceFile>) -> TinyA
     } else {
         TinyAgentsError::Capability(rendered)
     }
-}
-
-/// Builds the span-less "unknown {what}" [`TinyAgentsError::Capability`] used by
-/// [`Resolver::resolve_blueprint`].
-/// Maps a shared [`ReferenceClass`] to its stable spanned-diagnostic code.
-fn code_for(class: ReferenceClass) -> &'static str {
-    match class {
-        ReferenceClass::Model => CODE_UNKNOWN_MODEL,
-        ReferenceClass::Subgraph => CODE_UNKNOWN_SUBGRAPH,
-        ReferenceClass::Router => CODE_UNKNOWN_ROUTER,
-        ReferenceClass::Agent => CODE_UNKNOWN_AGENT,
-        ReferenceClass::Script => CODE_UNKNOWN_SCRIPT,
-    }
-}
-
-fn unregistered(what: &str, node: &str, target: &str) -> TinyAgentsError {
-    TinyAgentsError::Capability(format!(
-        "node `{node}` references unknown {what} `{target}`"
-    ))
 }
 
 /// Parses, registry-resolves (with full source spans), and lowers `.rag`

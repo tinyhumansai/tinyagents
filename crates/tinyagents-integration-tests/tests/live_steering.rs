@@ -1,11 +1,15 @@
 //! Live steering test against the real OpenAI API.
 //!
-//! Skips gracefully (early return) when `OPENAI_API_KEY` is unset, so
-//! `cargo test` stays green without credentials. Run it for real with:
+//! This test is `#[ignore]`d and only runs opted in via
+//! `tests/common/live.rs::require_live`, so `cargo test` stays green without
+//! credentials and never dials a real provider by accident. Run it for real
+//! with:
 //!
 //! ```text
-//! cargo test --test live_steering -- --nocapture
+//! TINYAGENTS_LIVE=1 cargo test --test live_steering -- --ignored --nocapture
 //! ```
+
+mod common;
 
 use std::sync::Arc;
 
@@ -19,11 +23,9 @@ use tinyinference_llm::message::Message;
 use tinyinference_llm::providers::openai::OpenAiModel;
 
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn orchestrator_steers_a_real_openai_run() {
-    // Load .env so `cargo test` picks up local credentials.
-    let _ = dotenvy::dotenv();
-    if std::env::var("OPENAI_API_KEY").is_err() {
-        eprintln!("OPENAI_API_KEY not set — skipping live_steering test");
+    if !common::live::require_live(&["OPENAI_API_KEY"]) {
         return;
     }
 

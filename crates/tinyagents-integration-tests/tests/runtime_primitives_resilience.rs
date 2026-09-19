@@ -276,7 +276,10 @@ fn loop9_a_panicking_listener_does_not_stop_later_delivery() {
 // ── LOOP-8: steering batches are atomic and pauses are resumable ─────────────
 
 #[test]
-fn loop8_a_rejected_batch_applies_nothing() {
+fn loop8_a_rejected_command_does_not_block_the_allowed_ones() {
+    // I-5/M-7: a disallowed command in a batch is now rejected individually
+    // rather than voiding the whole batch — the allowed command still
+    // applies and the checkpoint does not error.
     let handle =
         SteeringHandle::new(SteeringPolicy::new().allow(SteeringCommandKind::InjectMessage));
     handle.send(SteeringCommand::InjectMessage(Message::user("first")));
@@ -285,10 +288,14 @@ fn loop8_a_rejected_batch_applies_nothing() {
     let mut ctx: RunContext = RunContext::new(RunConfig::new("r"), ()).with_steering(handle);
     let mut messages: Vec<Message> = Vec::new();
 
-    assert!(apply_pending_steering(&mut ctx, &mut messages).is_err());
-    assert!(
-        messages.is_empty(),
-        "a command before the rejected one was still applied"
+    assert_eq!(
+        apply_pending_steering(&mut ctx, &mut messages).unwrap(),
+        SteeringOutcome::Continue
+    );
+    assert_eq!(
+        messages,
+        vec![Message::user("first")],
+        "the allowed command before the rejected one must still have applied"
     );
 }
 

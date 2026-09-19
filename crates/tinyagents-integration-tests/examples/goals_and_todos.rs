@@ -18,7 +18,7 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run --example goals_and_todos
+//! cargo run -p tinyagents-integration-tests --example goals_and_todos
 //! ```
 
 use std::sync::Arc;

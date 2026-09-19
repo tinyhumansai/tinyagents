@@ -112,6 +112,31 @@ pub struct ToolRegistry<State: Send + Sync, Ctx: Send + Sync> {
     tools: HashMap<String, Arc<dyn ToolDispatch<State, Ctx>>>,
 }
 
+/// Outcome of a registration that reports whether it replaced an existing
+/// entry under the same name.
+///
+/// Returned by [`ToolRegistry::try_register`]/[`ToolRegistry::try_register_dispatch`]
+/// so a caller that cares can detect the collision instead of it silently
+/// overwriting the earlier registration (M-5; `docs/sdk-gaps.md` §15 asks for
+/// duplicate-registration diagnostics).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegisterOutcome {
+    /// No prior registration existed under this name.
+    Registered,
+    /// A prior registration under this name was replaced. Carries the
+    /// replaced name (redundant with the call site's own `tool.name()`, but
+    /// convenient for a caller that registers in a loop and wants to report
+    /// which names collided without re-deriving them).
+    Replaced(String),
+}
+
+impl RegisterOutcome {
+    /// `true` when this call replaced an existing registration.
+    pub fn replaced(&self) -> bool {
+        matches!(self, RegisterOutcome::Replaced(_))
+    }
+}
+
 impl<State: Send + Sync, Ctx: Send + Sync> ToolRegistry<State, Ctx> {
     /// Creates an empty registry.
     #[must_use]
@@ -122,18 +147,70 @@ impl<State: Send + Sync, Ctx: Send + Sync> ToolRegistry<State, Ctx> {
     }
 
     /// Registers a canonical tool under its declared name.
+    ///
+    /// A duplicate name silently replaces the earlier registration (except
+    /// for logging a `tracing::warn!` diagnostic) so this method keeps its
+    /// chaining-friendly `&mut Self` return for existing callers; use
+    /// [`Self::try_register`] to detect and react to the collision instead.
     pub fn register(&mut self, tool: Arc<dyn tinytools::Tool>) -> &mut Self {
         let name = tool.name().to_owned();
-        self.tools
-            .insert(name, Arc::new(CanonicalDispatch { tool }));
+        if let RegisterOutcome::Replaced(name) =
+            self.insert_dispatch(name, Arc::new(CanonicalDispatch { tool }))
+        {
+            tracing::warn!(
+                target: "tinyagents::tool",
+                tool = %name,
+                "[tool] registration replaced an already-registered tool of the same name"
+            );
+        }
         self
     }
 
+    /// Like [`Self::register`], but reports whether the name was already
+    /// registered instead of only logging it, so a caller can fail fast on a
+    /// collision it did not expect (M-5).
+    pub fn try_register(&mut self, tool: Arc<dyn tinytools::Tool>) -> RegisterOutcome {
+        let name = tool.name().to_owned();
+        self.insert_dispatch(name, Arc::new(CanonicalDispatch { tool }))
+    }
+
     /// Registers an explicit typed-parent dispatcher for a canonical tool.
+    ///
+    /// See [`Self::register`] for the duplicate-name policy; use
+    /// [`Self::try_register_dispatch`] to detect it instead.
     pub fn register_dispatch(&mut self, dispatch: Arc<dyn ToolDispatch<State, Ctx>>) -> &mut Self {
         let name = dispatch.tool().name().to_owned();
-        self.tools.insert(name, dispatch);
+        if let RegisterOutcome::Replaced(name) = self.insert_dispatch(name, dispatch) {
+            tracing::warn!(
+                target: "tinyagents::tool",
+                tool = %name,
+                "[tool] registration replaced an already-registered tool of the same name"
+            );
+        }
         self
+    }
+
+    /// Like [`Self::register_dispatch`], but reports whether the name was
+    /// already registered instead of only logging it (M-5).
+    pub fn try_register_dispatch(
+        &mut self,
+        dispatch: Arc<dyn ToolDispatch<State, Ctx>>,
+    ) -> RegisterOutcome {
+        let name = dispatch.tool().name().to_owned();
+        self.insert_dispatch(name, dispatch)
+    }
+
+    /// Shared insertion path: inserts `dispatch` under `name`, returning
+    /// whether a prior entry under that name was replaced.
+    fn insert_dispatch(
+        &mut self,
+        name: String,
+        dispatch: Arc<dyn ToolDispatch<State, Ctx>>,
+    ) -> RegisterOutcome {
+        match self.tools.insert(name.clone(), dispatch) {
+            Some(_) => RegisterOutcome::Replaced(name),
+            None => RegisterOutcome::Registered,
+        }
     }
 
     /// Looks up the complete host dispatch entry, whatever its exposure.

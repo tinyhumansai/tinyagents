@@ -69,6 +69,17 @@ pub struct RunLimits {
     /// What the run should do when a call cap is reached. Defaults to
     /// [`LimitBehavior::Error`], which is the historical behaviour.
     pub behavior: LimitBehavior,
+    /// Caps how many tool calls in one concurrently-executed batch (see
+    /// [`should_execute_tools_concurrently`][crate::agent_loop] and its
+    /// module docs) may be in flight at once. `None` (the default) leaves the
+    /// batch unbounded — every eligible call in the turn starts together, as
+    /// before this field existed.
+    ///
+    /// Only applies to the concurrent tool path; the serial path always runs
+    /// one call at a time regardless of this setting. A `Some(0)` behaves the
+    /// same as `Some(1)`: at least one call must be in flight to make
+    /// progress.
+    pub max_tool_concurrency: Option<usize>,
 }
 
 /// What a run does when it reaches a configured call cap.
@@ -180,6 +191,7 @@ impl Default for RunLimits {
             max_retries_per_call: 3,
             max_depth: Self::DEFAULT_MAX_DEPTH,
             behavior: LimitBehavior::Error,
+            max_tool_concurrency: None,
         }
     }
 }

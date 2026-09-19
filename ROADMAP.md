@@ -30,6 +30,10 @@ build toward a production-grade Rust agent runtime.
   OpenAI-compatible endpoints are added
 - track and close the internal SDK feature-parity backlog in
   [`docs/sdk-gaps.md`](docs/sdk-gaps.md)
+- execute the phased plan in
+  [`docs/runtime-comparison/plan.md`](docs/runtime-comparison/plan.md), which
+  ranks the correctness fixes and feature gaps found by comparing TinyAgents
+  with LangGraph, Pydantic AI and pi
 
 ## Parallel Agents And Sub-Agents
 

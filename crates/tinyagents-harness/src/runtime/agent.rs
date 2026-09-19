@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures::{Stream, StreamExt};
+use futures::Stream;
 
 use crate::agent_loop::AgentStreamItem;
 use crate::context::RunContext;
@@ -35,7 +35,158 @@ use super::{AgentHarness, HostInvocationBinding, InvocationRuntime};
 /// substitute an unhosted or differently-hosted child harness for the
 /// parent's policy.
 pub(crate) struct HostInvocationAuthority<State: Send + Sync, Ctx: Send + Sync> {
-    pub(crate) binding: HostInvocationBinding<State, Ctx>,
+    pub(crate) binding: std::sync::Arc<HostInvocationBinding<State, Ctx>>,
+}
+
+/// Type-erasure boundary for [`RunContext::host_authority`][crate::context::RunContext].
+///
+/// This is a hand-written alternative to `dyn Any`. `Any::downcast_ref`
+/// requires the caller's own generic parameters to be provably `'static`,
+/// which the generic agent loop cannot promise: it deliberately keeps
+/// working with a borrowed `State`/`Ctx` on the explicit-model path (see
+/// `explicit_model_paths_accept_borrowed_state`). [`type_name`][Self::type_name]
+/// is callable with no `'static` bound at all (`std::any::type_name` never
+/// requires one), so [`host_invocation_binding`] can use it as a fail-closed
+/// guard in front of the unavoidable unsafe cast, without forcing `'static`
+/// onto the whole generic loop.
+///
+/// `type_name` is documented as not a guaranteed-unique identifier, so this
+/// is a defensive, best-effort check rather than the same soundness
+/// guarantee `TypeId` gives genuinely `'static` types. It still closes the
+/// realistic C-1 repro (a hosted context read by a *different* harness):
+/// distinct concrete `HostInvocationAuthority<State, Ctx>` monomorphizations
+/// in this crate reliably produce distinct strings.
+pub(crate) trait ErasedHostAuthority: Send + Sync {
+    fn type_name(&self) -> &'static str;
+}
+
+impl<State: Send + Sync, Ctx: Send + Sync> ErasedHostAuthority
+    for HostInvocationAuthority<State, Ctx>
+{
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+}
+
+/// Closed, non-leaking classification of a hosted invocation failure.
+///
+/// A host reading [`HostedError::kind`] can distinguish "the caller cancelled
+/// this" from "a configured limit was exhausted" from "the provider failed"
+/// without inspecting [`HostedError::message`] (which stays a fixed,
+/// sanitized string per kind — see that field's doc) or attaching a private
+/// event listener to reconstruct the same information from the event stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HostedErrorKind {
+    /// The run was cancelled before completion.
+    Cancelled,
+    /// The run exceeded a wall-clock deadline (the run's own, or a per-call
+    /// ceiling — see [`TinyAgentsError::Timeout`] and
+    /// [`TinyAgentsError::CallTimeout`]).
+    Timeout,
+    /// A configured run limit (model calls, tool calls, recursion depth, a
+    /// host budget) was exhausted.
+    LimitExceeded,
+    /// The host's own policy rejected the invocation (an unresolvable
+    /// definition, a failed security screen, an unauthorized delegate).
+    Policy,
+    /// The model provider failed the call.
+    Provider,
+    /// Any other internal failure not covered by a more specific kind.
+    Internal,
+}
+
+/// The typed failure returned by the hosted entry points
+/// ([`AgentHarness::invoke_agent`] and its streaming counterpart) in place of
+/// a generic `TinyAgentsError::Model("hosted agent invocation failed")`.
+///
+/// This intentionally does not implement `TinyAgentsError`'s "one error type"
+/// convention: it is the harness's product-host boundary type, not another
+/// case folded into the crate-wide error, and it is deliberately smaller —
+/// `message` is a fixed, sanitized string selected by `kind` (never the
+/// underlying provider/middleware/budget error text; that stays available to
+/// the host only through its own capability bundle's own logging and through
+/// the internal (non-hosted) event stream if it chose to attach a listener).
+#[derive(Debug)]
+pub struct HostedError {
+    /// Closed classification of the failure. See [`HostedErrorKind`].
+    pub kind: HostedErrorKind,
+    /// Fixed, sanitized message selected by `kind` — never raw provider,
+    /// middleware, or budget error text.
+    pub message: String,
+    /// The accumulated transcript, usage, and executed-tool summary as far as
+    /// the run got before failing, when available.
+    pub run: Option<Box<AgentRun>>,
+}
+
+impl std::fmt::Display for HostedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for HostedError {}
+
+/// Classifies a raw loop error into the closed [`HostedErrorKind`] vocabulary
+/// a host is allowed to see.
+fn classify_hosted_error(error: &TinyAgentsError) -> HostedErrorKind {
+    match error {
+        TinyAgentsError::Cancelled => HostedErrorKind::Cancelled,
+        TinyAgentsError::Timeout(_) | TinyAgentsError::CallTimeout(_) => HostedErrorKind::Timeout,
+        TinyAgentsError::LimitExceeded(_) | TinyAgentsError::SubAgentDepth(_) => {
+            HostedErrorKind::LimitExceeded
+        }
+        TinyAgentsError::Validation(_) | TinyAgentsError::Steering(_) => HostedErrorKind::Policy,
+        TinyAgentsError::Provider(_) | TinyAgentsError::Model(_) => HostedErrorKind::Provider,
+        _ => HostedErrorKind::Internal,
+    }
+}
+
+/// The fixed, sanitized message for each [`HostedErrorKind`]. Never derived
+/// from the underlying error's own text.
+fn hosted_error_message(kind: HostedErrorKind) -> &'static str {
+    match kind {
+        HostedErrorKind::Cancelled => "hosted agent invocation was cancelled",
+        HostedErrorKind::Timeout => "hosted agent invocation timed out",
+        HostedErrorKind::LimitExceeded => "hosted agent invocation exceeded a configured limit",
+        HostedErrorKind::Policy => "hosted agent invocation was rejected by policy",
+        HostedErrorKind::Provider => "hosted agent invocation failed at the model provider",
+        HostedErrorKind::Internal => "hosted agent invocation failed",
+    }
+}
+
+/// Builds a [`HostedError`] from the raw loop error and whatever partial
+/// [`AgentRun`] the loop accumulated before failing.
+fn hosted_error(error: &TinyAgentsError, run: AgentRun) -> HostedError {
+    let kind = classify_hosted_error(error);
+    HostedError {
+        kind,
+        message: hosted_error_message(kind).to_string(),
+        run: Some(Box::new(run)),
+    }
+}
+
+/// Reconstructs a crate-wide [`TinyAgentsError`] from a [`HostedError`] for
+/// internal callers (recursive hosted delegation) that must keep propagating
+/// through the ordinary `Result<T>` = `Result<T, TinyAgentsError>` surface.
+/// This is a lossless-enough round trip for control flow: `Cancelled` and
+/// `Timeout` map back to their own variants (so cancellation/deadline
+/// semantics upstream keep working, e.g. the fallback gate in
+/// `invoke_model_resolving`), and the rest become typed but message-generic
+/// variants — never worse than what this boundary already returned before
+/// `HostedError` existed.
+impl From<HostedError> for TinyAgentsError {
+    fn from(error: HostedError) -> Self {
+        match error.kind {
+            HostedErrorKind::Cancelled => TinyAgentsError::Cancelled,
+            HostedErrorKind::Timeout => TinyAgentsError::Timeout(error.message),
+            HostedErrorKind::LimitExceeded => TinyAgentsError::LimitExceeded(error.message),
+            HostedErrorKind::Policy => TinyAgentsError::Validation(error.message),
+            HostedErrorKind::Provider | HostedErrorKind::Internal => {
+                TinyAgentsError::Model(error.message)
+            }
+        }
+    }
 }
 
 /// A host-owned turn request.
@@ -137,27 +288,29 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentInvocation<State, Ctx> {
 /// observer even when a caller stops listening before a terminal item. The
 /// invocation's host authority is owned by that context, never by the harness.
 pub struct AgentStream<'a, State: Send + Sync + 'static, Ctx: Send + Sync> {
+    // Owns its inputs (the harness borrow or the invocation-local runtime is
+    // moved into the driving future itself, inside `invoke_stream_with_runner`)
+    // so nothing outside this field needs to outlive it and no lifetime
+    // extension is required to store it here.
     inner: Option<Pin<Box<dyn Stream<Item = AgentStreamItem> + Send + 'a>>>,
-    // Kept after `inner` so Rust drops the borrowed stream before the overlay
-    // that owns its harness. See `extend_overlay_stream_lifetime`.
-    #[expect(
-        dead_code,
-        reason = "drop order keeps the invocation runtime alive until the borrowed stream is dropped"
-    )]
-    runtime: Option<std::sync::Arc<InvocationRuntime<State, Ctx>>>,
     cancellation: crate::CancellationToken,
     terminal_observer: std::sync::Arc<std::sync::Mutex<Option<crate::context::TerminalObserver>>>,
     terminal_observed: bool,
-    marker: std::marker::PhantomData<(&'a State, Ctx)>,
+    // `fn() -> Ctx` (rather than bare `Ctx`) keeps this marker `Unpin`
+    // regardless of `Ctx`, which is what lets `poll_next` use the safe
+    // `Pin::get_mut` below instead of `get_unchecked_mut`.
+    #[allow(clippy::type_complexity)]
+    marker: std::marker::PhantomData<(&'a State, fn() -> Ctx)>,
 }
 
 impl<State: Send + Sync + 'static, Ctx: Send + Sync> Stream for AgentStream<'_, State, Ctx> {
     type Item = AgentStreamItem;
 
     fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // `inner` is pinned independently by `Box`; this projection never moves
-        // the boxed stream or any other field of `AgentStream`.
-        let stream = unsafe { self.get_unchecked_mut() };
+        // Every field is `Unpin` (`Option<Pin<Box<..>>>`, `CancellationToken`,
+        // an `Arc<Mutex<..>>`, `bool`, and a `fn()`-based `PhantomData`), so
+        // `AgentStream` itself is `Unpin` and this projection is safe.
+        let stream = self.get_mut();
         match stream.inner.as_mut() {
             Some(inner) => match inner.as_mut().poll_next(context) {
                 Poll::Ready(Some(item)) => {
@@ -251,7 +404,7 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync> Drop for AgentStream<'_, St
             && let Some(observer) = observer.take()
         {
             observer(
-                AgentRun::new(),
+                crate::context::TerminalRunSummary::default(),
                 false,
                 Some("hosted stream cancelled before execution began".to_string()),
             );
@@ -344,7 +497,7 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync + 'static> AgentHarness<Stat
         &self,
         invocation: AgentInvocation<State, Ctx>,
         state: &State,
-    ) -> Result<AgentRun>
+    ) -> std::result::Result<AgentRun, HostedError>
     where
         State: 'static,
     {
@@ -358,10 +511,85 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync + 'static> AgentHarness<Stat
         &self,
         invocation: AgentInvocation<State, Ctx>,
         state: &State,
-    ) -> Result<AgentRun>
+    ) -> std::result::Result<AgentRun, HostedError>
     where
         State: 'static,
     {
+        let (runtime, context, prepared) = self
+            .prepare_hosted_turn(invocation)
+            .await
+            .map_err(|error| hosted_error(&error, AgentRun::new()))?;
+        let runner = runtime
+            .as_deref()
+            .map(InvocationRuntime::harness)
+            .unwrap_or(self);
+
+        let outcome = runner
+            .invoke_in_context_collecting_partial(state, context, prepared.messages.clone())
+            .await;
+        match outcome.error {
+            None => Ok(outcome.run),
+            Some(error) => Err(hosted_error(&error, outcome.run)),
+        }
+    }
+
+    /// Collects a hosted turn through the streaming driver while preserving the
+    /// parent's exact capability bundle. Recursive streaming delegation uses
+    /// this rather than the unary entry point so model deltas and delta
+    /// middleware remain part of the shared parent event stream.
+    ///
+    /// Drives [`AgentHarness::invoke_streaming_in_context_collecting_partial`]
+    /// directly rather than going through [`AgentHarness::invoke_agent_stream`]:
+    /// the public stream sanitizes every item (see
+    /// [`sanitize_hosted_stream_item`]), which would throw away the real
+    /// [`TinyAgentsError`] this method needs to classify into a
+    /// [`HostedErrorKind`] before its own, separate sanitization.
+    pub(crate) async fn invoke_agent_streaming_with_capabilities(
+        &self,
+        invocation: AgentInvocation<State, Ctx>,
+        state: &State,
+    ) -> std::result::Result<AgentRun, HostedError>
+    where
+        Ctx: 'static,
+        State: 'static,
+    {
+        let (runtime, context, prepared) = self
+            .prepare_hosted_turn(invocation)
+            .await
+            .map_err(|error| hosted_error(&error, AgentRun::new()))?;
+        let runner = runtime
+            .as_deref()
+            .map(InvocationRuntime::harness)
+            .unwrap_or(self);
+
+        let outcome = runner
+            .invoke_streaming_in_context_collecting_partial(
+                state,
+                context,
+                prepared.messages.clone(),
+            )
+            .await;
+        match outcome.error {
+            None => Ok(outcome.run),
+            Some(error) => Err(hosted_error(&error, outcome.run)),
+        }
+    }
+
+    /// Shared setup for both hosted drivers: resolves and authorizes the
+    /// turn, installs the host authority and terminal observer on `context`,
+    /// and emits [`ProgressEvent::Started`]. Returns the invocation-local
+    /// runtime overlay (if any — the caller derives the harness that should
+    /// actually run the turn from it, since a reference borrowed from it here
+    /// cannot outlive this function), the prepared `context`, and the
+    /// prepared turn.
+    async fn prepare_hosted_turn(
+        &self,
+        invocation: AgentInvocation<State, Ctx>,
+    ) -> Result<(
+        Option<std::sync::Arc<InvocationRuntime<State, Ctx>>>,
+        RunContext<Ctx>,
+        PreparedAgentTurn<State, Ctx>,
+    )> {
         let AgentInvocation {
             host,
             request,
@@ -379,7 +607,7 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync + 'static> AgentHarness<Stat
         let agent_id = prepared.binding.agent_id.clone();
         context.host_agent_id = Some(agent_id.clone());
         context.host_authority = Some(std::sync::Arc::new(HostInvocationAuthority {
-            binding: prepared.binding.clone(),
+            binding: std::sync::Arc::new(prepared.binding.clone()),
         }));
         runner.install_host_terminal_observer(&mut context, prepared.clone());
         emit_host_progress::<State, Ctx>(
@@ -390,51 +618,7 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync + 'static> AgentHarness<Stat
                 agent: agent_id,
             },
         );
-
-        let outcome = runner
-            .invoke_in_context_collecting_partial(state, context, prepared.messages.clone())
-            .await;
-        match outcome.error {
-            None => Ok(outcome.run),
-            Some(TinyAgentsError::Cancelled) => Err(TinyAgentsError::Cancelled),
-            Some(TinyAgentsError::Timeout(message)) => Err(TinyAgentsError::Timeout(message)),
-            Some(_) => Err(TinyAgentsError::Model(
-                "hosted agent invocation failed".to_string(),
-            )),
-        }
-    }
-
-    /// Collects a hosted turn through the streaming driver while preserving the
-    /// parent's exact capability bundle. Recursive streaming delegation uses
-    /// this rather than the unary entry point so model deltas and delta
-    /// middleware remain part of the shared parent event stream.
-    pub(crate) async fn invoke_agent_streaming_with_capabilities(
-        &self,
-        invocation: AgentInvocation<State, Ctx>,
-        state: &State,
-    ) -> Result<AgentRun>
-    where
-        Ctx: 'static,
-        State: 'static,
-    {
-        let stream = self
-            .invoke_agent_stream_with_capabilities(invocation, state)
-            .await?;
-        futures::pin_mut!(stream);
-        while let Some(item) = stream.next().await {
-            match item {
-                AgentStreamItem::Completed(run) => return Ok(*run),
-                AgentStreamItem::Failed { .. } => {
-                    return Err(TinyAgentsError::Model(
-                        "hosted agent invocation failed".to_string(),
-                    ));
-                }
-                AgentStreamItem::Event(_) => {}
-            }
-        }
-        Err(TinyAgentsError::Model(
-            "hosted stream ended without a terminal result".to_string(),
-        ))
+        Ok((runtime, context, prepared))
     }
 
     /// Starts a hosted streaming turn.
@@ -475,14 +659,20 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync + 'static> AgentHarness<Stat
             .as_deref()
             .map(InvocationRuntime::harness)
             .unwrap_or(self);
+        // Unlike `prepare_hosted_turn` (used by the unary/streaming-collecting
+        // drivers, which classify the raw error into a `HostedError` and do
+        // their own, kind-scoped sanitization), this public-stream setup
+        // returns a plain `TinyAgentsError` directly to the caller — so it
+        // still needs `sanitize_hosted_preparation_error` applied here.
         let mut prepared = runner
             .prepare_agent_turn_bounded(host, request, &context)
-            .await?;
+            .await
+            .map_err(sanitize_hosted_preparation_error)?;
         prepared.binding.runtime = runtime.clone();
         let agent_id = prepared.binding.agent_id.clone();
         context.host_agent_id = Some(agent_id.clone());
         context.host_authority = Some(std::sync::Arc::new(HostInvocationAuthority {
-            binding: prepared.binding.clone(),
+            binding: std::sync::Arc::new(prepared.binding.clone()),
         }));
         let cancellation = context.cancellation.clone();
         let terminal_observer =
@@ -495,17 +685,24 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync + 'static> AgentHarness<Stat
                 agent: agent_id,
             },
         );
-        let stream = runner
-            .invoke_stream_in_context(state, context, prepared.messages.clone())
-            .map(|item| item);
+        // Build the stream from a `StreamRunner` that either borrows `self`
+        // (unhosted-runtime case) or owns `runtime` outright (hosted-runtime
+        // case). `invoke_stream_with_runner` moves whichever one it gets into
+        // the driving future's own state, so the returned stream needs no
+        // extra field or lifetime extension to keep an owned runtime alive:
+        // the future already owns it for exactly as long as it is needed.
+        let stream_runner = match runtime {
+            Some(runtime) => crate::agent_loop::StreamRunner::Owned(runtime),
+            None => crate::agent_loop::StreamRunner::Borrowed(self),
+        };
+        let stream = crate::agent_loop::invoke_stream_with_runner(
+            stream_runner,
+            state,
+            context,
+            prepared.messages.clone(),
+        );
         Ok(AgentStream {
-            // `runtime` is retained by this stream and is declared after
-            // `inner`, so it outlives the stream's borrow of its harness. The
-            // explicit helper records that otherwise non-obvious lifetime
-            // relationship at the one boundary where the owned hosted
-            // invocation meets the borrowed stream API.
-            inner: Some(unsafe { extend_overlay_stream_lifetime(Box::pin(stream)) }),
-            runtime,
+            inner: Some(Box::pin(stream)),
             cancellation,
             terminal_observer,
             terminal_observed: false,
@@ -517,6 +714,13 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync + 'static> AgentHarness<Stat
     /// controls as model resolution.  Definitions, security screening, and
     /// context composition are all host I/O boundaries, not setup work that
     /// may outlive a cancelled turn.
+    ///
+    /// Returns the raw, unsanitized [`TinyAgentsError`] — callers decide how
+    /// to sanitize: `prepare_hosted_turn` classifies it into a
+    /// [`HostedError`] (which does its own kind-scoped sanitization), while
+    /// `invoke_agent_stream_with_capabilities` (the one caller that still
+    /// returns a plain `TinyAgentsError` to the public API) applies
+    /// [`sanitize_hosted_preparation_error`] itself.
     async fn prepare_agent_turn_bounded(
         &self,
         host: std::sync::Arc<crate::host::HostCapabilities<State>>,
@@ -525,7 +729,7 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync + 'static> AgentHarness<Stat
     ) -> Result<PreparedAgentTurn<State, Ctx>> {
         let cancellation = context.cancellation.clone();
         let preparation = self.prepare_agent_turn(host, request, context);
-        let outcome = match self.host_io_budget(context) {
+        match self.host_io_budget(context) {
             Some(remaining) => tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => Err(TinyAgentsError::Cancelled),
@@ -539,8 +743,7 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync + 'static> AgentHarness<Stat
                 _ = cancellation.cancelled() => Err(TinyAgentsError::Cancelled),
                 result = preparation => result,
             },
-        };
-        outcome.map_err(sanitize_hosted_preparation_error)
+        }
     }
 
     /// The wall-clock time left for host I/O (definition lookup, security
@@ -590,9 +793,15 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync + 'static> AgentHarness<Stat
             .resolve(&request.agent_id)
             .await
             .map_err(|error| {
-                let _ = error;
-                tinyagents_tracing::warn!(agent_id = %request.agent_id, "[host] definition lookup failed");
-                TinyAgentsError::Validation("agent definition lookup failed".to_string())
+                tracing::warn!(
+                    agent_id = %request.agent_id,
+                    error = %error,
+                    "[host] definition lookup failed"
+                );
+                TinyAgentsError::Validation(format!(
+                    "agent definition lookup failed for `{}`: {error}",
+                    request.agent_id
+                ))
             })?
             .ok_or_else(|| {
                 TinyAgentsError::Validation(format!(
@@ -659,13 +868,20 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync + 'static> AgentHarness<Stat
         messages.append(&mut preamble);
         messages.append(&mut request.messages);
         let progress = start_progress_dispatcher(host.progress.clone());
+        // An empty declared list and "declared nothing" are indistinguishable
+        // on `AgentDefinition::tools` (`Vec<String>`), so both collapse to
+        // `None` here — `resolve_tool_allowlist` in `agent_loop::tools`
+        // treats that as fail-closed by default (I-9), not as "unrestricted".
+        let declared_tools: std::collections::HashSet<String> =
+            definition.tools.into_iter().collect();
+        let allowed_tools = (!declared_tools.is_empty()).then_some(declared_tools);
         Ok(PreparedAgentTurn {
             binding: HostInvocationBinding {
                 host: host.clone(),
                 agent_id: request.agent_id.clone(),
                 model_pin: definition.model,
                 role: definition.role,
-                allowed_tools: definition.tools.into_iter().collect(),
+                allowed_tools,
                 progress: progress.clone(),
                 runtime: None,
             },
@@ -699,7 +915,7 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync + 'static> AgentHarness<Stat
                     succeeded,
                     error.map(|error| {
                         let _ = error;
-                        tinyagents_tracing::warn!("[host] agent run failed");
+                        tracing::warn!("[host] agent run failed");
                         "agent run failed".to_string()
                     }),
                 );
@@ -718,44 +934,54 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync + 'static> AgentHarness<Stat
     }
 }
 
-/// Extends a stream borrow from an invocation overlay to the caller's stream
-/// lifetime.
-///
-/// Safety is established by `AgentStream`: it stores the exact `Arc` that owns
-/// the overlay alongside `inner`, and field order drops `inner` first. The
-/// other borrowed inputs (`&self` and `&State`) already have the public `'a`
-/// lifetime. No reference can escape the private `AgentStream` wrapper.
-unsafe fn extend_overlay_stream_lifetime<'a>(
-    stream: Pin<Box<dyn Stream<Item = AgentStreamItem> + Send + '_>>,
-) -> Pin<Box<dyn Stream<Item = AgentStreamItem> + Send + 'a>> {
-    // SAFETY: documented above; the owning Arc is retained by AgentStream.
-    unsafe { std::mem::transmute(stream) }
-}
-
 /// Returns this live context's host authorization, if it is a hosted run.
 ///
 /// The binding is carried by the non-serializable context rather than the
 /// reusable harness, so concurrent roots have no shared mutable authority.
+///
+/// `host_authority` is `Option<Arc<dyn Any + Send + Sync>>` and is installed
+/// only by the hosted entry points in this module, which require
+/// `State: 'static, Ctx: 'static` and store exactly
+/// `HostInvocationAuthority<State, Ctx>`. Nothing about [`RunContext`]
+/// prevents a caller from handing a hosted context to a *different* harness
+/// (a different `State`, or — via [`RunContext::child_with_data`] changing
+/// `Ctx`), so the erased type is checked with [`Any::downcast_ref`] rather
+/// than assumed. A mismatch fails closed with
+/// [`TinyAgentsError::Validation`] instead of reinterpreting memory through
+/// the wrong type. Absence of any authority is the ordinary, cheap case (an
+/// explicit-model run, or the generic loop when no hosted invocation
+/// installed one) and returns `Ok(None)` without touching `Any` at all, so
+/// this function itself still only needs `State: 'static, Ctx: 'static` on
+/// the (rare) hosted path — its callers already carry that bound.
 pub(crate) fn host_invocation_binding<State: Send + Sync, Ctx: Send + Sync>(
     context: &RunContext<Ctx>,
-) -> Result<Option<HostInvocationBinding<State, Ctx>>> {
+) -> Result<Option<std::sync::Arc<HostInvocationBinding<State, Ctx>>>> {
     let Some(authority) = context.host_authority.as_ref() else {
         return Ok(None);
     };
-    // `host_authority` is crate-private and is installed only by the hosted
-    // entry points, which require `State: 'static` and store exactly
-    // `HostInvocationAuthority<State>`. Explicit-model entry points never
-    // install it, so they return at the `None` branch without requiring
-    // `State: 'static` or consulting `Any` at all. Keeping this cast at the
-    // private hosted-context boundary restores borrowed-state support to the
-    // generic loop without creating a harness registry or any cross-invocation
-    // authority channel.
-    //
-    // SAFETY: no public API can construct or mutate `host_authority`; its only
-    // assignment is the hosted `AgentInvocation` path in this module.
-    // `RunContext::child` clones that same `Arc` only for recursive calls with
-    // the same `State`. Thus a present authority always points at the concrete
-    // type requested here for the active harness invocation.
+    // `RunContext::child` (the only authority-propagating path) requires the
+    // same `Ctx` as its parent, and `RunContext::child_with_data` (the only
+    // path that changes `Ctx`) always clears `host_authority` first — so a
+    // present authority's `Ctx` already matches this call's `Ctx` by
+    // construction. `State` has no such structural guarantee (nothing
+    // prevents handing a hosted context to a *different* harness), so it is
+    // checked here at read time via `ErasedHostAuthority::type_name` (see
+    // that trait's doc comment for why this, and not `Any`, is used).
+    let expected = std::any::type_name::<HostInvocationAuthority<State, Ctx>>();
+    if authority.type_name() != expected {
+        return Err(TinyAgentsError::Validation(
+            "host authority type mismatch: this run context was hosted by a different \
+             State/Ctx harness than the one reading it"
+                .to_string(),
+        ));
+    }
+    #[allow(unsafe_code)]
+    // SAFETY: `context.host_authority` is crate-private and is installed
+    // only by the hosted entry points in this module, which always store
+    // exactly `HostInvocationAuthority<State, Ctx>` for the harness they are
+    // called on. The `type_name` check above additionally rejects any value
+    // whose concrete type does not match this call's own `State`/`Ctx`
+    // before this cast runs, so a mismatched authority never reaches it.
     let authority = unsafe {
         &*(std::sync::Arc::as_ptr(authority) as *const HostInvocationAuthority<State, Ctx>)
     };
@@ -771,7 +997,7 @@ pub(crate) fn emit_host_progress<State: Send + Sync, Ctx: Send + Sync>(
     let Ok(Some(binding)) = host_invocation_binding::<State, Ctx>(context) else {
         return;
     };
-    let Some(progress) = binding.progress else {
+    let Some(progress) = binding.progress.as_ref() else {
         return;
     };
     progress.send_nonterminal(event);
@@ -785,7 +1011,9 @@ pub(crate) fn emit_host_progress<State: Send + Sync, Ctx: Send + Sync>(
 /// same generic message so internal detail never reaches a hosted caller.
 fn sanitize_hosted_preparation_error(error: TinyAgentsError) -> TinyAgentsError {
     match error {
-        TinyAgentsError::Cancelled | TinyAgentsError::Timeout(_) => error,
+        TinyAgentsError::Cancelled
+        | TinyAgentsError::Timeout(_)
+        | TinyAgentsError::CallTimeout(_) => error,
         _ => TinyAgentsError::Model("hosted agent invocation failed".to_string()),
     }
 }
@@ -799,14 +1027,14 @@ fn sanitize_hosted_preparation_error(error: TinyAgentsError) -> TinyAgentsError 
 /// happen even when the turn ends off the normal async call path.
 fn spawn_host_finalizer<State: Send + Sync + 'static, Ctx: Send + Sync + 'static>(
     prepared: PreparedAgentTurn<State, Ctx>,
-    run: AgentRun,
+    run: crate::context::TerminalRunSummary,
     succeeded: bool,
     error: Option<String>,
 ) {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move { finish_host_turn(prepared, run, succeeded, error).await });
     } else {
-        tinyagents_tracing::warn!(
+        tracing::warn!(
             run_id = %prepared.run_id,
             "[host] no Tokio runtime during terminal cleanup; starting fallback finalizer"
         );
@@ -830,7 +1058,7 @@ fn spawn_host_finalizer<State: Send + Sync + 'static, Ctx: Send + Sync + 'static
 /// there is nothing left to fail.
 async fn finish_host_turn<State: Send + Sync, Ctx: Send + Sync + 'static>(
     prepared: PreparedAgentTurn<State, Ctx>,
-    run: AgentRun,
+    run: crate::context::TerminalRunSummary,
     succeeded: bool,
     error: Option<String>,
 ) {
@@ -849,7 +1077,7 @@ async fn finish_host_turn<State: Send + Sync, Ctx: Send + Sync + 'static>(
             });
         }
     }
-    let output = run.text().unwrap_or_default();
+    let output = run.text.clone().unwrap_or_default();
     let mut summary = TurnSummary::new(prepared.thread_id.clone(), &prepared.binding.agent_id)
         .with_text(&prepared.input_text, &output)
         .with_usage(run.usage.usage);
@@ -866,13 +1094,13 @@ async fn finish_host_turn<State: Send + Sync, Ctx: Send + Sync + 'static>(
                 "turn_failure"
             });
         if let Err(error) = memory.remember(item).await {
-            tinyagents_tracing::warn!(%error, "[host] memory sink failed after terminal turn");
+            tracing::warn!(%error, "[host] memory sink failed after terminal turn");
         }
     }
     if let Some(learning) = &prepared.binding.host.learning
         && let Err(error) = learning.on_turn_complete(&summary).await
     {
-        tinyagents_tracing::warn!(%error, "[host] learning sink failed after terminal turn");
+        tracing::warn!(%error, "[host] learning sink failed after terminal turn");
     }
     if let Some(store) = &prepared.binding.host.experience {
         let mut experience =
@@ -881,7 +1109,7 @@ async fn finish_host_turn<State: Send + Sync, Ctx: Send + Sync + 'static>(
             experience = experience.succeeded();
         }
         if let Err(error) = store.record(&experience).await {
-            tinyagents_tracing::warn!(%error, "[host] experience store failed after terminal turn");
+            tracing::warn!(%error, "[host] experience store failed after terminal turn");
         }
     }
 }

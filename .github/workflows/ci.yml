@@ -39,28 +39,28 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Clippy all features
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Build
-        run: cargo build --all-targets
+        run: cargo build --workspace --all-targets
 
       - name: Build all features
-        run: cargo build --all-targets --all-features
+        run: cargo build --workspace --all-targets --all-features
 
       - name: Test
-        run: cargo test
+        run: cargo test --workspace
 
       - name: Test all features
-        run: cargo test --all-features
+        run: cargo test --workspace --all-features
 
       - name: Test optional features independently
         run: |
-          cargo test --no-default-features --features sqlite
-          cargo test --no-default-features --features tools
-          cargo test --no-default-features --features multimodal
+          cargo test --workspace --no-default-features --features sqlite
+          cargo test --workspace --no-default-features --features tools
+          cargo test --workspace --no-default-features --features multimodal
 
       - name: Coverage gate
         uses: taiki-e/install-action@cargo-llvm-cov
@@ -70,3 +70,19 @@ jobs:
           cargo llvm-cov --all-features --workspace
           --ignore-filename-regex '(^|/)(tests?|examples)/|/test(_.*)?\.rs$'
           --fail-under-lines 80
+
+      # TODO: drop `continue-on-error` once the ~160 existing broken
+      # intra-doc link warnings across the workspace are fixed and this can
+      # block merges instead of only reporting.
+      - name: Doc lints
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+        run: cargo doc --workspace --no-deps
+        continue-on-error: true
+
+      # TODO: drop `continue-on-error` once the existing unused-dependency
+      # findings across the workspace are cleaned up and this can block
+      # merges instead of only reporting.
+      - name: Unused dependencies
+        uses: bnjbvr/cargo-machete@main
+        continue-on-error: true

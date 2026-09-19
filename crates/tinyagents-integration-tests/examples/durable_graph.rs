@@ -10,7 +10,7 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run --example durable_graph
+//! cargo run -p tinyagents-integration-tests --example durable_graph
 //! ```
 
 use std::sync::Arc;

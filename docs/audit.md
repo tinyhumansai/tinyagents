@@ -33,19 +33,34 @@ registered tool schema before emitting `ToolStarted` or invoking tool code:
 - `crates/tinyagents-harness/src/agent_loop/test.rs`: end-to-end harness coverage proves invalid
   arguments return a validation error before the tool implementation is called.
 
-### Resolved: malformed OpenAI tool-call JSON fails closed
+### Resolved (superseded): malformed OpenAI tool-call JSON is recovered, not failed closed
 
-The OpenAI provider no longer converts malformed stringified tool arguments to
-`null`:
+**Note (2026-09-19):** provider adapters, including OpenAI, have moved out of
+this crate into `vendor/tinyinference/crates/tinyinference-llm`;
+`crates/tinyagents-harness/src/providers/` now holds only `claude_agent_sdk/`
+and `claude_code/`, so the file paths originally cited here no longer exist.
+The intended *behavior* has also inverted since this entry was written:
+malformed stringified tool arguments no longer fail the run. The provider
+marks the call `ToolCall::invalid` (raw arguments preserved, with a parse
+reason) instead of converting it to `null`:
 
-- `crates/tinyagents-harness/src/providers/openai/mod.rs`: unary response parsing now returns a
-  model/provider error that names the tool call id, tool name, parse error, and
-  raw argument string.
-- `crates/tinyagents-harness/src/providers/openai/mod.rs`: streamed tool-call reconstruction now
-  emits a terminal `ProviderFailed` item with code `invalid_tool_arguments`
-  when assembled arguments are invalid JSON.
-- `crates/tinyagents-harness/src/providers/openai/test.rs`: unit coverage exercises both unary
-  malformed arguments and streamed malformed argument fragments.
+- `vendor/tinyinference/crates/tinyinference-llm/src/providers/openai/convert.rs` (~403-436):
+  unary response parsing turns unparseable stringified arguments into a
+  `ToolCall::invalid` call rather than an error or `null`.
+- `vendor/tinyinference/crates/tinyinference-llm/src/providers/openai/sse.rs` (~224, ~462):
+  streamed tool-call reconstruction does the same for assembled arguments
+  that fail to parse as JSON.
+- `crates/tinyagents-harness/src/agent_loop/tools.rs` (~276-287): the agent
+  loop checks `call.invalid` and, rather than aborting, injects a tool-error
+  result carrying the parse detail and raw arguments so the model can retry
+  with corrected JSON — the same recovery path used for schema-invalid
+  arguments and unknown tool calls. This is applied unconditionally
+  (independent of `InvalidArgsPolicy`, which only governs schema validation of
+  well-formed arguments) and always resolves the call, so it cannot hang the
+  loop.
+
+In short: malformed provider-side tool-call JSON now fails *open* by design
+(recovered as a tool error the model can act on), not closed.
 
 ### Resolved: required model capabilities are enforced during resolution
 

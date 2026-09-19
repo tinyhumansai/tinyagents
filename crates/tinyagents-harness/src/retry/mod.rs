@@ -178,7 +178,7 @@ impl RetryPolicy {
     /// Shared sleep body: logs the decision, then waits when enabled.
     async fn sleep_for(&self, attempt: usize, backoff: Duration, hint: Option<Duration>) {
         if !self.backoff_sleep {
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 target: "tinyagents::retry",
                 attempt,
                 backoff_ms = backoff.as_millis() as u64,
@@ -187,7 +187,7 @@ impl RetryPolicy {
             return;
         }
         if backoff > Duration::ZERO {
-            tinyagents_tracing::debug!(
+            tracing::debug!(
                 target: "tinyagents::retry",
                 attempt,
                 backoff_ms = backoff.as_millis() as u64,
@@ -277,7 +277,11 @@ impl RetryPolicy {
     /// additive: LangGraph adds `uniform(0, 1)` seconds, LangChain applies
     /// `delay ± 25%` clamped at zero.
     pub fn backoff_for_attempt_with(&self, attempt: usize, rand01: f64) -> Duration {
-        let base = (self.initial_backoff_ms as f64) * self.multiplier.powi(attempt as i32);
+        // `powi` wants `i32`; an `attempt` this large would already dwarf any
+        // realistic `max_attempts`, so saturate rather than truncate/wrap
+        // silently (M-13).
+        let exponent = i32::try_from(attempt).unwrap_or(i32::MAX);
+        let base = (self.initial_backoff_ms as f64) * self.multiplier.powi(exponent);
         let jittered = if self.jitter {
             // Map [0, 1) onto [-1, 1) then scale by the band width.
             let offset = JITTER_FRACTION * (2.0 * rand01.clamp(0.0, 1.0) - 1.0);
@@ -286,7 +290,20 @@ impl RetryPolicy {
             base
         };
         let capped = jittered.min(self.max_backoff_ms as f64);
-        Duration::from_millis(capped as u64)
+        Duration::from_millis(saturating_millis(capped))
+    }
+}
+
+/// Converts a millisecond duration held as `f64` to `u64`, saturating a
+/// negative or non-finite value to `0` instead of relying on the cast's
+/// implicit (if well-defined since Rust 1.45) saturating behavior — the
+/// saturation is now spelled out at the call site rather than implicit in a
+/// bare `as` cast (M-13).
+fn saturating_millis(value: f64) -> u64 {
+    if value.is_finite() && value > 0.0 {
+        value as u64
+    } else {
+        0
     }
 }
 
@@ -333,6 +350,7 @@ pub fn retry_after_hint(error: &TinyAgentsError) -> Option<Duration> {
 /// | `Provider` | depends | Classified from [`tinyinference_llm::model::ProviderError::retryable`] — a 429/408/409/5xx is retryable, a 4xx like 401/400 is not. |
 /// | `Model` | depends | No structured `ProviderError` to read, so the message text is run through [`classify_provider_failure`] — a 5xx / 429 / timeout is retryable, an `invalid api key` or `model not found` is not. |
 /// | `Tool` | yes | Tool execution may have hit a transient dependency. |
+/// | `CallTimeout` | **yes** | A per-call ceiling fired with run time still left; unlike `Timeout`, the run is not out of budget. |
 /// | `Validation` | **no** | Caller-side schema or policy error; retrying will not help. |
 /// | `Serialization` | **no** | Malformed data; retrying will not help. |
 /// | `RecursionLimit` | **no** | Structural loop cap; not transient. |
@@ -361,6 +379,10 @@ pub fn is_retryable(err: &TinyAgentsError) -> bool {
         // guessing. Callers that know better narrow this with
         // [`RetryPolicy::retry_on`].
         TinyAgentsError::Tool(_) => true,
+        // A per-model-call ceiling firing means this one call wedged, with
+        // run time still left — retryable, unlike a run-deadline `Timeout`
+        // (see that variant's own retryability rationale above).
+        TinyAgentsError::CallTimeout(_) => true,
         _ => false,
     }
 }

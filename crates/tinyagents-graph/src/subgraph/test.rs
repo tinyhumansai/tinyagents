@@ -37,6 +37,14 @@ impl crate::subagent_node::AgentInvoker for NestedRecordingInvoker {
 
 /// Builds a minimal [`NodeContext`] standing in for the embedding node `id`.
 fn ctx_for(id: &str) -> NodeContext {
+    ctx_for_task(id, "task-test", 1)
+}
+
+/// Builds a minimal [`NodeContext`] standing in for a `Send` fan-out
+/// activation of embedding node `id`: `task_id` names this activation and
+/// `siblings` is the fan-out width (I1), which is what a subgraph node
+/// consults to decide whether to namespace its child checkpoint by task id.
+fn ctx_for_task(id: &str, task_id: &str, siblings: usize) -> NodeContext {
     NodeContext {
         graph_id: tinyagents_harness::ids::GraphId::new("graph-test"),
         node_id: NodeId::from(id),
@@ -50,6 +58,8 @@ fn ctx_for(id: &str) -> NodeContext {
         recursion_frames: Vec::new(),
         child_runs: None,
         agent_binding: None,
+        task_id: tinyagents_harness::ids::TaskId::from(task_id),
+        siblings,
     }
 }
 
@@ -590,4 +600,202 @@ async fn child_runs_recorded_in_checkpoint_metadata() {
         }
     }
     assert!(found, "child_runs not found in any checkpoint metadata");
+}
+
+// ---- I1: Send fan-out of a subgraph node gets its own checkpoint namespace,
+//      and R5: task-scoped interrupt/resume identity -----------------------
+
+#[tokio::test]
+async fn send_fanout_of_subgraph_node_gets_per_task_namespaces_and_resume() {
+    // A `Send` fan-out of three activations of one subgraph node, each of
+    // whose children interrupts: the parent must surface all three as
+    // distinct task-scoped interrupts (not just the lowest-index one), their
+    // children must persist under three distinct checkpoint namespaces (not
+    // one shared `["child"]` namespace all three interleave into), and a
+    // per-task resume map must deliver each activation its own value.
+    let ckpt = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
+    let seen_child = seen.clone();
+    let child = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("gate", move |s: i32, c: NodeContext| {
+            let seen_child = seen_child.clone();
+            async move {
+                match c.resume {
+                    Some(v) => {
+                        seen_child.lock().unwrap().push(v.as_i64().unwrap());
+                        Ok(NodeResult::Update(s))
+                    }
+                    None => Ok(NodeResult::Interrupt(crate::command::Interrupt::new(
+                        "gate",
+                        serde_json::json!({ "ask": "ok?" }),
+                    ))),
+                }
+            }
+        })
+        .set_entry("gate")
+        .set_finish("gate")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt.clone());
+
+    let parent = GraphBuilder::<i32, i32>::overwrite()
+        .with_parallel(true)
+        .add_node("dispatch", |_s: i32, _c: NodeContext| async move {
+            Ok(NodeResult::Command(crate::command::Command::send([
+                crate::command::Send::new("child", serde_json::json!(0)),
+                crate::command::Send::new("child", serde_json::json!(1)),
+                crate::command::Send::new("child", serde_json::json!(2)),
+            ])))
+        })
+        .add_node("child", shared_subgraph_node(child))
+        .set_entry("dispatch")
+        .mark_command_routing("dispatch")
+        .set_finish("child")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt.clone());
+
+    let paused = parent.run_with_thread("t", 0).await.unwrap();
+    assert!(
+        paused.is_interrupted(),
+        "every fan-out branch's child interrupted"
+    );
+    assert_eq!(
+        paused.interrupts.len(),
+        3,
+        "all three fan-out branches are surfaced, not only the lowest-index one"
+    );
+    let task_ids: HashSet<String> = paused
+        .interrupts
+        .iter()
+        .map(|i| {
+            i.task_id
+                .clone()
+                .expect("stamped with its own branch's task id (R5)")
+                .as_str()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        task_ids.len(),
+        3,
+        "each fan-out branch's interrupt carries a distinct task id"
+    );
+
+    // Each branch's child persisted under its own namespace (I1): three
+    // distinct `["child", task_id]` namespaces, not one shared `["child"]`.
+    let list = ckpt.list("t").await.unwrap();
+    let child_namespaces: HashSet<Vec<String>> = list
+        .iter()
+        .filter(|m| m.namespace.first().map(String::as_str) == Some("child"))
+        .map(|m| m.namespace.clone())
+        .collect();
+    assert_eq!(
+        child_namespaces.len(),
+        3,
+        "each fan-out branch's child checkpoints live under a distinct namespace"
+    );
+    for ns in &child_namespaces {
+        assert_eq!(
+            ns.len(),
+            2,
+            "namespace is [node_id, task_id] once the node fans out (I1): {ns:?}"
+        );
+    }
+
+    // Resume every branch with its own value in one call (I1).
+    let pairs: Vec<(tinyagents_harness::ids::TaskId, serde_json::Value)> = paused
+        .interrupts
+        .iter()
+        .enumerate()
+        .map(|(i, interrupt)| {
+            (
+                interrupt.task_id.clone().unwrap(),
+                serde_json::json!(100 + i as i64),
+            )
+        })
+        .collect();
+    let done = parent
+        .resume("t", crate::command::Command::resume_tasks(pairs))
+        .await
+        .unwrap();
+    assert!(!done.is_interrupted());
+
+    let mut delivered = seen.lock().unwrap().clone();
+    delivered.sort_unstable();
+    assert_eq!(
+        delivered,
+        vec![100, 101, 102],
+        "each activation's child received its own resume value"
+    );
+}
+
+// ---- C4: a subgraph child failure is resumable through the parent --------
+
+#[tokio::test]
+async fn parent_retry_after_subgraph_child_failure_resumes_not_restarts() {
+    // The child increments a shared side-effect counter on its first node,
+    // then fails on its second. A parent `retry()` must continue the child
+    // from its own resumable checkpoint (not restart it from scratch), so
+    // the first node's side effect never runs twice.
+    let ckpt = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let should_fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let counter_for_node = counter.clone();
+    let should_fail_for_node = should_fail.clone();
+    let child = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("bump", move |s: i32, _c: NodeContext| {
+            let counter = counter_for_node.clone();
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(NodeResult::Update(s + 1))
+            }
+        })
+        .add_node("maybe_fail", move |s: i32, _c: NodeContext| {
+            let should_fail = should_fail_for_node.clone();
+            async move {
+                if should_fail.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    return Err(crate::TinyAgentsError::Graph("boom".to_string()));
+                }
+                Ok(NodeResult::Update(s + 1))
+            }
+        })
+        .set_entry("bump")
+        .add_edge("bump", "maybe_fail")
+        .set_finish("maybe_fail")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt.clone());
+
+    let parent = GraphBuilder::<i32, i32>::overwrite()
+        .add_node("child", shared_subgraph_node(child))
+        .set_entry("child")
+        .set_finish("child")
+        .compile()
+        .unwrap()
+        .with_checkpointer(ckpt.clone());
+
+    let failed = parent.run_with_thread("t", 0).await;
+    assert!(
+        failed.is_err(),
+        "the child's node failure aborts the parent run"
+    );
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the child's first node ran exactly once before its second node failed"
+    );
+
+    let done = parent
+        .retry("t")
+        .await
+        .expect("retry must continue the child from its resumable checkpoint");
+    assert!(!done.is_interrupted());
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "C4: retry must not re-run the child's already-completed node"
+    );
+    // bump(+1) -> maybe_fail(+1) = 2, once retried past the failure.
+    assert_eq!(done.state, 2);
 }

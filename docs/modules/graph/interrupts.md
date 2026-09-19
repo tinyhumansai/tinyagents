@@ -1,6 +1,30 @@
 # Graph Interrupts And Resume
 
-Interrupts pause execution and return control to the caller.
+Interrupts pause execution and return control to the caller. Basic
+interrupt/resume — the `Interrupt` type, `Command::resume`, and
+`CompiledGraph::resume`/`resume_from` — is implemented today
+(`crates/tinyagents-graph/src/command/types.rs`,
+`crates/tinyagents-graph/src/compiled/executor.rs`). Everything under
+"Targeted Human Steering" below, plus `interrupt_before`/`interrupt_after`
+selectors and resume-by-interrupt-id maps, is a **target — not implemented**
+(verified by grep against `crates/tinyagents-graph/src`; see
+`docs/runtime-comparison/plan.md`).
+
+The struct actually shipped today is smaller than the one below — `id` is a
+bare `String` (not `InterruptId`) and there is no `order` field, but
+`task_id` is now a typed field (R5), stamped by the interrupt boundary with
+the pausing branch's task id:
+
+```rust
+pub struct Interrupt {
+    pub id: String,
+    pub node: NodeId,
+    pub payload: serde_json::Value,
+    pub task_id: Option<TaskId>,
+}
+```
+
+The fuller shape this doc originally described (target, not implemented):
 
 ```rust
 pub struct Interrupt {
@@ -23,7 +47,7 @@ compiled_graph
     .await?;
 ```
 
-Rules:
+Rules (implemented today unless marked target):
 
 - interrupts require both a checkpointer and a `thread_id`
 - if a node emits an interrupt without resumable durability, the run returns a
@@ -31,17 +55,40 @@ Rules:
 - interrupted executions are returned only after the checkpoint needed for
   resume has been persisted
 - the interrupted node restarts from the beginning
-- multiple interrupts inside one task are matched by order or interrupt id
-- resume values can be a single value or a map from interrupt id to value
+- every branch of a step that interrupts is surfaced (`GraphExecution::interrupts`
+  carries all of them, not just the lowest-index one) — a `Send` fan-out of
+  one node interrupting on several concurrent activations is matched by task
+  id, each stamped onto its own `Interrupt::task_id`, rather than by an
+  `order` field
+- resume values as a map from task id to value: `Command::resume_tasks(..)` /
+  `Command::resume_by_task` deliver a distinct value per interrupted task in
+  one resume call, keyed by `TaskId` — `Command::resume(value)` (one value,
+  fanned to every task named by the checkpoint's stamped `interrupted_nodes`
+  or, absent that, to every pending task) still works and is consulted as the
+  fallback for any task the map does not name
+- **Target (not implemented):** resume values as a map keyed by interrupt id
+  specifically (rather than task id)
 - node code before an interrupt must be deterministic or idempotent
 - side effects before an interrupt must be guarded by idempotency keys
-- interrupts can be configured before or after named nodes
+- **Target (not implemented):** interrupts configured before or after named
+  nodes (see below)
 
-Compile-time `interrupt_before` and `interrupt_after` selectors are useful for
+**Target (not implemented; see `docs/runtime-comparison/plan.md`).**
+Compile-time `interrupt_before` and `interrupt_after` selectors — useful for
 debugging, approvals, and human review at arbitrary graph boundaries without
-editing node code.
+editing node code — do not exist in `crates/tinyagents-graph/src` today; a
+node must call the interrupt itself.
 
 ## Targeted Human Steering
+
+**Target (not implemented; see `docs/runtime-comparison/plan.md`).** Nothing
+below this point — `ResumeTarget` as a targeted-steering struct,
+`resume_targeted`, or per-run/per-task/per-namespace resume routing — exists
+in `crates/tinyagents-graph/src` today. The `ResumeTarget` type that does
+exist (`crates/tinyagents-graph/src/compiled/types.rs`) is unrelated: it is a
+`Latest`/`Checkpoint(CheckpointId)` enum selecting which checkpoint a resume
+replays from, not a target-selection struct with `run_id`/`task_id`/
+`interrupt_id`/`namespace` fields.
 
 Human input during an interrupt is one form of steering. A control surface
 should be able to target:

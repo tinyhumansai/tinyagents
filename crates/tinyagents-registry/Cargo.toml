@@ -5,12 +5,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 description = "Named capability registry and offline model catalog."
 
 [dependencies]
-anyhow = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tinyagents-definition = { path = "../tinyagents-definition", version = "2.1.2" }
 tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.2", default-features = false }
 tinyagents-language = { path = "../tinyagents-language", version = "2.1.2" }
@@ -22,8 +23,8 @@ default = []
 tracing = ["tinyagents-harness/tracing"]
 
 [dev-dependencies]
-async-trait = "0.1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+async-trait = { workspace = true }
+tokio = { workspace = true, default-features = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

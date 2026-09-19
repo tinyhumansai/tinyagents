@@ -9,7 +9,7 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run --example basic_graph
+//! cargo run -p tinyagents-integration-tests --example basic_graph
 //! ```
 
 use tinyagents_graph::END;

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
-use super::ToolRegistry;
+use super::{RegisterOutcome, ToolRegistry};
 
 struct Echo;
 
@@ -48,6 +48,36 @@ fn registry_accepts_the_canonical_trait_and_hides_injected_values() {
     let schema = registry.schemas().pop().expect("registered schema");
     assert!(schema.parameters["properties"].get("call_id").is_none());
     assert_eq!(schema.parameters["required"], json!(["text"]));
+}
+
+/// M-5 regression: a second `Echo` registered under the same name used to
+/// silently overwrite the first with no signal at all. `register` keeps its
+/// `&mut Self`-chaining, non-breaking signature, but `try_register` now
+/// reports the collision so a caller that wants to detect it can.
+#[test]
+fn try_register_reports_a_duplicate_name() {
+    let mut registry: ToolRegistry<(), ()> = ToolRegistry::new();
+    assert_eq!(
+        registry.try_register(Arc::new(Echo)),
+        RegisterOutcome::Registered
+    );
+    assert_eq!(
+        registry.try_register(Arc::new(Echo)),
+        RegisterOutcome::Replaced("echo".to_string())
+    );
+    // Still only one entry under the name; the second registration replaced
+    // the first rather than being rejected outright.
+    assert_eq!(registry.names(), vec!["echo".to_string()]);
+}
+
+#[test]
+fn register_still_replaces_silently_for_the_non_breaking_api() {
+    let mut registry: ToolRegistry<(), ()> = ToolRegistry::new();
+    // `register` keeps its existing `&mut Self` chaining contract even on a
+    // duplicate name; the collision is only surfaced through `try_register`
+    // or the `tracing::warn!` diagnostic.
+    registry.register(Arc::new(Echo)).register(Arc::new(Echo));
+    assert_eq!(registry.names(), vec!["echo".to_string()]);
 }
 
 #[test]

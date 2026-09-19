@@ -917,3 +917,88 @@ fn with_transaction_waits_out_a_competing_writer() {
         "BEGIN IMMEDIATE must wait for the competing writer, not fail instantly: {result:?}"
     );
 }
+
+/// Many concurrent callers hammering the same workspace still see correct,
+/// fully durable results through the cached connection.
+///
+/// This is a regression test for the `store::with_connection` connection-
+/// reuse change (M10): before that change every call opened its own
+/// `rusqlite::Connection`, so this same stress sequence exercised N separate
+/// file handles; now it exercises one cached handle behind a `Mutex` shared
+/// by every thread. Whether the underlying connection is literally reused
+/// (as opposed to reopened per call) is an implementation detail this
+/// black-box test cannot observe directly — see `store::cached_connection`
+/// for that, and the connection-cache unit coverage below. What this test
+/// *can* assert, and what would break if reuse were done incorrectly (stale
+/// handles, lost writes, cross-thread corruption of a shared `Connection`),
+/// is that every write from every thread is durably and correctly visible
+/// afterward.
+#[test]
+fn concurrent_callers_through_the_shared_connection_see_correct_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().to_path_buf();
+
+    const THREADS: usize = 8;
+    const MESSAGES_PER_THREAD: usize = 25;
+
+    let handles: Vec<_> = (0..THREADS)
+        .map(|thread_index| {
+            let workspace = workspace.clone();
+            std::thread::spawn(move || {
+                let session_id = format!("stress-session-{thread_index}");
+                record_session_start(
+                    &workspace,
+                    &session_id,
+                    "agent",
+                    "Agent",
+                    &format!("stress-key-{thread_index}"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+                for message_index in 0..MESSAGES_PER_THREAD {
+                    record_message(
+                        &workspace,
+                        &session_id,
+                        "user",
+                        &format!("message {message_index} from thread {thread_index}"),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                }
+                record_session_end(
+                    &workspace,
+                    &session_id,
+                    SessionStatus::Completed,
+                    MESSAGES_PER_THREAD as u32,
+                    0,
+                    0,
+                    0,
+                    0.0,
+                )
+                .unwrap();
+                session_id
+            })
+        })
+        .collect();
+
+    let session_ids: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    for session_id in &session_ids {
+        let session = get_session(&workspace, session_id).unwrap();
+        assert_eq!(session.status, SessionStatus::Completed);
+
+        let messages = list_messages(&workspace, session_id, None).unwrap();
+        assert_eq!(
+            messages.len(),
+            MESSAGES_PER_THREAD,
+            "session {session_id} lost or duplicated messages under concurrent access"
+        );
+    }
+}

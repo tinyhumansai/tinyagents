@@ -106,19 +106,32 @@ pub const END: &str = "END";
 /// the blueprint — it is supplied later, downstream of this crate, by a
 /// Rust-side `NodeFactory` (see `tinyagents-graph`'s `language` module) that
 /// materialises a `Blueprint` into a runnable graph.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Blueprint {
+    /// The blueprint schema version, for stored/diffed/reloaded blueprints
+    /// (`Blueprint` docs above) to detect and migrate old shapes. Defaults to
+    /// `1` — every blueprint compiled before this field existed is schema
+    /// version 1 — so a stored blueprint from before this field existed still
+    /// deserializes (M5 in `docs/runtime-comparison/code-review-workspace.md`).
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     /// The graph identifier.
+    #[serde(default)]
     pub graph_id: String,
     /// The validated start node name.
+    #[serde(default)]
     pub start: String,
     /// State channel specifications.
+    #[serde(default)]
     pub channels: Vec<ChannelSpec>,
     /// Node specifications.
+    #[serde(default)]
     pub nodes: Vec<NodeSpec>,
     /// Static edge specifications.
+    #[serde(default)]
     pub edges: Vec<EdgeSpec>,
     /// Graph default key/value entries.
+    #[serde(default)]
     pub defaults: Vec<(String, Literal)>,
     /// The declared graph input shape (empty when unspecified).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -156,6 +169,33 @@ impl Blueprint {
     /// generated plan) it came from.
     pub fn provenance(&self) -> Option<&BlueprintProvenance> {
         self.provenance.as_ref()
+    }
+}
+
+/// The current [`Blueprint::schema_version`]. Used as both the `Default`
+/// value and the serde field default, so a freshly built blueprint and one
+/// deserialized without the field (an old stored shape) agree.
+fn default_schema_version() -> u32 {
+    1
+}
+
+impl Default for Blueprint {
+    fn default() -> Self {
+        Self {
+            schema_version: default_schema_version(),
+            graph_id: String::new(),
+            start: String::new(),
+            channels: Vec::new(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            defaults: Vec::new(),
+            input: Vec::new(),
+            output: Vec::new(),
+            checkpoint: None,
+            interrupt: None,
+            joins: Vec::new(),
+            provenance: None,
+        }
     }
 }
 
@@ -318,16 +358,22 @@ pub struct SendSpec {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NodeSpec {
     /// The node name.
+    #[serde(default)]
     pub name: String,
     /// The node kind (defaults to `model` when unspecified in source).
+    #[serde(default)]
     pub kind: String,
     /// The bound model name, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// The node prompt, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// Tool capability names referenced by this node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
     /// How control leaves this node.
+    #[serde(default)]
     pub routing: Routing,
     /// A registered agent name for a `subagent` node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -339,6 +385,15 @@ pub struct NodeSpec {
     /// never inline code).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<String>,
+    // Deliberately no dedicated `router` field here: a `router "name"` source
+    // item (M4 in `docs/runtime-comparison/code-review-workspace.md`) is
+    // folded into `model` at compile time (`crate::compiler::compile_graph`),
+    // the same field `router` nodes already used before that item existed —
+    // adding a new required-at-construction field to this struct would break
+    // every exhaustive `NodeSpec { .. }` literal outside this crate's edit
+    // boundary for this change (no `..Default::default()`, and `NodeSpec`
+    // has no `Default` impl). `crate::ast::NodeDecl::router` carries the
+    // dedicated item through parsing, before that fold.
     /// An input-mapping name for sub-agent / subgraph nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<String>,
@@ -369,14 +424,18 @@ pub struct NodeSpec {
 }
 
 /// How control flows out of a [`NodeSpec`].
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum Routing {
     /// A single static successor node.
     Next(String),
     /// Conditional routing: `(label, target)` pairs in declaration order.
     Conditional(Vec<(String, String)>),
-    /// The node terminates the run.
+    /// The node terminates the run. The default: a stored `NodeSpec` missing
+    /// its `routing` field (an old shape, or a hand-authored fixture) fails
+    /// safe to "no successor" rather than silently deserializing to some
+    /// other target.
+    #[default]
     Terminal,
 }
 

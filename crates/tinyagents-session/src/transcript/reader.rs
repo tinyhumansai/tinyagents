@@ -28,7 +28,7 @@ pub fn read_transcript(path: &Path) -> Result<SessionTranscript> {
     // `find_latest_transcript` when only legacy files exist) must go to
     // the legacy parser, never to the JSONL parser.
     if path.extension().and_then(|s| s.to_str()) == Some("md") {
-        log::debug!(
+        tracing::debug!(
             "[transcript] reading legacy .md transcript: {}",
             path.display()
         );
@@ -41,7 +41,7 @@ pub fn read_transcript(path: &Path) -> Result<SessionTranscript> {
         // Fallback: try the .md sibling (legacy one-release compat).
         let md_path = path.with_extension("md");
         if md_path.exists() {
-            log::debug!(
+            tracing::debug!(
                 "[transcript] .jsonl not found, falling back to legacy .md: {}",
                 md_path.display()
             );
@@ -100,7 +100,7 @@ fn read_transcript_jsonl(path: &Path) -> Result<SessionTranscript> {
                 // accumulated so far, exactly reproducing the old full-rewrite.
                 let replacement: Vec<TranscriptMessage> =
                     cl.replacement.into_iter().map(message_from_line).collect();
-                log::debug!(
+                tracing::debug!(
                     "[transcript] replay: compaction at line {} replaces {} accumulated message(s) with {} (request_id={:?}) in {}",
                     line_no + 1,
                     messages.len(),
@@ -115,7 +115,7 @@ fn read_transcript_jsonl(path: &Path) -> Result<SessionTranscript> {
                 if ml.interrupted {
                     // Display-only partial — never part of the model context.
                     interrupted_skipped += 1;
-                    log::debug!(
+                    tracing::debug!(
                         "[transcript] replay: skipping interrupted partial line {} (display only) in {}",
                         line_no + 1,
                         path.display()
@@ -125,7 +125,7 @@ fn read_transcript_jsonl(path: &Path) -> Result<SessionTranscript> {
                 messages.push(message_from_line(ml));
             }
             Err(err) => {
-                log::warn!(
+                tracing::warn!(
                     "[transcript] skipping malformed/unknown record line {} in {}: {err}",
                     line_no + 1,
                     path.display()
@@ -141,7 +141,7 @@ fn read_transcript_jsonl(path: &Path) -> Result<SessionTranscript> {
         )
     })?;
 
-    log::debug!(
+    tracing::debug!(
         "[transcript] loaded {} messages (jsonl, {} compaction(s) replayed, {} interrupted skipped) from {}",
         messages.len(),
         compactions_replayed,
@@ -203,7 +203,7 @@ pub fn read_transcript_display(path: &Path) -> Result<DisplaySessionTranscript> 
                 ))));
             }
             Err(err) => {
-                log::warn!(
+                tracing::warn!(
                     "[transcript] display: skipping malformed/unknown record line {} in {}: {err}",
                     line_no + 1,
                     path.display()
@@ -219,7 +219,7 @@ pub fn read_transcript_display(path: &Path) -> Result<DisplaySessionTranscript> 
         )
     })?;
 
-    log::debug!(
+    tracing::debug!(
         "[transcript] display-loaded {} record(s) from {}",
         records.len(),
         path.display()

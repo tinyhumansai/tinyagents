@@ -198,7 +198,7 @@ impl EventMapper {
                     .filter(|s| !s.is_empty())
                     .map(str::to_string);
                 if let Some(name) = tool_name.as_deref() {
-                    log::debug!(
+                    tracing::debug!(
                         "[claude-code][event-mapper] CLI self-executed tool `{name}` (not surfaced to the harness)"
                     );
                 }
@@ -280,7 +280,7 @@ impl EventMapper {
             // provider behaves as what it is — a chat model whose tool use is
             // internal. OpenHuman's own tools reach it through the prompt
             // catalogue, not through native tool calls.
-            log::debug!(
+            tracing::debug!(
                 "[claude-code][event-mapper] dropping cli-internal tool call name={}",
                 state.tool_name.unwrap_or_default(),
             );

@@ -16,7 +16,7 @@ use std::time::Duration;
 use crate::Result;
 use crate::command::NodeResult;
 use crate::reducer::StateReducer;
-use tinyagents_harness::ids::{GraphId, NodeId, RunId, ThreadId};
+use tinyagents_harness::ids::{GraphId, NodeId, RunId, TaskId, ThreadId};
 
 /// The reserved virtual entry node.
 pub const START: &str = "__start__";
@@ -33,7 +33,13 @@ pub type NodeHandler<State, Update> =
 
 /// A conditional routing function over committed state. Returns a route label
 /// resolved against the node's route table at the step boundary.
-pub type RouterFn<State> = dyn Fn(&State) -> String + Send + Sync;
+///
+/// Internally this returns a typed [`Route`] rather than a bare `String` —
+/// `Route` is `From<String>`/cheaply stringifies, so this is purely a
+/// representation change and does not affect
+/// [`super::GraphBuilder::add_conditional_edges`]'s public signature, which
+/// still accepts any router closure returning `impl ToString`.
+pub type RouterFn<State> = dyn Fn(&State) -> Route + Send + Sync;
 
 /// Identifies one branch of a concurrent (fan-out) superstep.
 ///
@@ -107,6 +113,25 @@ pub struct NodeContext {
     /// Complete host-owned recursive-agent binding for this execution, if one
     /// was supplied at the graph entry point.
     pub agent_binding: Option<crate::subagent_node::AgentInvocationBinding>,
+    /// Stable identity of this scheduled activation within its superstep
+    /// (R5). Distinguishes repeated `Send` fan-out activations of the same
+    /// node — a subgraph node consults this (with [`Self::siblings`]) to
+    /// namespace its child checkpoint per fan-out branch instead of sharing
+    /// one namespace across every concurrent activation of the node (I1).
+    pub task_id: TaskId,
+    /// The number of activations of [`Self::node_id`] in this same
+    /// superstep's active set (I1). `1` for an ordinary (non-fan-out)
+    /// activation; greater than `1` means a `Send` fan-out scheduled several
+    /// concurrent activations of this node this step.
+    pub siblings: usize,
+}
+
+impl NodeContext {
+    /// This activation's stable task identity (R5). See the field docs on
+    /// [`Self::task_id`].
+    pub fn task_id(&self) -> &TaskId {
+        &self.task_id
+    }
 }
 
 impl std::fmt::Debug for NodeContext {
@@ -125,6 +150,8 @@ impl std::fmt::Debug for NodeContext {
             .field("recursion_frames", &self.recursion_frames)
             .field("has_child_runs", &self.child_runs.is_some())
             .field("has_agent_binding", &self.agent_binding.is_some())
+            .field("task_id", &self.task_id)
+            .field("siblings", &self.siblings)
             .finish()
     }
 }
@@ -155,17 +182,15 @@ pub(crate) struct NodeMeta {
     pub(crate) metadata: BTreeMap<String, String>,
 }
 
-/// A compiled-in node: id plus its handler.
+/// A compiled-in node: its handler. The node's id lives as the key of the
+/// `nodes` map it is stored in ([`crate::compiled::CompiledGraph::nodes`]).
 pub(crate) struct BuilderNode<State, Update> {
-    #[allow(dead_code)]
-    pub(crate) id: NodeId,
     pub(crate) handler: Arc<NodeHandler<State, Update>>,
 }
 
 impl<State, Update> Clone for BuilderNode<State, Update> {
     fn clone(&self) -> Self {
         Self {
-            id: self.id.clone(),
             handler: self.handler.clone(),
         }
     }
@@ -196,6 +221,24 @@ impl Route {
 impl std::fmt::Display for Route {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl From<Route> for String {
+    fn from(route: Route) -> Self {
+        route.0
+    }
+}
+
+impl From<String> for Route {
+    fn from(label: String) -> Self {
+        Self(label)
+    }
+}
+
+impl From<&str> for Route {
+    fn from(label: &str) -> Self {
+        Self(label.to_string())
     }
 }
 
@@ -248,8 +291,18 @@ pub struct GraphBuilder<State, Update> {
     /// (the `graph_id` remains the stable identifier).
     pub(crate) name: Option<String>,
     pub(crate) nodes: HashMap<NodeId, BuilderNode<State, Update>>,
-    pub(crate) edges: HashMap<NodeId, NodeId>,
+    /// Static/waiting edges: source node -> its ordered, deduplicated list of
+    /// successor targets. A node may have more than one static successor
+    /// (fan-out): every target in the list activates, not just one.
+    pub(crate) edges: HashMap<NodeId, Vec<NodeId>>,
     pub(crate) branches: HashMap<NodeId, Branch<State>>,
+    /// Exhaustive route-label declarations registered via
+    /// [`super::GraphBuilder::add_conditional_edges_checked`]: node -> every
+    /// label its router may produce. [`super::GraphBuilder::validate_routes`]
+    /// cross-checks these against the node's actual route table at build
+    /// time, catching a typo'd label before it can fail a run with
+    /// [`crate::TinyAgentsError::MissingRoute`].
+    pub(crate) route_label_checks: HashMap<NodeId, Vec<String>>,
     pub(crate) command_nodes: HashSet<NodeId>,
     /// Barrier/waiting edges: target node -> set of predecessor nodes that must
     /// all have completed (across steps) before the target activates.

@@ -45,6 +45,8 @@
 //! LOCAL_MODEL_TESTS=1 cargo test --test live_local_models -- --nocapture
 //! ```
 
+mod common;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -212,14 +214,16 @@ async fn discover(
 /// switch is unset or nothing is listening, which is what lets these tests pass
 /// on a machine with no local runtime at all.
 async fn reachable_runtimes() -> Vec<LocalRuntime> {
-    if std::env::var("LOCAL_MODEL_TESTS")
-        .ok()
-        .filter(|v| !v.trim().is_empty() && v != "0")
-        .is_none()
+    // Local runtimes need no credential, so `require_live`'s "is this key
+    // present" check does not apply here; the opt-in is `LOCAL_MODEL_TESTS=1`,
+    // kept in addition to the shared `TINYAGENTS_LIVE=1` so either one works.
+    if !(common::live::is_flag_on("LOCAL_MODEL_TESTS")
+        || common::live::is_flag_on("TINYAGENTS_LIVE"))
     {
         eprintln!(
-            "skipping live local-model tests: set LOCAL_MODEL_TESTS=1 to dial local runtimes \
-             (LOCAL_MODEL_TESTS=1 cargo test --test live_local_models -- --nocapture)"
+            "skipping live local-model tests: set LOCAL_MODEL_TESTS=1 (or TINYAGENTS_LIVE=1) to \
+             dial local runtimes (LOCAL_MODEL_TESTS=1 cargo test --test live_local_models -- \
+             --ignored --nocapture)"
         );
         return Vec::new();
     }
@@ -485,6 +489,7 @@ fn weather_schema() -> ToolSchema {
 /// the only way to learn a local runtime's model ids — there is no catalogue to
 /// hard-code.
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn local_runtimes_advertise_their_loaded_models() {
     for runtime in reachable_runtimes().await {
         let listed = runtime
@@ -509,6 +514,7 @@ async fn local_runtimes_advertise_their_loaded_models() {
 
 /// A single-turn chat call must return non-empty assistant text.
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn local_runtimes_answer_a_single_turn_chat() {
     for runtime in reachable_runtimes().await {
         let response = runtime
@@ -536,6 +542,7 @@ async fn local_runtimes_answer_a_single_turn_chat() {
 /// SSE event technically "streams" but breaks every incremental consumer, so
 /// the delta count is asserted, not just the merged text.
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn local_runtimes_stream_incremental_deltas() {
     for runtime in reachable_runtimes().await {
         let mut stream = runtime
@@ -578,6 +585,7 @@ async fn local_runtimes_stream_incremental_deltas() {
 /// reject a *named* tool choice object, and the transport degrades that shape
 /// for local runtimes. This asserts the degradation actually works end to end.
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn local_runtimes_emit_a_parseable_tool_call() {
     for runtime in reachable_runtimes().await {
         let model = runtime.model();
@@ -632,6 +640,7 @@ async fn local_runtimes_emit_a_parseable_tool_call() {
 /// grounded final answer is where small quantised local models — and any bug in
 /// how the adapter serialises tool results back onto the wire — actually break.
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn local_runtimes_complete_a_full_tool_loop() {
     for runtime in reachable_runtimes().await {
         with_tool_reroll(&runtime, "full tool loop", || async {
@@ -717,6 +726,7 @@ async fn local_runtimes_complete_a_full_tool_loop() {
 /// local runtimes, and this asserts the degraded request is both accepted and
 /// honoured.
 #[tokio::test]
+#[ignore = "network: set TINYAGENTS_LIVE=1 and run with --ignored"]
 async fn local_runtimes_produce_structured_json_output() {
     for runtime in reachable_runtimes().await {
         let mut request = base_request(vec![Message::user(

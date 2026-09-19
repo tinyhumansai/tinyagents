@@ -306,35 +306,96 @@ impl<Ctx> RunContext<Ctx> {
             host_agent_id: None,
             host_authority: None,
             terminal_observer: None,
+            active_model_call: None,
+            child_ordinal: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
-    /// Builds an isolated child context from this live parent context.
+    /// Returns the next value from this context's own child-ordinal counter
+    /// (starting at `0`), advancing it.
+    ///
+    /// The counter is per-context, not process-global: a freshly constructed
+    /// context (including a child context, which never inherits its parent's
+    /// counter) always starts at `0`. Callers that spawn deterministically
+    /// named children — [`crate::subagent::SubAgent`], for one — use this
+    /// instead of a process-wide sequence so two processes calling the same
+    /// parent context's child spawner in the same order derive identical
+    /// ordinals, and therefore identical child run ids (M-2).
+    pub fn next_child_ordinal(&self) -> u64 {
+        self.child_ordinal
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Builds an isolated child context from this live parent context,
+    /// propagating the parent's host authority.
     ///
     /// A child gets a new run id, lineage record, [`LimitTracker`], control
     /// slot, and instance id.  It deliberately shares the capabilities that
     /// describe one recursive operation: cancellation, events, stores,
     /// workspace policy, steering, streaming mode, thread identity, output
-    /// cap, and depth cap.  Metadata is shallow-merged automatically: any key
+    /// cap, and depth cap. Metadata is shallow-merged automatically: any key
     /// set on `child_config.metadata` overlays the parent's metadata object
     /// (see `shallow_merge_metadata`), so callers only need to pass the
     /// child-specific keys.
-    pub fn child<ChildCtx>(
+    ///
+    /// This keeps the child's `Ctx` type identical to the parent's, which is
+    /// what makes propagating [`Self::host_authority`] sound: the type-erased
+    /// authority installed by a hosted invocation is keyed to the exact
+    /// `(State, Ctx)` pair it was constructed for, and this method is the only
+    /// place that carries it forward. A recursive call that needs a
+    /// *different* `Ctx` type must go through [`Self::child_with_data`]
+    /// instead, which never propagates host authority.
+    pub fn child(&self, child_config: RunConfig, data: Ctx) -> Result<RunContext<Ctx>> {
+        let mut child = self.child_without_authority(child_config, data)?;
+        child.host_authority = self.host_authority.clone();
+        Ok(child)
+    }
+
+    /// Builds an isolated child context whose user data type may differ from
+    /// this context's, deliberately *not* propagating host authority.
+    ///
+    /// Use this whenever the child's `Ctx` differs from the parent's (for
+    /// example, a differently-typed sub-harness). Because [`RunContext`] does
+    /// not track its `State` type parameter at all, and the erased host
+    /// authority is keyed to a specific `(State, Ctx)` pair, there is no sound
+    /// way to check at this boundary whether the parent's authority would
+    /// still apply to the child's types. Rather than guess, the child simply
+    /// starts unhosted; a caller that legitimately needs to delegate hosted
+    /// authority across a `Ctx` change must do so explicitly through the
+    /// hosted subagent entry points, which re-derive authority from the live
+    /// host capability bundle rather than reinterpreting the parent's.
+    pub fn child_with_data<ChildCtx>(
+        &self,
+        child_config: RunConfig,
+        data: ChildCtx,
+    ) -> Result<RunContext<ChildCtx>> {
+        self.child_without_authority(child_config, data)
+    }
+
+    fn child_without_authority<ChildCtx>(
         &self,
         child_config: RunConfig,
         data: ChildCtx,
     ) -> Result<RunContext<ChildCtx>> {
         let mut config = self.config.child(child_config)?;
         config.metadata = shallow_merge_metadata(&self.config.metadata, config.metadata);
+        let child_run_id = config.run_id.clone();
+        // Derive a per-child handle (not a bare clone): it shares the parent's
+        // queue/policy but only drains commands addressed to *this* child's
+        // run id, `SteeringTarget::Root`-addressed commands stay with the
+        // parent, and its pause/checkpoint state is its own (I-5).
+        let steering = self
+            .steering
+            .as_ref()
+            .map(|handle| handle.for_child(child_run_id));
         let mut child = RunContext::new(config, data)
             .with_stores(self.stores.clone())
             .with_events(self.events.clone())
             .with_cancellation(self.cancellation.clone())
-            .with_optional_steering(self.steering.clone())
+            .with_optional_steering(steering)
             .with_optional_workspace(self.workspace.clone())
             .with_streaming(self.streaming);
         child.host_agent_id = self.host_agent_id.clone();
-        child.host_authority = self.host_authority.clone();
         Ok(child)
     }
 
@@ -462,8 +523,15 @@ impl<Ctx> RunContext<Ctx> {
     /// The agent loop drains the handle before each model call via
     /// [`crate::steering::apply_pending_steering`]. Without this the
     /// run accepts no steering.
+    ///
+    /// Binds the handle to this run's id as the **root** of its steering tree
+    /// (see [`crate::steering::SteeringTarget::Root`]); a child run created
+    /// from this context via [`Self::child`]/[`Self::child_with_data`] gets a
+    /// derived handle scoped to its own id instead of sharing this binding
+    /// (I-5).
     pub fn with_steering(mut self, steering: crate::steering::SteeringHandle) -> Self {
-        self.steering = Some(steering);
+        let root_run_id = self.lineage().root_run_id.clone();
+        self.steering = Some(steering.bind_root(root_run_id));
         self
     }
 

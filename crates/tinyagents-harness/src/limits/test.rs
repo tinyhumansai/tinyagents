@@ -155,6 +155,31 @@ fn rollback_tool_calls_uncounts_calls_that_never_ran() {
 }
 
 #[test]
+fn restart_resets_the_wall_clock_start_without_touching_counters() {
+    // M-8 regression: `started_at` is stamped when the tracker (via
+    // `RunContext::new`) is constructed, not when the run actually starts
+    // doing work. A context built ahead of time and left to sit burns down
+    // its deadline before the first model call. `restart` must reset the
+    // clock while leaving the call counters alone.
+    let mut tracker =
+        LimitTracker::new(RunLimits::default().with_max_wall_clock_ms(Some(1_000_000)));
+    tracker.record_model_call().unwrap();
+    tracker.record_tool_call().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let elapsed_before_restart = tracker.elapsed();
+    assert!(elapsed_before_restart >= std::time::Duration::from_millis(20));
+
+    tracker.restart();
+
+    assert!(
+        tracker.elapsed() < elapsed_before_restart,
+        "restart should reset the wall-clock start, not extend it"
+    );
+    assert_eq!(tracker.model_calls(), 1, "counters must survive a restart");
+    assert_eq!(tracker.tool_calls(), 1, "counters must survive a restart");
+}
+
+#[test]
 fn limit_kind_labels_match_the_event_layer() {
     // The limits module keeps its own `LimitKind` so it need not depend on the
     // observability layer; the labels must not drift apart.

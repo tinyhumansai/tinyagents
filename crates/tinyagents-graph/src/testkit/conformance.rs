@@ -30,6 +30,7 @@ fn contract_checkpoint(
         state: step as i32,
         next_nodes: vec![NodeId::from("n")],
         completed_tasks: vec![],
+        completed_routes: vec![],
         pending_writes: vec![],
         interrupts: vec![],
         pending_activations: None,

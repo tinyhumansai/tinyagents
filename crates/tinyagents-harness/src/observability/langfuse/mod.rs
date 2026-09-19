@@ -652,42 +652,19 @@ pub fn clean_nulls(mut value: Value) -> Value {
     value
 }
 
-/// Formats a Unix-epoch millisecond timestamp as the UTC ISO-8601 string
-/// Langfuse's ingestion API expects (`YYYY-MM-DDTHH:MM:SS.sssZ`).
+/// Renders a Unix epoch millisecond timestamp as the `YYYY-MM-DDTHH:MM:SS.sssZ`
+/// form Langfuse's ingestion API expects.
+///
+/// Delegates to `chrono` (M-9): `chrono` is already a non-optional workspace
+/// dependency of this crate (`tools/time.rs` uses it under the `tools`
+/// feature), so the hand-rolled Howard Hinnant civil-date conversion this
+/// module carried was duplicating logic the dependency graph already pays
+/// for, unconditionally, elsewhere.
 pub fn iso_ms(ms: u64) -> String {
-    use std::time::{Duration, UNIX_EPOCH};
-    let system_time = UNIX_EPOCH + Duration::from_millis(ms);
-    let duration = system_time
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0));
-    let secs = duration.as_secs();
-    let millis = duration.subsec_millis();
-    format_unix_iso(secs, millis)
-}
-
-fn format_unix_iso(secs: u64, millis: u32) -> String {
-    // Howard Hinnant civil-date conversion for Unix days, dependency-free.
-    let days = (secs / 86_400) as i64;
-    let day_secs = secs % 86_400;
-    let (year, month, day) = civil_from_days(days);
-    let hour = day_secs / 3_600;
-    let minute = (day_secs % 3_600) / 60;
-    let second = day_secs % 60;
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
-}
-
-fn civil_from_days(days: i64) -> (i32, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    let year = y + if m <= 2 { 1 } else { 0 };
-    (year as i32, m as u32, d as u32)
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(i64::try_from(ms).unwrap_or(i64::MAX))
+        .unwrap_or_default()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
 }
 
 #[cfg(test)]

@@ -135,30 +135,33 @@ runtime into a callback-only design.
 
 ## Initial Syntax
 
+This is verified-runnable source, taken verbatim from
+`crates/tinyagents-integration-tests/examples/rag_blueprint.rs` (run it with
+`cargo run -p tinyagents-integration-tests --example rag_blueprint`). An
+earlier version of this example used a top-level `metadata { description: … }`
+block and `timeout 60s` inside `defaults`; neither parses — `parse_graph_item`
+has no `metadata` production at graph scope, and `defaults` values must be a
+string/number/ident literal via `parse_literal`, not a duration suffix like
+`60s`.
+
 ```tinyagents
 graph support_agent {
-  metadata {
-    description: "Support workflow with tool loop and optional review."
-  }
+  start agent
 
   defaults {
     recursion_limit 50
-    timeout 60s
+    backoff "exponential"
     checkpoint inherit
   }
 
-  start agent
-
   channel messages messages
   channel tool_calls append
-  channel review overwrite
 
   node agent {
     kind agent
     model "default"
-    system "You are a concise support agent."
+    system "Resolve support requests using tools when useful."
     tools ["lookup_user", "create_ticket"]
-
     routes {
       tool_call -> tools
       final -> END

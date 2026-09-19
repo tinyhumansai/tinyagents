@@ -75,6 +75,14 @@ impl RunLimits {
         self.behavior = behavior;
         self
     }
+
+    /// Caps how many tool calls a concurrently-executed batch may run at
+    /// once. `None` removes the cap. See
+    /// [`RunLimits::max_tool_concurrency`].
+    pub fn with_max_tool_concurrency(mut self, n: Option<usize>) -> Self {
+        self.max_tool_concurrency = n;
+        self
+    }
 }
 
 /// Tracks live counters for a single harness run and enforces [`RunLimits`].
@@ -100,6 +108,22 @@ impl LimitTracker {
             tool_calls: 0,
             started_at: Instant::now(),
         }
+    }
+
+    /// Resets the wall-clock start to now, leaving the call counters and
+    /// limits untouched.
+    ///
+    /// [`RunContext::new`][crate::context::RunContext::new] constructs the
+    /// tracker (and therefore stamps `started_at`) at context-construction
+    /// time, which is not always the same moment the run actually starts
+    /// doing work — a context built ahead of time and queued, or reused
+    /// across a retry of the *surrounding* host operation, would otherwise
+    /// have its wall-clock deadline silently burn down before the agent loop
+    /// issues its first model call (M-8). The agent loop calls this at the
+    /// top of the run so the deadline is always measured from when the run
+    /// actually began.
+    pub fn restart(&mut self) {
+        self.started_at = Instant::now();
     }
 
     /// Records one model call and returns an error if the cap is exceeded.
@@ -148,7 +172,7 @@ impl LimitTracker {
     fn exhausted(&self, kind: LimitKind, cap: usize) -> Result<LimitOutcome> {
         match self.limits.behavior {
             LimitBehavior::Error => {
-                tinyagents_tracing::debug!(
+                tracing::debug!(
                     target: "tinyagents::limits",
                     limit_kind = kind.as_str(),
                     cap,
@@ -163,7 +187,7 @@ impl LimitTracker {
                 )))
             }
             LimitBehavior::StopWithPartial => {
-                tinyagents_tracing::debug!(
+                tracing::debug!(
                     target: "tinyagents::limits",
                     limit_kind = kind.as_str(),
                     cap,
@@ -286,7 +310,7 @@ impl LimitTracker {
     /// defaulted. See the note on [`LimitTracker::tighten_call_limits`] for what
     /// the agent loop has to do about it.
     pub fn sync_call_limits(&mut self, max_model_calls: usize, max_tool_calls: usize) {
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             target: "tinyagents::limits",
             from_model_calls = self.limits.max_model_calls,
             from_tool_calls = self.limits.max_tool_calls,
@@ -323,7 +347,7 @@ impl LimitTracker {
     pub fn tighten_call_limits(&mut self, max_model_calls: usize, max_tool_calls: usize) {
         let model = self.limits.max_model_calls.min(max_model_calls);
         let tool = self.limits.max_tool_calls.min(max_tool_calls);
-        tinyagents_tracing::debug!(
+        tracing::debug!(
             target: "tinyagents::limits",
             from_model_calls = self.limits.max_model_calls,
             from_tool_calls = self.limits.max_tool_calls,
