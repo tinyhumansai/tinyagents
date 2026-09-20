@@ -133,6 +133,11 @@ fn classify_hosted_error(error: &TinyAgentsError) -> HostedErrorKind {
     match error {
         TinyAgentsError::Cancelled => HostedErrorKind::Cancelled,
         TinyAgentsError::Timeout(_) | TinyAgentsError::CallTimeout(_) => HostedErrorKind::Timeout,
+        TinyAgentsError::Model(message)
+            if message.contains("timed out") || message.contains("timeout") =>
+        {
+            HostedErrorKind::Timeout
+        }
         TinyAgentsError::LimitExceeded(_) | TinyAgentsError::SubAgentDepth(_) => {
             HostedErrorKind::LimitExceeded
         }
