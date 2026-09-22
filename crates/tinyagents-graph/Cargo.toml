@@ -19,7 +19,7 @@ tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.2", defaul
     "langfuse",
 ] }
 tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.3.0" }
-tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.3.0" }
+tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.4.0" }
 tokio = { workspace = true, features = ["sync", "time", "macros", "rt", "rt-multi-thread", "fs"] }
 tracing = { workspace = true }
 

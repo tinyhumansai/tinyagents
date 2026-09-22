@@ -26,7 +26,7 @@ tinyagents-registry = { path = "../tinyagents-registry" }
 tinyagents-session = { path = "../tinyagents-session" }
 tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.3.0" }
 tinyinference-embeddings = { path = "../../vendor/tinyinference/crates/tinyinference-embeddings", version = "0.3.0" }
-tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.3.0" }
+tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.4.0" }
 tokio = { workspace = true, default-features = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 
 [features]

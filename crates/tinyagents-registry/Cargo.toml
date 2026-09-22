@@ -16,7 +16,7 @@ serde_json = { workspace = true }
 tinyagents-definition = { path = "../tinyagents-definition", version = "2.1.2" }
 tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.2", default-features = false }
 tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.3.0" }
-tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.3.0" }
+tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.4.0" }
 
 [features]
 default = []

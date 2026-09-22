@@ -15,7 +15,7 @@ thiserror = "2"
 tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.2" }
 tinyagents-session = { path = "../tinyagents-session", version = "2.1.2" }
 tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.3.0" }
-tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.3.0" }
+tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.4.0" }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 
 [dev-dependencies]

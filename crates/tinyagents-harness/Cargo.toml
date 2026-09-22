@@ -28,10 +28,10 @@ sha2 = "0.11"
 thiserror = "2"
 tracing = { workspace = true }
 tinyagents-definition = { path = "../tinyagents-definition", version = "2.1.2" }
-tinytools-agent = { path = "../../vendor/tinytools/crates/tinytools-agent", version = "0.3.0", default-features = false }
+tinytools-agent = { path = "../../vendor/tinytools/crates/tinytools-agent", version = "0.4.0", default-features = false }
 tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.3.0" }
 tinyinference-embeddings = { path = "../../vendor/tinyinference/crates/tinyinference-embeddings", version = "0.3.0" }
-tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.3.0" }
+tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.4.0" }
 tokio = { workspace = true, features = ["sync", "time", "macros", "rt", "rt-multi-thread", "fs", "io-util", "process"] }
 tempfile = { workspace = true }
 wait-timeout = { version = "0.2", optional = true }
