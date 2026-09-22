@@ -21,7 +21,7 @@ tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.2", defaul
 tinyagents-session = { path = "../tinyagents-session", version = "2.1.2", default-features = false }
 tinyagents-runtime = { path = "../tinyagents-runtime", version = "2.1.2", default-features = false }
 tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.3.0" }
-tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.3.0" }
+tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.4.0" }
 tokio = { workspace = true, features = ["sync", "rt", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 

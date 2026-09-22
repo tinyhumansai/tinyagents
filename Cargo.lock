@@ -1476,7 +1476,7 @@ dependencies = [
  "tempfile",
  "tinyagents-harness",
  "tinyinference-llm",
- "tinytools",
+ "tinytools 0.4.0",
  "tokio",
  "tracing",
 ]
@@ -1504,8 +1504,8 @@ dependencies = [
  "tinyagents-definition",
  "tinyinference-embeddings",
  "tinyinference-llm",
- "tinytools",
- "tinytools-agent",
+ "tinytools 0.4.0",
+ "tinytools-agent 0.4.0",
  "tokio",
  "tracing",
  "uuid",
@@ -1534,7 +1534,7 @@ dependencies = [
  "tinyagents-session",
  "tinyinference-embeddings",
  "tinyinference-llm",
- "tinytools",
+ "tinytools 0.4.0",
  "tokio",
 ]
 
@@ -1559,7 +1559,7 @@ dependencies = [
  "tinyagents-runtime",
  "tinyagents-session",
  "tinyinference-llm",
- "tinytools",
+ "tinytools 0.4.0",
  "tokio",
  "uuid",
 ]
@@ -1576,7 +1576,7 @@ dependencies = [
  "tinyagents-definition",
  "tinyagents-harness",
  "tinyinference-llm",
- "tinytools",
+ "tinytools 0.4.0",
  "tokio",
 ]
 
@@ -1593,7 +1593,7 @@ dependencies = [
  "tinyagents-harness",
  "tinyagents-session",
  "tinyinference-llm",
- "tinytools",
+ "tinytools 0.4.0",
  "tokio",
 ]
 
@@ -1652,7 +1652,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "tinyinference-core",
- "tinytools-agent",
+ "tinytools-agent 0.3.0",
  "tokio",
  "tracing",
 ]
@@ -1670,6 +1670,17 @@ dependencies = [
 [[package]]
 name = "tinytools"
 version = "0.3.0"
+source = "git+https://github.com/tinyhumansai/tinytools?rev=a5d04a7f3af0abc1dd748f87f94871b36ae9fe71#a5d04a7f3af0abc1dd748f87f94871b36ae9fe71"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tinytools"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1680,11 +1691,22 @@ dependencies = [
 [[package]]
 name = "tinytools-agent"
 version = "0.3.0"
+source = "git+https://github.com/tinyhumansai/tinytools?rev=a5d04a7f3af0abc1dd748f87f94871b36ae9fe71#a5d04a7f3af0abc1dd748f87f94871b36ae9fe71"
 dependencies = [
  "regex",
  "serde",
  "serde_json",
- "tinytools",
+ "tinytools 0.3.0",
+]
+
+[[package]]
+name = "tinytools-agent"
+version = "0.4.0"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "tinytools 0.4.0",
  "tracing",
 ]
 
