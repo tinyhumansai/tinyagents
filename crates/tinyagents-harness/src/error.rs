@@ -354,6 +354,31 @@ impl From<tinyinference_embeddings::Error> for TinyAgentsError {
     }
 }
 
+#[cfg(feature = "media")]
+impl From<tinyinference_image::Error> for TinyAgentsError {
+    fn from(error: tinyinference_image::Error) -> Self {
+        match error {
+            tinyinference_image::Error::Serialization(error) => Self::Serialization(error),
+            error @ (tinyinference_image::Error::Validation(_)
+            | tinyinference_image::Error::Unsupported { .. }) => {
+                Self::Validation(error.to_string())
+            }
+            other => Self::Model(other.to_string()),
+        }
+    }
+}
+
+#[cfg(feature = "media")]
+impl From<tinyinference_video::Error> for TinyAgentsError {
+    fn from(error: tinyinference_video::Error) -> Self {
+        match error {
+            tinyinference_video::Error::Media(error) => error.into(),
+            error @ tinyinference_video::Error::Timeout { .. } => Self::Timeout(error.to_string()),
+            other => Self::Model(other.to_string()),
+        }
+    }
+}
+
 impl TinyAgentsError {
     /// Builds the right error for a structured provider failure, promoting a
     /// recognised context overflow to [`TinyAgentsError::ContextOverflow`].

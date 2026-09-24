@@ -31,6 +31,8 @@ tinyagents-definition = { path = "../tinyagents-definition", version = "2.1.2" }
 tinytools-agent = { path = "../../vendor/tinytools/crates/tinytools-agent", version = "0.4.1", default-features = false }
 tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.3.0" }
 tinyinference-embeddings = { path = "../../vendor/tinyinference/crates/tinyinference-embeddings", version = "0.3.0" }
+tinyinference-image = { path = "../../vendor/tinyinference/crates/tinyinference-image", version = "0.3.0", optional = true }
+tinyinference-video = { path = "../../vendor/tinyinference/crates/tinyinference-video", version = "0.3.0", optional = true }
 tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.4.1" }
 tokio = { workspace = true, features = ["sync", "time", "macros", "rt", "rt-multi-thread", "fs", "io-util", "process"] }
 tempfile = { workspace = true }
@@ -45,6 +47,8 @@ sqlite = ["dep:rusqlite"]
 tools = ["builtin-tools"]
 builtin-tools = ["dep:chrono-tz"]
 multimodal = ["dep:flate2", "dep:reqwest"]
+# Image and video generation tools over tinyinference-image / -video.
+media = ["dep:tinyinference-image", "dep:tinyinference-video"]
 # Gates the Claude Code CLI and Claude Agent SDK provider adapters, which are
 # the only consumers of `uuid`, `tempfile` beyond the artifact tests, `dirs`,
 # and `wait-timeout` in this crate.

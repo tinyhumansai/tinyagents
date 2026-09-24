@@ -39,6 +39,7 @@ observability, or test contracts.
   - [Context](../modules/harness/context.md)
   - [Model and providers](../modules/harness/model.md)
   - [Embeddings and retrieval](../modules/harness/embeddings.md)
+  - [Media generation](../modules/harness/media.md)
   - [Prompt](../modules/harness/prompt.md)
   - [Tool](../modules/harness/tool.md)
   - [Tool exposure and discovery](../modules/harness/tool-discovery.md)
