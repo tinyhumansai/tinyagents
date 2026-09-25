@@ -16,6 +16,17 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
+/// Decode records independently so a cut multibyte character in one record
+/// cannot make every earlier and later turn unreadable.
+fn read_jsonl_lines(path: &Path) -> Result<Vec<Option<String>>> {
+    let raw =
+        fs::read(path).with_context(|| format!("read transcript jsonl {}", path.display()))?;
+    Ok(raw
+        .split(|byte| *byte == b'\n')
+        .map(|line| std::str::from_utf8(line).ok().map(str::to_owned))
+        .collect())
+}
+
 /// Read a session transcript.
 ///
 /// **Primary path**: reads the `.jsonl` source of truth.
@@ -58,8 +69,7 @@ pub fn read_transcript(path: &Path) -> Result<SessionTranscript> {
 /// wholesale, and `interrupted` partials are skipped since they never entered
 /// the model's context.
 fn read_transcript_jsonl(path: &Path) -> Result<SessionTranscript> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read transcript jsonl {}", path.display()))?;
+    let lines = read_jsonl_lines(path)?;
 
     let mut meta: Option<TranscriptMeta> = None;
     let mut messages: Vec<TranscriptMessage> = Vec::new();
@@ -72,7 +82,21 @@ fn read_transcript_jsonl(path: &Path) -> Result<SessionTranscript> {
     // (which *replace* the accumulated context), interrupted partials (skipped
     // for the model-context path), or refreshed `_meta` lines (last wins).
     let mut seen_first = false;
-    for (line_no, line) in raw.lines().enumerate() {
+    for (line_no, line) in lines.iter().enumerate() {
+        let Some(line) = line else {
+            if !seen_first {
+                anyhow::bail!(
+                    "first non-empty line of {} is not valid UTF-8",
+                    path.display()
+                );
+            }
+            tracing::warn!(
+                "[transcript] skipping invalid UTF-8 record line {} in {}",
+                line_no + 1,
+                path.display()
+            );
+            continue;
+        };
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -168,14 +192,27 @@ fn read_transcript_jsonl(path: &Path) -> Result<SessionTranscript> {
 ///
 /// `meta` reflects the newest `_meta` line (cumulative totals stay current).
 pub fn read_transcript_display(path: &Path) -> Result<DisplaySessionTranscript> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read transcript jsonl (display) {}", path.display()))?;
+    let lines = read_jsonl_lines(path)?;
 
     let mut meta: Option<TranscriptMeta> = None;
     let mut records: Vec<DisplayRecord> = Vec::new();
     let mut seen_first = false;
 
-    for (line_no, line) in raw.lines().enumerate() {
+    for (line_no, line) in lines.iter().enumerate() {
+        let Some(line) = line else {
+            if !seen_first {
+                anyhow::bail!(
+                    "first non-empty line of {} is not valid UTF-8",
+                    path.display()
+                );
+            }
+            tracing::warn!(
+                "[transcript] display: skipping invalid UTF-8 record line {} in {}",
+                line_no + 1,
+                path.display()
+            );
+            continue;
+        };
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -246,9 +283,13 @@ pub fn read_transcript_display(path: &Path) -> Result<DisplaySessionTranscript> 
 /// so a multi-turn session reports its running totals — not just the first
 /// turn's. Falls back to line 1 for legacy single-header files.
 pub(super) fn read_transcript_meta_only(path: &Path) -> Option<TranscriptMeta> {
-    let raw = fs::read_to_string(path).ok()?;
+    let lines = read_jsonl_lines(path).ok()?;
     let mut latest: Option<TranscriptMeta> = None;
-    for line in raw.lines() {
+    for line in &lines {
+        let Some(line) = line else {
+            latest.as_ref()?;
+            continue;
+        };
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -270,10 +311,16 @@ pub(super) fn read_transcript_meta_only(path: &Path) -> Option<TranscriptMeta> {
 /// rows are considered so a compacted transcript still surfaces its latest
 /// usage.
 pub(super) fn read_last_assistant_usage(path: &Path) -> Option<(MessageUsage, Option<String>)> {
-    let raw = fs::read_to_string(path).ok()?;
+    let lines = read_jsonl_lines(path).ok()?;
     let mut result = None;
     let mut seen_first = false;
-    for line in raw.lines() {
+    for line in &lines {
+        let Some(line) = line else {
+            if !seen_first {
+                return None;
+            }
+            continue;
+        };
         let line = line.trim();
         if line.is_empty() {
             continue;

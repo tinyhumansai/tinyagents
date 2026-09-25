@@ -218,8 +218,15 @@ pub(crate) fn append_transcript_turn_with_extras(
             buf.push_str(&tools_line_json(tools)?);
             buf.push('\n');
         }
-        fs::write(jsonl_path, buf.as_bytes())
-            .with_context(|| format!("create transcript {}", jsonl_path.display()))?;
+        // A direct write can publish a partial _meta header if the process
+        // stops mid-write. Such a file exists but cannot be resumed at all.
+        // Publish the complete first generation only after staging it, and
+        // never replace a file another writer created meanwhile.
+        anyhow::ensure!(
+            publish_transcript_if_absent(jsonl_path, buf.as_bytes())?,
+            "transcript appeared during initial creation: {}",
+            jsonl_path.display()
+        );
         tracing::debug!(
             "[transcript] created append-only transcript with {} message(s) at {}",
             messages.len(),
@@ -522,12 +529,27 @@ fn publish_transcript_if_absent(path: &Path, contents: &[u8]) -> Result<bool> {
 
 /// Append raw bytes to a file, opening in append mode (O(1), no read-back).
 fn append_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
+    use std::io::{Read, Seek, SeekFrom, Write};
     let mut file = fs::OpenOptions::new()
+        .read(true)
         .append(true)
         .open(path)
         .with_context(|| format!("open transcript for append {}", path.display()))?;
-    file.write_all(bytes)
+    // A previous write may have stopped in the middle of a JSONL record.
+    // Separate that incomplete tail from the new turn, so readers can skip
+    // the damaged line without also skipping every later record.
+    let len = file.metadata()?.len();
+    let mut last = [0u8; 1];
+    if len > 0 {
+        file.seek(SeekFrom::End(-1))?;
+        file.read_exact(&mut last)?;
+    }
+    let mut append = Vec::with_capacity(bytes.len() + usize::from(len > 0 && last[0] != b'\n'));
+    if len > 0 && last[0] != b'\n' {
+        append.push(b'\n');
+    }
+    append.extend_from_slice(bytes);
+    file.write_all(&append)
         .with_context(|| format!("append transcript {}", path.display()))?;
     Ok(())
 }

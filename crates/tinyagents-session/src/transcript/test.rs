@@ -124,6 +124,67 @@ fn malformed_required_message_record_is_skipped_without_losing_valid_rows() {
 }
 
 #[test]
+fn a_torn_append_does_not_swallow_the_next_turn() {
+    let dir = tempdir().unwrap();
+    let path = resolve_keyed_transcript_path(dir.path(), "torn-tail").unwrap();
+    let first = vec![TranscriptMessage::new("user", "before crash")];
+    append_transcript_turn(&path, &[], &first, &meta(), None, Some("first")).unwrap();
+
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{\"role\":\"assistant\",\"content\":\"cut")
+        .unwrap();
+
+    // Both readers skip malformed JSON records. The next append must start
+    // on a separate line so only this cut record is skipped.
+    let next = [
+        first.clone(),
+        vec![TranscriptMessage::new("user", "after crash")],
+    ]
+    .concat();
+    append_transcript_turn(&path, &first, &next, &meta(), None, Some("second")).unwrap();
+
+    let model = read_transcript(&path).unwrap();
+    assert_eq!(model.messages.len(), 2);
+    assert_eq!(model.messages[0].content, "before crash");
+    assert_eq!(model.messages[1].content, "after crash");
+    let display = read_transcript_display(&path).unwrap();
+    assert_eq!(display.records.len(), 2);
+}
+
+#[test]
+fn an_invalid_utf8_tail_does_not_block_cold_resume() {
+    let dir = tempdir().unwrap();
+    let path = resolve_keyed_transcript_path(dir.path(), "cut-utf8").unwrap();
+    let first = vec![TranscriptMessage::new("user", "before crash")];
+    append_transcript_turn(&path, &[], &first, &meta(), None, Some("first")).unwrap();
+
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(&[b'{', 0xc3])
+        .unwrap();
+
+    let next = [
+        first.clone(),
+        vec![TranscriptMessage::new("user", "after crash")],
+    ]
+    .concat();
+    append_transcript_turn(&path, &first, &next, &meta(), None, Some("second")).unwrap();
+
+    let model = read_transcript(&path).unwrap();
+    assert_eq!(model.messages.len(), 2);
+    assert_eq!(model.messages[1].content, "after crash");
+    assert_eq!(read_transcript_display(&path).unwrap().records.len(), 2);
+    assert!(super::reader::read_transcript_meta_only(&path).is_some());
+}
+
+#[test]
 fn append_replays_delta_compaction_request_ids_and_interrupted_partials() {
     let dir = tempdir().unwrap();
     let path = resolve_keyed_transcript_path(dir.path(), "session").unwrap();
