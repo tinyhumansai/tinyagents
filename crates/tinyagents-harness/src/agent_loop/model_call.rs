@@ -207,20 +207,27 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 }
             };
             if let Some(mut cached) = looked_up {
-                ctx.emit(AgentEvent::CacheHit {
-                    call_id: call_id.clone(),
-                    key: key.clone(),
-                });
-                cached.served_from_cache = true;
-                if cached.resolved_model.is_none() {
-                    cached.resolved_model = Some(binding.resolved.clone());
+                if Self::should_skip_empty_response_cache(shape, &cached) {
+                    tracing::debug!(
+                        call_id = %call_id.as_str(),
+                        "[cache] ignoring blank cached response; retry policy requires a provider call"
+                    );
+                } else {
+                    ctx.emit(AgentEvent::CacheHit {
+                        call_id: call_id.clone(),
+                        key: key.clone(),
+                    });
+                    cached.served_from_cache = true;
+                    if cached.resolved_model.is_none() {
+                        cached.resolved_model = Some(binding.resolved.clone());
+                    }
+                    if streaming {
+                        cached = self
+                            .replay_cached_response_as_deltas(state, ctx, call_id, cached)
+                            .await?;
+                    }
+                    return Ok(cached);
                 }
-                if streaming {
-                    cached = self
-                        .replay_cached_response_as_deltas(state, ctx, call_id, cached)
-                        .await?;
-                }
-                return Ok(cached);
             }
             ctx.emit(AgentEvent::CacheMiss {
                 call_id: call_id.clone(),
@@ -275,6 +282,11 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             .await?;
 
         if let Some((cache, key)) = decision.as_ref() {
+            // A host that opted into empty-response recovery must be able to
+            // reach the provider on the next identical request. Caching the
+            // first successful-but-unusable completion would replay that blank
+            // answer, mark it `served_from_cache`, and defeat the retry.
+            let blank_for_retry = Self::should_skip_empty_response_cache(shape, &response);
             // Only the *primary* model's answer may be stored under this key.
             // `invoke_model_resolving` walks the fallback chain on failure and
             // can return a different model's response; writing that under the
@@ -285,7 +297,12 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 .resolved_model
                 .as_ref()
                 .map(|resolved| resolved.name.as_str());
-            if served_by.is_some_and(|name| name != primary_name) {
+            if blank_for_retry {
+                tracing::debug!(
+                    call_id = %call_id.as_str(),
+                    "[cache] skipping write: completion has no visible answer and may be retried"
+                );
+            } else if served_by.is_some_and(|name| name != primary_name) {
                 tracing::debug!(
                     call_id = %call_id.as_str(),
                     primary = %primary_name,
@@ -308,6 +325,24 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         }
 
         Ok(response)
+    }
+
+    /// A prior cache entry or a newly completed response must not short-circuit
+    /// an opted-in retry when it contains no usable assistant answer.
+    fn should_skip_empty_response_cache(
+        shape: &super::dialect::CallShape,
+        response: &ModelResponse,
+    ) -> bool {
+        // `ModelResponse` has no independent structured payload: the
+        // StructuredExtractor reads visible text or tool-call arguments. The
+        // call shape still excludes structured plans so their own output retry
+        // policy remains the sole owner of failed extraction and caching.
+        shape.retry_empty_final
+            && response.continue_turn.is_none()
+            && response.message.tool_calls.is_empty()
+            && response.text().trim().is_empty()
+            && response.finish_reason.as_deref() != Some("length")
+            && response.finish_reason.as_deref() != Some("tool_calls")
     }
 
     /// Resolves the effective [`CachePolicy`] for `request`: the per-request

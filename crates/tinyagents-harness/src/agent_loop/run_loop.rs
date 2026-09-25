@@ -401,6 +401,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // records the original cap so growth stays clamped at 4x, and the counter
         // bounds how many times we re-issue the call.
         let mut truncated_empty_retries_used: u32 = 0;
+        let mut empty_response_retries_used: u32 = 0;
         // Consecutive "you said tool_calls but sent none" re-prompts
         // (see `RunPolicy::dropped_tool_call_nudges`).
         let mut dropped_tool_call_nudges_used: u32 = 0;
@@ -1110,6 +1111,9 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 shape: super::dialect::CallShape {
                     streaming,
                     recovery: recovery.clone(),
+                    retry_empty_final: self.policy.empty_response_retries > 0
+                        && structured_plan.is_none()
+                        && run.structured.is_none(),
                 },
             };
             // Snapshot the request messages for observability before `request`
@@ -1410,6 +1414,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 // otherwise receive fewer than the policy's configured number
                 // of consecutive re-prompts.
                 dropped_tool_call_nudges_used = 0;
+                empty_response_retries_used = 0;
                 reset_truncated_empty_recovery(
                     &mut truncated_empty_retries_used,
                     &mut boosted_max_tokens,
@@ -1489,6 +1494,42 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     continue;
                 }
 
+                // A provider can also finish normally after sending only a
+                // reasoning side channel (or no content at all). Retrying that
+                // unusable answer is opt-in because it incurs another provider
+                // call. Unlike a length-truncated reply, keep the same token
+                // cap: there is no evidence that output space ran out.
+                let nontruncated_empty = tool_calls.is_empty()
+                    && response.text().trim().is_empty()
+                    && response.continue_turn.is_none()
+                    && structured_plan.is_none()
+                    && run.structured.is_none()
+                    && response.finish_reason.as_deref() != Some("length")
+                    && response.finish_reason.as_deref() != Some("tool_calls")
+                    && !response.served_from_cache;
+                if nontruncated_empty
+                    && empty_response_retries_used < self.policy.empty_response_retries
+                    && ctx.limits.remaining_model_calls() > 0
+                {
+                    messages.pop();
+                    empty_response_retries_used += 1;
+                    tracing::info!(
+                        target: "tinyagents::agent_loop",
+                        run_id = %ctx.run_id(),
+                        call_id = %call_id,
+                        attempt = empty_response_retries_used,
+                        finish_reason = ?response.finish_reason,
+                        content_blocks = response.message.content.len(),
+                        "[agent_loop] retrying completion without visible answer"
+                    );
+                    let record = ctx.emit(AgentEvent::RetryScheduled {
+                        call_id: call_id.clone(),
+                        attempt: empty_response_retries_used as usize,
+                    });
+                    status.set_last_event(record.id);
+                    continue;
+                }
+
                 // Dropped tool call: the provider says the model stopped to
                 // call a tool, but nothing arrived — structured or in text.
                 // A bounded re-prompt asks for the call itself. The assistant
@@ -1508,6 +1549,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     continue;
                 }
                 dropped_tool_call_nudges_used = 0;
+                empty_response_retries_used = 0;
 
                 // This turn resolved without scheduling a truncated-empty
                 // retry, so the recovery state must not leak into later turns:
@@ -1621,6 +1663,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // recovery state before the tools run so the next turn starts from
             // the caller's configured cap and a full retry budget.
             dropped_tool_call_nudges_used = 0;
+            empty_response_retries_used = 0;
             reset_truncated_empty_recovery(
                 &mut truncated_empty_retries_used,
                 &mut boosted_max_tokens,

@@ -359,6 +359,9 @@ pub(super) struct CallShape {
     pub(super) streaming: bool,
     /// Offered tools and P-Format registry for text recovery.
     pub(super) recovery: TextRecovery,
+    /// Whether this call's final response is eligible for the opt-in retry
+    /// when it has no visible answer. Structured-output plans are excluded.
+    pub(super) retry_empty_final: bool,
 }
 
 /// Converts a recovered call into the harness's [`ToolCall`], minting an id

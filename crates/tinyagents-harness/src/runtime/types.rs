@@ -310,6 +310,17 @@ pub struct RunPolicy {
     /// Defaults to `1` (one retry, two attempts total). Set to `0` to disable
     /// for exact-replay callers that must not re-issue a call.
     pub truncated_empty_retries: u32,
+    /// Automatic retries for a completion with no visible text, tool calls, or
+    /// structured output when the provider did not report length truncation.
+    /// Reasoning-only `stop` responses are one example: the model spent tokens
+    /// but gave the caller nothing it can use. Each retry reissues the same
+    /// request without increasing its output-token cap and counts against the
+    /// run's model-call limit. The unusable assistant row is not retained.
+    ///
+    /// Defaults to `0` because some callers deliberately accept blank finals
+    /// and because another provider call may be billable. Hosts that require a
+    /// visible reply can opt in to one bounded retry.
+    pub empty_response_retries: u32,
     /// How [`tinytools::ToolExposure::Deferred`] tools are surfaced: never in
     /// the request's `tools` array, but findable through the intrinsic
     /// `tool_search` / `tool_call` bridge. See
@@ -548,6 +559,7 @@ impl Default for RunPolicy {
             // caller, so one stochastic-failure retry is strictly better than a
             // blank final.
             truncated_empty_retries: 1,
+            empty_response_retries: 0,
             text_dialect_recovery: TextDialectRecovery::default(),
             discovery: crate::tool::discover::ToolDiscoveryPolicy::default(),
             tool_schemas: None,

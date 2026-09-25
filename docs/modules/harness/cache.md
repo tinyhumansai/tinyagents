@@ -180,6 +180,10 @@ Raw credentials never reach a key: `credential_fingerprint` hashes them first.
 - Only the **primary** model's answer is written under its own key. When the
   fallback chain answers, the write is skipped — otherwise the primary's key is
   poisoned (permanently, absent a TTL) with a different model's response.
+- When `RunPolicy::empty_response_retries` is enabled, a non-truncated
+  completion with no visible text or tool call is not cached, and an older
+  blank cache hit is treated as a miss. The retry must reach the provider
+  rather than replay the blank response under the same key.
 - A cache read or write failure is logged and ignored. The provider call has
   already succeeded and been paid for; discarding its answer because the cache
   was unavailable is strictly worse than not caching.

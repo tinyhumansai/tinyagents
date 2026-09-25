@@ -131,6 +131,18 @@ that guard (if enabled) turn the still-blank final into
 restore exact-replay behavior. The recovery lives in the shared `run_loop`, so
 it applies identically to the unary and streaming paths.
 
+A provider can also end a stream normally after emitting only reasoning, with
+no visible text or tool call. Hosts may set
+`RunPolicy::empty_response_retries` to retry that non-truncated blank result;
+it defaults to `0` because the extra model call may be billed. The retry drops
+the unusable assistant row, keeps the original output-token cap, counts toward
+the model-call limit, and emits `RetryScheduled`. It never promotes reasoning
+into visible answer text. Such a blank result is excluded from the local
+response cache, and a prior blank cache hit is ignored when retries are
+enabled, so the next attempt reaches the provider. A still-empty response
+follows the caller's normal
+`error_on_empty_response` policy.
+
 ## Public surface
 
 - `AgentHarness::invoke(state, ctx_data, config, input) -> Result<AgentRun>` —

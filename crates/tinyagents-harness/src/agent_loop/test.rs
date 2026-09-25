@@ -456,6 +456,32 @@ fn truncated_empty_response(reasoning_tokens: u64) -> ModelResponse {
     }
 }
 
+/// A provider may finish normally after emitting only the hidden reasoning
+/// channel. Unlike a length-truncated response, another call should keep the
+/// same output-token limit rather than doubling it.
+fn reasoning_only_stop_response() -> ModelResponse {
+    ModelResponse {
+        message: AssistantMessage {
+            id: None,
+            content: vec![ContentBlock::Thinking {
+                text: "A greeting that never reached visible content".into(),
+                signature: None,
+            }],
+            tool_calls: Vec::new(),
+            usage: Some(Usage::new(4, 20)),
+            origin: None,
+        },
+        usage: Some(Usage::new(4, 20)),
+        finish_reason: Some("stop".to_string()),
+        raw: None,
+        resolved_model: None,
+        continue_turn: None,
+        served_from_cache: false,
+        correlation: None,
+        resolved_route: None,
+    }
+}
+
 /// Middleware that appends a user message to every model request.
 struct InjectMiddleware {
     text: &'static str,
@@ -927,6 +953,222 @@ async fn empty_response_terminates_normally_when_guard_disabled() {
         .expect("run succeeds with a blank final by default");
     assert_eq!(run.model_calls, 1);
     assert_eq!(run.text(), Some(String::new()));
+}
+
+#[tokio::test]
+async fn reasoning_only_stop_retries_once_when_enabled() {
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
+        reasoning_only_stop_response(),
+        text_response("recovered", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+    harness.with_policy(RunPolicy {
+        empty_response_retries: 1,
+        ..RunPolicy::default()
+    });
+
+    let ctx = RunContext::new(
+        RunConfig::new("reasoning-only-retry").with_max_turn_output_tokens(2048),
+        (),
+    );
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("a second usable response should recover the turn");
+
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert_eq!(run.model_calls, 2);
+    assert_eq!(run.messages.len(), 2, "discard the blank assistant row");
+    assert_eq!(
+        model
+            .requests()
+            .iter()
+            .map(|request| request.max_tokens)
+            .collect::<Vec<_>>(),
+        vec![Some(2048), Some(2048)],
+        "a non-truncated empty completion must not boost the token cap"
+    );
+}
+
+#[tokio::test]
+async fn reasoning_only_stop_keeps_default_blank_final() {
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
+        reasoning_only_stop_response(),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("the new retry remains opt-in");
+    assert_eq!(run.model_calls, 1);
+    assert_eq!(run.text(), Some(String::new()));
+}
+
+#[tokio::test]
+async fn reasoning_only_stop_retry_exhaustion_respects_empty_guard() {
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
+        reasoning_only_stop_response(),
+        reasoning_only_stop_response(),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+    harness.with_policy(RunPolicy {
+        empty_response_retries: 1,
+        error_on_empty_response: true,
+        ..RunPolicy::default()
+    });
+
+    let err = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("two reasoning-only completions must fail the guarded run");
+    assert!(matches!(err, TinyAgentsError::EmptyResponse));
+    assert_eq!(model.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn empty_response_retry_budget_resets_after_a_tool_turn() {
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
+        reasoning_only_stop_response(),
+        tool_call_response("c1", "fake", json!({})),
+        reasoning_only_stop_response(),
+        text_response("done", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness
+        .register_model("mock", Arc::clone(&model) as _)
+        .register_tool(Arc::new(FakeTool::new("fake", "tool output")));
+    harness.with_policy(RunPolicy {
+        empty_response_retries: 1,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("each logical turn gets its own retry allowance");
+    assert_eq!(run.text(), Some("done".to_string()));
+    assert_eq!(run.model_calls, 4);
+}
+
+#[tokio::test]
+async fn empty_response_retry_does_not_replace_an_explicit_continuation() {
+    let mut continuing = reasoning_only_stop_response();
+    continuing.continue_turn = Some("Please finish your answer".to_string());
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
+        continuing,
+        text_response("done", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+    harness.with_policy(RunPolicy {
+        empty_response_retries: 1,
+        ..RunPolicy::default()
+    });
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect("the model's explicit continuation should run");
+    assert_eq!(run.text(), Some("done".to_string()));
+    assert_eq!(run.model_calls, 2);
+    assert_eq!(
+        run.messages.len(),
+        4,
+        "retain the continuing assistant row and nudge"
+    );
+}
+
+#[tokio::test]
+async fn empty_response_retry_does_not_replay_a_cached_blank() {
+    use crate::cache::InMemoryResponseCache;
+
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
+        reasoning_only_stop_response(),
+        text_response("recovered", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+    harness.with_response_cache(Arc::new(InMemoryResponseCache::new()));
+    harness.with_policy(RunPolicy {
+        empty_response_retries: 1,
+        ..RunPolicy::default()
+    });
+
+    let input = vec![Message::user("same request")];
+    let first = harness
+        .invoke_default(&(), input.clone())
+        .await
+        .expect("the retry must reach the provider, not the cached blank");
+    assert_eq!(first.text(), Some("recovered".to_string()));
+    assert_eq!(model.requests().len(), 2);
+
+    let second = harness
+        .invoke_default(&(), input)
+        .await
+        .expect("the usable answer should be cached");
+    assert_eq!(second.text(), Some("recovered".to_string()));
+    assert_eq!(model.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn empty_response_retry_ignores_a_blank_cached_before_opt_in() {
+    use crate::cache::InMemoryResponseCache;
+
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
+        reasoning_only_stop_response(),
+        text_response("recovered", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+    harness.with_response_cache(Arc::new(InMemoryResponseCache::new()));
+    let input = vec![Message::user("same request")];
+
+    let first = harness
+        .invoke_default(&(), input.clone())
+        .await
+        .expect("default policy still accepts a blank final");
+    assert_eq!(first.text(), Some(String::new()));
+    assert_eq!(model.requests().len(), 1);
+
+    harness.with_policy(RunPolicy {
+        empty_response_retries: 1,
+        ..RunPolicy::default()
+    });
+    let second = harness
+        .invoke_default(&(), input)
+        .await
+        .expect("an old blank cache entry must not block recovery");
+    assert_eq!(second.text(), Some("recovered".to_string()));
+    assert_eq!(model.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn truncated_empty_retry_does_not_replay_a_cached_blank() {
+    use crate::cache::InMemoryResponseCache;
+
+    let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
+        truncated_empty_response(2048),
+        text_response("recovered", 4, 3),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("mock", Arc::clone(&model) as _);
+    harness.with_response_cache(Arc::new(InMemoryResponseCache::new()));
+
+    let ctx = RunContext::new(
+        RunConfig::new("truncated-empty-cache").with_max_turn_output_tokens(2048),
+        (),
+    );
+    let run = harness
+        .invoke_in_context(&(), ctx, vec![Message::user("hi")])
+        .await
+        .expect("length-truncated empty completion should reach the provider again");
+    assert_eq!(run.text(), Some("recovered".to_string()));
+    assert_eq!(model.requests().len(), 2);
+    assert_eq!(model.requests()[1].max_tokens, Some(4096));
 }
 
 #[tokio::test]
