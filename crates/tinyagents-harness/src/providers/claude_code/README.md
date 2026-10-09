@@ -58,6 +58,11 @@ UUID comes from `session_store.rs`. `cwd` is `project_dir` — the caller's
 project root, not this provider's own `workspace_dir` — so CC's file tools
 act on the user's code.
 
+If a resumed session fails with Claude's explicit `No conversation found with
+session ID` diagnostic, the driver clears that thread mapping and retries once
+as a new session with the full conversation history. Other CLI failures do not
+invalidate the mapping or retry.
+
 The thread key that selects a session comes from `thread_key_from_request`
 in `mod.rs`: it reads `metadata.thread_id` / `conversation_id` / `session_id`
 off the `ModelRequest`, then `continuation_id`, and falls back to a fresh

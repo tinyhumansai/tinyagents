@@ -57,6 +57,20 @@ impl SessionStore {
         }
         std::fs::write(&self.path, serialized)
     }
+
+    /// Forget a thread's session mapping after the CLI confirms that session
+    /// does not exist. The next turn can then create a replacement session.
+    pub fn remove(&self, thread_id: &str) -> std::io::Result<()> {
+        let mut guard = self.inner.lock().expect("session store mutex poisoned");
+        if guard.sessions.remove(thread_id).is_none() {
+            return Ok(());
+        }
+        let serialized = serde_json::to_string_pretty(&*guard).map_err(std::io::Error::other)?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&self.path, serialized)
+    }
 }
 
 /// Random RFC-4122 v4 UUID, formatted lower-case with hyphens.

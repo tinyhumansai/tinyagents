@@ -26,3 +26,15 @@ fn roundtrip_set_and_get() {
     let reopened = SessionStore::open(dir.path());
     assert_eq!(reopened.get("thread_a").as_deref(), Some("abc"));
 }
+
+#[test]
+fn remove_forgets_mapping_across_reopen() {
+    let dir = tempdir().unwrap();
+    let store = SessionStore::open(dir.path());
+    store.set("thread_a", "session-a").unwrap();
+
+    store.remove("thread_a").unwrap();
+
+    assert!(store.get("thread_a").is_none());
+    assert!(SessionStore::open(dir.path()).get("thread_a").is_none());
+}

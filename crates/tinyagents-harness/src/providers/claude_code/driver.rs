@@ -37,6 +37,10 @@ fn parse_error_line_shape(line: &str) -> &'static str {
     }
 }
 
+fn is_missing_session_error(message: &str) -> bool {
+    message.contains("No conversation found with session ID:")
+}
+
 fn parse_error_log_line(ev: &ClaudeCodeEvent) -> Option<String> {
     let ClaudeCodeEvent::ParseError { line, reason } = ev else {
         return None;
@@ -611,6 +615,17 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
     let stderr_text = stderr_task.await.unwrap_or_default();
 
     if !status.success() {
+        if !is_new && is_missing_session_error(&stderr_text) {
+            tracing::warn!(
+                "[claude-code][driver] saved session is missing; clearing mapping and retrying with full history"
+            );
+            match ctx.session_store.remove(&ctx.thread_id) {
+                Ok(()) => return Box::pin(run_turn(ctx)).await,
+                Err(error) => tracing::warn!(
+                    "[claude-code][driver] failed to clear missing session mapping: {error}"
+                ),
+            }
+        }
         anyhow::bail!(
             "[claude-code][driver] exit {:?} stderr={}",
             status.code(),
@@ -618,6 +633,17 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
         );
     }
     if let Some(err) = mapper.error.clone() {
+        if !is_new && is_missing_session_error(&err) {
+            tracing::warn!(
+                "[claude-code][driver] saved session is missing; clearing mapping and retrying with full history"
+            );
+            match ctx.session_store.remove(&ctx.thread_id) {
+                Ok(()) => return Box::pin(run_turn(ctx)).await,
+                Err(error) => tracing::warn!(
+                    "[claude-code][driver] failed to clear missing session mapping: {error}"
+                ),
+            }
+        }
         anyhow::bail!("[claude-code][driver] {}", err);
     }
 

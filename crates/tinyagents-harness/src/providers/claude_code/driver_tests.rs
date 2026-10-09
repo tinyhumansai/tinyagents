@@ -4,6 +4,15 @@
 use super::*;
 
 #[test]
+fn missing_session_error_is_recognized_precisely() {
+    assert!(is_missing_session_error(
+        "No conversation found with session ID: 1234"
+    ));
+    assert!(!is_missing_session_error("authentication_failed"));
+    assert!(!is_missing_session_error("permission denied"));
+}
+
+#[test]
 fn write_mcp_http_config_emits_http_url_with_bearer_header() {
     let dir = tempfile::tempdir().expect("tempdir");
     let addr: std::net::SocketAddr = "127.0.0.1:54321".parse().unwrap();
