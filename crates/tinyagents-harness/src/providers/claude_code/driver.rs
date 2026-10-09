@@ -68,6 +68,54 @@ fn push_bounded(acc: &mut String, chunk: &str, max_bytes: usize) {
     }
 }
 
+/// Upper bound on the structured stdout error carried into a returned error.
+const STDOUT_ERROR_CAP: usize = 2_048;
+
+/// Remove credentials from a CLI-reported message and bound its length.
+/// Redacts the configured API key verbatim and any whitespace-delimited token
+/// that looks like an `sk-` key.
+fn sanitize_cli_message(raw: &str, api_key: Option<&str>) -> String {
+    let mut text = raw.to_string();
+    if let Some(key) = api_key.filter(|key| !key.is_empty()) {
+        text = text.replace(key, "[redacted]");
+    }
+    let redacted = text
+        .split_whitespace()
+        .map(|token| {
+            let core =
+                token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+            if core.starts_with("sk-") {
+                "[redacted]"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut out = String::new();
+    push_bounded(&mut out, &redacted, STDOUT_ERROR_CAP);
+    out
+}
+
+/// Error text for a nonzero CLI exit: the structured stdout error when the
+/// CLI printed one (sanitized and bounded), otherwise the bounded stderr.
+fn nonzero_exit_message(
+    code: Option<i32>,
+    stdout_error: Option<&str>,
+    stderr: &str,
+    api_key: Option<&str>,
+) -> String {
+    match stdout_error.map(|e| sanitize_cli_message(e, api_key)) {
+        Some(message) if !message.is_empty() => {
+            format!("[claude-code][driver] exit {code:?}: {message}")
+        }
+        _ => format!(
+            "[claude-code][driver] exit {code:?} stderr={}",
+            stderr.trim()
+        ),
+    }
+}
+
 use super::bridge::{ChatMessage, ChatResponse, ProviderDelta};
 use super::event_mapper::EventMapper;
 use super::input_builder::build_stdin;
@@ -611,10 +659,18 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
     let stderr_text = stderr_task.await.unwrap_or_default();
 
     if !status.success() {
+        // The CLI reports most failures (bad auth, unknown model, invalid
+        // session) as a structured `result`/`error` event on stdout and often
+        // leaves stderr empty. Prefer that message; fall back to stderr only
+        // when stdout carried none.
         anyhow::bail!(
-            "[claude-code][driver] exit {:?} stderr={}",
-            status.code(),
-            stderr_text.trim()
+            "{}",
+            nonzero_exit_message(
+                status.code(),
+                mapper.error.as_deref(),
+                &stderr_text,
+                ctx.anthropic_api_key.as_deref(),
+            )
         );
     }
     if let Some(err) = mapper.error.clone() {
