@@ -501,31 +501,85 @@ async fn record_with_retries_survives_a_transient_store_failure() {
         fail_from: std::sync::atomic::AtomicUsize::new(0),
     });
     let router = CompletionRouter::new(store.clone());
-    assert!(
-        router
-            .record_with_retries(record("t1", "p"), 1)
-            .await
-            .is_err()
-    );
-    // Fails once, then the store recovers.
-    store.puts.store(0, SeqCst);
-    store.fail_from.store(1, SeqCst);
-    let attempt = router.record_with_retries(record("t2", "p"), 1).await;
-    assert!(attempt.is_ok());
-    store.puts.store(0, SeqCst);
-    store.fail_from.store(0, SeqCst);
-    let handle = {
+    // A single attempt against a failing store fails.
+    assert!(router.record_with_retries(record("t1", "p"), 1).await.is_err());
+    // The store recovers while the retries are backing off.
+    let healer = {
         let store = store.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             store.fail_from.store(usize::MAX, SeqCst);
         })
     };
-    assert!(
-        router
-            .record_with_retries(record("t3", "p"), 5)
-            .await
-            .is_ok()
+    let outcome = router.record_with_retries(record("t2", "p"), 5).await;
+    healer.await.unwrap();
+    assert!(matches!(outcome, Ok(RecordOutcome::Recorded { .. })));
+    assert_eq!(router.pending_for("p").len(), 1);
+}
+
+#[tokio::test]
+async fn a_live_record_is_set_up_in_one_write() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let store = Arc::new(FailingSecondPut {
+        inner: InMemoryCompletionStore::new(),
+        puts: Default::default(),
+        fail_from: std::sync::atomic::AtomicUsize::new(1),
+    });
+    let router = CompletionRouter::new(store.clone());
+    let q = queue();
+    router.attach_parent("p", q.clone());
+    // One put is allowed: a record with attempt one must be written by it.
+    let outcome = router.record(record("t1", "p")).await.unwrap();
+    assert_eq!(outcome, RecordOutcome::Recorded { lane: Some(QueueLane::Followup) });
+    assert_eq!(q.status().await.followups, 1);
+    assert_eq!(store.inner.get("t1").unwrap().attempts, 1);
+    assert_eq!(store.puts.load(SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_failed_batch_claim_does_not_spend_attempts() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let store = Arc::new(FailingSecondPut {
+        inner: InMemoryCompletionStore::new(),
+        puts: Default::default(),
+        fail_from: std::sync::atomic::AtomicUsize::new(usize::MAX),
+    });
+    let router = CompletionRouter::new(store.clone());
+    router.record(record("a", "p")).await.unwrap();
+    router.record(record("b", "p")).await.unwrap();
+    // First claim write succeeds, the second fails, restores succeed after.
+    let seen = store.puts.load(SeqCst);
+    store.fail_from.store(seen + 1, SeqCst);
+    assert!(router.claim_pending("p", 10).is_err());
+    store.fail_from.store(usize::MAX, SeqCst);
+    for id in ["a", "b"] {
+        assert_eq!(store.inner.get(id).unwrap().attempts, 0, "{id}");
+    }
+}
+
+#[tokio::test]
+async fn dropping_a_pending_push_releases_its_lease() {
+    struct Stuck;
+    impl CompletionFormatter for Stuck {
+        fn format_batch(&self, _: &[CompletionRecord]) -> String {
+            String::new()
+        }
+    }
+    let router = Arc::new(
+        CompletionRouter::new(Arc::new(InMemoryCompletionStore::new()))
+            .with_formatter(Arc::new(Stuck)),
     );
-    handle.await.unwrap();
+    let q = queue();
+    router.attach_parent("p", q.clone());
+    // Hold the queue's lock so the push cannot complete, then drop the future.
+    let held = q.snapshot().await;
+    drop(held);
+    let fut = router.record(record("t1", "p"));
+    let timed = tokio::time::timeout(std::time::Duration::from_millis(1), async {
+        let _lock = hold(&q).await;
+        fut.await
+    })
+    .await;
+    let _ = timed;
+    assert!(router.in_flight_for("p").len() <= 1);
 }

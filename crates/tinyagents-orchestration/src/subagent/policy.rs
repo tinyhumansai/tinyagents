@@ -123,10 +123,11 @@ pub(crate) async fn apply_outcome_policies(
     mut outcome: SubagentOutcome,
     policy: &SubAgentPolicy,
     result_policy: &ResultPolicy,
-) -> (SubagentOutcome, usize) {
+) -> (SubagentOutcome, usize, Option<ArtifactReference>) {
     let mut omitted_chars = 0;
+    let mut overflow = None;
     if !matches!(outcome.status, SubagentOutcomeKind::Completed) {
-        return (outcome, omitted_chars);
+        return (outcome, omitted_chars, overflow);
     }
     let measured = tinyagents_graph::SubAgentOutput {
         usage: outcome.usage,
@@ -145,9 +146,10 @@ pub(crate) async fn apply_outcome_policies(
         outcome.output = applied.text;
         outcome.schema_error = applied.schema_error;
         outcome.artifact_error = applied.artifact_error;
+        overflow = applied.artifact.clone();
         outcome.artifacts.extend(applied.artifact);
     }
-    (outcome, omitted_chars)
+    (outcome, omitted_chars, overflow)
 }
 
 #[cfg(test)]

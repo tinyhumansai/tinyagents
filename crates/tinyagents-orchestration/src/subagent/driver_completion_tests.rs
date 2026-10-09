@@ -378,8 +378,8 @@ async fn truncation_metadata_reaches_the_completion() {
 }
 
 #[test]
-fn the_overflow_artifact_is_the_one_a_completion_names() {
-    let origin_task = SubagentTaskKey {
+fn only_the_overflow_artifact_is_named_by_a_completion() {
+    let task_key = SubagentTaskKey {
         root_run_id: "r".into(),
         parent_run_id: "pr".into(),
         thread_id: Some("p".into()),
@@ -393,15 +393,19 @@ fn the_overflow_artifact_is_the_one_a_completion_names() {
         RunContext::new(RunConfig::new("c"), String::new()),
     )
     .with_notify_mode(NotifyMode::Off);
-    let origin = completion::CompletionOrigin::new(&origin_task, &prepared).unwrap();
+    let origin = completion::CompletionOrigin::new(&task_key, &prepared).unwrap();
     let mut outcome = SubagentOutcome::completed("t1", "preview");
-    for id in ["pre-existing", "overflow"] {
-        outcome.artifacts.push(ArtifactReference {
-            id: id.into(),
-            ..Default::default()
-        });
-    }
-    let record = origin.record_for_outcome(&outcome, 9).unwrap();
-    assert_eq!(record.result.artifact.unwrap().id, "overflow");
-    assert_eq!(record.parent_key, "p");
+    outcome.artifacts.push(ArtifactReference {
+        id: "executor-own".into(),
+        ..Default::default()
+    });
+    let none = origin.record_for_outcome(&outcome, 0, None).unwrap();
+    assert!(none.result.artifact.is_none());
+    let overflow = ArtifactReference {
+        id: "overflow".into(),
+        ..Default::default()
+    };
+    let some = origin.record_for_outcome(&outcome, 9, Some(&overflow)).unwrap();
+    assert_eq!(some.result.artifact.unwrap().id, "overflow");
+    assert_eq!(some.parent_key, "p");
 }

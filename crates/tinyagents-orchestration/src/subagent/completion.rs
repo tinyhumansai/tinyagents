@@ -87,6 +87,7 @@ impl CompletionOrigin {
         &self,
         outcome: &SubagentOutcome,
         omitted_chars: usize,
+        overflow_artifact: Option<&ArtifactReference>,
     ) -> Option<CompletionRecord> {
         let (status, text) = match &outcome.status {
             SubagentOutcomeKind::Completed => (CompletionStatus::Success, outcome.output.clone()),
@@ -103,9 +104,9 @@ impl CompletionOrigin {
         let result = CompletionResult {
             text,
             omitted_chars,
-            // An overflow artifact is appended by the result policy, so the last
-            // reference is the one holding the full output.
-            artifact: outcome.artifacts.last().map(CompletionArtifact::from),
+            // Only the artifact the result policy stored the full output in; the
+            // executor's own artifacts are not the omitted output.
+            artifact: overflow_artifact.map(CompletionArtifact::from),
         };
         Some(self.record(status, result))
     }

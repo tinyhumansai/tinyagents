@@ -218,14 +218,6 @@ impl CompletionRouter {
             record.state = CompletionState::Pending;
             record.attempts = 0;
             record.updated_at = SystemTime::now();
-            self.store.put(&record)?;
-            tracing::debug!(
-                task_id = %record.task_id,
-                parent_key = %record.parent_key,
-                status = record.status.as_str(),
-                notify_mode = record.notify_mode.as_str(),
-                "{LOG_PREFIX} recorded"
-            );
             let lane = match record.notify_mode {
                 NotifyMode::Followup => Some(QueueLane::Followup),
                 NotifyMode::Collect => Some(QueueLane::Collect),
@@ -235,27 +227,42 @@ impl CompletionRouter {
             // stays pending and leased until the host acknowledges it with
             // `mark_delivered`, so a crash, a cleared queue or a detached parent
             // never loses it (it is redelivered through `claim_pending`).
-            match lane.and_then(|lane| {
+            // Attempt one is written with the record in a single put, so a store
+            // failure leaves either nothing or a record that is fully set up.
+            let live = lane.and_then(|lane| {
                 state
                     .parents
                     .get(&record.parent_key)
                     .map(|queue| (lane, queue.clone()))
-            }) {
-                Some((lane, queue)) => {
-                    record.attempts = 1;
-                    record.updated_at = SystemTime::now();
-                    self.store.put(&record)?;
-                    state.leased.insert(record.task_id.clone());
-                    Some((lane, queue))
-                }
-                None => None,
+            });
+            if live.is_some() {
+                record.attempts = 1;
             }
+            self.store.put(&record)?;
+            tracing::debug!(
+                task_id = %record.task_id,
+                parent_key = %record.parent_key,
+                status = record.status.as_str(),
+                notify_mode = record.notify_mode.as_str(),
+                "{LOG_PREFIX} recorded"
+            );
+            if live.is_some() {
+                state.leased.insert(record.task_id.clone());
+            }
+            live
         };
         let Some((lane, queue)) = push else {
             return Ok(RecordOutcome::Recorded { lane: None });
         };
         let message = self.formatter.to_message(std::slice::from_ref(&record));
+        // If this future is dropped while the push is pending, the guard frees
+        // the lease so the record is not stranded.
+        let guard = LeaseGuard {
+            router: self,
+            task_id: &record.task_id,
+        };
         queue.push(lane, message).await;
+        std::mem::forget(guard);
         tracing::debug!(
             task_id = %record.task_id,
             parent_key = %record.parent_key,
@@ -422,16 +429,30 @@ impl CompletionRouter {
         sort_oldest_first(&mut candidates);
         candidates.truncate(max);
         let mut claimed: Vec<CompletionRecord> = Vec::with_capacity(candidates.len());
+        let mut originals: Vec<CompletionRecord> = Vec::with_capacity(candidates.len());
         for mut record in candidates {
+            let original = record.clone();
             record.attempts = record.attempts.saturating_add(1);
             record.updated_at = SystemTime::now();
             if let Err(error) = self.store.put(&record) {
-                // The caller gets no ids on error, so none may stay leased.
+                // The caller gets no ids on error: nothing stays leased and the
+                // attempts already written are put back, so a failed claim
+                // costs no delivery attempt.
                 for done in &claimed {
                     state.leased.remove(&done.task_id);
                 }
+                for before in &originals {
+                    if let Err(restore) = self.store.put(before) {
+                        tracing::warn!(
+                            task_id = %before.task_id,
+                            error = %restore,
+                            "{LOG_PREFIX} could not restore attempts after failed claim"
+                        );
+                    }
+                }
                 return Err(error);
             }
+            originals.push(original);
             state.leased.insert(record.task_id.clone());
             claimed.push(record);
         }
@@ -528,6 +549,19 @@ impl CompletionRouter {
         } else {
             format!("{finished}\n\n{interrupted}")
         }
+    }
+}
+
+/// Releases a lease on drop; `forget` it once the push has completed.
+struct LeaseGuard<'a> {
+    router: &'a CompletionRouter,
+    task_id: &'a str,
+}
+
+impl Drop for LeaseGuard<'_> {
+    fn drop(&mut self) {
+        tracing::debug!(task_id = %self.task_id, "{LOG_PREFIX} push abandoned; lease released");
+        self.router.release(&[self.task_id]);
     }
 }
 

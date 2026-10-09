@@ -113,6 +113,9 @@ pub struct JsonlCompletionStore {
     path: PathBuf,
     inner: InMemoryCompletionStore,
     file: Mutex<std::fs::File>,
+    /// Set when a failed append could not be rolled back; the log tail is then
+    /// unrepaired, so every later write fails until the store is reopened.
+    broken: std::sync::atomic::AtomicBool,
 }
 
 impl JsonlCompletionStore {
@@ -140,6 +143,7 @@ impl JsonlCompletionStore {
             path,
             inner,
             file: Mutex::new(file),
+            broken: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -180,7 +184,7 @@ fn replay(path: &Path) -> Result<Vec<CompletionRecord>> {
                 good_len = next;
                 needs_newline = !terminated;
             }
-            Err(_) if line.iter().all(u8::is_ascii_whitespace) => {
+            Err(_) if terminated && line.iter().all(u8::is_ascii_whitespace) => {
                 good_len = next;
             }
             Err(err) if terminated => {
@@ -237,13 +241,25 @@ impl CompletionStore for JsonlCompletionStore {
                 .map_err(|_| store_err("file lock", "poisoned"))?;
             // One write_all of the whole line, then fsync: a crash leaves either
             // the full line or a torn tail that `open` discards.
+            if self.broken.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(store_err(
+                    "append",
+                    "log tail is unrepaired after an earlier failed write; reopen the store",
+                ));
+            }
             let start = file.metadata().map_err(|e| store_err("stat", e))?.len();
             let written = file
                 .write_all(line.as_bytes())
                 .and_then(|()| file.sync_data());
             if let Err(e) = written {
                 // Drop a partial line so the next append cannot fuse with it.
-                let _ = file.set_len(start);
+                if let Err(rollback) = file.set_len(start) {
+                    self.broken.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return Err(store_err(
+                        "append (rollback also failed)",
+                        format!("{e}; {rollback}"),
+                    ));
+                }
                 return Err(store_err("append", e));
             }
             // Still under the file lock, so `compact` never sees the line
@@ -267,8 +283,14 @@ impl CompletionStore for JsonlCompletionStore {
             let before = map.len();
             let kept: Vec<&CompletionRecord> =
                 map.values().filter(|r| !expired(r, now, retain)).collect();
-            let tmp = self.path.with_extension("jsonl.tmp");
-            let _ = std::fs::remove_file(&tmp);
+            // A name no other compaction or store instance can be using.
+            let tmp = self.path.with_extension(format!(
+                "jsonl.{}.{}.tmp",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos())
+            ));
             let out = {
                 // Append mode, so the handle that becomes the live log keeps
                 // O_APPEND semantics (a rolled-back write cannot leave a hole).
@@ -288,7 +310,10 @@ impl CompletionStore for JsonlCompletionStore {
                     .map_err(|e| store_err("sync compaction file", e))?;
                 out
             };
-            std::fs::rename(&tmp, &self.path).map_err(|e| store_err("swap compacted log", e))?;
+            if let Err(e) = std::fs::rename(&tmp, &self.path) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(store_err("swap compacted log", e));
+            }
             if let Some(dir) = self.path.parent().filter(|p| !p.as_os_str().is_empty())
                 && let Ok(dir) = std::fs::File::open(dir)
             {
