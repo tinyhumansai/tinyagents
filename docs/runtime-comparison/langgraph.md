@@ -90,7 +90,7 @@ Legend: Yes / Partial / No. File paths are what I checked.
 | LLM tool selector / provider tool search | Yes | Yes/No — `DynamicToolSelectionMiddleware`, `ContextualToolSelectionMiddleware` (`tool/select/`); no provider-side tool search | |
 | Todo list middleware | Yes (opt-in) | Yes — `graph/src/todos/` (`TodoList`, same shape) | |
 | Shell / file-search middleware | Yes | No in harness (`tools/` has `time.rs` only); `workspace/` gives roots | OpenHuman owns tools. |
-| `ToolRuntime` injection (state, store, stream_writer, tool_call_id) | Yes | Partial — `ToolExecutionContext` (run/thread/depth/events/cancel/workspace); no state/store/tool_call_id | `tool/injected.rs` exists for hidden args. |
+| `ToolRuntime` injection (state, store, stream_writer, tool_call_id) | Yes | Partial — `ToolExecutionContext` (run/thread/depth/events/cancel/workspace); no state/store/tool_call_id | `tinytools::prepare_tool_arguments` exists for hidden args. |
 | Tool returns `Command` (state update + routing) | Yes | No — `ToolResult{content,is_error}` (vendor `tinytools`) | |
 | `return_direct`, `ToolMessage.artifact` | Yes | No / Partial — no early-exit flag; `artifacts/` + `handoff.rs` offload large results instead | `sdk-gaps/orchestration.md` §13 "early-exit tools". |
 | `ToolNode.handle_tool_errors` matrix | Yes | Partial — tool errors are recoverable results; unknown tool aborts (`sdk-gaps/tools.md` §2) | |

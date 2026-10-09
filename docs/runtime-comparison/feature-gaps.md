@@ -28,7 +28,7 @@ that the feature would extend.
 
 | # | Gap | Who has it | Source | Existing seam | Layer | Value | Status |
 |---|---|---|---|---|---|---|---|
-| B1 | `ToolRuntime` parity: tool sees `call_id`, store, state view, stream writer, execution info | LG, PA (`RunContext`) | LG §3.6 | `ToolExecutionContext{run_id, thread_id, depth, events, cancel, workspace}`, `tool/injected.rs` | RT harness | 1 | shipped |
+| B1 | `ToolRuntime` parity: tool sees `call_id`, store, state view, stream writer, execution info | LG, PA (`RunContext`) | LG §3.6 | `ToolExecutionContext{run_id, thread_id, depth, events, cancel, workspace}`, `tinytools::prepare_tool_arguments` | RT harness | 1 | shipped |
 | B2 | Rich tool return: model-visible value + separate multimodal follow-up content + app metadata / artifact never shown to the model | PA (`ToolReturn`), LG (`ToolMessage.artifact`) | PA §3.3, LG §3.6 | `ToolContent::{Text, Json}` (vendor tinytools), `artifacts/`, `handoff.rs` | RT tinytools+harness | 1 | shipped |
 | B3 | Composable toolsets: `Combined`, `Filtered`, `Prefixed`, `Renamed`, `Prepared`, `ApprovalRequired`, `External`; per-tool `prepare` hook; toolset carries its own instructions | PA | PA §3.4 | `ToolRegistry`, `ToolAllowlistMiddleware`, `DynamicToolSelectionMiddleware`, `ToolExposure` | RT harness (OpenHuman `agent/tool_policy.rs` shrinks to predicates) | 2 | shipped |
 | B4 | Generic MCP client (stdio / streamable HTTP / SSE), prefixes, sampling, elicitation, `process_tool_call`, config-file loading | PA, LG (`langchain.mcp`) | PA §3.5, LG §3.10 | MCP only inside `providers/claude_code`; OpenHuman has `mcp/` | RT new crate (`tinytools-mcp`); server config/auth UI in OH | 2 | OpenHuman |

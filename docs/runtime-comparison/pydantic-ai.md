@@ -276,7 +276,7 @@ sanitisation belong to the host (§5).
   one signature. TinyAgents splits `&State` (graph state) from `Ctx`
   (runtime deps), which is the right split for a graph runtime but means
   tools receive `ToolRunContext` (tinytools) rather than the harness
-  `RunContext`; the injected-argument mechanism (`tool/injected.rs`) is a
+  `RunContext`; the injected-argument mechanism (`tinytools::prepare_tool_arguments`) is a
   workaround Pydantic does not need. Worse in Pydantic: no separate durable
   state, so "state" is whatever you put in `deps` or message history.
 - **Validation-retry loop.** Pydantic's single `ModelRetry` exception unifies
