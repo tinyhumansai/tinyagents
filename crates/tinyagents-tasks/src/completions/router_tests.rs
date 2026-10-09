@@ -546,23 +546,46 @@ async fn a_live_record_is_set_up_in_one_write() {
     assert_eq!(store.puts.load(SeqCst), 1);
 }
 
+struct FailOnce {
+    inner: InMemoryCompletionStore,
+    puts: std::sync::atomic::AtomicUsize,
+    fail_at: std::sync::atomic::AtomicUsize,
+}
+
+impl CompletionStore for FailOnce {
+    fn get(&self, task_id: &str) -> Option<CompletionRecord> {
+        self.inner.get(task_id)
+    }
+    fn put(&self, record: &CompletionRecord) -> tinyagents_harness::error::Result<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.puts.fetch_add(1, SeqCst) == self.fail_at.load(SeqCst) {
+            return Err(tinyagents_harness::error::TinyAgentsError::Graph(
+                "disk".into(),
+            ));
+        }
+        self.inner.put(record)
+    }
+    fn list(&self, parent_key: Option<&str>) -> Vec<CompletionRecord> {
+        self.inner.list(parent_key)
+    }
+}
+
 #[tokio::test]
 async fn a_failed_batch_claim_does_not_spend_attempts() {
     use std::sync::atomic::Ordering::SeqCst;
-    let store = Arc::new(FailingSecondPut {
+    let store = Arc::new(FailOnce {
         inner: InMemoryCompletionStore::new(),
         puts: Default::default(),
-        fail_from: std::sync::atomic::AtomicUsize::new(usize::MAX),
+        fail_at: std::sync::atomic::AtomicUsize::new(usize::MAX),
     });
     let router = CompletionRouter::new(store.clone());
     router.record(record("a", "p")).await.unwrap();
     router.record(record("b", "p")).await.unwrap();
-    // First claim write succeeds, the second fails, restores succeed after.
-    let seen = store.puts.load(SeqCst);
-    store.fail_from.store(seen + 1, SeqCst);
+    // The first claim write succeeds, the second fails; the restore succeeds.
+    store.fail_at.store(store.puts.load(SeqCst) + 1, SeqCst);
     assert!(router.claim_pending("p", 10).is_err());
-    store.fail_from.store(usize::MAX, SeqCst);
     for id in ["a", "b"] {
         assert_eq!(store.inner.get(id).unwrap().attempts, 0, "{id}");
     }
+    assert_eq!(router.claim_pending("p", 10).unwrap().len(), 2);
 }
