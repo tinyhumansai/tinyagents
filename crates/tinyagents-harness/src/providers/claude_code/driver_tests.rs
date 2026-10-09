@@ -27,7 +27,11 @@ fn ephemeral_calls_disable_session_persistence_and_durable_calls_keep_resume_arg
     let mut ephemeral = vec!["-p".to_string()];
     append_session_args(&mut ephemeral, false, true, "unused-id");
     assert!(ephemeral.contains(&"--no-session-persistence".to_string()));
-    assert!(!ephemeral.iter().any(|arg| arg == "--session-id" || arg == "--resume"));
+    assert!(
+        !ephemeral
+            .iter()
+            .any(|arg| arg == "--session-id" || arg == "--resume")
+    );
 
     let mut new_conversation = Vec::new();
     append_session_args(&mut new_conversation, true, true, "conversation-id");

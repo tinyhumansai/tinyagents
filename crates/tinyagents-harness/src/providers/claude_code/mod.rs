@@ -332,16 +332,19 @@ fn thread_key_from_request(request: &ModelRequest) -> String {
 /// Whether the host supplied a durable conversation identity. A generated
 /// fallback id isolates a one-shot call but must not create a Claude transcript.
 fn request_has_session_identity(request: &ModelRequest) -> bool {
-    ["thread_id", "conversation_id", "session_id"].iter().any(|key| {
-        request
-            .metadata
-            .get(*key)
-            .and_then(serde_json::Value::as_str)
+    ["thread_id", "conversation_id", "session_id"]
+        .iter()
+        .any(|key| {
+            request
+                .metadata
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+        || request
+            .continuation_id
+            .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
-    }) || request
-        .continuation_id
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
 }
 
 /// Converts a `ModelRequest` into the flattened [`ChatMessage`] list this
@@ -568,9 +571,9 @@ impl ChatModel<()> for ClaudeCodeProvider {
             thread_id,
             persist_session,
         )
-            .await
-            .map(|response| model_response_with_tools(response, &request.tools))
-            .map_err(map_error)
+        .await
+        .map(|response| model_response_with_tools(response, &request.tools))
+        .map_err(map_error)
     }
     async fn stream(
         &self,
