@@ -235,3 +235,27 @@ async fn a_cancelled_parent_stays_cancelled_after_a_reopen() {
         RecordOutcome::Recorded { .. }
     ));
 }
+
+#[tokio::test]
+async fn an_unterminated_whitespace_tail_is_repaired() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("completions.jsonl");
+    let line = serde_json::to_string(&record("t1", "p")).unwrap();
+    std::fs::write(&path, format!("{line}\n   ")).unwrap();
+    let router = open_router(&path);
+    router.record(record("t2", "p")).await.unwrap();
+    drop(router);
+    assert_eq!(open_router(&path).pending_for("p").len(), 2);
+}
+
+#[tokio::test]
+async fn compaction_leaves_an_unrelated_tmp_file_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("completions.jsonl");
+    let unrelated = dir.path().join("completions.jsonl.tmp");
+    std::fs::write(&unrelated, "not ours").unwrap();
+    let router = open_router(&path);
+    router.record(record("a", "p")).await.unwrap();
+    router.compact(Duration::from_secs(3600)).unwrap();
+    assert_eq!(std::fs::read_to_string(&unrelated).unwrap(), "not ours");
+}

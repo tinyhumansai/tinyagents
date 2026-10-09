@@ -405,7 +405,9 @@ fn only_the_overflow_artifact_is_named_by_a_completion() {
         id: "overflow".into(),
         ..Default::default()
     };
-    let some = origin.record_for_outcome(&outcome, 9, Some(&overflow)).unwrap();
+    let some = origin
+        .record_for_outcome(&outcome, 9, Some(&overflow))
+        .unwrap();
     assert_eq!(some.result.artifact.unwrap().id, "overflow");
     assert_eq!(some.parent_key, "p");
 }
