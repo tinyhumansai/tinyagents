@@ -23,6 +23,22 @@ fn write_mcp_http_config_emits_http_url_with_bearer_header() {
 }
 
 #[test]
+fn ephemeral_calls_disable_session_persistence_and_durable_calls_keep_resume_args() {
+    let mut ephemeral = vec!["-p".to_string()];
+    append_session_args(&mut ephemeral, false, true, "unused-id");
+    assert!(ephemeral.contains(&"--no-session-persistence".to_string()));
+    assert!(!ephemeral.iter().any(|arg| arg == "--session-id" || arg == "--resume"));
+
+    let mut new_conversation = Vec::new();
+    append_session_args(&mut new_conversation, true, true, "conversation-id");
+    assert_eq!(new_conversation, ["--session-id", "conversation-id"]);
+
+    let mut resumed_conversation = Vec::new();
+    append_session_args(&mut resumed_conversation, true, false, "conversation-id");
+    assert_eq!(resumed_conversation, ["--resume", "conversation-id"]);
+}
+
+#[test]
 fn child_path_prepends_cli_dir_and_keeps_inherited_entries() {
     let _env = super::super::ENV_TEST_LOCK
         .lock()
