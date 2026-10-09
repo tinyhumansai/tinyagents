@@ -123,7 +123,7 @@ pub(crate) async fn apply_outcome_policies(
     mut outcome: SubagentOutcome,
     policy: &SubAgentPolicy,
     result_policy: &ResultPolicy,
-) -> (SubagentOutcome, usize, Option<ArtifactReference>) {
+) -> (SubagentOutcome, usize, Option<super::ArtifactReference>) {
     let mut omitted_chars = 0;
     let mut overflow = None;
     if !matches!(outcome.status, SubagentOutcomeKind::Completed) {
