@@ -652,7 +652,7 @@ fn last_context_of_a_legacy_record_is_exact_for_one_call_and_averaged_for_many()
 
     let mut many = turn_usage(5_710_657, 30_790, 0);
     many.iteration = 72;
-    assert_eq!(context_tokens_of(&many), (5_710_657 + 30_790) / 72);
+    assert_eq!(context_tokens_of(&many), 5_710_657 / 72 + 30_790 / 72);
 
     // A record that never stamped its call count counts as one call.
     let mut unnumbered = turn_usage(40_000, 1_000, 0);
