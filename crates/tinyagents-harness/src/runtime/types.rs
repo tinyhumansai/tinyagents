@@ -468,6 +468,11 @@ pub struct RunPolicy {
     /// (for example after a deferral) starts the budget over.
     ///
     /// Defaults to `2` (three truncated turns in a row stop the run).
+    ///
+    /// Independently of the budget, a tool cut off on two consecutive
+    /// truncated turns gets a stronger "stop sending calls this large"
+    /// corrective, and one more cut-off call of that tool stops the run: the
+    /// model is re-sending the same oversized shape.
     pub truncated_tool_call_retries: u32,
     /// How [`tinytools::ToolExposure::Deferred`] tools are surfaced: never in
     /// the request's `tools` array, but findable through the intrinsic
