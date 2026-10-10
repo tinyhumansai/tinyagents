@@ -348,7 +348,7 @@ pub enum TinyAgentsError {
 
 impl TinyAgentsError {
     /// Whether a limit error is terminal instead of a refilling rate limit.
-    pub(crate) fn is_terminal_limit(&self) -> bool {
+    pub fn is_terminal_limit(&self) -> bool {
         match self {
             Self::LimitExceeded(message) => !message.starts_with("rate limit:"),
             _ => false,

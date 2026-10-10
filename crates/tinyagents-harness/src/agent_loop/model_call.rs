@@ -734,7 +734,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                         // Provider and run-budget refusals are terminal: a
                         // retry or another model cannot make the exhausted
                         // budget available again.
-                        if matches!(&error, TinyAgentsError::LimitExceeded(_)) {
+                        if error.is_terminal_limit() {
                             break Err(error);
                         }
                         // The breaker outranks retry, not fallback: a model
