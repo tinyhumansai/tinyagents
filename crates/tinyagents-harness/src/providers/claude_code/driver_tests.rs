@@ -444,3 +444,41 @@ fn the_shape_of_the_line_is_reported() {
     assert!(shape("panic: claude-code crashed").contains("non-json"));
     assert!(shape("   ").contains("blank"));
 }
+
+#[cfg(unix)]
+mod structured_exit {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn nonzero_exit_with_structured_missing_session_error_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = "11111111-1111-4111-8111-111111111111";
+        let store = Arc::new(SessionStore::open(dir.path()));
+        store.set("t1", saved).unwrap();
+        let bin = dir.path().join("claude");
+        let script = format!(
+            "#!/bin/sh\ncat >/dev/null\ncase \"$*\" in *--resume*) echo '{{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"errors\":[\"No conversation found with session ID: {saved}\"]}}'; exit 1;; esac\necho '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\"}}'\n"
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let messages = vec![ChatMessage::user("hi")];
+        run_turn(TurnContext {
+            bin_path: bin,
+            workspace_dir: dir.path().to_path_buf(),
+            project_dir: dir.path().join("project"),
+            thread_id: "t1".into(),
+            persist_session: true,
+            model: "m".into(),
+            append_system_prompt: None,
+            messages: &messages,
+            session_store: store.clone(),
+            stream: None,
+            anthropic_api_key: None,
+            mcp_provider: None,
+        })
+        .await
+        .expect("retry succeeds");
+        assert_ne!(store.get("t1").as_deref(), Some(saved));
+    }
+}

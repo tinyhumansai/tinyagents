@@ -622,10 +622,12 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
     let stderr_text = stderr_task.await.unwrap_or_default();
 
     if !status.success() {
-        if !is_new
-            && is_missing_session_error(&stderr_text, &cc_session_id)
-            && clear_missing_session(&ctx, &cc_session_id)
-        {
+        let missing = is_missing_session_error(&stderr_text, &cc_session_id)
+            || mapper
+                .error
+                .as_deref()
+                .is_some_and(|e| is_missing_session_error(e, &cc_session_id));
+        if !is_new && missing && clear_missing_session(&ctx, &cc_session_id) {
             return Box::pin(run_turn(ctx)).await;
         }
         anyhow::bail!(
@@ -664,8 +666,8 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
 
 /// Drop the saved mapping that `--resume` just proved missing, but only if it
 /// still points at `failed_session_id`. Returns true when the caller may retry
-/// as a new session with the full history; false means the mapping could not
-/// be cleared and the original failure must be surfaced.
+/// as a new session with the full history; false means this call did not remove
+/// the mapping (write failed, or a concurrent turn already replaced it) and the original failure must be surfaced.
 fn clear_missing_session(ctx: &TurnContext<'_>, failed_session_id: &str) -> bool {
     tracing::warn!(
         "[claude-code][driver] saved session is missing; clearing mapping and retrying with full history"
@@ -674,7 +676,7 @@ fn clear_missing_session(ctx: &TurnContext<'_>, failed_session_id: &str) -> bool
         .session_store
         .remove_if(&ctx.thread_id, failed_session_id)
     {
-        Ok(_) => true,
+        Ok(removed) => removed,
         Err(error) => {
             tracing::warn!(
                 "[claude-code][driver] failed to clear missing session mapping: {error}"
