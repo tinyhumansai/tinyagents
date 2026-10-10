@@ -12,7 +12,7 @@ use crate::transcript::{
 
 const MODEL: &str = "openrouter/deepseek/deepseek-v4-flash";
 
-fn meta(agent: &str, agent_type: &str, thread_id: Option<&str>) -> TranscriptMeta {
+pub(super) fn meta(agent: &str, agent_type: &str, thread_id: Option<&str>) -> TranscriptMeta {
     TranscriptMeta {
         agent_name: agent.to_string(),
         agent_id: Some(agent.to_string()),
@@ -38,7 +38,7 @@ fn meta(agent: &str, agent_type: &str, thread_id: Option<&str>) -> TranscriptMet
     }
 }
 
-fn turn_usage(input: u64, output: u64, cached: u64) -> TurnUsage {
+pub(super) fn turn_usage(input: u64, output: u64, cached: u64) -> TurnUsage {
     TurnUsage {
         provider: "openhuman".into(),
         model: MODEL.into(),
