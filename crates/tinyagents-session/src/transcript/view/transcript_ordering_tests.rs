@@ -51,6 +51,7 @@ fn usage(iteration: u32, unix: i64, tool_calls: Vec<TranscriptToolCall>) -> Turn
             cached_input: 0,
             context_window: 0,
             cost_usd: 0.001,
+            ..Default::default()
         },
         ts: rfc3339(unix),
         reasoning_content: None,
