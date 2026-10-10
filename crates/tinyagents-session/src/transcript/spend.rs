@@ -49,7 +49,9 @@ pub struct TranscriptSpend {
 pub fn context_tokens_of(usage: &TurnUsage) -> u64 {
     let record = &usage.usage;
     if record.last_call_input > 0 {
-        return record.last_call_input.saturating_add(record.last_call_output);
+        return record
+            .last_call_input
+            .saturating_add(record.last_call_output);
     }
     let calls = u64::from(usage.iteration.max(1));
     record.input.saturating_add(record.output) / calls
