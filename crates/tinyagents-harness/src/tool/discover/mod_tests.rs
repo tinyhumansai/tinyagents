@@ -436,3 +436,43 @@ fn tool_search_schema_normalizes_inconsistent_limits() {
     assert!(minimum <= maximum, "minimum must not exceed maximum");
     assert!(maximum >= 1);
 }
+
+/// Production captures: models call `tool_search` with the query under
+/// `description`, `name`, `skill`, `q` or `text`. Each is the query.
+#[tokio::test]
+async fn answer_tool_search_reads_query_aliases() {
+    let policy = ToolDiscoveryPolicy::default();
+    for key in ["q", "text", "description", "name", "skill", "search"] {
+        let answer = answer_tool_search(&catalog(), &policy, &json!({ key: "read a pdf" })).await;
+        assert!(!answer.result.is_error, "{key}: {}", answer.result.text());
+        assert_eq!(
+            answer.matched_names.first().map(String::as_str),
+            Some("pdf_read"),
+            "{key}"
+        );
+    }
+    // `query` wins over an alias when both are present.
+    let answer = answer_tool_search(
+        &catalog(),
+        &policy,
+        &json!({ "query": "read a pdf", "name": "calendar invite" }),
+    )
+    .await;
+    assert_eq!(
+        answer.matched_names.first().map(String::as_str),
+        Some("pdf_read")
+    );
+}
+
+/// `{}` gets a short corrective that shows the call to make.
+#[tokio::test]
+async fn answer_tool_search_with_no_query_shows_an_example_call() {
+    let policy = ToolDiscoveryPolicy::default();
+    for args in [json!({}), json!({ "limit": 3 }), json!({ "query": "" })] {
+        let answer = answer_tool_search(&catalog(), &policy, &args).await;
+        assert!(answer.result.is_error);
+        let text = answer.result.text();
+        assert!(text.contains("{\"query\":"), "{text}");
+        assert!(text.len() < 200, "{text}");
+    }
+}
