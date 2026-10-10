@@ -569,6 +569,29 @@ impl ChatModel<()> for FailingModel {
     }
 }
 
+/// A model that refuses a request after the TinyInference budget is exhausted.
+struct BudgetFailingModel {
+    attempts: Mutex<usize>,
+}
+
+#[async_trait]
+impl ChatModel<()> for BudgetFailingModel {
+    async fn invoke(
+        &self,
+        _state: &(),
+        _request: ModelRequest,
+    ) -> tinyinference_llm::Result<ModelResponse> {
+        *self.attempts.lock().unwrap() += 1;
+        Err(tinyinference_llm::Error::BudgetExceeded(
+            tinyinference_llm::model::budget::BudgetExceeded {
+                snapshot: tinyinference_llm::model::budget::BudgetSnapshot::default(),
+                requested: tinyinference_llm::model::budget::Spend::default(),
+                limits: tinyinference_llm::model::budget::SpendLimits::default(),
+            },
+        ))
+    }
+}
+
 /// A model that always fails with a retryable error and records the
 /// (virtual) `tokio::time::Instant` of each `invoke` call, so a test can
 /// assert on the actual elapsed time between retries rather than just the
@@ -4097,6 +4120,32 @@ async fn retry_then_fallback_succeeds() {
 }
 
 #[tokio::test]
+async fn provider_budget_refusal_does_not_call_model_fallback() {
+    let primary = Arc::new(BudgetFailingModel {
+        attempts: Mutex::new(0),
+    });
+    let fallback = Arc::new(crate::testkit::ScriptedModel::replies(vec![
+        "unexpected fallback",
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("primary", primary.clone());
+    harness.register_model("fallback", fallback.clone());
+    harness.with_policy(RunPolicy {
+        fallback: Some(FallbackPolicy::new(["primary", "fallback"])),
+        ..RunPolicy::default()
+    });
+
+    let error = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("a provider budget refusal must stop the run");
+
+    assert!(matches!(error, TinyAgentsError::LimitExceeded(_)));
+    assert_eq!(*primary.attempts.lock().unwrap(), 1);
+    assert!(fallback.requests().is_empty());
+}
+
+#[tokio::test]
 async fn run_limits_max_retries_per_call_caps_a_looser_retry_policy() {
     // Regression test: `RunLimits::max_retries_per_call` was parsed but never
     // enforced, so a `RetryPolicy` with a higher `max_attempts` silently
@@ -5301,6 +5350,11 @@ async fn per_model_call_ceiling_consults_the_fallback_chain_instead_of_aborting(
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model("slow", slow.clone());
     harness.register_model("fallback", fallback.clone());
+    harness.with_policy(RunPolicy {
+        fallback: Some(FallbackPolicy::new(["fallback"])),
+        ..RunPolicy::default()
+    });
+
     harness.with_policy(RunPolicy {
         limits: RunLimits::default().with_max_model_call_ms(Some(20)),
         retry: RetryPolicy::default()
