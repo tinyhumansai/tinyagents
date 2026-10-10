@@ -481,3 +481,18 @@ async fn zero_exit_is_error_result_is_sanitized_and_bounded() {
     );
     assert!(text.len() < 2_300, "len {}", text.len());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nonzero_exit_stderr_fallback_is_redacted_and_bounded() {
+    let script = r#"echo "auth failed key=topsecret99 sk-ant-live-1234" >&2; head -c 5000 /dev/zero | tr '\0' x >&2; exit 1"#;
+    let err = run_fake_claude(script, Some("topsecret99"))
+        .await
+        .expect_err("nonzero exit must fail");
+    let text = err.to_string();
+    assert!(
+        !text.contains("topsecret99") && !text.contains("sk-ant-live-1234"),
+        "{text}"
+    );
+    assert!(text.len() < 2_300, "len {}", text.len());
+}

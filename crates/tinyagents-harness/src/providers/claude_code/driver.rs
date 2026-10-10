@@ -127,7 +127,7 @@ fn nonzero_exit_message(
         }
         _ => format!(
             "[claude-code][driver] exit {code:?} stderr={}",
-            stderr.trim()
+            sanitize_cli_message(stderr.trim(), api_key)
         ),
     }
 }
