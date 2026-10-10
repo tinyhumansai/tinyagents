@@ -41,6 +41,18 @@ fn never_retries_a_permanent_failure() {
 }
 
 #[test]
+fn terminal_budget_refusals_never_retry_even_with_a_custom_predicate() {
+    let policy = retrying().with_retry(
+        RetryPolicy::default()
+            .with_max_attempts(3)
+            .with_retry_on(std::sync::Arc::new(|_| true)),
+    );
+    let refusal = TinyAgentsError::LimitExceeded("budget exceeded: max tokens".into());
+
+    assert!(!may_retry(&policy, 0, &refusal, false));
+}
+
+#[test]
 fn does_not_retry_after_tools_ran_unless_the_policy_allows_it() {
     assert!(!may_retry(&retrying(), 0, &transient(), true));
     let allowed = retrying().with_retry_after_tool_calls(true);

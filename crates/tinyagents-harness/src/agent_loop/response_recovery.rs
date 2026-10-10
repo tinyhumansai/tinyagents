@@ -393,9 +393,11 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // and halve the output cap each time: the cap is the one limit on
         // deliberation these providers honour, and a smaller one makes the
         // model act sooner.
-        let clock_allows_another_nudge = truncated_retry
-            .as_ref()
-            .is_some_and(|plan| plan.another_nudge_fits())
+        // Zero explicitly disables nudges even when the run has clock room.
+        let clock_allows_another_nudge = self.policy.truncated_empty_nudges > 0
+            && truncated_retry
+                .as_ref()
+                .is_some_and(|plan| plan.another_nudge_fits())
             && turn_recovery.truncated_empty_nudges_used < TRUNCATED_CLOCK_NUDGE_LIMIT;
         let clock_only_nudge =
             turn_recovery.truncated_empty_nudges_used >= self.policy.truncated_empty_nudges;

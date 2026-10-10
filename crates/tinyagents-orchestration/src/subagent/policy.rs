@@ -36,7 +36,9 @@ pub(crate) fn may_retry(
     error: &TinyAgentsError,
     tools_ran: bool,
 ) -> bool {
-    policy.retry.should_retry_error(attempt, error) && (!tools_ran || policy.retry_after_tool_calls)
+    !error.is_terminal_limit()
+        && policy.retry.should_retry_error(attempt, error)
+        && (!tools_ran || policy.retry_after_tool_calls)
 }
 
 /// Everything about a plan except its (consumed) run context, kept so a

@@ -636,6 +636,8 @@ fn last_context_is_the_final_calls_size_not_the_turns_summed_spend() {
     assert_eq!(spend.root.last_input_tokens, 5_710_657);
     // The gauge reads one request.
     assert_eq!(spend.root.last_context_tokens, 103_900);
+    assert_eq!(spend.root.last_context_input_tokens, 103_000);
+    assert_eq!(spend.root.last_context_output_tokens, 900);
     assert!(spend.root.last_context_tokens < spend.root.context_window);
 }
 
@@ -651,6 +653,22 @@ fn last_context_of_a_legacy_record_is_exact_for_one_call_and_averaged_for_many()
     let mut many = turn_usage(5_710_657, 30_790, 0);
     many.iteration = 72;
     assert_eq!(context_tokens_of(&many), (5_710_657 + 30_790) / 72);
+    assert_eq!(context_input_tokens_of(&many), 5_710_657 / 72);
+    assert_eq!(context_output_tokens_of(&many), 30_790 / 72);
+
+    // Legacy component estimates round independently; preserve the historical
+    // combined total even when those estimates sum to one token less.
+    assert_eq!(
+        context_input_tokens_of(&many) + context_output_tokens_of(&many) + 1,
+        context_tokens_of(&many)
+    );
+
+    // A stamped output-only final call is still recognized as a call stamp.
+    let mut output_only = turn_usage(40_000, 1_000, 0);
+    output_only.usage.last_call_output = 17;
+    assert_eq!(context_input_tokens_of(&output_only), 0);
+    assert_eq!(context_output_tokens_of(&output_only), 17);
+    assert_eq!(context_tokens_of(&output_only), 17);
 
     // A record that never stamped its call count counts as one call.
     let mut unnumbered = turn_usage(40_000, 1_000, 0);

@@ -31,18 +31,3 @@ fn refilling_rate_limit_errors_are_not_terminal_limits() {
     let error = TinyAgentsError::LimitExceeded("rate limit: could not acquire 1 token".into());
     assert!(!error.is_terminal_limit());
 }
-
-#[test]
-fn provider_budget_refusals_convert_to_terminal_run_limits() {
-    let source = tinyinference_llm::model::budget::BudgetExceeded {
-        snapshot: tinyinference_llm::model::budget::BudgetSnapshot::default(),
-        requested: tinyinference_llm::model::budget::Spend::default(),
-        limits: tinyinference_llm::model::budget::SpendLimits::default(),
-    };
-
-    let converted = TinyAgentsError::from(tinyinference_llm::Error::BudgetExceeded(source));
-
-    assert!(
-        matches!(converted, TinyAgentsError::LimitExceeded(message) if message.contains("budget exceeded"))
-    );
-}

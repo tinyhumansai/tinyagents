@@ -654,6 +654,9 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         loop {
             // Retry loop for the current model.
             let mut attempt = 0usize;
+            // Track the source of a limit error explicitly. The idle breaker
+            // may send its own limit error through fallback, while all other
+            // limit errors remain terminal regardless of the timeout count.
             let mut idle_breaker_error = false;
             // Counts the deltas the *current* streaming attempt has already
             // handed to consumers. A stream that dies after 200 tokens has
@@ -728,6 +731,9 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 match attempt_result {
                     Ok(response) => break Ok(response),
                     Err(error) => {
+                        // Provider and run-budget refusals are terminal: a
+                        // retry or another model cannot make the exhausted
+                        // budget available again.
                         if error.is_terminal_limit() {
                             break Err(error);
                         }

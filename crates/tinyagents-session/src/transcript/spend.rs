@@ -33,6 +33,10 @@ pub struct TranscriptSpend {
     /// plus its reply): the numerator of a context-window gauge. See
     /// [`context_tokens_of`] for records written before the per-call fields.
     pub last_context_tokens: u64,
+    /// Final call's input and output are kept separately for readers that need
+    /// to exclude generated output from conversation-history estimates.
+    pub last_context_input_tokens: u64,
+    pub last_context_output_tokens: u64,
     pub model: Option<String>,
     pub context_window: u64,
     /// `cost_usd` split by how much of it is known; see [`CostSplit`].
@@ -114,13 +118,33 @@ impl CostSplit {
 /// 1M window.
 pub fn context_tokens_of(usage: &TurnUsage) -> u64 {
     let record = &usage.usage;
-    if record.last_call_input > 0 {
+    if record.last_call_input > 0 || record.last_call_output > 0 {
         return record
             .last_call_input
             .saturating_add(record.last_call_output);
     }
     let calls = u64::from(usage.iteration.max(1));
     record.input.saturating_add(record.output) / calls
+}
+
+/// Input tokens of the final provider call, with an averaged legacy fallback.
+pub fn context_input_tokens_of(usage: &TurnUsage) -> u64 {
+    let record = &usage.usage;
+    if record.last_call_input > 0 || record.last_call_output > 0 {
+        return record.last_call_input;
+    }
+    let calls = u64::from(usage.iteration.max(1));
+    record.input / calls
+}
+
+/// Output tokens of the final provider call, with an averaged legacy fallback.
+pub fn context_output_tokens_of(usage: &TurnUsage) -> u64 {
+    let record = &usage.usage;
+    if record.last_call_input > 0 || record.last_call_output > 0 {
+        return record.last_call_output;
+    }
+    let calls = u64::from(usage.iteration.max(1));
+    record.output / calls
 }
 
 /// Total one transcript's own recorded spend over its logical message set.
@@ -174,6 +198,8 @@ fn spend_from_usages<'a>(
         spend.last_input_tokens = usage.usage.input;
         spend.last_output_tokens = usage.usage.output;
         spend.last_context_tokens = context_tokens_of(usage);
+        spend.last_context_input_tokens = context_input_tokens_of(usage);
+        spend.last_context_output_tokens = context_output_tokens_of(usage);
         if usage.usage.context_window > 0 {
             spend.context_window = usage.usage.context_window;
         }
@@ -382,6 +408,8 @@ pub fn thread_spend(workspace_dir: &Path, thread_id: &str) -> ThreadSpend {
                 out.root.last_input_tokens = spend.last_input_tokens;
                 out.root.last_output_tokens = spend.last_output_tokens;
                 out.root.last_context_tokens = spend.last_context_tokens;
+                out.root.last_context_input_tokens = spend.last_context_input_tokens;
+                out.root.last_context_output_tokens = spend.last_context_output_tokens;
             }
             if spend.context_window > 0 {
                 out.root.context_window = spend.context_window;
