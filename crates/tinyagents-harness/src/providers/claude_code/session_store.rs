@@ -70,6 +70,7 @@ impl SessionStore {
     }
 
     /// Fingerprints of user turns already delivered to `thread_id`'s session.
+    #[cfg(test)]
     pub fn delivered(&self, thread_id: &str) -> HashSet<String> {
         self.lock()
             .delivered
