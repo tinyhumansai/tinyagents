@@ -186,6 +186,9 @@ mod tool_rules_test;
 #[path = "tools_args_recovery_tests.rs"]
 mod tools_args_recovery_test;
 #[cfg(test)]
+#[path = "truncated_tool_call_tests.rs"]
+mod truncated_tool_call_test;
+#[cfg(test)]
 #[path = "unknown_tool_tests.rs"]
 mod unknown_tool_test;
 
