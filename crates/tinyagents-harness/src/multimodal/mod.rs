@@ -42,7 +42,7 @@
 //!
 //! | Host owns | Why |
 //! | --- | --- |
-//! | The `reqwest::Client` | proxy configuration and timeouts are host policy; this module borrows one |
+//! | The `reqwest::Client` | retained in resolver signatures for compatibility; remote fetches use a DNS-pinned direct client with redirects disabled |
 //! | [`TextExtractor`] | which document parser (if any) a host carries, and how long it may run |
 //! | The stash policy | which directory holds bytes between ingress and dispatch, how large it may grow, how long files live ([`stash::AttachmentStash`] is the mechanism) |
 //! | Message-level counting | only the host knows what its message type is |

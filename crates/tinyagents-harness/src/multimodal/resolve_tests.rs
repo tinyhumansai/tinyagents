@@ -45,6 +45,94 @@ async fn remote_file_rejects_mapped_private_destination_before_fetch() {
 }
 
 #[tokio::test]
+async fn remote_file_ignores_caller_dns_override_to_loopback() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = Client::builder()
+        .no_proxy()
+        .resolve("attachment.invalid", listener.local_addr().unwrap())
+        .build()
+        .unwrap();
+    let limits = FileLimits {
+        allow_remote_fetch: true,
+        ..FileLimits::default()
+    };
+    let error = resolve_attachment(
+        "http://attachment.invalid/file.txt",
+        &limits,
+        1024,
+        &client,
+        UnknownMimePolicy::Accept,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        MultimodalError::RemoteFileFetchFailed { .. }
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn remote_image_ignores_caller_dns_override_to_loopback() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = Client::builder()
+        .no_proxy()
+        .resolve("image.invalid", listener.local_addr().unwrap())
+        .build()
+        .unwrap();
+    let limits = ImageLimits {
+        allow_remote_fetch: true,
+        ..ImageLimits::default()
+    };
+    let error = resolve_image("http://image.invalid/a.png", &limits, 1024, &client)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, MultimodalError::RemoteFetchFailed { .. }));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn guarded_client_does_not_follow_redirects() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    // The synthetic validated address tests the transport policy in isolation.
+    // Production obtains this struct only from the DNS guard, which rejects it.
+    let validated = tinytools_std::url_guard::ValidatedUrl {
+        url: format!("http://example.com:{}/image.png", address.port()),
+        host: "example.com".to_string(),
+        addrs: vec![address],
+    };
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 512];
+        assert!(stream.read(&mut request).await.unwrap() > 0);
+        stream
+            .write_all(b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let response = guarded_remote_client(&validated)
+        .unwrap()
+        .get(validated.url())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+    assert_eq!(response.url().as_str(), validated.url());
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn generic_resolution_retains_binary_bytes_and_decodes_only_transport_gzip() {
     let bytes = [0, 255, 7, 0];
     let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -266,50 +354,18 @@ async fn malformed_and_oversized_data_uri_payloads_fail_before_extraction() {
     ));
 }
 
-#[tokio::test]
-async fn generic_http_mime_precedes_utf8_sniff_and_legacy_stays_narrow() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = "http://example.com/media";
-    let client = Client::builder()
-        .no_proxy()
-        .resolve("example.com", listener.local_addr().unwrap())
-        .build()
-        .unwrap();
-    let server = tokio::spawn(async move {
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0; 2048];
-            let mut received = 0;
-            loop {
-                let amount = stream.read(&mut request[received..]).await.unwrap();
-                assert!(amount > 0);
-                received += amount;
-                if request[..received]
-                    .windows(4)
-                    .any(|part| part == b"\r\n\r\n")
-                {
-                    break;
-                }
-                assert!(received < request.len());
-            }
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: audio/wav; charset=binary\r\nContent-Length: 12\r\nConnection: close\r\n\r\nRIFF\0\0\0\0WAVE").await.unwrap();
-        }
-    });
-    let limits = FileLimits {
-        allow_remote_fetch: true,
-        ..FileLimits::default()
-    };
-    let resolved = resolve_attachment(url, &limits, 1024, &client, UnknownMimePolicy::Accept)
-        .await
-        .unwrap();
-    assert_eq!(resolved.mime, "audio/wav");
-    assert_eq!(resolved.bytes, b"RIFF\0\0\0\0WAVE");
-    let legacy = resolve_attachment(url, &limits, 1024, &client, UnknownMimePolicy::Reject)
-        .await
-        .unwrap();
-    assert_eq!(legacy.mime, "text/plain");
-    server.await.unwrap();
+#[test]
+fn generic_http_mime_precedes_utf8_sniff_and_legacy_stays_narrow() {
+    let bytes = b"RIFF\0\0\0\0WAVE";
+    let path = std::path::Path::new("media");
+    assert_eq!(
+        super::super::mime::detect_attachment_mime(path, bytes, Some("audio/wav; charset=binary")),
+        Some("audio/wav".to_string())
+    );
+    assert_eq!(
+        detect_file_mime(Some(path), bytes, Some("audio/wav; charset=binary")),
+        Some("text/plain".to_string())
+    );
 }
 
 #[tokio::test]

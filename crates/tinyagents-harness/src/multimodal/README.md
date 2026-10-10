@@ -77,17 +77,18 @@ format contributes a header naming it plus a content hash.
 - **Check the sentinel before the clamp.** `max_files == 0` means *none*;
   `FileLimits::effective` clamps it up to `1`. Consulting only the clamped
   value would admit one attachment from a source that asked for zero.
-- What stays with the host, deliberately: the `reqwest::Client` (proxy/timeout
-  policy), the `TextExtractor` implementation (which parser, if any, and its
+- What stays with the host, deliberately: the `TextExtractor` implementation (which parser, if any, and its
   timeout), the attachment stash (where bytes live between ingress and
   dispatch), and message-level marker counting (only the host knows its
   message type). This module never decides which local paths may be read —
   that is `FileLimits::files_disabled`'s lever, not a filesystem allowlist
   here.
-- Opt-in remote image and file URLs pass TinyTools' lexical URL guard before
-  the host's client sends a request. The host client still owns DNS resolution,
-  connection pinning, proxy use, and redirect policy; this admission check
-  alone does not validate those subsequent destinations.
+- Opt-in remote image and file URLs pass TinyTools' URL and DNS guard. The
+  resolver pins the vetted addresses in its own direct HTTP client and refuses
+  redirects. It uses 30-second request and 10-second connection timeouts.
+  The legacy `reqwest::Client` argument remains for source compatibility but is
+  ignored for remote fetches: its proxy, custom DNS, redirect and timeout
+  settings cannot safely be inherited from a built client.
 - Text extraction failures degrade to a `FilePayload::Reference`. Resolution
   errors (read/fetch/MIME/size) remain typed errors for the host to present or
   skip according to its own policy.
