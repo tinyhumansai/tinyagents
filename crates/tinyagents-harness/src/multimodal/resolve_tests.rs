@@ -300,12 +300,12 @@ async fn generic_http_mime_precedes_utf8_sniff_and_legacy_stays_narrow() {
         allow_remote_fetch: true,
         ..FileLimits::default()
     };
-    let resolved = resolve_attachment(&url, &limits, 1024, &client, UnknownMimePolicy::Accept)
+    let resolved = resolve_attachment(url, &limits, 1024, &client, UnknownMimePolicy::Accept)
         .await
         .unwrap();
     assert_eq!(resolved.mime, "audio/wav");
     assert_eq!(resolved.bytes, b"RIFF\0\0\0\0WAVE");
-    let legacy = resolve_attachment(&url, &limits, 1024, &client, UnknownMimePolicy::Reject)
+    let legacy = resolve_attachment(url, &limits, 1024, &client, UnknownMimePolicy::Reject)
         .await
         .unwrap();
     assert_eq!(legacy.mime, "text/plain");
