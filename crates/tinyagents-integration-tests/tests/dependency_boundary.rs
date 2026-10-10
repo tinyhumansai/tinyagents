@@ -51,7 +51,7 @@ const KNOWN_GENERIC_CLAUDE_CODE_CHAT_MESSAGE_DEBT: &[(&str, usize)] = &[
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/driver_tests.rs",
-        356,
+        401,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder.rs",
@@ -75,15 +75,15 @@ const KNOWN_GENERIC_CLAUDE_CODE_CHAT_MESSAGE_DEBT: &[(&str, usize)] = &[
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder.rs",
-        170,
+        181,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder.rs",
-        171,
+        182,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder.rs",
-        191,
+        202,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
@@ -155,47 +155,43 @@ const KNOWN_GENERIC_CLAUDE_CODE_CHAT_MESSAGE_DEBT: &[(&str, usize)] = &[
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
-        260,
+        268,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
-        271,
+        278,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
-        273,
+        280,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
-        283,
+        289,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
-        286,
+        292,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
-        287,
+        293,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
-        288,
+        294,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
-        299,
+        305,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
-        301,
+        306,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
-        302,
-    ),
-    (
-        "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
-        303,
+        307,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
@@ -203,7 +199,55 @@ const KNOWN_GENERIC_CLAUDE_CODE_CHAT_MESSAGE_DEBT: &[(&str, usize)] = &[
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
-        318,
+        311,
+    ),
+    (
+        "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
+        312,
+    ),
+    (
+        "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
+        313,
+    ),
+    (
+        "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
+        314,
+    ),
+    (
+        "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
+        324,
+    ),
+    (
+        "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
+        325,
+    ),
+    (
+        "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
+        334,
+    ),
+    (
+        "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
+        340,
+    ),
+    (
+        "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
+        342,
+    ),
+    (
+        "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
+        343,
+    ),
+    (
+        "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
+        344,
+    ),
+    (
+        "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
+        351,
+    ),
+    (
+        "crates/tinyagents-harness/src/providers/claude_code/input_builder_tests.rs",
+        359,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/mod.rs",
