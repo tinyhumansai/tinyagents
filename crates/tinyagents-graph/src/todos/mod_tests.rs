@@ -570,8 +570,7 @@ mod tool_tests {
                 .unwrap_or_else(|err| panic!("{args}: {err}"));
         }
         assert_eq!(
-            schema["properties"]["todos"]["items"]["properties"]["content"]["type"],
-            "string",
+            schema["properties"]["todos"]["items"]["properties"]["content"]["type"], "string",
             "`content` stays the canonical, advertised field"
         );
     }
