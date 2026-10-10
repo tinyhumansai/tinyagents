@@ -15,6 +15,13 @@
 use super::bridge::ChatMessage;
 use base64::Engine as _;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+
+/// Sent on resume when every pending user turn is already in the Claude
+/// session (another service or loop iteration on the same thread delivered it).
+/// Re-sending the text would make the model see the same message twice.
+const ALREADY_DELIVERED_NOTICE: &str = "[The user's latest message was already delivered earlier in this session. Respond to it now; do not treat it as a new, repeated message.]";
 
 /// Upper bound on a single decoded inline image's byte size; larger images
 /// are dropped rather than inlined (see [`image_block`]).
@@ -23,6 +30,17 @@ const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 /// Build the bytes to write to claude's stdin. Returns an empty `Vec`
 /// when there is nothing to send (caller should abort).
 pub fn build_stdin(messages: &[ChatMessage], is_new_session: bool) -> Vec<u8> {
+    build_stdin_with_delivered(messages, is_new_session, &HashSet::new())
+}
+
+/// Like [`build_stdin`], but on a resumed session skips pending user turns whose
+/// fingerprint (see [`pending_fingerprints`]) is in `delivered`: the session
+/// already received them. Ignored for a new session, which replays context.
+pub fn build_stdin_with_delivered(
+    messages: &[ChatMessage],
+    is_new_session: bool,
+    delivered: &HashSet<String>,
+) -> Vec<u8> {
     // Resolve any `[Image: … #att:<id>]` placeholders to on-disk `[IMAGE:<path>]`
     // markers so pasted images can be inlined below. No-op for messages that
     // carry no image placeholder, so plain-text turns are unaffected.
@@ -38,7 +56,30 @@ pub fn build_stdin(messages: &[ChatMessage], is_new_session: bool) -> Vec<u8> {
     // context on a new session; never resubmit an earlier answered prompt.
     let last_user_pos = non_system.iter().rposition(|m| m.role == "user");
     let active_user_pos = last_user_pos.filter(|&pos| pos == non_system.len() - 1);
-    let active_user_content = active_user_pos.and_then(|_| pending_user_content(&non_system));
+    let active_user_content = active_user_pos.and_then(|_| {
+        let skip = if is_new_session {
+            &HashSet::new()
+        } else {
+            delivered
+        };
+        let turns = pending_user_turns(&non_system);
+        let fresh: Vec<&str> = turns
+            .iter()
+            .filter(|(fingerprint, _)| !skip.contains(fingerprint))
+            .map(|(_, content)| *content)
+            .collect();
+        if turns.is_empty() {
+            None
+        } else if fresh.is_empty() {
+            tracing::debug!(
+                "[claude-code][input] all {} pending user turn(s) already delivered to session",
+                turns.len()
+            );
+            Some(ALREADY_DELIVERED_NOTICE.to_string())
+        } else {
+            Some(fresh.join("\n\n"))
+        }
+    });
 
     let mut content: Vec<Value> = Vec::new();
     if is_new_session {
@@ -86,21 +127,55 @@ pub fn build_stdin(messages: &[ChatMessage], is_new_session: bool) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// Join user turns that arrived after the most recent assistant response. A
-/// single Claude input message is required, but queued steering/user messages
-/// must retain their order instead of silently dropping every turn except the
-/// last one.
-fn pending_user_content(non_system: &[&ChatMessage]) -> Option<String> {
-    let after_assistant = non_system
+/// User turns that arrived after the most recent assistant response, each with
+/// its delivery fingerprint. A single Claude input message is required, but
+/// queued steering/user messages must retain their order instead of silently
+/// dropping every turn except the last one.
+fn pending_user_turns<'a>(non_system: &[&'a ChatMessage]) -> Vec<(String, &'a str)> {
+    let last_assistant = non_system
         .iter()
-        .rposition(|message| message.role == "assistant")
-        .map_or(0, |position| position + 1);
-    let pending: Vec<&str> = non_system[after_assistant..]
+        .rposition(|message| message.role == "assistant");
+    let anchor = last_assistant.map_or("", |position| non_system[position].content.as_str());
+    let after_assistant = last_assistant.map_or(0, |position| position + 1);
+    non_system[after_assistant..]
         .iter()
         .filter(|message| message.role == "user" && !message.content.is_empty())
-        .map(|message| message.content.as_str())
-        .collect();
-    (!pending.is_empty()).then(|| pending.join("\n\n"))
+        .enumerate()
+        .map(|(index, message)| {
+            (
+                fingerprint(anchor, index, &message.content),
+                message.content.as_str(),
+            )
+        })
+        .collect()
+}
+
+/// Identity of one pending user turn: the assistant reply it follows, its
+/// position among the turns pending after that reply, and its text. History
+/// position is deliberately not part of it, so services that hold different
+/// slices of the same thread (or a compacted one) still agree on it, while a
+/// user repeating the same words after a new reply gets a new identity.
+fn fingerprint(anchor: &str, index: usize, content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(anchor.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(index.to_le_bytes());
+    hasher.update(content.as_bytes());
+    let digest = hasher.finalize();
+    digest[..12].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Fingerprints of the user turns a resumed call would deliver for `messages`
+/// (empty unless the final non-system turn is from the user).
+pub fn pending_fingerprints(messages: &[ChatMessage]) -> Vec<String> {
+    let non_system: Vec<&ChatMessage> = messages.iter().filter(|m| m.role != "system").collect();
+    if non_system.last().is_none_or(|m| m.role != "user") {
+        return Vec::new();
+    }
+    pending_user_turns(&non_system)
+        .into_iter()
+        .map(|(fingerprint, _)| fingerprint)
+        .collect()
 }
 
 /// Render the turns before `end` (the latest user turn) as a plain-text preamble

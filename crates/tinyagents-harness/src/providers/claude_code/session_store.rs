@@ -5,7 +5,7 @@
 //! OpenHuman thread id → CC session UUID in a JSON file under the
 //! workspace.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -15,7 +15,14 @@ use serde::{Deserialize, Serialize};
 struct StoreFile {
     /// thread_id → CC session uuid (v4)
     sessions: HashMap<String, String>,
+    /// thread_id → fingerprints of user turns already delivered to that
+    /// thread's CC session (see `input_builder::pending_fingerprints`).
+    #[serde(default)]
+    delivered: HashMap<String, Vec<String>>,
 }
+
+/// Most delivered-turn fingerprints remembered per thread.
+const MAX_DELIVERED_PER_THREAD: usize = 256;
 
 /// Disk-backed session store. Cheap to clone — it's `Arc`-shareable via
 /// the holding `ClaudeCodeProvider`.
@@ -45,13 +52,49 @@ impl SessionStore {
         guard.sessions.get(thread_id).cloned()
     }
 
-    /// Persist a thread → UUID mapping.
+    /// Fingerprints of user turns already delivered to `thread_id`'s session.
+    pub fn delivered(&self, thread_id: &str) -> HashSet<String> {
+        let guard = self.inner.lock().expect("session store mutex poisoned");
+        guard
+            .delivered
+            .get(thread_id)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Record user-turn fingerprints delivered to `thread_id`'s session.
+    pub fn record_delivered(&self, thread_id: &str, fingerprints: &[String]) -> std::io::Result<()> {
+        if fingerprints.is_empty() {
+            return Ok(());
+        }
+        let mut guard = self.inner.lock().expect("session store mutex poisoned");
+        let entry = guard.delivered.entry(thread_id.to_string()).or_default();
+        for fingerprint in fingerprints {
+            if !entry.contains(fingerprint) {
+                entry.push(fingerprint.clone());
+            }
+        }
+        if entry.len() > MAX_DELIVERED_PER_THREAD {
+            let excess = entry.len() - MAX_DELIVERED_PER_THREAD;
+            entry.drain(..excess);
+        }
+        self.persist(&guard)
+    }
+
+    /// Persist a thread → UUID mapping. A different session UUID starts with an
+    /// empty delivered-turn record, since it has received nothing yet.
     pub fn set(&self, thread_id: &str, uuid: &str) -> std::io::Result<()> {
         let mut guard = self.inner.lock().expect("session store mutex poisoned");
-        guard
+        let previous = guard
             .sessions
             .insert(thread_id.to_string(), uuid.to_string());
-        let serialized = serde_json::to_string_pretty(&*guard).map_err(std::io::Error::other)?;
+        if previous.as_deref() != Some(uuid) {
+            guard.delivered.remove(thread_id);
+        }
+        self.persist(&guard)
+    }
+
+    fn persist(&self, guard: &StoreFile) -> std::io::Result<()> {        let serialized = serde_json::to_string_pretty(guard).map_err(std::io::Error::other)?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
