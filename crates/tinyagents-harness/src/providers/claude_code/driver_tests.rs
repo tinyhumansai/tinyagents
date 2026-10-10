@@ -415,9 +415,9 @@ async fn nonzero_exit_stdout_error_keeps_secrets_out() {
 fn stdout_error_is_bounded() {
     let long = "e".repeat(STDOUT_ERROR_CAP * 3);
     let message = nonzero_exit_message(Some(1), Some(&long), "", None);
+    assert!(message.len() < STDOUT_ERROR_CAP + 128, "{}", message.len());
 }
 
-assert!(message.len() < STDOUT_ERROR_CAP + 128, "{}", message.len());
 // ---- one session shared by several callers (openhuman#5877) ----
 
 /// Two calls on one thread (parallel services, or loop iterations) carry the
