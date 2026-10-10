@@ -12,7 +12,7 @@ use crate::transcript::{
 
 const MODEL: &str = "openrouter/deepseek/deepseek-v4-flash";
 
-fn meta(agent: &str, agent_type: &str, thread_id: Option<&str>) -> TranscriptMeta {
+pub(super) fn meta(agent: &str, agent_type: &str, thread_id: Option<&str>) -> TranscriptMeta {
     TranscriptMeta {
         agent_name: agent.to_string(),
         agent_id: Some(agent.to_string()),
@@ -38,7 +38,7 @@ fn meta(agent: &str, agent_type: &str, thread_id: Option<&str>) -> TranscriptMet
     }
 }
 
-fn turn_usage(input: u64, output: u64, cached: u64) -> TurnUsage {
+pub(super) fn turn_usage(input: u64, output: u64, cached: u64) -> TurnUsage {
     TurnUsage {
         provider: "openhuman".into(),
         model: MODEL.into(),
@@ -679,58 +679,4 @@ fn last_call_fields_round_trip_and_default_on_old_lines() {
     .expect("parse old line");
     assert_eq!(old.last_call_input, 0);
     assert_eq!(old.last_call_output, 0);
-}
-
-fn priced(input: u64, cost: f64, source: Option<UsageCostSource>) -> TurnUsage {
-    let mut usage = turn_usage(input, 10, 0);
-    usage.usage.cost_usd = cost;
-    usage.usage.cost_source = source;
-    usage
-}
-
-/// A record written before `cost_source` existed may carry a guessed rate: a
-/// glm-5.3-flash thread recorded $4.25 at a $3/$15 per-MTok default when the
-/// provider billed about $0.30. Its cost must land in the unpriced split, not
-/// be summed in with charges.
-#[test]
-fn cost_split_keeps_stated_charges_apart_from_records_without_a_source() {
-    let mut split = CostSplit::default();
-    split.add(&priced(1_000, 0.25, Some(UsageCostSource::Charged)));
-    split.add(&priced(2_000, 4.25, None));
-    split.add(&priced(3_000, 0.0, Some(UsageCostSource::Unknown)));
-
-    assert!((split.priced_cost_usd - 0.25).abs() < f64::EPSILON);
-    assert_eq!(split.priced_source, Some(UsageCostSource::Charged));
-    assert_eq!(split.unpriced_turns, 2);
-    assert_eq!(split.unpriced_input_tokens, 5_000);
-    assert_eq!(split.unpriced_output_tokens, 20);
-}
-
-/// An estimate anywhere makes the priced total an estimate.
-#[test]
-fn cost_split_source_is_the_least_certain_of_its_records() {
-    let mut a = CostSplit::default();
-    a.add(&priced(1, 0.1, Some(UsageCostSource::Charged)));
-    let mut b = CostSplit::default();
-    b.add(&priced(1, 0.2, Some(UsageCostSource::Estimated)));
-    a.merge(&b);
-    assert_eq!(a.priced_source, Some(UsageCostSource::Estimated));
-    assert!((a.priced_cost_usd - 0.3).abs() < 1e-12);
-}
-
-/// `cost_source` round-trips and is absent from (and defaults on) old lines.
-#[test]
-fn cost_source_round_trips_and_is_omitted_when_unset() {
-    let usage = MessageUsage {
-        cost_usd: 0.01,
-        cost_source: Some(UsageCostSource::Charged),
-        ..Default::default()
-    };
-    let json = serde_json::to_value(&usage).expect("serialize");
-    assert_eq!(json["cost_source"], "charged");
-    let back: MessageUsage = serde_json::from_value(json).expect("parse");
-    assert_eq!(back, usage);
-
-    let unset = serde_json::to_value(MessageUsage::default()).expect("serialize");
-    assert!(unset.get("cost_source").is_none());
 }
