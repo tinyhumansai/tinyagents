@@ -343,7 +343,10 @@ pub fn span_to_otlp(
         attrs.push(json_attribute("langfuse.observation.output", &output));
     }
     if span.status == SpanStatus::Error {
-        attrs.push(attribute("langfuse.observation.level", failed_span_level(span)));
+        attrs.push(attribute(
+            "langfuse.observation.level",
+            failed_span_level(span),
+        ));
         if let Some(message) = string_attr(span, "error.message") {
             attrs.push(attribute("langfuse.observation.status_message", message));
         }

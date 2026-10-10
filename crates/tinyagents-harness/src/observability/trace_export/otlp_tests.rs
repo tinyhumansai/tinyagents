@@ -242,8 +242,10 @@ fn a_failed_span_can_downgrade_its_level_to_warning() {
     exit.status = SpanStatus::Error;
     exit.attributes
         .insert(OBSERVATION_LEVEL_ATTR.into(), json!("WARNING"));
-    exit.attributes
-        .insert("error.message".into(), json!("Command failed (exit code 1)"));
+    exit.attributes.insert(
+        "error.message".into(),
+        json!("Command failed (exit code 1)"),
+    );
     let mut broken = span("broken", Some("root"), SpanKind::Tool, "tool.web_fetch");
     broken.status = SpanStatus::Error;
     let mut bogus = span("bogus", Some("root"), SpanKind::Tool, "tool.file_read");
