@@ -349,6 +349,9 @@ pub enum TinyAgentsError {
 impl From<tinyinference_llm::Error> for TinyAgentsError {
     fn from(error: tinyinference_llm::Error) -> Self {
         match error {
+            tinyinference_llm::Error::BudgetExceeded(error) => {
+                Self::LimitExceeded(error.to_string())
+            }
             tinyinference_llm::Error::Model(message) => Self::Model(message),
             tinyinference_llm::Error::Provider(error) => Self::from_provider_error(*error),
             tinyinference_llm::Error::Validation(message) => Self::Validation(message),
