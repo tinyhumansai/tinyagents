@@ -69,6 +69,7 @@ fn jsonl_round_trip_keeps_raw_tool_arguments_and_provider_extension() {
             cached_input: 0,
             context_window: 3,
             cost_usd: 0.0,
+            ..Default::default()
         },
         ts: "2026-01-01T00:00:00Z".into(),
         reasoning_content: Some("reasoning".into()),
@@ -1106,6 +1107,7 @@ fn a_turn_stamps_iteration_and_ts_on_every_step_it_appends() {
             cached_input: 0,
             context_window: 0,
             cost_usd: 0.0,
+            ..Default::default()
         },
         ts: "2026-01-01T00:00:09Z".into(),
         reasoning_content: None,

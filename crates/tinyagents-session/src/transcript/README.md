@@ -35,7 +35,11 @@ Re-exported from `transcript::` (see `../transcript.rs`); reachable as
   `_meta.prefix_message_count` records how many leading messages were frozen
   prompt tiers in this generation; older files omit it.
 - `MessageUsage` / `TurnUsage` — per-turn usage and provenance attached to
-  the last assistant message of a turn.
+  the last assistant message of a turn. `input` / `output` / `cached_input`
+  sum every provider call of the turn (its spend); `last_call_input` /
+  `last_call_output` are the final call alone, the figure a context-window
+  gauge needs. `spend::TranscriptSpend::last_context_tokens` reads them,
+  falling back to the mean request size for records written before them.
 - `DisplayMessage` / `CompactionMarker` / `DisplayRecord` /
   `DisplaySessionTranscript` — the display projection, which (unlike the
   model-context view) preserves every record in file order.

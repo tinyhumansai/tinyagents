@@ -42,6 +42,7 @@ fn usage(iteration: u32, input: u64, output: u64) -> TurnUsage {
             cached_input: 3,
             context_window: 128,
             cost_usd: 0.125,
+            ..Default::default()
         },
         ts: format!("2026-09-19T10:00:0{iteration}Z"),
         reasoning_content: Some("checked durable evidence".into()),
