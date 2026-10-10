@@ -222,6 +222,7 @@ impl ClaudeCodeProvider {
         stream: Option<&tokio::sync::mpsc::Sender<ProviderDelta>>,
         model_override: Option<&str>,
         thread_id: String,
+        persist_session: bool,
     ) -> anyhow::Result<ChatResponse> {
         // Acquire the per-thread mutex *before* the global concurrency
         // semaphore (M-14). Reversed, N callers on one busy thread each hold
@@ -254,6 +255,7 @@ impl ClaudeCodeProvider {
             workspace_dir: self.workspace_dir.clone(),
             project_dir: self.project_dir.clone(),
             thread_id,
+            persist_session,
             model: model_override.unwrap_or(&self.model).to_string(),
             append_system_prompt,
             messages,
@@ -325,6 +327,24 @@ fn thread_key_from_request(request: &ModelRequest) -> String {
         return value.to_string();
     }
     format!("ephemeral_{}", uuid::Uuid::new_v4())
+}
+
+/// Whether the host supplied a durable conversation identity. A generated
+/// fallback id isolates a one-shot call but must not create a Claude transcript.
+fn request_has_session_identity(request: &ModelRequest) -> bool {
+    ["thread_id", "conversation_id", "session_id"]
+        .iter()
+        .any(|key| {
+            request
+                .metadata
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+        || request
+            .continuation_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
 }
 
 /// Converts a `ModelRequest` into the flattened [`ChatMessage`] list this
@@ -542,11 +562,18 @@ impl ChatModel<()> for ClaudeCodeProvider {
         request: ModelRequest,
     ) -> tinyinference_llm::Result<ModelResponse> {
         let thread_id = thread_key_from_request(&request);
+        let persist_session = request_has_session_identity(&request);
         let messages = request_messages(&request);
-        self.run_chat(&messages, None, request.model.as_deref(), thread_id)
-            .await
-            .map(|response| model_response_with_tools(response, &request.tools))
-            .map_err(map_error)
+        self.run_chat(
+            &messages,
+            None,
+            request.model.as_deref(),
+            thread_id,
+            persist_session,
+        )
+        .await
+        .map(|response| model_response_with_tools(response, &request.tools))
+        .map_err(map_error)
     }
     async fn stream(
         &self,
@@ -555,6 +582,7 @@ impl ChatModel<()> for ClaudeCodeProvider {
     ) -> tinyinference_llm::Result<ModelStream> {
         let provider = self.clone();
         let thread_id = thread_key_from_request(&request);
+        let persist_session = request_has_session_identity(&request);
         let model_override = request.model.clone();
         let tools = request.tools.clone();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -572,6 +600,7 @@ impl ChatModel<()> for ClaudeCodeProvider {
                 Some(&delta_tx),
                 model_override.as_deref(),
                 thread_id,
+                persist_session,
             );
             tokio::pin!(call);
             let response = loop {

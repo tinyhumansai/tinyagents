@@ -23,6 +23,26 @@ fn write_mcp_http_config_emits_http_url_with_bearer_header() {
 }
 
 #[test]
+fn ephemeral_calls_disable_session_persistence_and_durable_calls_keep_resume_args() {
+    let mut ephemeral = vec!["-p".to_string()];
+    append_session_args(&mut ephemeral, false, true, "unused-id");
+    assert!(ephemeral.contains(&"--no-session-persistence".to_string()));
+    assert!(
+        !ephemeral
+            .iter()
+            .any(|arg| arg == "--session-id" || arg == "--resume")
+    );
+
+    let mut new_conversation = Vec::new();
+    append_session_args(&mut new_conversation, true, true, "conversation-id");
+    assert_eq!(new_conversation, ["--session-id", "conversation-id"]);
+
+    let mut resumed_conversation = Vec::new();
+    append_session_args(&mut resumed_conversation, true, false, "conversation-id");
+    assert_eq!(resumed_conversation, ["--resume", "conversation-id"]);
+}
+
+#[test]
 fn child_path_prepends_cli_dir_and_keeps_inherited_entries() {
     let _env = super::super::ENV_TEST_LOCK
         .lock()
@@ -352,6 +372,7 @@ async fn run_fake_claude(script_body: &str, api_key: Option<&str>) -> anyhow::Re
         session_store: Arc::new(SessionStore::open(&dir.path().join("ws"))),
         stream: None,
         anthropic_api_key: api_key.map(str::to_string),
+        persist_session: false,
         mcp_provider: None,
     })
     .await
@@ -416,4 +437,47 @@ fn stdout_error_is_bounded() {
     let long = "e".repeat(STDOUT_ERROR_CAP * 3);
     let message = nonzero_exit_message(Some(1), Some(&long), "", None);
     assert!(message.len() < STDOUT_ERROR_CAP + 128, "{}", message.len());
+}
+
+#[test]
+fn sk_keys_are_redacted_after_separators() {
+    for raw in [
+        "key:sk-ant-abc123 failed",
+        "token=sk-ant-abc123",
+        "https://x.test/?k=sk-ant-abc123&y=1",
+        "\"sk-ant-abc123\"",
+        "ANTHROPIC_API_KEY=sk-ant-abc123,",
+    ] {
+        let out = sanitize_cli_message(raw, None);
+        assert!(!out.contains("abc123"), "{raw} -> {out}");
+        assert!(out.contains("[redacted]"), "{raw} -> {out}");
+    }
+    assert_eq!(
+        sanitize_cli_message("task-force ask-me sk-", None),
+        "task-force ask-me sk-"
+    );
+}
+
+#[test]
+fn configured_key_embedded_in_larger_token_is_redacted() {
+    let out = sanitize_cli_message("bad my-secret_suffix and pre-my-secret.", Some("my-secret"));
+    assert!(!out.contains("my-secret"), "{out}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn zero_exit_is_error_result_is_sanitized_and_bounded() {
+    let big = "x".repeat(5_000);
+    let script = format!(
+        r#"echo '{{"type":"result","subtype":"success","is_error":true,"result":"bad key topsecret99 sk-ant-zzz {big}"}}'; exit 0"#
+    );
+    let err = run_fake_claude(&script, Some("topsecret99"))
+        .await
+        .expect_err("is_error must fail");
+    let text = err.to_string();
+    assert!(
+        !text.contains("topsecret99") && !text.contains("sk-ant-zzz"),
+        "{text}"
+    );
+    assert!(text.len() < 2_300, "len {}", text.len());
 }

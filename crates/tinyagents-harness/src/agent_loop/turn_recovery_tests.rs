@@ -8,6 +8,8 @@ fn spent() -> TurnRecovery {
         dropped_tool_call_nudges_used: 2,
         withheld_call_nudges_used: 1,
         truncated_tool_call_retries_used: 2,
+        truncated_tool_names: ["save_workflow".to_string()].into(),
+        truncated_repeat_names: ["save_workflow".to_string()].into(),
         boosted_max_tokens: Some(4096),
         truncation_base: Some(1024),
         reasoning_fallback: super::super::reasoning_fallback::ReasoningFallback::default(),

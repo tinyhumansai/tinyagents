@@ -303,13 +303,25 @@ are handled separately:
 - **Schema-invalid** (well-formed JSON that violates the tool's input schema) is
   governed by `RunPolicy::invalid_args: InvalidArgsPolicy`. `ReturnToolError`
   (the default) injects a repairable tool-error message (carrying the
-  validation detail and the expected schema) and continues; `Fail` aborts the
+  validation detail and a compact TypeScript-style signature of the expected
+  arguments, not the full JSON Schema) and continues; `Fail` aborts the
   turn and is no longer the default.
   `NormalizeThenReturnToolError` first repairs common object-schema transport
   shapes (a JSON object encoded as a string, including markdown fences, or a
   non-object for an object schema with no required fields), then returns any
   remaining validation failure as a tool error. Schemas that accept top-level
-  primitives or arrays are left untouched.
+  primitives or arrays are left untouched. Per property, an object-typed value
+  sent as a string that is not strict JSON goes through the same
+  `recover_object` ladder, and a `null` for an optional property whose type
+  rejects null is dropped (`"tool": null` means "not given").
+- **Wrapped** calls: a call to a pseudo tool named `tool_call`, `call_tool`,
+  `function_call`, `tool_use`, `invoke` (and a few spellings) whose arguments
+  name a callable tool (`{"name": .., "arguments": ..}`, `{"function": {..}}`,
+  `{"<tool>": {..}}`, or `use_skill`'s `{"skill", "tool", "args"}`) is
+  retargeted to that tool before admission, so every rule, hook and gate sees
+  the real call. It emits `AgentEvent::InvalidToolArgs { recovery:
+  "unwrapped:<tool>" }`. A payload that names no callable tool keeps the
+  ordinary unknown-tool corrective.
 - **Unparseable** (malformed JSON the provider could not parse into arguments at
   all) is surfaced by the provider as a `ToolCall` with `invalid: Some(reason)`
   and the raw string preserved in `arguments`. Small local models (Ollama, LM
