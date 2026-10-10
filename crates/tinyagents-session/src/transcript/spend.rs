@@ -73,8 +73,9 @@ impl CostSplit {
                 self.unpriced_turns += 1;
                 self.unpriced_input_tokens =
                     self.unpriced_input_tokens.saturating_add(usage.usage.input);
-                self.unpriced_output_tokens =
-                    self.unpriced_output_tokens.saturating_add(usage.usage.output);
+                self.unpriced_output_tokens = self
+                    .unpriced_output_tokens
+                    .saturating_add(usage.usage.output);
                 self.unpriced_cached_input_tokens = self
                     .unpriced_cached_input_tokens
                     .saturating_add(usage.usage.cached_input);
