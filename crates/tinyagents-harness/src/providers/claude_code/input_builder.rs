@@ -136,30 +136,41 @@ fn pending_user_turns<'a>(non_system: &[&'a ChatMessage]) -> Vec<(String, &'a st
         .iter()
         .rposition(|message| message.role == "assistant");
     let anchor = last_assistant.map_or("", |position| non_system[position].content.as_str());
+    // Replies are not unique ("Done" twice), so the reply's ordinal among the
+    // assistant turns marks which exchange the pending turns belong to.
+    let reply_ordinal = non_system
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .count();
     let after_assistant = last_assistant.map_or(0, |position| position + 1);
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     non_system[after_assistant..]
         .iter()
         .filter(|message| message.role == "user" && !message.content.is_empty())
-        .enumerate()
-        .map(|(index, message)| {
-            (
-                fingerprint(anchor, index, &message.content),
-                message.content.as_str(),
-            )
+        .map(|message| {
+            // Occurrence of this exact text among the pending turns: distinct
+            // for a repeated message, yet unchanged when an earlier, different
+            // pending turn is absent from another service's slice.
+            let occurrence = seen.entry(message.content.as_str()).or_insert(0);
+            let fp = fingerprint(anchor, reply_ordinal, *occurrence, &message.content);
+            *occurrence += 1;
+            (fp, message.content.as_str())
         })
         .collect()
 }
 
-/// Identity of one pending user turn: the assistant reply it follows, its
-/// position among the turns pending after that reply, and its text. History
-/// position is deliberately not part of it, so services that hold different
-/// slices of the same thread (or a compacted one) still agree on it, while a
-/// user repeating the same words after a new reply gets a new identity.
-fn fingerprint(anchor: &str, index: usize, content: &str) -> String {
+/// Identity of one pending user turn: the assistant reply it follows (text and
+/// ordinal, so two identical replies are still different boundaries), how many
+/// times the same text already appeared among the pending turns, and the text.
+/// User-turn history position is deliberately not part of it, so services that
+/// hold different slices of the same thread still agree on it, while a user
+/// repeating the same words after a new reply gets a new identity.
+fn fingerprint(anchor: &str, reply_ordinal: usize, occurrence: usize, content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(anchor.as_bytes());
     hasher.update([0u8]);
-    hasher.update(index.to_le_bytes());
+    hasher.update(reply_ordinal.to_le_bytes());
+    hasher.update(occurrence.to_le_bytes());
     hasher.update(content.as_bytes());
     let digest = hasher.finalize();
     digest[..12].iter().map(|b| format!("{b:02x}")).collect()
