@@ -355,6 +355,9 @@ impl From<tinyinference_llm::Error> for TinyAgentsError {
             tinyinference_llm::Error::Serialization(error) => Self::Serialization(error),
             tinyinference_llm::Error::Catalog(message) => Self::Model(message),
             tinyinference_llm::Error::Unsupported(message) => Self::Validation(message),
+            tinyinference_llm::Error::BudgetExceeded(error) => {
+                Self::LimitExceeded(error.to_string())
+            }
         }
     }
 }
