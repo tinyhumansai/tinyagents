@@ -44,7 +44,7 @@ for the same conversation cannot race on the same session UUID, then
 claude -p --input-format stream-json --output-format stream-json --verbose
   --include-partial-messages --add-dir <project_dir>
   --permission-mode <acceptEdits|bypassPermissions>
-  --session-id <uuid>|--resume <uuid> --model <model>
+  (--session-id <uuid>|--resume <uuid>|--no-session-persistence) --model <model>
 ```
 
 plus `--append-system-prompt-file <scratch>/append-system-prompt.txt` when a
@@ -53,8 +53,11 @@ hit Windows' argv length limit), `--mcp-config <scratch>/openhuman-mcp-config.js
 --strict-mcp-config` when a host-supplied `McpEndpointProvider` resolved an
 endpoint, and `--disallowedTools Bash,BashOutput,KillShell,WebFetch,WebSearch,Task`
 unless full access is on (see [Permission posture](#permission-posture-sandbox-and-mcp)).
-`--session-id` is used on a new CC session and `--resume` afterwards; the
-UUID comes from `session_store.rs`. `cwd` is `project_dir` — the caller's
+Requests with a caller-supplied conversation identity use `--session-id` on a
+new CC session and `--resume` afterwards; the UUID comes from
+`session_store.rs`. Requests without an explicit identity use
+`--no-session-persistence`, so one-shot inference calls cannot create source
+transcripts. `cwd` is `project_dir` — the caller's
 project root, not this provider's own `workspace_dir` — so CC's file tools
 act on the user's code.
 

@@ -5,11 +5,96 @@ use super::*;
 
 #[test]
 fn missing_session_error_is_recognized_precisely() {
-    assert!(is_missing_session_error(
-        "No conversation found with session ID: 1234"
+    let msg = "No conversation found with session ID: 1234";
+    assert!(is_missing_session_error(msg, "1234"));
+    assert!(is_missing_session_error(&format!("Error: {msg}\n"), "1234"));
+    // Different session, quoted phrase, or extra text must not match.
+    assert!(!is_missing_session_error(msg, "9999"));
+    assert!(!is_missing_session_error(
+        &format!("tool stderr: {msg}"),
+        "1234"
     ));
-    assert!(!is_missing_session_error("authentication_failed"));
-    assert!(!is_missing_session_error("permission denied"));
+    assert!(!is_missing_session_error(&format!("{msg}\nboom"), "1234"));
+    assert!(!is_missing_session_error("authentication_failed", "1234"));
+}
+
+#[cfg(unix)]
+mod retry {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Fake `claude`: logs its args, fails `--resume` with `$FAIL_MSG` on
+    /// stderr, and answers `--session-id` runs with a result event.
+    fn fake_cli(dir: &std::path::Path, fail_msg: &str) -> PathBuf {
+        let bin = dir.join("claude");
+        let script = format!(
+            "#!/bin/sh\ncat >/dev/null\necho \"$@\" >> '{log}'\n\
+             case \"$*\" in *--resume*) echo '{fail_msg}' >&2; exit 1;; esac\n\
+             echo '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\"}}'\n",
+            log = dir.join("calls.log").display(),
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    async fn drive(
+        dir: &std::path::Path,
+        store: Arc<SessionStore>,
+        bin: PathBuf,
+    ) -> anyhow::Result<ChatResponse> {
+        let messages = vec![ChatMessage::user("hi")];
+        run_turn(TurnContext {
+            bin_path: bin,
+            workspace_dir: dir.to_path_buf(),
+            project_dir: dir.join("project"),
+            thread_id: "t1".into(),
+            persist_session: true,
+            model: "m".into(),
+            append_system_prompt: None,
+            messages: &messages,
+            session_store: store,
+            stream: None,
+            anthropic_api_key: None,
+            mcp_provider: None,
+        })
+        .await
+    }
+
+    const SAVED: &str = "11111111-1111-4111-8111-111111111111";
+
+    #[tokio::test]
+    async fn missing_resumed_session_clears_mapping_and_retries_as_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::open(dir.path()));
+        store.set("t1", SAVED).unwrap();
+        let bin = fake_cli(
+            dir.path(),
+            &format!("No conversation found with session ID: {SAVED}"),
+        );
+        drive(dir.path(), store.clone(), bin)
+            .await
+            .expect("retry succeeds");
+        let log = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 2, "one resume then one retry: {log}");
+        assert!(lines[0].contains("--resume"));
+        assert!(lines[1].contains("--session-id") && !lines[1].contains("--resume"));
+        let new_id = store.get("t1").expect("new mapping persisted");
+        assert_ne!(new_id, SAVED);
+    }
+
+    #[tokio::test]
+    async fn unrelated_failure_keeps_mapping_and_does_not_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::open(dir.path()));
+        store.set("t1", SAVED).unwrap();
+        let bin = fake_cli(dir.path(), "authentication_failed");
+        assert!(drive(dir.path(), store.clone(), bin).await.is_err());
+        let log = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
+        assert_eq!(log.lines().count(), 1);
+        assert_eq!(store.get("t1").as_deref(), Some(SAVED));
+    }
 }
 
 #[test]
@@ -29,6 +114,26 @@ fn write_mcp_http_config_emits_http_url_with_bearer_header() {
     assert_eq!(server["headers"]["Authorization"], "Bearer tok-abc123");
     // It must NOT spawn a stdio child (the old jailed path).
     assert!(server.get("command").is_none());
+}
+
+#[test]
+fn ephemeral_calls_disable_session_persistence_and_durable_calls_keep_resume_args() {
+    let mut ephemeral = vec!["-p".to_string()];
+    append_session_args(&mut ephemeral, false, true, "unused-id");
+    assert!(ephemeral.contains(&"--no-session-persistence".to_string()));
+    assert!(
+        !ephemeral
+            .iter()
+            .any(|arg| arg == "--session-id" || arg == "--resume")
+    );
+
+    let mut new_conversation = Vec::new();
+    append_session_args(&mut new_conversation, true, true, "conversation-id");
+    assert_eq!(new_conversation, ["--session-id", "conversation-id"]);
+
+    let mut resumed_conversation = Vec::new();
+    append_session_args(&mut resumed_conversation, true, false, "conversation-id");
+    assert_eq!(resumed_conversation, ["--resume", "conversation-id"]);
 }
 
 #[test]

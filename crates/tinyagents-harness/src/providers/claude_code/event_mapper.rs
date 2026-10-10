@@ -108,7 +108,7 @@ impl EventMapper {
                 subtype,
                 usage,
                 total_cost_usd,
-                ..
+                raw,
             } => {
                 let mut parsed = usage.as_ref().map(parse_usage);
                 // CC stream emits `total_cost_usd` on the terminal `result`
@@ -120,8 +120,23 @@ impl EventMapper {
                     usage.charged_amount_usd = cost;
                 }
                 self.usage = parsed;
-                if subtype.as_deref() == Some("error") && self.error.is_none() {
-                    self.error = Some("claude reported `result.subtype=error`".into());
+                // Newer CLIs report failures as `subtype: "error_*"` with the
+                // diagnostics in `errors`; surface those so the driver can
+                // classify them (e.g. a missing resumed session).
+                let structured: Vec<&str> = raw
+                    .get("errors")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                let error_subtype = subtype.as_deref().is_some_and(|s| {
+                    s == "error" || (s.starts_with("error_") && !structured.is_empty())
+                });
+                if error_subtype && self.error.is_none() {
+                    self.error = Some(if structured.is_empty() {
+                        "claude reported `result.subtype=error`".into()
+                    } else {
+                        structured.join("\n")
+                    });
                 }
                 self.finished = true;
                 Vec::new()

@@ -58,18 +58,27 @@ impl SessionStore {
         std::fs::write(&self.path, serialized)
     }
 
-    /// Forget a thread's session mapping after the CLI confirms that session
-    /// does not exist. The next turn can then create a replacement session.
-    pub fn remove(&self, thread_id: &str) -> std::io::Result<()> {
+    /// Forget a thread's session mapping, but only while it still maps to
+    /// `expected_uuid` (compare-and-remove under the store lock), so a newer
+    /// mapping written by a concurrent turn is never clobbered. The removal is
+    /// persisted first; if that fails the in-memory mapping is left intact.
+    /// Returns whether a mapping was removed.
+    pub fn remove_if(&self, thread_id: &str, expected_uuid: &str) -> std::io::Result<bool> {
         let mut guard = self.inner.lock().expect("session store mutex poisoned");
-        if guard.sessions.remove(thread_id).is_none() {
-            return Ok(());
+        if guard.sessions.get(thread_id).map(String::as_str) != Some(expected_uuid) {
+            return Ok(false);
         }
-        let serialized = serde_json::to_string_pretty(&*guard).map_err(std::io::Error::other)?;
+        let mut staged = StoreFile {
+            sessions: guard.sessions.clone(),
+        };
+        staged.sessions.remove(thread_id);
+        let serialized = serde_json::to_string_pretty(&staged).map_err(std::io::Error::other)?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&self.path, serialized)
+        std::fs::write(&self.path, serialized)?;
+        *guard = staged;
+        Ok(true)
     }
 }
 
