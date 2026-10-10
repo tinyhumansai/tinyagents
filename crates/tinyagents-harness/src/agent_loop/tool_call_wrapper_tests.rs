@@ -11,7 +11,14 @@ fn unwrap(arguments: Value) -> Option<(String, Value)> {
 
 #[test]
 fn wrapper_names_match_case_insensitively() {
-    for name in ["tool_call", "TOOL_CALL", " call_tool ", "function_call", "tool_use", "invoke"] {
+    for name in [
+        "tool_call",
+        "TOOL_CALL",
+        " call_tool ",
+        "function_call",
+        "tool_use",
+        "invoke",
+    ] {
         assert!(is_wrapper_name(name), "{name}");
     }
     assert!(!is_wrapper_name("use_skill"));
@@ -91,15 +98,23 @@ fn a_wrapper_naming_use_skill_still_takes_its_arguments() {
 #[test]
 fn a_stringified_wrapper_payload_is_decoded() {
     assert_eq!(
-        unwrap(json!("{\"name\":\"web_search\",\"arguments\":{\"query\":\"x\"}}")),
+        unwrap(json!(
+            "{\"name\":\"web_search\",\"arguments\":{\"query\":\"x\"}}"
+        )),
         Some(("web_search".into(), json!({ "query": "x" })))
     );
 }
 
 #[test]
 fn nothing_callable_means_no_rewrite() {
-    assert_eq!(unwrap(json!({ "name": "frobnicate", "arguments": {} })), None);
-    assert_eq!(unwrap(json!({ "name": "tool_call", "arguments": {} })), None);
+    assert_eq!(
+        unwrap(json!({ "name": "frobnicate", "arguments": {} })),
+        None
+    );
+    assert_eq!(
+        unwrap(json!({ "name": "tool_call", "arguments": {} })),
+        None
+    );
     assert_eq!(unwrap(json!({ "query": "rust" })), None);
     assert_eq!(unwrap(json!({})), None);
     assert_eq!(unwrap(json!("not json")), None);

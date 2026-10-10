@@ -135,6 +135,7 @@ mod response_recovery;
 mod run_loop;
 pub(crate) mod stream;
 mod structured_plan;
+mod tool_call_wrapper;
 mod tool_changes;
 mod tool_surface;
 mod tool_timing;
@@ -182,11 +183,11 @@ mod test;
 #[path = "tool_rules_tests.rs"]
 mod tool_rules_test;
 #[cfg(test)]
-#[path = "unknown_tool_tests.rs"]
-mod unknown_tool_test;
-#[cfg(test)]
 #[path = "tools_args_recovery_tests.rs"]
 mod tools_args_recovery_test;
+#[cfg(test)]
+#[path = "unknown_tool_tests.rs"]
+mod unknown_tool_test;
 
 #[cfg(test)]
 #[path = "wrap_concurrency_tests.rs"]

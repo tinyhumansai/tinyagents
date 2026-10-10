@@ -606,6 +606,45 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             return Err(TinyAgentsError::LimitExceeded(err.to_string()));
         }
 
+        // A real call buried inside a pseudo `tool_call` tool (see
+        // `tool_call_wrapper`). Retargeted before the discovery bridge and
+        // every rule, hook and gate below, so each of them sees the real tool
+        // name and arguments exactly as if the model had called it directly.
+        // A registered tool under a wrapper name keeps it.
+        if self.tools.dispatch(&call.name).is_none()
+            && super::tool_call_wrapper::is_wrapper_name(&call.name)
+        {
+            let is_callable = |name: &str| {
+                self.tools.model_dispatch(name).is_some()
+                    || name == crate::tool::discover::TOOL_SEARCH_NAME
+            };
+            if let Some((target, arguments)) =
+                super::tool_call_wrapper::unwrap_wrapped_call(&call.arguments, &is_callable)
+            {
+                tracing::debug!(
+                    target: "tinyagents::agent_loop",
+                    run_id = %ctx.run_id(),
+                    call_id = %call.id,
+                    wrapper = %call.name,
+                    tool = %target,
+                    "[agent_loop] unwrapped a tool call wrapped in a pseudo tool"
+                );
+                // Reported as an argument repair, not an `UnknownToolCall`:
+                // hosts render that event as a failed call, and this one runs.
+                let record = ctx.emit(AgentEvent::InvalidToolArgs {
+                    call_id: CallId::new(call.id.clone()),
+                    tool_name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                    error: format!("call to `{target}` wrapped in pseudo tool `{}`", call.name),
+                    recovery: format!("unwrapped:{target}"),
+                });
+                status.set_last_event(record.id);
+                call.name = target;
+                call.arguments = arguments;
+                call.invalid = None;
+            }
+        }
+
         // Discovery bridge, resolved before any hook runs. `tool_search` is
         // answered from the run's catalogue without running a tool. A deferred
         // tool is not bridged at all: the model calls it by its own name, so
@@ -939,7 +978,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             let message = format!(
                 "invalid arguments for tool `{}`: {detail}; expected arguments: {}",
                 call.name,
-                crate::tool::signature::type_signature(&schema.parameters)
+                crate::tool::type_signature(&schema.parameters)
             );
             let record = ctx.emit(AgentEvent::InvalidToolArgs {
                 call_id,

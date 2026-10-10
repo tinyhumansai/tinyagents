@@ -97,7 +97,9 @@ async fn use_skill_args_sent_as_relaxed_json_string_runs_the_tool() {
     .await;
     assert_eq!(
         out.received,
-        vec![json!({ "skill": "email", "tool": "send", "args": { "to": "a@b.c", "subject": "hi" } })],
+        vec![
+            json!({ "skill": "email", "tool": "send", "args": { "to": "a@b.c", "subject": "hi" } })
+        ],
         "{}",
         out.transcript
     );
