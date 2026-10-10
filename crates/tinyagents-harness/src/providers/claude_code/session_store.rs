@@ -21,6 +21,17 @@ struct StoreFile {
     delivered: HashMap<String, Vec<String>>,
 }
 
+/// Serializes every read-modify-write of a store file across all
+/// `SessionStore` instances in this process (two providers on one workspace).
+/// Separate OS processes are not locked against each other.
+static FILE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Turns reserved by a running call but not yet confirmed delivered, keyed by
+/// (store file, thread, fingerprint). Process-local on purpose: a reservation
+/// must never reach disk, or a crash mid-turn would leave a turn the session
+/// never received marked as delivered.
+static IN_FLIGHT: Mutex<Vec<(PathBuf, String, String)>> = Mutex::new(Vec::new());
+
 /// Most delivered-turn fingerprints remembered per thread.
 const MAX_DELIVERED_PER_THREAD: usize = 256;
 
@@ -58,10 +69,11 @@ impl SessionStore {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, StoreFile> {
-        let mut guard = self.inner.lock().expect("session store mutex poisoned");
-        self.refresh(&mut guard);
-        guard
+    fn lock(&self) -> Locked<'_> {
+        let file = FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock().expect("session store mutex poisoned");
+        self.refresh(&mut inner);
+        Locked { inner, _file: file }
     }
 
     /// Lookup an existing CC session UUID for `thread_id`.
@@ -80,31 +92,43 @@ impl SessionStore {
     }
 
     /// Atomically reserve `fingerprints` for `thread_id` before the CLI is
-    /// spawned. Returns the fingerprints that were already delivered or
-    /// reserved by an earlier call (the caller must not re-send those) and a
-    /// guard that releases this call's own reservations unless
-    /// [`DeliveryClaim::commit`] is called, so a failed turn stays retryable.
+    /// spawned. Returns the fingerprints already delivered (on disk) or
+    /// reserved by a running call in this process (the caller must not re-send
+    /// those) and a guard for this call's own reservations. Reservations stay in
+    /// memory, so a crash never leaves an undelivered turn marked delivered;
+    /// dropping the guard without [`DeliveryClaim::commit`] releases them, so a
+    /// failed turn stays retryable.
     pub fn claim_delivered(
         self: &Arc<Self>,
         thread_id: &str,
         fingerprints: &[String],
     ) -> (HashSet<String>, DeliveryClaim) {
-        let mut guard = self.lock();
-        let entry = guard.delivered.entry(thread_id.to_string()).or_default();
-        let already: HashSet<String> = entry.iter().cloned().collect();
+        let guard = self.lock();
+        let mut already: HashSet<String> = guard
+            .delivered
+            .get(thread_id)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default();
+        let mut in_flight = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        for (path, thread, fingerprint) in in_flight.iter() {
+            if *path == self.path && thread == thread_id {
+                already.insert(fingerprint.clone());
+            }
+        }
         let mut mine = Vec::new();
         for fingerprint in fingerprints {
             if !already.contains(fingerprint) && !mine.contains(fingerprint) {
                 mine.push(fingerprint.clone());
             }
         }
-        if !mine.is_empty() {
-            entry.extend(mine.iter().cloned());
-            trim(entry, fingerprints.len());
-            if let Err(error) = self.persist(&guard) {
-                tracing::warn!("[claude-code][session-store] failed to persist claim: {error}");
-            }
+        for fingerprint in &mine {
+            in_flight.push((
+                self.path.clone(),
+                thread_id.to_string(),
+                fingerprint.clone(),
+            ));
         }
+        drop(in_flight);
         let claim = DeliveryClaim {
             store: Arc::clone(self),
             thread_id: thread_id.to_string(),
@@ -113,17 +137,14 @@ impl SessionStore {
         (already, claim)
     }
 
-    fn release(&self, thread_id: &str, fingerprints: &[String]) {
+    fn release_in_flight(&self, thread_id: &str, fingerprints: &[String]) {
         if fingerprints.is_empty() {
             return;
         }
-        let mut guard = self.lock();
-        if let Some(entry) = guard.delivered.get_mut(thread_id) {
-            entry.retain(|f| !fingerprints.contains(f));
-        }
-        if let Err(error) = self.persist(&guard) {
-            tracing::warn!("[claude-code][session-store] failed to persist release: {error}");
-        }
+        let mut in_flight = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        in_flight.retain(|(path, thread, fingerprint)| {
+            !(*path == self.path && thread == thread_id && fingerprints.contains(fingerprint))
+        });
     }
 
     /// Record user-turn fingerprints delivered to `thread_id`'s session.
@@ -164,7 +185,29 @@ impl SessionStore {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&self.path, serialized)
+        // Write-then-rename so a reader never sees a half-written file.
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, serialized)?;
+        std::fs::rename(&tmp, &self.path)
+    }
+}
+
+/// Held store state plus the process-wide file lock.
+struct Locked<'a> {
+    inner: std::sync::MutexGuard<'a, StoreFile>,
+    _file: std::sync::MutexGuard<'static, ()>,
+}
+
+impl std::ops::Deref for Locked<'_> {
+    type Target = StoreFile;
+    fn deref(&self) -> &StoreFile {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for Locked<'_> {
+    fn deref_mut(&mut self) -> &mut StoreFile {
+        &mut self.inner
     }
 }
 
@@ -180,8 +223,9 @@ fn trim(entry: &mut Vec<String>, keep_at_least: usize) {
 }
 
 /// Reservation of delivered-turn fingerprints taken by
-/// [`SessionStore::claim_delivered`]. Dropping it without `commit` releases
-/// the reservations (the turn failed, so the session never received them).
+/// [`SessionStore::claim_delivered`]. The turn's fingerprints are recorded
+/// durably with [`SessionStore::record_delivered`] once the CLI accepted them;
+/// `commit` then (and dropping on failure) just ends the in-memory reservation.
 #[derive(Debug)]
 pub struct DeliveryClaim {
     store: Arc<SessionStore>,
@@ -190,15 +234,14 @@ pub struct DeliveryClaim {
 }
 
 impl DeliveryClaim {
-    /// The turn reached the session; keep the reservations as delivered.
-    pub fn commit(mut self) {
-        self.claimed.clear();
-    }
+    /// The turn reached the session and was recorded as delivered; end the
+    /// reservation.
+    pub fn commit(self) {}
 }
 
 impl Drop for DeliveryClaim {
     fn drop(&mut self) {
-        self.store.release(&self.thread_id, &self.claimed);
+        self.store.release_in_flight(&self.thread_id, &self.claimed);
     }
 }
 

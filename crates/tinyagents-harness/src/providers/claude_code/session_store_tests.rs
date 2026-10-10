@@ -97,12 +97,65 @@ fn claim_is_exclusive_and_released_on_failure() {
     let (already, second) = store.claim_delivered("t", &fps);
     assert!(already.contains("turn"), "second caller must not re-send");
     drop(second); // owns nothing, releases nothing
-    assert!(store.delivered("t").contains("turn"));
 
     drop(first); // failed turn: reservation released
-    assert!(store.delivered("t").is_empty());
+    let (already, again) = store.claim_delivered("t", &fps);
+    assert!(already.is_empty(), "failed turn must stay retryable");
 
-    let (_, ok) = store.claim_delivered("t", &fps);
-    ok.commit();
+    store.record_delivered("t", &fps).unwrap();
+    again.commit();
     assert!(store.delivered("t").contains("turn"));
+}
+
+#[test]
+fn a_claim_is_never_written_to_disk() {
+    let dir = tempdir().unwrap();
+    let store = Arc::new(SessionStore::open(dir.path()));
+    let (_, _claim) = store.claim_delivered("t", &["turn".to_string()]);
+    // A restarted process reads only the file: the reservation is not there.
+    assert!(SessionStore::open(dir.path()).delivered("t").is_empty());
+}
+
+#[test]
+fn concurrent_claimers_on_separate_instances_get_exactly_one_winner() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let store = Arc::new(SessionStore::open(&path));
+                let (already, claim) = store.claim_delivered("t", &["turn".to_string()]);
+                // Hold the claim until every thread has tried.
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                drop(claim);
+                already.is_empty()
+            })
+        })
+        .collect();
+    let winners = handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .filter(|won| *won)
+        .count();
+    assert_eq!(winners, 1);
+}
+
+#[test]
+fn concurrent_writers_on_separate_instances_lose_no_updates() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let store = SessionStore::open(&path);
+                store.record_delivered("t", &[format!("fp-{i}")]).unwrap();
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    assert_eq!(SessionStore::open(&path).delivered("t").len(), 8);
 }
