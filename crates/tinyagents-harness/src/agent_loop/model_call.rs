@@ -654,6 +654,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         loop {
             // Retry loop for the current model.
             let mut attempt = 0usize;
+            // Track the source of a limit error explicitly. The idle breaker
+            // may send its own limit error through fallback, while all other
+            // limit errors remain terminal regardless of the timeout count.
+            let mut idle_breaker_error = false;
             // Counts the deltas the *current* streaming attempt has already
             // handed to consumers. A stream that dies after 200 tokens has
             // already delivered them; the retry replays from scratch, so a UI
@@ -742,6 +746,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                             && let Some(tripped) =
                                 self.stream_idle_breaker_error(ctx, &current_name)
                         {
+                            idle_breaker_error = true;
                             break Err(tripped);
                         }
                         // `RunLimits::max_retries_per_call` is a hard ceiling
@@ -844,20 +849,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     // back into the fallback chain: the run itself is out of
                     // wall-clock budget, so trying another model would just
                     // spin until the *next* deadline check fails identically.
-                    let idle_breaker_tripped = self
-                        .policy
-                        .limits
-                        .max_consecutive_stream_idle_timeouts
-                        .is_some_and(|max| {
-                            max > 0
-                                && ctx
-                                    .limits
-                                    .consecutive_stream_idle_timeouts_for(&current_name)
-                                    >= max
-                        });
                     if matches!(error, TinyAgentsError::Timeout(_))
-                        || matches!(error, TinyAgentsError::LimitExceeded(_))
-                            && !idle_breaker_tripped
+                        || matches!(error, TinyAgentsError::LimitExceeded(_)) && !idle_breaker_error
                     {
                         return Err(error);
                     }
