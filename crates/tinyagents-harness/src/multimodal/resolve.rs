@@ -31,6 +31,7 @@
 //! text and not the turn.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -87,6 +88,33 @@ impl TextExtractor for NoTextExtractor {
     async fn extract(&self, mime: &str, _bytes: &[u8]) -> std::result::Result<String, String> {
         Err(format!("no text extractor is configured for '{mime}'"))
     }
+}
+
+/// Fetch only from addresses vetted by TinyTools. The caller's `Client` cannot
+/// be used here: reqwest does not let a request override its DNS or redirect
+/// policy, so that client could reach a different address after validation.
+async fn guarded_remote_get(source: &str) -> std::result::Result<reqwest::Response, String> {
+    let validated = tinytools_std::url_guard::validate_url_with_dns_check(source, &[])
+        .await
+        .map_err(|error| error.to_string())?;
+    let client = guarded_remote_client(&validated).map_err(|error| error.to_string())?;
+    client
+        .get(validated.url())
+        .send()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn guarded_remote_client(
+    validated: &tinytools_std::url_guard::ValidatedUrl,
+) -> reqwest::Result<Client> {
+    Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .resolve_to_addrs(&validated.host, validated.addresses())
+        .build()
 }
 
 // ── Images ───────────────────────────────────────────────────────────────
@@ -156,14 +184,15 @@ fn resolve_image_data_uri(source: &str, max_bytes: usize) -> Result<String> {
 async fn resolve_remote_image(
     source: &str,
     max_bytes: usize,
-    remote_client: &Client,
+    _remote_client: &Client,
 ) -> Result<String> {
-    let response = remote_client.get(source).send().await.map_err(|error| {
-        MultimodalError::RemoteFetchFailed {
-            input: source.to_string(),
-            reason: error.to_string(),
-        }
-    })?;
+    let response =
+        guarded_remote_get(source)
+            .await
+            .map_err(|error| MultimodalError::RemoteFetchFailed {
+                input: source.to_string(),
+                reason: error,
+            })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -565,12 +594,12 @@ async fn read_local_file(source: &str, max_bytes: usize) -> Result<(Vec<u8>, Pat
 async fn fetch_remote_file(
     source: &str,
     max_bytes: usize,
-    remote_client: &Client,
+    _remote_client: &Client,
 ) -> Result<(Vec<u8>, String, Option<String>)> {
-    let response = remote_client.get(source).send().await.map_err(|error| {
+    let response = guarded_remote_get(source).await.map_err(|error| {
         MultimodalError::RemoteFileFetchFailed {
             input: source.to_string(),
-            reason: error.to_string(),
+            reason: error,
         }
     })?;
 
