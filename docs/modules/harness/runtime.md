@@ -150,7 +150,7 @@ fails with a retryable `CallTimeout`, so the normal retry/fallback path
 applies. After `RunLimits::max_consecutive_stream_idle_timeouts` (default 5,
 `None`/`Some(0)` disables) idle timeouts in a row on one model (since its last
 output event) the circuit breaker stops retrying that model with
-`TinyAgentsError::LimitExceeded`; the fallback chain is still consulted with a
+`TinyAgentsError::StreamIdleTimeout`; the fallback chain is still consulted with a
 fresh count per model, and the run fails with that error only when the chain is
 exhausted. Because any output event resets the count, the breaker is aimed at
 streams that stall before producing output (pair it with

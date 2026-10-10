@@ -132,7 +132,9 @@ pub struct ModelFallbackMiddleware {
 /// capacity for a call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RateLimitBehavior {
-    /// Fail the call immediately with
+    /// Fail immediately: a temporarily empty bucket that can refill returns
+    /// [`TinyAgentsError::RateLimited`][crate::error::TinyAgentsError::RateLimited],
+    /// while a bucket that can never admit the requested tokens returns
     /// [`TinyAgentsError::LimitExceeded`][crate::error::TinyAgentsError::LimitExceeded].
     Error,
     /// Wait (polling at the configured interval) until the bucket refills enough

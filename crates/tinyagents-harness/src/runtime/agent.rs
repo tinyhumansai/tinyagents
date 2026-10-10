@@ -84,6 +84,10 @@ pub enum HostedErrorKind {
     /// ceiling — see [`TinyAgentsError::Timeout`] and
     /// [`TinyAgentsError::CallTimeout`]).
     Timeout,
+    /// A refillable rate limiter denied the model call.
+    RateLimited,
+    /// The per-model streaming idle breaker stopped the call.
+    StreamIdleTimeout,
     /// A configured run limit (model calls, tool calls, recursion depth, a
     /// host budget) was exhausted.
     LimitExceeded,
@@ -152,6 +156,8 @@ impl std::error::Error for HostedError {}
 fn classify_hosted_error(error: &TinyAgentsError) -> HostedErrorKind {
     match error {
         TinyAgentsError::Cancelled => HostedErrorKind::Cancelled,
+        TinyAgentsError::StreamIdleTimeout(_) => HostedErrorKind::StreamIdleTimeout,
+        TinyAgentsError::RateLimited(_) => HostedErrorKind::RateLimited,
         TinyAgentsError::Timeout(_) | TinyAgentsError::CallTimeout(_) => HostedErrorKind::Timeout,
         TinyAgentsError::LimitExceeded(_) | TinyAgentsError::SubAgentDepth(_) => {
             HostedErrorKind::LimitExceeded
@@ -177,6 +183,8 @@ fn hosted_error_message(kind: HostedErrorKind) -> &'static str {
     match kind {
         HostedErrorKind::Cancelled => "hosted agent invocation was cancelled",
         HostedErrorKind::Timeout => "hosted agent invocation timed out",
+        HostedErrorKind::RateLimited => "hosted agent invocation was rate limited",
+        HostedErrorKind::StreamIdleTimeout => "hosted agent invocation hit the stream idle limit",
         HostedErrorKind::LimitExceeded => "hosted agent invocation exceeded a configured limit",
         HostedErrorKind::Policy => "hosted agent invocation was rejected by policy",
         HostedErrorKind::Provider => "hosted agent invocation failed at the model provider",
@@ -221,6 +229,8 @@ impl From<HostedError> for TinyAgentsError {
                 Some(TimeoutBound::PerModelCall) => TinyAgentsError::CallTimeout(error.message),
                 _ => TinyAgentsError::Timeout(error.message),
             },
+            HostedErrorKind::RateLimited => TinyAgentsError::RateLimited(error.message),
+            HostedErrorKind::StreamIdleTimeout => TinyAgentsError::StreamIdleTimeout(error.message),
             HostedErrorKind::LimitExceeded => TinyAgentsError::LimitExceeded(error.message),
             HostedErrorKind::Policy => TinyAgentsError::Validation(error.message),
             HostedErrorKind::Provider | HostedErrorKind::Internal => {

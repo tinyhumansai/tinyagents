@@ -76,6 +76,30 @@ fn call_timeout_is_a_provider_timeout() {
 }
 
 #[test]
+fn rate_limit_and_stream_idle_errors_keep_provider_classification() {
+    let rate_limited = TerminalOutcome::from_error(
+        &TinyAgentsError::RateLimited("bucket empty".into()),
+        TimeoutPhase::Provider,
+    );
+    assert_eq!(
+        rate_limited.reason,
+        TerminalReason::ProviderFailed(Some(FailoverReason::RateLimit))
+    );
+    assert_eq!(rate_limited.class, TerminalClass::Failure);
+
+    let idle = TerminalOutcome::from_error(
+        &TinyAgentsError::StreamIdleTimeout("provider stalled".into()),
+        TimeoutPhase::Provider,
+    );
+    assert_eq!(
+        idle.reason,
+        TerminalReason::ProviderFailed(Some(FailoverReason::StreamIdleTimeout))
+    );
+    assert_eq!(idle.class, TerminalClass::Timeout);
+    assert_eq!(idle.timeout_phase, Some(TimeoutPhase::Provider));
+}
+
+#[test]
 fn provider_errors_carry_the_failover_reason() {
     let o = TerminalOutcome::from_error(
         &TinyAgentsError::Model("HTTP 429 too many requests".into()),
@@ -199,6 +223,10 @@ fn merge_follows_the_documented_precedence() {
             assert_eq!(b.reason, *high, "{high:?} over {low:?} (swapped)");
         }
     }
+    let idle = ProviderFailed(Some(FailoverReason::StreamIdleTimeout));
+    let limit = LimitReached(Some(LimitKind::ModelCalls));
+    assert_eq!(out(idle).merge(out(limit)).reason, idle);
+    assert_eq!(out(limit).merge(out(idle)).reason, idle);
     // Failures share a rank.
     for failure in [ProviderFailed(None), ToolFailed, Internal] {
         assert_eq!(out(Halted).merge(out(failure)).reason, Halted);

@@ -21,6 +21,8 @@
 //! | `TinyAgentsError::Cancelled` | `Cancelled` | `Cancellation` |
 //! | `TinyAgentsError::Timeout` (run deadline) | `Timeout` | `Timeout` |
 //! | `TinyAgentsError::CallTimeout` (one call wedged) | `ProviderFailed(Some(Timeout))` | `Timeout` |
+//! | `TinyAgentsError::RateLimited` (refillable bucket) | `ProviderFailed(Some(RateLimit))` | `Failure` |
+//! | `TinyAgentsError::StreamIdleTimeout` (breaker threshold) | `ProviderFailed(Some(StreamIdleTimeout))` | `Timeout` |
 //! | provider / model / overflow / empty-response errors | `ProviderFailed(reason)` | `Failure` |
 //! | tool errors | `ToolFailed` | `Failure` |
 //! | run caps, depth caps | `LimitReached(..)` | `Failure` |
@@ -125,9 +127,10 @@ impl TerminalReason {
     pub fn class(self) -> TerminalClass {
         match self {
             Self::Completed => TerminalClass::Success,
-            Self::Timeout | Self::ProviderFailed(Some(FailoverReason::Timeout)) => {
-                TerminalClass::Timeout
-            }
+            Self::Timeout
+            | Self::ProviderFailed(Some(
+                FailoverReason::Timeout | FailoverReason::StreamIdleTimeout,
+            )) => TerminalClass::Timeout,
             Self::Cancelled => TerminalClass::Cancellation,
             Self::Paused | Self::Deferred => TerminalClass::Suspended,
             Self::LimitReached(_)
@@ -143,7 +146,9 @@ impl TerminalReason {
         match self {
             Self::Cancelled => 0,
             Self::Timeout => 1,
-            Self::ProviderFailed(Some(FailoverReason::Timeout)) => 2,
+            Self::ProviderFailed(Some(
+                FailoverReason::Timeout | FailoverReason::StreamIdleTimeout,
+            )) => 2,
             Self::LimitReached(_) => 3,
             Self::Halted => 4,
             Self::ProviderFailed(_) | Self::ToolFailed | Self::Internal => 5,
@@ -249,6 +254,15 @@ impl TerminalOutcome {
                 message,
             )
             .with_timeout_phase(site),
+            E::RateLimited(_) | E::StreamIdleTimeout(_) => {
+                let reason = FailoverReason::classify(error);
+                let outcome = Self::new(TerminalReason::ProviderFailed(Some(reason)), message);
+                if reason == FailoverReason::StreamIdleTimeout {
+                    outcome.with_timeout_phase(site)
+                } else {
+                    outcome
+                }
+            }
             E::Provider(_)
             | E::Model(_)
             | E::ContextOverflow { .. }

@@ -233,6 +233,14 @@ pub enum TinyAgentsError {
     #[error("limit exceeded: {0}")]
     LimitExceeded(String),
 
+    /// A refillable token-bucket rate limit denied a model call.
+    #[error("rate limited: {0}")]
+    RateLimited(String),
+
+    /// The stream idle-timeout breaker stopped retries on one model.
+    #[error("stream idle timeout limit: {0}")]
+    StreamIdleTimeout(String),
+
     /// The provider returned an empty completion — no text, no tool calls, and
     /// no structured output — while
     /// [`crate::runtime::RunPolicy`]'s `error_on_empty_response` guard
@@ -347,12 +355,9 @@ pub enum TinyAgentsError {
 }
 
 impl TinyAgentsError {
-    /// Whether a limit error is terminal instead of a refilling rate limit.
+    /// Whether this is a terminal configured or provider budget limit.
     pub fn is_terminal_limit(&self) -> bool {
-        match self {
-            Self::LimitExceeded(message) => !message.starts_with("rate limit:"),
-            _ => false,
-        }
+        matches!(self, Self::LimitExceeded(_))
     }
 }
 
