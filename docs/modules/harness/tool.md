@@ -303,7 +303,8 @@ are handled separately:
 - **Schema-invalid** (well-formed JSON that violates the tool's input schema) is
   governed by `RunPolicy::invalid_args: InvalidArgsPolicy`. `ReturnToolError`
   (the default) injects a repairable tool-error message (carrying the
-  validation detail and the expected schema) and continues; `Fail` aborts the
+  validation detail and a compact TypeScript-style signature of the expected
+  arguments, not the full JSON Schema) and continues; `Fail` aborts the
   turn and is no longer the default.
   `NormalizeThenReturnToolError` first repairs common object-schema transport
   shapes (a JSON object encoded as a string, including markdown fences, or a
