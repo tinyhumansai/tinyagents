@@ -158,12 +158,20 @@ async fn resolve_remote_image(
     max_bytes: usize,
     remote_client: &Client,
 ) -> Result<String> {
-    let response = remote_client.get(source).send().await.map_err(|error| {
+    let validated_url = tinytools_std::url_guard::validate_url(source, &[]).map_err(|error| {
         MultimodalError::RemoteFetchFailed {
             input: source.to_string(),
             reason: error.to_string(),
         }
     })?;
+    let response = remote_client
+        .get(validated_url)
+        .send()
+        .await
+        .map_err(|error| MultimodalError::RemoteFetchFailed {
+            input: source.to_string(),
+            reason: error.to_string(),
+        })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -567,12 +575,20 @@ async fn fetch_remote_file(
     max_bytes: usize,
     remote_client: &Client,
 ) -> Result<(Vec<u8>, String, Option<String>)> {
-    let response = remote_client.get(source).send().await.map_err(|error| {
+    let validated_url = tinytools_std::url_guard::validate_url(source, &[]).map_err(|error| {
         MultimodalError::RemoteFileFetchFailed {
             input: source.to_string(),
             reason: error.to_string(),
         }
     })?;
+    let response = remote_client
+        .get(validated_url)
+        .send()
+        .await
+        .map_err(|error| MultimodalError::RemoteFileFetchFailed {
+            input: source.to_string(),
+            reason: error.to_string(),
+        })?;
 
     let status = response.status();
     if !status.is_success() {

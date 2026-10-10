@@ -84,6 +84,10 @@ format contributes a header naming it plus a content hash.
   message type). This module never decides which local paths may be read —
   that is `FileLimits::files_disabled`'s lever, not a filesystem allowlist
   here.
+- Opt-in remote image and file URLs pass TinyTools' lexical URL guard before
+  the host's client sends a request. The host client still owns DNS resolution,
+  connection pinning, proxy use, and redirect policy; this admission check
+  alone does not validate those subsequent destinations.
 - Text extraction failures degrade to a `FilePayload::Reference`. Resolution
   errors (read/fetch/MIME/size) remain typed errors for the host to present or
   skip according to its own policy.

@@ -3,6 +3,48 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::io::Write;
 
 #[tokio::test]
+async fn remote_image_rejects_private_destination_before_fetch() {
+    let limits = ImageLimits {
+        allow_remote_fetch: true,
+        ..ImageLimits::default()
+    };
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_millis(100))
+        .build()
+        .unwrap();
+    let error = resolve_image("http://127.0.0.1:9/image.png", &limits, 1024, &client)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, MultimodalError::RemoteFetchFailed { reason, .. } if reason.contains("Blocked local/private host"))
+    );
+}
+
+#[tokio::test]
+async fn remote_file_rejects_mapped_private_destination_before_fetch() {
+    let limits = FileLimits {
+        allow_remote_fetch: true,
+        ..FileLimits::default()
+    };
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_millis(100))
+        .build()
+        .unwrap();
+    let error = resolve_attachment(
+        "http://[::ffff:127.0.0.1]:9/file.bin",
+        &limits,
+        1024,
+        &client,
+        UnknownMimePolicy::Accept,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, MultimodalError::RemoteFileFetchFailed { reason, .. } if reason.contains("IPv6"))
+    );
+}
+
+#[tokio::test]
 async fn generic_resolution_retains_binary_bytes_and_decodes_only_transport_gzip() {
     let bytes = [0, 255, 7, 0];
     let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -228,7 +270,12 @@ async fn malformed_and_oversized_data_uri_payloads_fail_before_extraction() {
 async fn generic_http_mime_precedes_utf8_sniff_and_legacy_stays_narrow() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/media", listener.local_addr().unwrap());
+    let url = "http://example.com/media";
+    let client = Client::builder()
+        .no_proxy()
+        .resolve("example.com", listener.local_addr().unwrap())
+        .build()
+        .unwrap();
     let server = tokio::spawn(async move {
         for _ in 0..2 {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -253,26 +300,14 @@ async fn generic_http_mime_precedes_utf8_sniff_and_legacy_stays_narrow() {
         allow_remote_fetch: true,
         ..FileLimits::default()
     };
-    let resolved = resolve_attachment(
-        &url,
-        &limits,
-        1024,
-        &Client::new(),
-        UnknownMimePolicy::Accept,
-    )
-    .await
-    .unwrap();
+    let resolved = resolve_attachment(&url, &limits, 1024, &client, UnknownMimePolicy::Accept)
+        .await
+        .unwrap();
     assert_eq!(resolved.mime, "audio/wav");
     assert_eq!(resolved.bytes, b"RIFF\0\0\0\0WAVE");
-    let legacy = resolve_attachment(
-        &url,
-        &limits,
-        1024,
-        &Client::new(),
-        UnknownMimePolicy::Reject,
-    )
-    .await
-    .unwrap();
+    let legacy = resolve_attachment(&url, &limits, 1024, &client, UnknownMimePolicy::Reject)
+        .await
+        .unwrap();
     assert_eq!(legacy.mime, "text/plain");
     server.await.unwrap();
 }
