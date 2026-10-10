@@ -1,5 +1,6 @@
-use super::tests::{meta, turn_usage};
 use super::*;
+
+use super::tests::{meta, turn_usage};
 use crate::transcript::{MessageUsage, append_transcript_turn, read_transcript};
 
 fn priced(input: u64, cost: f64, source: Option<UsageCostSource>) -> TurnUsage {
