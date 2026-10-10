@@ -111,13 +111,9 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     .intersection(&turn_recovery.truncated_tool_names)
                     .cloned()
                     .collect();
-                if repeated.is_empty() {
-                    // Give the retry room to finish the call.
-                    turn_recovery.boost_max_tokens(attempt_max_tokens);
-                } else {
-                    // A larger cap already failed to fit this call (or the
-                    // host clamps it); growing it again only makes the next
-                    // cut-off call more expensive.
+                // Give the retry room to finish the call.
+                turn_recovery.boost_max_tokens(attempt_max_tokens);
+                if !repeated.is_empty() {
                     tracing::info!(
                         target: "tinyagents::agent_loop",
                         run_id = %ctx.run_id(),
