@@ -373,9 +373,6 @@ impl From<tinyinference_llm::Error> for TinyAgentsError {
             tinyinference_llm::Error::Serialization(error) => Self::Serialization(error),
             tinyinference_llm::Error::Catalog(message) => Self::Model(message),
             tinyinference_llm::Error::Unsupported(message) => Self::Validation(message),
-            tinyinference_llm::Error::BudgetExceeded(error) => {
-                Self::LimitExceeded(error.to_string())
-            }
         }
     }
 }
@@ -418,14 +415,6 @@ impl From<tinyinference_video::Error> for TinyAgentsError {
 }
 
 impl TinyAgentsError {
-    /// Returns whether this limit error is terminal instead of refillable.
-    pub fn is_terminal_limit(&self) -> bool {
-        match self {
-            Self::LimitExceeded(message) => !message.starts_with("rate limit:"),
-            _ => false,
-        }
-    }
-
     /// Builds the right error for a structured provider failure, promoting a
     /// recognised context overflow to [`TinyAgentsError::ContextOverflow`].
     ///

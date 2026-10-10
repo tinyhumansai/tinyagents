@@ -555,28 +555,6 @@ struct FailingModel {
     attempts: Mutex<usize>,
 }
 
-struct BudgetFailingModel {
-    attempts: Mutex<usize>,
-}
-
-#[async_trait]
-impl ChatModel<()> for BudgetFailingModel {
-    async fn invoke(
-        &self,
-        _state: &(),
-        _request: ModelRequest,
-    ) -> tinyinference_llm::Result<ModelResponse> {
-        *self.attempts.lock().unwrap() += 1;
-        Err(tinyinference_llm::Error::BudgetExceeded(
-            tinyinference_llm::model::budget::BudgetExceeded {
-                snapshot: tinyinference_llm::model::budget::BudgetSnapshot::default(),
-                requested: tinyinference_llm::model::budget::Spend::default(),
-                limits: tinyinference_llm::model::budget::SpendLimits::default(),
-            },
-        ))
-    }
-}
-
 #[async_trait]
 impl ChatModel<()> for FailingModel {
     async fn invoke(
@@ -4207,7 +4185,7 @@ async fn a_provider_budget_refusal_stops_retries_and_model_fallback() {
     harness.register_model("fallback", fallback.clone());
     harness.with_policy(RunPolicy {
         retry: RetryPolicy::default().with_max_attempts(4),
-        fallback: Some(FallbackPolicy::new(["fallback"])),
+        fallback: Some(FallbackPolicy::new(["primary", "fallback"])),
         ..RunPolicy::default()
     });
 
