@@ -223,6 +223,10 @@ fn merge_follows_the_documented_precedence() {
             assert_eq!(b.reason, *high, "{high:?} over {low:?} (swapped)");
         }
     }
+    let idle = ProviderFailed(Some(FailoverReason::StreamIdleTimeout));
+    let limit = LimitReached(Some(LimitKind::ModelCalls));
+    assert_eq!(out(idle).merge(out(limit)).reason, idle);
+    assert_eq!(out(limit).merge(out(idle)).reason, idle);
     // Failures share a rank.
     for failure in [ProviderFailed(None), ToolFailed, Internal] {
         assert_eq!(out(Halted).merge(out(failure)).reason, Halted);

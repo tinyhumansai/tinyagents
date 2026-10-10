@@ -146,7 +146,9 @@ impl TerminalReason {
         match self {
             Self::Cancelled => 0,
             Self::Timeout => 1,
-            Self::ProviderFailed(Some(FailoverReason::Timeout)) => 2,
+            Self::ProviderFailed(Some(
+                FailoverReason::Timeout | FailoverReason::StreamIdleTimeout,
+            )) => 2,
             Self::LimitReached(_) => 3,
             Self::Halted => 4,
             Self::ProviderFailed(_) | Self::ToolFailed | Self::Internal => 5,
