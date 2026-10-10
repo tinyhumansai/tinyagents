@@ -636,6 +636,8 @@ fn last_context_is_the_final_calls_size_not_the_turns_summed_spend() {
     assert_eq!(spend.root.last_input_tokens, 5_710_657);
     // The gauge reads one request.
     assert_eq!(spend.root.last_context_tokens, 103_900);
+    assert_eq!(spend.root.last_context_input_tokens, 103_000);
+    assert_eq!(spend.root.last_context_output_tokens, 900);
     assert!(spend.root.last_context_tokens < spend.root.context_window);
 }
 
