@@ -451,6 +451,10 @@ pub struct RunContext<Ctx = ()> {
     /// Positional, not by provider id, so duplicate or empty ids fail closed.
     /// Set per turn and cleared when the batch ends.
     pub(crate) truncated_call_positions: std::collections::HashSet<usize>,
+    /// The subset of `truncated_call_positions` whose tool was also cut off
+    /// on the previous truncated turn: answered with the stronger "stop
+    /// sending calls this large" corrective. Same lifetime as the set above.
+    pub(crate) truncated_repeat_positions: std::collections::HashSet<usize>,
     /// How many calls the current batch has admitted so far; the position
     /// `truncated_call_positions` is matched against. Reset per batch.
     pub(crate) batch_admissions: usize,

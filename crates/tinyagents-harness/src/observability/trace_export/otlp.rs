@@ -10,6 +10,22 @@ use sha2::{Digest, Sha256};
 use super::ExportBrand;
 use super::types::{SpanKind, SpanStatus, TraceSpan};
 
+/// Span attribute a host sets to pick a span's Langfuse level. `"WARNING"`
+/// marks an expected failure (a command that exited non-zero) apart from a
+/// harness failure, or flags a span that did not fail but should be looked at
+/// (a cancelled turn, a span force-closed at turn end). Any other value is
+/// ignored: a failed span exports as `ERROR`, any other span with no level.
+pub const OBSERVATION_LEVEL_ATTR: &str = "observation.level";
+
+/// The Langfuse level to export for `span`, if any.
+fn span_level(span: &TraceSpan) -> Option<&'static str> {
+    match (string_attr(span, OBSERVATION_LEVEL_ATTR), span.status) {
+        (Some("WARNING"), _) => Some("WARNING"),
+        (_, SpanStatus::Error) => Some("ERROR"),
+        _ => None,
+    }
+}
+
 // The backend JSON parser caps requests at 10 MiB. A generation can carry a
 // 200 KiB structured prompt, so use a much smaller transport batch.
 const MAX_SPANS_PER_REQUEST: usize = 20;
@@ -329,14 +345,17 @@ pub fn span_to_otlp(
         };
         attrs.push(json_attribute("langfuse.observation.output", &output));
     }
-    if span.status == SpanStatus::Error {
-        attrs.push(attribute("langfuse.observation.level", "ERROR"));
+    if let Some(level) = span_level(span) {
+        attrs.push(attribute("langfuse.observation.level", level));
         if let Some(message) = string_attr(span, "error.message") {
             attrs.push(attribute("langfuse.observation.status_message", message));
         }
     }
     for (key, value) in &span.attributes {
-        if key.starts_with("gen_ai.usage.") || key == "gen_ai.request.model" {
+        if key.starts_with("gen_ai.usage.")
+            || key == "gen_ai.request.model"
+            || key == OBSERVATION_LEVEL_ATTR
+        {
             continue;
         }
         attrs.push(json_attribute(

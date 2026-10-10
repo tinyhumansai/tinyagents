@@ -502,6 +502,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // The positions belong to this batch only; a later admission (a
         // deferred call resumed inline) must not match them.
         ctx.truncated_call_positions.clear();
+        ctx.truncated_repeat_positions.clear();
         Ok(deferred)
     }
 
@@ -592,8 +593,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 call_id = %call.id,
                 "[agent_loop] answering a possibly-truncated tool call with an error"
             );
+            let message = if ctx.truncated_repeat_positions.contains(&position) {
+                repeated_truncated_tool_call_message(&call.name)
+            } else {
+                truncated_tool_call_message(&call.name)
+            };
             return Ok(ResolvedToolCall::Answered(tinytools::ToolResult::error(
-                truncated_tool_call_message(&call.name),
+                message,
             )));
         }
         // The context's `LimitTracker` (synced with `RunPolicy::limits` at run
@@ -604,6 +610,45 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 kind: LimitKind::ToolCalls,
             });
             return Err(TinyAgentsError::LimitExceeded(err.to_string()));
+        }
+
+        // A real call buried inside a pseudo `tool_call` tool (see
+        // `tool_call_wrapper`). Retargeted before the discovery bridge and
+        // every rule, hook and gate below, so each of them sees the real tool
+        // name and arguments exactly as if the model had called it directly.
+        // A registered tool under a wrapper name keeps it.
+        if self.tools.dispatch(&call.name).is_none()
+            && super::tool_call_wrapper::is_wrapper_name(&call.name)
+        {
+            let is_callable = |name: &str| {
+                self.tools.model_dispatch(name).is_some()
+                    || name == crate::tool::discover::TOOL_SEARCH_NAME
+            };
+            if let Some((target, arguments)) =
+                super::tool_call_wrapper::unwrap_wrapped_call(&call.arguments, &is_callable)
+            {
+                tracing::debug!(
+                    target: "tinyagents::agent_loop",
+                    run_id = %ctx.run_id(),
+                    call_id = %call.id,
+                    wrapper = %call.name,
+                    tool = %target,
+                    "[agent_loop] unwrapped a tool call wrapped in a pseudo tool"
+                );
+                // Reported as an argument repair, not an `UnknownToolCall`:
+                // hosts render that event as a failed call, and this one runs.
+                let record = ctx.emit(AgentEvent::InvalidToolArgs {
+                    call_id: CallId::new(call.id.clone()),
+                    tool_name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                    error: format!("call to `{target}` wrapped in pseudo tool `{}`", call.name),
+                    recovery: format!("unwrapped:{target}"),
+                });
+                status.set_last_event(record.id);
+                call.name = target;
+                call.arguments = arguments;
+                call.invalid = None;
+            }
         }
 
         // Discovery bridge, resolved before any hook runs. `tool_search` is
@@ -926,16 +971,20 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 return Err(err.into());
             }
             // `ReturnToolError`: inject a tool-error result carrying the
-            // validation detail and the tool's expected parameter schema, then
-            // continue so the model can correct itself. This consumed one
+            // validation detail and a compact, TypeScript-style signature of
+            // the expected arguments (`{skill: "a" | "b", tool?: string}`),
+            // then continue so the model can correct itself. The full JSON
+            // Schema used to be echoed here; with descriptions and scaffolding
+            // it was most of the corrective's bytes and re-sent on every bad
+            // call, while the names, types, optionality and enum values the
+            // model actually needs survive in the signature. This consumed one
             // tool-call budget slot above, bounding the loop.
             let call_id = CallId::new(call.id.clone());
             let detail = err.to_string();
-            let schema_repr = serde_json::to_string(&schema.parameters)
-                .unwrap_or_else(|_| "<unserializable>".to_string());
             let message = format!(
-                "invalid arguments for tool `{}`: {detail}; expected schema: {schema_repr}",
-                call.name
+                "invalid arguments for tool `{}`: {detail}; expected arguments: {}",
+                call.name,
+                crate::tool::type_signature(&schema.parameters)
             );
             let record = ctx.emit(AgentEvent::InvalidToolArgs {
                 call_id,
@@ -2053,11 +2102,32 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
 }
 
 /// The error a call from a length-truncated response is answered with.
+/// The corrective for a call a length stop cut off.
+///
+/// It used to end "Re-issue the tool call with complete arguments", and models
+/// did exactly that: production traces show the same multi-thousand-token
+/// call (a whole workflow document in one argument) re-sent turn after turn,
+/// each cut at the same host output cap. The output cap is fixed, so the only
+/// way forward is a smaller call; the wording says so and forbids the repeat.
 fn truncated_tool_call_message(tool_name: &str) -> String {
     format!(
-        "Tool call `{tool_name}` was not executed: your response hit the output token limit \
-         mid-turn, so its arguments may be truncated. Re-issue the tool call with complete \
-         arguments (split large content into smaller calls if needed)."
+        "Tool call `{tool_name}` was cut off at the output token limit: your response ended \
+         before its arguments were complete, so it was not run. Do not repeat this call; the \
+         same content will be cut off again at the same limit. Split the change into smaller \
+         incremental calls (for example create a minimal version first, then add or edit one \
+         part per call), each well under the limit."
+    )
+}
+
+/// The corrective when the same tool was also cut off on the previous
+/// truncated turn: the model ignored the first one, so the next oversized call
+/// of this tool ends the run (see `reject_truncated_tool_calls`).
+fn repeated_truncated_tool_call_message(tool_name: &str) -> String {
+    format!(
+        "Tool call `{tool_name}` was cut off at the output token limit again, so it was not \
+         run. Stop sending `{tool_name}` calls this large: the limit is fixed, and another \
+         oversized `{tool_name}` call will end the run. Make the change in several smaller \
+         incremental steps, one part per call."
     )
 }
 
