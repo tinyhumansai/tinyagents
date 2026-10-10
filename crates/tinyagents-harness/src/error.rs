@@ -346,9 +346,22 @@ pub enum TinyAgentsError {
     Storage(String),
 }
 
+impl TinyAgentsError {
+    /// Whether a limit error is terminal instead of a refilling rate limit.
+    pub fn is_terminal_limit(&self) -> bool {
+        match self {
+            Self::LimitExceeded(message) => !message.starts_with("rate limit:"),
+            _ => false,
+        }
+    }
+}
+
 impl From<tinyinference_llm::Error> for TinyAgentsError {
     fn from(error: tinyinference_llm::Error) -> Self {
         match error {
+            tinyinference_llm::Error::BudgetExceeded(error) => {
+                Self::LimitExceeded(error.to_string())
+            }
             tinyinference_llm::Error::Model(message) => Self::Model(message),
             tinyinference_llm::Error::Provider(error) => Self::from_provider_error(*error),
             tinyinference_llm::Error::Validation(message) => Self::Validation(message),

@@ -654,6 +654,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         loop {
             // Retry loop for the current model.
             let mut attempt = 0usize;
+            // Track the source of a limit error explicitly. The idle breaker
+            // may send its own limit error through fallback, while all other
+            // limit errors remain terminal regardless of the timeout count.
+            let mut idle_breaker_error = false;
             // Counts the deltas the *current* streaming attempt has already
             // handed to consumers. A stream that dies after 200 tokens has
             // already delivered them; the retry replays from scratch, so a UI
@@ -727,6 +731,12 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 match attempt_result {
                     Ok(response) => break Ok(response),
                     Err(error) => {
+                        // Provider and run-budget refusals are terminal: a
+                        // retry or another model cannot make the exhausted
+                        // budget available again.
+                        if error.is_terminal_limit() {
+                            break Err(error);
+                        }
                         // The breaker outranks retry, not fallback: a model
                         // that keeps going silent is not retried again, but
                         // the chain below may still reach a healthy model.
@@ -736,6 +746,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                             && let Some(tripped) =
                                 self.stream_idle_breaker_error(ctx, &current_name)
                         {
+                            idle_breaker_error = true;
                             break Err(tripped);
                         }
                         // `RunLimits::max_retries_per_call` is a hard ceiling
@@ -838,7 +849,9 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     // back into the fallback chain: the run itself is out of
                     // wall-clock budget, so trying another model would just
                     // spin until the *next* deadline check fails identically.
-                    if matches!(error, TinyAgentsError::Timeout(_)) {
+                    if matches!(error, TinyAgentsError::Timeout(_))
+                        || error.is_terminal_limit() && !idle_breaker_error
+                    {
                         return Err(error);
                     }
                     // A hosted resolver owns routing authority. Its first

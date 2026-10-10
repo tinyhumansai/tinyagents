@@ -555,6 +555,28 @@ struct FailingModel {
     attempts: Mutex<usize>,
 }
 
+struct BudgetFailingModel {
+    attempts: Mutex<usize>,
+}
+
+#[async_trait]
+impl ChatModel<()> for BudgetFailingModel {
+    async fn invoke(
+        &self,
+        _state: &(),
+        _request: ModelRequest,
+    ) -> tinyinference_llm::Result<ModelResponse> {
+        *self.attempts.lock().unwrap() += 1;
+        Err(tinyinference_llm::Error::BudgetExceeded(
+            tinyinference_llm::model::budget::BudgetExceeded {
+                snapshot: tinyinference_llm::model::budget::BudgetSnapshot::default(),
+                requested: tinyinference_llm::model::budget::Spend::default(),
+                limits: tinyinference_llm::model::budget::SpendLimits::default(),
+            },
+        ))
+    }
+}
+
 #[async_trait]
 impl ChatModel<()> for FailingModel {
     async fn invoke(
@@ -1735,17 +1757,19 @@ async fn truncated_empty_retries_exhausted_errors_when_guard_enabled() {
 }
 
 #[tokio::test]
-async fn truncated_empty_retry_disabled_by_zero_policy() {
+async fn truncated_empty_retry_disabled_by_zero_policy_even_with_clock() {
     // truncated_empty_retries=0 with truncated_empty_nudges=0 restores
     // exact-replay behavior: no retry, a single model call, blank final.
     let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
         truncated_empty_response(2048),
+        text_response("unexpected recovery", 4, 3),
     ]));
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model("mock", Arc::clone(&model) as _);
     harness.with_policy(RunPolicy {
         truncated_empty_retries: 0,
         truncated_empty_nudges: 0,
+        limits: RunLimits::default().with_max_wall_clock_ms(Some(60_000)),
         ..RunPolicy::default()
     });
 
@@ -4119,6 +4143,33 @@ async fn run_limits_max_retries_per_call_caps_a_looser_retry_policy() {
         .expect_err("no fallback, retries capped by RunLimits");
     assert!(matches!(err, TinyAgentsError::Model(_)), "got {err:?}");
     assert_eq!(*failing.attempts.lock().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn a_provider_budget_refusal_stops_retries_and_model_fallback() {
+    let primary = Arc::new(BudgetFailingModel {
+        attempts: Mutex::new(0),
+    });
+    let fallback = Arc::new(crate::testkit::ScriptedModel::replies(vec![
+        "unexpected fallback",
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.register_model("primary", primary.clone());
+    harness.register_model("fallback", fallback.clone());
+    harness.with_policy(RunPolicy {
+        retry: RetryPolicy::default().with_max_attempts(4),
+        fallback: Some(FallbackPolicy::new(["fallback"])),
+        ..RunPolicy::default()
+    });
+
+    let error = harness
+        .invoke_default(&(), vec![Message::user("hi")])
+        .await
+        .expect_err("a provider budget refusal must stop the run");
+
+    assert!(matches!(error, TinyAgentsError::LimitExceeded(_)));
+    assert_eq!(*primary.attempts.lock().unwrap(), 1);
+    assert!(fallback.requests().is_empty());
 }
 
 #[tokio::test]

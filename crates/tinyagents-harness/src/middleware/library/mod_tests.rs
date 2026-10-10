@@ -334,6 +334,98 @@ async fn model_fallback_does_not_switch_on_non_retryable() {
 }
 
 #[tokio::test]
+async fn model_fallback_does_not_switch_on_limit_exceeded() {
+    let (mut ctx, recorder) = ctx_with_recorder();
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_model_middleware(Arc::new(ModelFallbackMiddleware::new(["backup"])));
+
+    let base = FakeModelBase::new(|_n, _req| {
+        Err(TinyAgentsError::LimitExceeded(
+            "budget exhausted".to_string(),
+        ))
+    });
+    let error = stack
+        .run_wrapped_model(&mut ctx, &(), ModelRequest::default(), &base)
+        .await
+        .expect_err("budget refusal is terminal");
+
+    assert!(matches!(error, TinyAgentsError::LimitExceeded(_)));
+    assert_eq!(base.calls(), 1);
+    assert_eq!(
+        events(&recorder)
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::FallbackSelected { .. }))
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn retry_middleware_does_not_retry_limit_exceeded_even_with_custom_policy() {
+    let (mut ctx, recorder) = ctx_with_recorder();
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_model_middleware(Arc::new(RetryMiddleware::new(
+        RetryPolicy::default()
+            .with_max_attempts(4)
+            .with_retry_on(Arc::new(|_| true)),
+    )));
+
+    let base = FakeModelBase::new(|_n, _req| {
+        Err(TinyAgentsError::LimitExceeded(
+            "budget exhausted".to_string(),
+        ))
+    });
+    let error = stack
+        .run_wrapped_model(&mut ctx, &(), ModelRequest::default(), &base)
+        .await
+        .expect_err("budget refusal is terminal");
+
+    assert!(matches!(error, TinyAgentsError::LimitExceeded(_)));
+    assert_eq!(base.calls(), 1);
+    assert_eq!(
+        events(&recorder)
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::RetryScheduled { .. }))
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn retry_middleware_honors_custom_retries_for_rate_limit_errors() {
+    let (mut ctx, recorder) = ctx_with_recorder();
+    let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
+    stack.push_model_middleware(Arc::new(RetryMiddleware::new(
+        RetryPolicy::default()
+            .with_max_attempts(2)
+            .with_retry_on(Arc::new(|_| true)),
+    )));
+
+    let base = FakeModelBase::new(|attempt, _req| {
+        if attempt == 0 {
+            Err(TinyAgentsError::LimitExceeded(
+                "rate limit: could not acquire 1 token".to_string(),
+            ))
+        } else {
+            Ok(ok_response())
+        }
+    });
+    stack
+        .run_wrapped_model(&mut ctx, &(), ModelRequest::default(), &base)
+        .await
+        .expect("a caller may retry a refilling rate limit");
+
+    assert_eq!(base.calls(), 2);
+    assert_eq!(
+        events(&recorder)
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::RetryScheduled { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn model_fallback_returns_last_error_when_all_fail() {
     let (mut ctx, _recorder) = ctx_with_recorder();
     let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
