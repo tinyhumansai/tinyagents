@@ -1070,7 +1070,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// event on the current model have reached
     /// [`RunLimits::max_consecutive_stream_idle_timeouts`][crate::limits::RunLimits::max_consecutive_stream_idle_timeouts].
     ///
-    /// [`TinyAgentsError::LimitExceeded`] is not retryable, so the caller
+    /// [`TinyAgentsError::StreamIdleTimeout`] marks a tripped per-model breaker,
+    /// so the caller
     /// stops retrying this model; the fallback chain is still consulted.
     fn stream_idle_breaker_error(
         &self,

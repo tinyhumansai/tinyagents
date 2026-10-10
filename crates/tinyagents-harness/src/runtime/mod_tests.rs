@@ -1185,6 +1185,21 @@ fn hosted_timeout_round_trip_preserves_the_bound() {
         TinyAgentsError::from(hosted(None)),
         TinyAgentsError::Timeout(_)
     ));
+
+    let hosted_kind = |kind| HostedError {
+        kind,
+        message: "sanitized failure".to_string(),
+        timeout_bound: None,
+        run: None,
+    };
+    assert!(matches!(
+        TinyAgentsError::from(hosted_kind(HostedErrorKind::RateLimited)),
+        TinyAgentsError::RateLimited(_)
+    ));
+    assert!(matches!(
+        TinyAgentsError::from(hosted_kind(HostedErrorKind::StreamIdleTimeout)),
+        TinyAgentsError::StreamIdleTimeout(_)
+    ));
 }
 
 /// A model whose every call (streaming included) never answers.
