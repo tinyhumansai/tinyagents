@@ -727,6 +727,12 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 match attempt_result {
                     Ok(response) => break Ok(response),
                     Err(error) => {
+                        // Provider and run-budget refusals are terminal: a
+                        // retry or another model cannot make the exhausted
+                        // budget available again.
+                        if matches!(&error, TinyAgentsError::LimitExceeded(_)) {
+                            break Err(error);
+                        }
                         // The breaker outranks retry, not fallback: a model
                         // that keeps going silent is not retried again, but
                         // the chain below may still reach a healthy model.
@@ -838,7 +844,10 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     // back into the fallback chain: the run itself is out of
                     // wall-clock budget, so trying another model would just
                     // spin until the *next* deadline check fails identically.
-                    if matches!(error, TinyAgentsError::Timeout(_)) {
+                    if matches!(
+                        error,
+                        TinyAgentsError::Timeout(_) | TinyAgentsError::LimitExceeded(_)
+                    ) {
                         return Err(error);
                     }
                     // A hosted resolver owns routing authority. Its first

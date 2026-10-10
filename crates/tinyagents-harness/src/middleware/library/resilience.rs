@@ -53,6 +53,12 @@ impl<State: Send + Sync, Ctx: Send + Sync> ModelMiddleware<State, Ctx> for Retry
             match next.run(ctx, state, request.clone()).await {
                 Ok(outcome) => return Ok(outcome),
                 Err(error) => {
+                    // A run or provider budget refusal cannot be repaired by
+                    // replaying the same call, even when a custom retry
+                    // predicate opts into every error.
+                    if matches!(&error, TinyAgentsError::LimitExceeded(_)) {
+                        return Err(error);
+                    }
                     if self.policy.should_retry_error(attempt, &error) {
                         // Compute the backoff from the *pre-increment* attempt
                         // number: `attempt == 0` is the first retry and must
