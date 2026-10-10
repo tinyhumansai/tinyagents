@@ -496,3 +496,20 @@ async fn nonzero_exit_stderr_fallback_is_redacted_and_bounded() {
     );
     assert!(text.len() < 2_300, "len {}", text.len());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nonzero_exit_surfaces_object_error_message_sanitized() {
+    let err = run_fake_claude(
+        r#"echo '{"type":"error","error":{"message":"denied for topsecret99 sk-ant-xyz"}}'; exit 2"#,
+        Some("topsecret99"),
+    )
+    .await
+    .expect_err("nonzero exit must fail");
+    let text = err.to_string();
+    assert!(text.contains("denied for"), "{text}");
+    assert!(
+        !text.contains("topsecret99") && !text.contains("sk-ant-xyz"),
+        "{text}"
+    );
+}

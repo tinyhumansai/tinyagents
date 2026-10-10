@@ -243,3 +243,13 @@ fn feed_bytes_still_replaces_genuinely_invalid_bytes() {
         "0xFF must decode to the replacement character, not vanish"
     );
 }
+
+#[test]
+fn error_event_with_object_payload_keeps_its_message() {
+    let mut parser = StreamJsonParser::new();
+    let events = parser.feed(b"{\"type\":\"error\",\"error\":{\"message\":\"rate limited\"}}\n");
+    assert!(matches!(
+        events.as_slice(),
+        [ClaudeCodeEvent::Error { message }] if message == "rate limited"
+    ));
+}
