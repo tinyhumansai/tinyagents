@@ -10,16 +10,19 @@ use sha2::{Digest, Sha256};
 use super::ExportBrand;
 use super::types::{SpanKind, SpanStatus, TraceSpan};
 
-/// Span attribute a host sets on a failed span to export it below `ERROR`:
-/// `"WARNING"` marks an expected failure (a command that exited non-zero)
-/// apart from a harness failure. Any other value exports as `ERROR`.
+/// Span attribute a host sets to pick a span's Langfuse level. `"WARNING"`
+/// marks an expected failure (a command that exited non-zero) apart from a
+/// harness failure, or flags a span that did not fail but should be looked at
+/// (a cancelled turn, a span force-closed at turn end). Any other value is
+/// ignored: a failed span exports as `ERROR`, any other span with no level.
 pub const OBSERVATION_LEVEL_ATTR: &str = "observation.level";
 
-/// Langfuse level for a span whose status is [`SpanStatus::Error`].
-fn failed_span_level(span: &TraceSpan) -> &'static str {
-    match string_attr(span, OBSERVATION_LEVEL_ATTR) {
-        Some("WARNING") => "WARNING",
-        _ => "ERROR",
+/// The Langfuse level to export for `span`, if any.
+fn span_level(span: &TraceSpan) -> Option<&'static str> {
+    match (string_attr(span, OBSERVATION_LEVEL_ATTR), span.status) {
+        (Some("WARNING"), _) => Some("WARNING"),
+        (_, SpanStatus::Error) => Some("ERROR"),
+        _ => None,
     }
 }
 
@@ -342,11 +345,8 @@ pub fn span_to_otlp(
         };
         attrs.push(json_attribute("langfuse.observation.output", &output));
     }
-    if span.status == SpanStatus::Error {
-        attrs.push(attribute(
-            "langfuse.observation.level",
-            failed_span_level(span),
-        ));
+    if let Some(level) = span_level(span) {
+        attrs.push(attribute("langfuse.observation.level", level));
         if let Some(message) = string_attr(span, "error.message") {
             attrs.push(attribute("langfuse.observation.status_message", message));
         }
