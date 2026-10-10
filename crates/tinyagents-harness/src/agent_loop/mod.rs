@@ -184,6 +184,9 @@ mod tool_rules_test;
 #[cfg(test)]
 #[path = "unknown_tool_tests.rs"]
 mod unknown_tool_test;
+#[cfg(test)]
+#[path = "tools_args_recovery_tests.rs"]
+mod tools_args_recovery_test;
 
 #[cfg(test)]
 #[path = "wrap_concurrency_tests.rs"]

@@ -926,16 +926,20 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 return Err(err.into());
             }
             // `ReturnToolError`: inject a tool-error result carrying the
-            // validation detail and the tool's expected parameter schema, then
-            // continue so the model can correct itself. This consumed one
+            // validation detail and a compact, TypeScript-style signature of
+            // the expected arguments (`{skill: "a" | "b", tool?: string}`),
+            // then continue so the model can correct itself. The full JSON
+            // Schema used to be echoed here; with descriptions and scaffolding
+            // it was most of the corrective's bytes and re-sent on every bad
+            // call, while the names, types, optionality and enum values the
+            // model actually needs survive in the signature. This consumed one
             // tool-call budget slot above, bounding the loop.
             let call_id = CallId::new(call.id.clone());
             let detail = err.to_string();
-            let schema_repr = serde_json::to_string(&schema.parameters)
-                .unwrap_or_else(|_| "<unserializable>".to_string());
             let message = format!(
-                "invalid arguments for tool `{}`: {detail}; expected schema: {schema_repr}",
-                call.name
+                "invalid arguments for tool `{}`: {detail}; expected arguments: {}",
+                call.name,
+                crate::tool::signature::type_signature(&schema.parameters)
             );
             let record = ctx.emit(AgentEvent::InvalidToolArgs {
                 call_id,
