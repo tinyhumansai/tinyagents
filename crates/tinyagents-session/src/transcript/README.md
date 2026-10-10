@@ -39,6 +39,8 @@ Re-exported from `transcript::` (see `../transcript.rs`); reachable as
   sum every provider call of the turn (its spend); `last_call_input` /
   `last_call_output` are the final call alone, the figure a context-window
   gauge needs. `spend::TranscriptSpend::last_context_tokens` reads them,
+  with `last_context_input_tokens` and `last_context_output_tokens` exposing
+  the two components separately,
   falling back to the mean request size for records written before them.
 - `DisplayMessage` / `CompactionMarker` / `DisplayRecord` /
   `DisplaySessionTranscript` — the display projection, which (unlike the
