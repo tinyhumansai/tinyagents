@@ -13,7 +13,7 @@ description = "Runs live (realtime voice) agent sessions with harness tools and 
 tinyliveagents = { path = "../../vendor/tinyliveagents/crates/tinyliveagents", version = "0.1.0" }
 # Tool calls run through the harness's own admission / middleware / fold
 # pipeline (`agent_loop::phases::execute_tool_batch`).
-tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.3" }
+tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.4" }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time"] }
 tracing = { workspace = true }
@@ -23,7 +23,7 @@ async-trait = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "macros", "rt-multi-thread"] }
 # The example builds a harness with the testkit's FakeTool.
-tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.3" }
+tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.4" }
 
 [lints]
 workspace = true
