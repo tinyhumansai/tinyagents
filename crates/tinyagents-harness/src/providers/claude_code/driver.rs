@@ -667,7 +667,8 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
 /// Drop the saved mapping that `--resume` just proved missing, but only if it
 /// still points at `failed_session_id`. Returns true when the caller may retry
 /// as a new session with the full history; false means this call did not remove
-/// the mapping (write failed, or a concurrent turn already replaced it) and the original failure must be surfaced.
+/// the mapping (write failed, or a concurrent turn already replaced it)
+/// and the original failure must be surfaced.
 fn clear_missing_session(ctx: &TurnContext<'_>, failed_session_id: &str) -> bool {
     tracing::warn!(
         "[claude-code][driver] saved session is missing; clearing mapping and retrying with full history"
