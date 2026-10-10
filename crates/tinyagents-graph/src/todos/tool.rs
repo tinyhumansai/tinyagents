@@ -41,11 +41,47 @@ pub struct TodoTool {
 /// One item as the model writes it. `status` accepts the Claude-style
 /// `pending` / `in_progress` / `completed` plus the aliases [`parse_status`]
 /// knows (`todo`, `done`, ...).
+///
+/// `content` is canonical, but models also name the item's text `title`,
+/// `item`, `text`, `task` or `description` (all seen in production). Each is
+/// its own field rather than a serde alias so an item carrying two of them is
+/// not a "duplicate field" error: the first non-blank one in
+/// [`TodoArg::text`]'s order wins. Unknown keys (`id`, `priority`) are
+/// ignored.
 #[derive(Deserialize)]
 struct TodoArg {
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    item: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    task: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
     #[serde(default)]
     status: Option<String>,
+}
+
+impl TodoArg {
+    /// The item's text: `content`, else the first non-blank alias.
+    fn text(&self) -> &str {
+        [
+            &self.content,
+            &self.title,
+            &self.item,
+            &self.text,
+            &self.task,
+            &self.description,
+        ]
+        .into_iter()
+        .filter_map(|field| field.as_deref().map(str::trim))
+        .find(|text| !text.is_empty())
+        .unwrap_or_default()
+    }
 }
 
 impl TodoTool {
@@ -109,7 +145,7 @@ fn parse_items(raw: &Value) -> std::result::Result<Vec<TodoItem>, String> {
         serde_json::from_value(raw.clone()).map_err(|e| format!("invalid `todos`: {e}"))?;
     let mut items = Vec::with_capacity(args.len());
     for arg in args {
-        let content = arg.content.trim();
+        let content = arg.text();
         if content.is_empty() {
             return Err("every todo needs non-empty `content`".to_string());
         }
@@ -131,6 +167,11 @@ fn parameters_schema() -> Value {
                 "description": "The full list, in order. Pass null to read the current list.",
                 "items": {
                     "type": "object",
+                    // `content` is the advertised field. It is not
+                    // `required`: the tool also reads the `title` / `task` /
+                    // ... spellings models drift to (see `TodoArg`), and a
+                    // schema rejection here would stop the call before the
+                    // tool could. A blank item is still refused, by the tool.
                     "properties": {
                         "content": { "type": "string" },
                         "status": {
@@ -141,8 +182,7 @@ fn parameters_schema() -> Value {
                                 "completed", "complete", "done", "finished"
                             ]
                         }
-                    },
-                    "required": ["content", "status"]
+                    }
                 }
             }
         },
