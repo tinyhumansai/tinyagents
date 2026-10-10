@@ -72,7 +72,15 @@ fn unwrap_object(
             .iter()
             .filter_map(|key| payload.get(*key).and_then(Value::as_str))
             .any(|name| name == USE_SKILL);
-        if !wrapped_name {
+        // `{name: "web_search", skill: ..., arguments: ...}`: `name` (unlike
+        // `tool`) never belongs to the `{skill, tool, args}` shape, so a
+        // callable tool named there owns the `skill` key as its own argument.
+        let named_real_tool = payload
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|name| !is_wrapper_name(name) && is_callable(name));
+        if !wrapped_name && !named_real_tool {
             return Some((USE_SKILL.to_string(), Value::Object(payload.clone())));
         }
     }

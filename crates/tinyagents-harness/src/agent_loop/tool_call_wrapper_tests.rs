@@ -129,3 +129,16 @@ fn the_skill_shape_needs_use_skill_to_be_callable() {
         None
     );
 }
+
+#[test]
+fn a_callable_tool_named_by_name_keeps_its_own_skill_argument() {
+    let callable = |name: &str| matches!(name, "use_skill" | "calendar");
+    assert_eq!(
+        unwrap_wrapped_call(
+            &json!({ "name": "calendar", "skill": "email", "arguments": { "q": "x" } }),
+            &callable
+        )
+        .map(|(name, _)| name),
+        Some("calendar".to_string())
+    );
+}

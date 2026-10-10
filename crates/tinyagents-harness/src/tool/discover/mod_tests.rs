@@ -464,6 +464,21 @@ async fn answer_tool_search_reads_query_aliases() {
     );
 }
 
+/// A blank `query` falls through to a populated alias.
+#[tokio::test]
+async fn answer_tool_search_skips_a_blank_query_for_an_alias() {
+    let answer = answer_tool_search(
+        &catalog(),
+        &ToolDiscoveryPolicy::default(),
+        &json!({ "query": "  ", "q": "read a pdf" }),
+    )
+    .await;
+    assert_eq!(
+        answer.matched_names.first().map(String::as_str),
+        Some("pdf_read")
+    );
+}
+
 /// `{}` gets a short corrective that shows the call to make.
 #[tokio::test]
 async fn answer_tool_search_with_no_query_shows_an_example_call() {
