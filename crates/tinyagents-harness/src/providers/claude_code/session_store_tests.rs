@@ -120,14 +120,16 @@ fn a_claim_is_never_written_to_disk() {
 fn concurrent_claimers_on_separate_instances_get_exactly_one_winner() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
+    let barrier = Arc::new(std::sync::Barrier::new(8));
     let handles: Vec<_> = (0..8)
         .map(|_| {
             let path = path.clone();
+            let barrier = barrier.clone();
             std::thread::spawn(move || {
                 let store = Arc::new(SessionStore::open(&path));
                 let (already, claim) = store.claim_delivered("t", &["turn".to_string()]);
                 // Hold the claim until every thread has tried.
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                barrier.wait();
                 drop(claim);
                 already.is_empty()
             })
