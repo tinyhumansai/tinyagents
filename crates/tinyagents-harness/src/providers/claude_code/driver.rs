@@ -37,6 +37,16 @@ fn parse_error_line_shape(line: &str) -> &'static str {
     }
 }
 
+/// True only when `message` is, in its entirety, the CLI's missing-session
+/// diagnostic for `session_id` (the id passed to `--resume`). A message that
+/// merely quotes the phrase, names another session, or carries extra text is
+/// not a confirmation that the saved session is gone.
+fn is_missing_session_error(message: &str, session_id: &str) -> bool {
+    let message = message.trim();
+    let message = message.strip_prefix("Error: ").unwrap_or(message);
+    message == format!("No conversation found with session ID: {session_id}")
+}
+
 fn parse_error_log_line(ev: &ClaudeCodeEvent) -> Option<String> {
     let ClaudeCodeEvent::ParseError { line, reason } = ev else {
         return None;
@@ -676,6 +686,14 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
     let stderr_text = stderr_task.await.unwrap_or_default();
 
     if !status.success() {
+        let missing = is_missing_session_error(&stderr_text, &cc_session_id)
+            || mapper
+                .error
+                .as_deref()
+                .is_some_and(|e| is_missing_session_error(e, &cc_session_id));
+        if !is_new && missing && clear_missing_session(&ctx, &cc_session_id) {
+            return Box::pin(run_turn(ctx)).await;
+        }
         // The CLI reports most failures (bad auth, unknown model, invalid
         // session) as a structured `result`/`error` event on stdout and often
         // leaves stderr empty. Prefer that message; fall back to stderr only
@@ -691,6 +709,12 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
         );
     }
     if let Some(err) = mapper.error.clone() {
+        if !is_new
+            && is_missing_session_error(&err, &cc_session_id)
+            && clear_missing_session(&ctx, &cc_session_id)
+        {
+            return Box::pin(run_turn(ctx)).await;
+        }
         anyhow::bail!(
             "[claude-code][driver] {}",
             sanitize_cli_message(&err, ctx.anthropic_api_key.as_deref())
@@ -713,6 +737,29 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
     }
 
     Ok(mapper.into_response())
+}
+
+/// Drop the saved mapping that `--resume` just proved missing, but only if it
+/// still points at `failed_session_id`. Returns true when the caller may retry
+/// as a new session with the full history; false means this call did not remove
+/// the mapping (write failed, or a concurrent turn already replaced it)
+/// and the original failure must be surfaced.
+fn clear_missing_session(ctx: &TurnContext<'_>, failed_session_id: &str) -> bool {
+    tracing::warn!(
+        "[claude-code][driver] saved session is missing; clearing mapping and retrying with full history"
+    );
+    match ctx
+        .session_store
+        .remove_if(&ctx.thread_id, failed_session_id)
+    {
+        Ok(removed) => removed,
+        Err(error) => {
+            tracing::warn!(
+                "[claude-code][driver] failed to clear missing session mapping: {error}"
+            );
+            false
+        }
+    }
 }
 
 /// Select durable Claude session arguments only for requests that have an

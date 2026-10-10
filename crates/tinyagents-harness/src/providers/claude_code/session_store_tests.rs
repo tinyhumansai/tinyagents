@@ -26,3 +26,39 @@ fn roundtrip_set_and_get() {
     let reopened = SessionStore::open(dir.path());
     assert_eq!(reopened.get("thread_a").as_deref(), Some("abc"));
 }
+
+#[test]
+fn remove_if_forgets_matching_mapping_across_reopen() {
+    let dir = tempdir().unwrap();
+    let store = SessionStore::open(dir.path());
+    store.set("thread_a", "session-a").unwrap();
+
+    assert!(store.remove_if("thread_a", "session-a").unwrap());
+
+    assert!(store.get("thread_a").is_none());
+    assert!(SessionStore::open(dir.path()).get("thread_a").is_none());
+}
+
+#[test]
+fn remove_if_keeps_a_newer_mapping() {
+    let dir = tempdir().unwrap();
+    let store = SessionStore::open(dir.path());
+    store.set("thread_a", "session-new").unwrap();
+
+    assert!(!store.remove_if("thread_a", "session-old").unwrap());
+    assert_eq!(store.get("thread_a").as_deref(), Some("session-new"));
+}
+
+#[test]
+fn remove_if_keeps_mapping_when_persistence_fails() {
+    let dir = tempdir().unwrap();
+    let store = SessionStore::open(dir.path());
+    store.set("thread_a", "session-a").unwrap();
+    // Make the store file unwritable by replacing it with a directory.
+    let path = dir.path().join("claude-code-sessions.json");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+
+    assert!(store.remove_if("thread_a", "session-a").is_err());
+    assert_eq!(store.get("thread_a").as_deref(), Some("session-a"));
+}

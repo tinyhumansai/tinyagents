@@ -120,19 +120,33 @@ impl EventMapper {
                     usage.charged_amount_usd = cost;
                 }
                 self.usage = parsed;
-                // A failed turn is reported as `subtype=error` or as
-                // `is_error=true` with the human-readable reason in `result`.
+                // A failed turn is reported as `subtype=error`, as
+                // `is_error=true` with the reason in `result`, or (newer CLIs)
+                // as `subtype: "error_*"` with diagnostics in `errors`.
+                // Surface the structured diagnostics so the driver can
+                // classify them (e.g. a missing resumed session).
+                let structured: Vec<&str> = raw
+                    .get("errors")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
                 let failed = subtype.as_deref() == Some("error")
-                    || raw.get("is_error").and_then(Value::as_bool) == Some(true);
+                    || raw.get("is_error").and_then(Value::as_bool) == Some(true)
+                    || (subtype.as_deref().is_some_and(|s| s.starts_with("error_"))
+                        && !structured.is_empty());
                 if failed && self.error.is_none() {
                     let reason = raw
                         .get("result")
                         .and_then(Value::as_str)
                         .map(str::trim)
                         .filter(|reason| !reason.is_empty());
-                    self.error = Some(match reason {
-                        Some(reason) => reason.to_string(),
-                        None => "claude reported `result.subtype=error`".into(),
+                    self.error = Some(if !structured.is_empty() {
+                        structured.join("\n")
+                    } else {
+                        match reason {
+                            Some(reason) => reason.to_string(),
+                            None => "claude reported `result.subtype=error`".into(),
+                        }
                     });
                 }
                 self.finished = true;

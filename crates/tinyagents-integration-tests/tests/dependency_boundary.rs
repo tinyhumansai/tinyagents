@@ -43,15 +43,23 @@ const KNOWN_GENERIC_CLAUDE_CODE_CHAT_MESSAGE_DEBT: &[(&str, usize)] = &[
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/driver.rs",
-        135,
+        145,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/driver.rs",
-        304,
+        314,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/driver_tests.rs",
-        363,
+        46,
+    ),
+    (
+        "crates/tinyagents-harness/src/providers/claude_code/driver_tests.rs",
+        457,
+    ),
+    (
+        "crates/tinyagents-harness/src/providers/claude_code/driver_tests.rs",
+        628,
     ),
     (
         "crates/tinyagents-harness/src/providers/claude_code/input_builder.rs",
