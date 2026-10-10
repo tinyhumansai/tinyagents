@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     DisplayRecord, SessionTranscript, TranscriptMessage, TranscriptMeta, TurnUsage,
-    find_root_transcripts_for_thread, read_transcript_display,
+    UsageCostSource, find_root_transcripts_for_thread, read_transcript_display,
 };
 
 /// One transcript's own spend, summed from the per-turn `turn_usage` records
@@ -35,6 +35,71 @@ pub struct TranscriptSpend {
     pub last_context_tokens: u64,
     pub model: Option<String>,
     pub context_window: u64,
+    /// `cost_usd` split by how much of it is known; see [`CostSplit`].
+    pub cost_split: CostSplit,
+}
+
+/// A transcript's recorded cost, split into the part whose source is stated
+/// and the turns whose cost is not known.
+///
+/// `cost_usd` sums every record, including records written before
+/// [`MessageUsage::cost_source`](super::MessageUsage::cost_source) existed,
+/// whose cost may be a host's guessed rate. A reader that presents spend
+/// should use `priced_cost_usd` and re-price (or decline to report) the
+/// `unpriced_*` tokens instead.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CostSplit {
+    /// Sum of `cost_usd` over records stating a `Charged` or `Estimated` source.
+    pub priced_cost_usd: f64,
+    /// Least certain of those records' sources; `None` when there were none.
+    pub priced_source: Option<UsageCostSource>,
+    /// Turns whose cost is not known: no stated source, or `Unknown`.
+    pub unpriced_turns: usize,
+    /// Token counts of those turns, for a reader that can price them.
+    pub unpriced_input_tokens: u64,
+    pub unpriced_output_tokens: u64,
+    pub unpriced_cached_input_tokens: u64,
+}
+
+impl CostSplit {
+    /// Fold one turn's record in.
+    fn add(&mut self, usage: &TurnUsage) {
+        match usage.usage.cost_source {
+            Some(source @ (UsageCostSource::Charged | UsageCostSource::Estimated)) => {
+                self.priced_cost_usd += usage.usage.cost_usd;
+                self.priced_source = Some(self.priced_source.map_or(source, |s| s.max(source)));
+            }
+            Some(UsageCostSource::Unknown) | None => {
+                self.unpriced_turns += 1;
+                self.unpriced_input_tokens =
+                    self.unpriced_input_tokens.saturating_add(usage.usage.input);
+                self.unpriced_output_tokens =
+                    self.unpriced_output_tokens.saturating_add(usage.usage.output);
+                self.unpriced_cached_input_tokens = self
+                    .unpriced_cached_input_tokens
+                    .saturating_add(usage.usage.cached_input);
+            }
+        }
+    }
+
+    /// Fold another transcript's split in.
+    pub fn merge(&mut self, other: &CostSplit) {
+        self.priced_cost_usd += other.priced_cost_usd;
+        self.priced_source = match (self.priced_source, other.priced_source) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        self.unpriced_turns += other.unpriced_turns;
+        self.unpriced_input_tokens = self
+            .unpriced_input_tokens
+            .saturating_add(other.unpriced_input_tokens);
+        self.unpriced_output_tokens = self
+            .unpriced_output_tokens
+            .saturating_add(other.unpriced_output_tokens);
+        self.unpriced_cached_input_tokens = self
+            .unpriced_cached_input_tokens
+            .saturating_add(other.unpriced_cached_input_tokens);
+    }
 }
 
 /// Context occupancy recorded by one turn's usage: the final call's input plus
@@ -103,6 +168,7 @@ fn spend_from_usages<'a>(
             .cached_input_tokens
             .saturating_add(usage.usage.cached_input);
         spend.cost_usd += usage.usage.cost_usd;
+        spend.cost_split.add(usage);
         spend.turns += 1;
         spend.last_input_tokens = usage.usage.input;
         spend.last_output_tokens = usage.usage.output;
@@ -307,6 +373,7 @@ pub fn thread_spend(workspace_dir: &Path, thread_id: &str) -> ThreadSpend {
                 .cached_input_tokens
                 .saturating_add(spend.cached_input_tokens);
             out.root.cost_usd += spend.cost_usd;
+            out.root.cost_split.merge(&spend.cost_split);
             out.root.turns += spend.turns;
             // `find_root_transcripts_for_thread` returns oldest first, so the
             // last root to report a turn owns the last-turn view.
@@ -339,6 +406,7 @@ pub fn thread_spend(workspace_dir: &Path, thread_id: &str) -> ThreadSpend {
                 .cached_input_tokens
                 .saturating_add(spend.cached_input_tokens);
             entry.0.cost_usd += spend.cost_usd;
+            entry.0.cost_split.merge(&spend.cost_split);
             entry.0.turns += spend.turns;
             if entry.0.model.is_none() {
                 entry.0.model = spend.model;
