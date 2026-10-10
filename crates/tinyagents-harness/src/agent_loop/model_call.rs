@@ -844,10 +844,21 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     // back into the fallback chain: the run itself is out of
                     // wall-clock budget, so trying another model would just
                     // spin until the *next* deadline check fails identically.
-                    if matches!(
-                        error,
-                        TinyAgentsError::Timeout(_) | TinyAgentsError::LimitExceeded(_)
-                    ) {
+                    let idle_breaker_tripped = self
+                        .policy
+                        .limits
+                        .max_consecutive_stream_idle_timeouts
+                        .is_some_and(|max| {
+                            max > 0
+                                && ctx
+                                    .limits
+                                    .consecutive_stream_idle_timeouts_for(&current_name)
+                                    >= max
+                        });
+                    if matches!(error, TinyAgentsError::Timeout(_))
+                        || matches!(error, TinyAgentsError::LimitExceeded(_))
+                            && !idle_breaker_tripped
+                    {
                         return Err(error);
                     }
                     // A hosted resolver owns routing authority. Its first
