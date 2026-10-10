@@ -219,7 +219,11 @@ impl StreamJsonParser {
             "error" => ClaudeCodeEvent::Error {
                 message: v
                     .get("error")
-                    .and_then(Value::as_str)
+                    .and_then(|e| {
+                        e.as_str()
+                            .or_else(|| e.get("message").and_then(Value::as_str))
+                    })
+                    .or_else(|| v.get("message").and_then(Value::as_str))
                     .unwrap_or("claude-code error")
                     .to_string(),
             },

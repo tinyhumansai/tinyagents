@@ -187,3 +187,15 @@ fn error_subtype_without_errors_array_is_not_a_failure_unless_plain_error() {
     });
     assert!(m.error.is_none());
 }
+
+#[test]
+fn is_error_result_carries_its_reason_as_the_error() {
+    let mut m = EventMapper::new();
+    m.handle(ClaudeCodeEvent::Result {
+        subtype: Some("success".into()),
+        usage: None,
+        total_cost_usd: None,
+        raw: json!({"type":"result","subtype":"success","is_error":true,"result":"Invalid API key"}),
+    });
+    assert_eq!(m.error.as_deref(), Some("Invalid API key"));
+}

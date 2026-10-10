@@ -445,6 +445,169 @@ fn the_shape_of_the_line_is_reported() {
     assert!(shape("   ").contains("blank"));
 }
 
+// ---- nonzero exit with a structured stdout error (openhuman#5712) ----
+
+#[cfg(unix)]
+async fn run_fake_claude(script_body: &str, api_key: Option<&str>) -> anyhow::Result<ChatResponse> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin = dir.path().join("claude");
+    std::fs::write(&bin, format!("#!/bin/sh\ncat >/dev/null\n{script_body}\n")).expect("script");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let messages = [ChatMessage::user("hello")];
+    run_turn(TurnContext {
+        bin_path: bin,
+        workspace_dir: dir.path().join("ws"),
+        project_dir: dir.path().join("project"),
+        thread_id: "t-5712".into(),
+        model: "sonnet".into(),
+        append_system_prompt: None,
+        messages: &messages,
+        session_store: Arc::new(SessionStore::open(&dir.path().join("ws"))),
+        stream: None,
+        anthropic_api_key: api_key.map(str::to_string),
+        persist_session: false,
+        mcp_provider: None,
+    })
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nonzero_exit_surfaces_structured_stdout_error() {
+    let err = run_fake_claude(
+        r#"echo '{"type":"result","subtype":"success","is_error":true,"result":"Invalid API key - please run /login"}'; exit 1"#,
+        None,
+    )
+    .await
+    .expect_err("nonzero exit must fail");
+    let text = err.to_string();
+    assert!(
+        text.contains("Invalid API key - please run /login"),
+        "{text}"
+    );
+    assert!(text.contains("exit Some(1)"), "{text}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nonzero_exit_surfaces_error_event_message() {
+    let err = run_fake_claude(
+        r#"echo '{"type":"error","error":"model not found"}'; exit 2"#,
+        None,
+    )
+    .await
+    .expect_err("nonzero exit must fail");
+    assert!(err.to_string().contains("model not found"), "{err}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nonzero_exit_without_stdout_error_falls_back_to_stderr() {
+    let err = run_fake_claude(r#"echo 'boom on stderr' >&2; exit 1"#, None)
+        .await
+        .expect_err("nonzero exit must fail");
+    let text = err.to_string();
+    assert!(text.contains("stderr=boom on stderr"), "{text}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nonzero_exit_stdout_error_keeps_secrets_out() {
+    let err = run_fake_claude(
+        r#"echo '{"type":"result","is_error":true,"result":"auth failed for key sk-ant-live-key-1234 and my-configured-secret"}'; exit 1"#,
+        Some("my-configured-secret"),
+    )
+    .await
+    .expect_err("nonzero exit must fail");
+    let text = err.to_string();
+    assert!(text.contains("auth failed"), "{text}");
+    assert!(!text.contains("sk-ant-live-key-1234"), "{text}");
+    assert!(!text.contains("my-configured-secret"), "{text}");
+}
+
+#[test]
+fn stdout_error_is_bounded() {
+    let long = "e".repeat(STDOUT_ERROR_CAP * 3);
+    let message = nonzero_exit_message(Some(1), Some(&long), "", None);
+    assert!(message.len() < STDOUT_ERROR_CAP + 128, "{}", message.len());
+}
+
+#[test]
+fn sk_keys_are_redacted_after_separators() {
+    for raw in [
+        "key:sk-ant-abc123 failed",
+        "token=sk-ant-abc123",
+        "https://x.test/?k=sk-ant-abc123&y=1",
+        "\"sk-ant-abc123\"",
+        "ANTHROPIC_API_KEY=sk-ant-abc123,",
+    ] {
+        let out = sanitize_cli_message(raw, None);
+        assert!(!out.contains("abc123"), "{raw} -> {out}");
+        assert!(out.contains("[redacted]"), "{raw} -> {out}");
+    }
+    assert_eq!(
+        sanitize_cli_message("task-force ask-me sk-", None),
+        "task-force ask-me sk-"
+    );
+}
+
+#[test]
+fn configured_key_embedded_in_larger_token_is_redacted() {
+    let out = sanitize_cli_message("bad my-secret_suffix and pre-my-secret.", Some("my-secret"));
+    assert!(!out.contains("my-secret"), "{out}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn zero_exit_is_error_result_is_sanitized_and_bounded() {
+    let big = "x".repeat(5_000);
+    let script = format!(
+        r#"echo '{{"type":"result","subtype":"success","is_error":true,"result":"bad key topsecret99 sk-ant-zzz {big}"}}'; exit 0"#
+    );
+    let err = run_fake_claude(&script, Some("topsecret99"))
+        .await
+        .expect_err("is_error must fail");
+    let text = err.to_string();
+    assert!(
+        !text.contains("topsecret99") && !text.contains("sk-ant-zzz"),
+        "{text}"
+    );
+    assert!(text.len() < 2_300, "len {}", text.len());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nonzero_exit_stderr_fallback_is_redacted_and_bounded() {
+    let script = r#"echo "auth failed key=topsecret99 sk-ant-live-1234" >&2; head -c 5000 /dev/zero | tr '\0' x >&2; exit 1"#;
+    let err = run_fake_claude(script, Some("topsecret99"))
+        .await
+        .expect_err("nonzero exit must fail");
+    let text = err.to_string();
+    assert!(
+        !text.contains("topsecret99") && !text.contains("sk-ant-live-1234"),
+        "{text}"
+    );
+    assert!(text.len() < 2_300, "len {}", text.len());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nonzero_exit_surfaces_object_error_message_sanitized() {
+    let err = run_fake_claude(
+        r#"echo '{"type":"error","error":{"message":"denied for topsecret99 sk-ant-xyz"}}'; exit 2"#,
+        Some("topsecret99"),
+    )
+    .await
+    .expect_err("nonzero exit must fail");
+    let text = err.to_string();
+    assert!(text.contains("denied for"), "{text}");
+    assert!(
+        !text.contains("topsecret99") && !text.contains("sk-ant-xyz"),
+        "{text}"
+    );
+}
+
 #[cfg(unix)]
 mod structured_exit {
     use super::*;
