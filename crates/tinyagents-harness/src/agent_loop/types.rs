@@ -123,6 +123,12 @@ pub(super) struct TurnRecovery {
     /// (`RunPolicy::truncated_tool_call_retries`); reset by any tool turn that
     /// was not cut off, never by the truncated turn itself.
     pub(super) truncated_tool_call_retries_used: u32,
+    /// Tools whose call was cut off on the most recent truncated turn, so a
+    /// repeat of the same oversized shape can be told apart from a new one.
+    pub(super) truncated_tool_names: std::collections::BTreeSet<String>,
+    /// Tools already answered with the repeat corrective in this logical
+    /// turn; one more cut-off call of any of them ends the run.
+    pub(super) truncated_repeat_names: std::collections::BTreeSet<String>,
     /// Overrides the next request's output cap after a length truncation.
     pub(super) boosted_max_tokens: Option<u32>,
     /// The original output cap, so growth stays clamped at 4x.

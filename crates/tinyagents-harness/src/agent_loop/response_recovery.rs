@@ -51,12 +51,41 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             ..
         } = *turn;
         ctx.truncated_call_positions.clear();
+        ctx.truncated_repeat_positions.clear();
         if self.policy.reject_truncated_tool_calls
             && !tool_calls.is_empty()
             && crate::finish_reason::is_length_stop(response.finish_reason.as_deref())
         {
             let truncated_positions = truncated_call_positions(tool_calls);
             if !truncated_positions.is_empty() {
+                let truncated_names: std::collections::BTreeSet<String> = truncated_positions
+                    .iter()
+                    .map(|&index| tool_calls[index].name.clone())
+                    .collect();
+                // A tool already warned that its calls are too large, cut off
+                // once more: the model is re-sending the same oversized shape
+                // and the output cap is not going to move. Stop here instead
+                // of spending the rest of the retry budget on it.
+                if let Some(name) = truncated_names
+                    .iter()
+                    .find(|name| turn_recovery.truncated_repeat_names.contains(*name))
+                {
+                    tracing::warn!(
+                        target: "tinyagents::agent_loop",
+                        run_id = %ctx.run_id(),
+                        call_id = %call_id,
+                        tool = %name,
+                        "[agent_loop] the same tool keeps being cut off by the output token limit; stopping"
+                    );
+                    messages.pop();
+                    ctx.retract_transcript(messages.len());
+                    return Err(TinyAgentsError::LimitExceeded(format!(
+                        "run `{}` stopped: tool `{name}` was cut off by the output token limit \
+                         on consecutive turns after being told to split the call into smaller \
+                         ones (RunPolicy::reject_truncated_tool_calls)",
+                        ctx.run_id(),
+                    )));
+                }
                 if turn_recovery.truncated_tool_call_retries_used
                     >= self.policy.truncated_tool_call_retries
                 {
@@ -78,8 +107,25 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     )));
                 }
                 turn_recovery.truncated_tool_call_retries_used += 1;
+                let repeated: std::collections::BTreeSet<String> = truncated_names
+                    .intersection(&turn_recovery.truncated_tool_names)
+                    .cloned()
+                    .collect();
                 // Give the retry room to finish the call.
                 turn_recovery.boost_max_tokens(attempt_max_tokens);
+                if !repeated.is_empty() {
+                    tracing::info!(
+                        target: "tinyagents::agent_loop",
+                        run_id = %ctx.run_id(),
+                        call_id = %call_id,
+                        tools = ?repeated,
+                        "[agent_loop] same tool cut off by the output limit twice; answering with the stop-repeating corrective"
+                    );
+                }
+                turn_recovery
+                    .truncated_repeat_names
+                    .extend(repeated.iter().cloned());
+                turn_recovery.truncated_tool_names = truncated_names;
                 tracing::info!(
                     target: "tinyagents::agent_loop",
                     run_id = %ctx.run_id(),
@@ -138,6 +184,9 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     }
                     if truncated_positions.contains(&index) {
                         ctx.truncated_call_positions.insert(batch_index);
+                        if repeated.contains(&call.name) {
+                            ctx.truncated_repeat_positions.insert(batch_index);
+                        }
                     }
                     batch_index += 1;
                 }

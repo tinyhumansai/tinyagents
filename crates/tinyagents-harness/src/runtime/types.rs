@@ -128,7 +128,8 @@ pub enum UnknownToolPolicy {
 ///
 /// The default is [`InvalidArgsPolicy::ReturnToolError`]: a missing `required`
 /// field, wrong type, or bad `enum` is model output the model can fix, so the
-/// validation detail plus the expected schema go back into the transcript
+/// validation detail plus a compact signature of the expected arguments
+/// (`{skill: "a" | "b", tool?: string}`) go back into the transcript
 /// instead of aborting the turn. The recovery consumes a tool-call budget slot,
 /// so [`RunLimits::max_tool_calls`] bounds any invalid-args loop. Mirrors
 /// [`UnknownToolPolicy`] for the schema-validation seam — including why the
@@ -138,8 +139,8 @@ pub enum InvalidArgsPolicy {
     /// Abort the run with
     /// [`TinyAgentsError::Validation`][crate::error::TinyAgentsError::Validation].
     Fail,
-    /// Inject a tool-error result (carrying the validation detail and the
-    /// tool's expected parameter schema) back into the transcript and continue
+    /// Inject a tool-error result (carrying the validation detail and a
+    /// compact signature of the tool's expected arguments) back into the transcript and continue
     /// the loop, letting the model retry with corrected arguments. The default.
     #[default]
     ReturnToolError,
@@ -467,6 +468,11 @@ pub struct RunPolicy {
     /// (for example after a deferral) starts the budget over.
     ///
     /// Defaults to `2` (three truncated turns in a row stop the run).
+    ///
+    /// Independently of the budget, a tool cut off on two consecutive
+    /// truncated turns gets a stronger "stop sending calls this large"
+    /// corrective, and one more cut-off call of that tool stops the run: the
+    /// model is re-sending the same oversized shape.
     pub truncated_tool_call_retries: u32,
     /// How [`tinytools::ToolExposure::Deferred`] tools are surfaced: never in
     /// the request's `tools` array, but findable through the intrinsic

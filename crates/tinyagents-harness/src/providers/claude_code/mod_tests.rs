@@ -4,6 +4,29 @@
 use super::*;
 
 #[test]
+fn only_explicit_conversation_identity_enables_claude_session_persistence() {
+    assert!(!request_has_session_identity(&ModelRequest::default()));
+
+    let with_thread = ModelRequest {
+        metadata: serde_json::json!({"thread_id": "thread-1"}),
+        ..ModelRequest::default()
+    };
+    assert!(request_has_session_identity(&with_thread));
+
+    let with_continuation = ModelRequest {
+        continuation_id: Some("continuation-1".into()),
+        ..ModelRequest::default()
+    };
+    assert!(request_has_session_identity(&with_continuation));
+
+    let blank_identity = ModelRequest {
+        metadata: serde_json::json!({"session_id": "  "}),
+        ..ModelRequest::default()
+    };
+    assert!(!request_has_session_identity(&blank_identity));
+}
+
+#[test]
 fn chat_model_profile_advertises_streaming_without_native_tools() {
     let workspace = tempfile::tempdir().expect("workspace");
     let project = tempfile::tempdir().expect("project");
