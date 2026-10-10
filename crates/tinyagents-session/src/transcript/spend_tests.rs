@@ -592,3 +592,90 @@ fn carried_from_compares_typed_structure() {
     ));
     assert!(!carried_from(&tool, &TranscriptMessage::tool("ok")));
 }
+
+/// Write one durable turn whose usage record is `usage`.
+fn write_single_turn(workspace: &Path, stem: &str, thread: &str, usage: &TurnUsage) {
+    let dir = workspace.join("session_raw");
+    std::fs::create_dir_all(&dir).expect("create session_raw");
+    let next = vec![
+        TranscriptMessage::new("user", "q0"),
+        TranscriptMessage::assistant("a0"),
+    ];
+    let mut turn_meta = meta("orchestrator", "root", Some(thread));
+    turn_meta.turn_count = 1;
+    append_transcript_turn(
+        &dir.join(format!("{stem}.jsonl")),
+        &[],
+        &next,
+        &turn_meta,
+        Some(usage),
+        Some("req-0"),
+    )
+    .expect("append turn");
+}
+
+/// A turn of many tool rounds sums every request into its spend. The context
+/// gauge must read the final request's size, not that sum: a 72-call turn
+/// summed to 5.7M input tokens against a 1M window while no request exceeded
+/// ~103k.
+#[test]
+fn last_context_is_the_final_calls_size_not_the_turns_summed_spend() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let thread = "thread-many-calls";
+    let mut usage = turn_usage(5_710_657, 30_790, 5_398_592);
+    usage.iteration = 72;
+    usage.usage.last_call_input = 103_000;
+    usage.usage.last_call_output = 900;
+    write_single_turn(tmp.path(), "1790000000_orchestrator_many", thread, &usage);
+
+    let spend = thread_spend(tmp.path(), thread);
+
+    // Spend is still the full sum: that is what was billed.
+    assert_eq!(spend.root.input_tokens, 5_710_657);
+    assert_eq!(spend.root.last_input_tokens, 5_710_657);
+    // The gauge reads one request.
+    assert_eq!(spend.root.last_context_tokens, 103_900);
+    assert!(spend.root.last_context_tokens < spend.root.context_window);
+}
+
+/// A record written before the per-call fields existed carries only the
+/// summed spend. A one-call turn's sum is exact; a many-call turn's falls back
+/// to the mean request size instead of the sum.
+#[test]
+fn last_context_of_a_legacy_record_is_exact_for_one_call_and_averaged_for_many() {
+    let mut single = turn_usage(40_000, 1_000, 0);
+    single.iteration = 1;
+    assert_eq!(context_tokens_of(&single), 41_000);
+
+    let mut many = turn_usage(5_710_657, 30_790, 0);
+    many.iteration = 72;
+    assert_eq!(context_tokens_of(&many), (5_710_657 + 30_790) / 72);
+
+    // A record that never stamped its call count counts as one call.
+    let mut unnumbered = turn_usage(40_000, 1_000, 0);
+    unnumbered.iteration = 0;
+    assert_eq!(context_tokens_of(&unnumbered), 41_000);
+}
+
+/// The per-call fields survive the JSONL round trip, and a line written
+/// before they existed still parses with them at zero.
+#[test]
+fn last_call_fields_round_trip_and_default_on_old_lines() {
+    let usage = MessageUsage {
+        input: 10,
+        output: 2,
+        last_call_input: 7,
+        last_call_output: 1,
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&usage).expect("serialize");
+    let back: MessageUsage = serde_json::from_str(&json).expect("parse");
+    assert_eq!(back, usage);
+
+    let old: MessageUsage = serde_json::from_str(
+        r#"{"input":10,"output":2,"cached_input":0,"context_window":0,"cost_usd":0.0}"#,
+    )
+    .expect("parse old line");
+    assert_eq!(old.last_call_input, 0);
+    assert_eq!(old.last_call_output, 0);
+}
