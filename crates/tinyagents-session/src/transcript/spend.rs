@@ -104,6 +104,7 @@ fn spend_from_usages<'a>(
         spend.turns += 1;
         spend.last_input_tokens = usage.usage.input;
         spend.last_output_tokens = usage.usage.output;
+        spend.last_context_tokens = context_tokens_of(usage);
         if usage.usage.context_window > 0 {
             spend.context_window = usage.usage.context_window;
         }
