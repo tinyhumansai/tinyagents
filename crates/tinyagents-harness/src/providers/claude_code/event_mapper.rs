@@ -108,7 +108,7 @@ impl EventMapper {
                 subtype,
                 usage,
                 total_cost_usd,
-                ..
+                raw,
             } => {
                 let mut parsed = usage.as_ref().map(parse_usage);
                 // CC stream emits `total_cost_usd` on the terminal `result`
@@ -120,8 +120,20 @@ impl EventMapper {
                     usage.charged_amount_usd = cost;
                 }
                 self.usage = parsed;
-                if subtype.as_deref() == Some("error") && self.error.is_none() {
-                    self.error = Some("claude reported `result.subtype=error`".into());
+                // A failed turn is reported as `subtype=error` or as
+                // `is_error=true` with the human-readable reason in `result`.
+                let failed = subtype.as_deref() == Some("error")
+                    || raw.get("is_error").and_then(Value::as_bool) == Some(true);
+                if failed && self.error.is_none() {
+                    let reason = raw
+                        .get("result")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|reason| !reason.is_empty());
+                    self.error = Some(match reason {
+                        Some(reason) => reason.to_string(),
+                        None => "claude reported `result.subtype=error`".into(),
+                    });
                 }
                 self.finished = true;
                 Vec::new()

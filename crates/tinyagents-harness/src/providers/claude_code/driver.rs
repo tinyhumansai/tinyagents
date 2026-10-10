@@ -68,6 +68,70 @@ fn push_bounded(acc: &mut String, chunk: &str, max_bytes: usize) {
     }
 }
 
+/// Upper bound on the structured stdout error carried into a returned error.
+const STDOUT_ERROR_CAP: usize = 2_048;
+
+/// Redact every `sk-` style key in `text`, wherever it sits (after `=`, `:`,
+/// quotes, URL separators, ...). A match must start at a non-identifier
+/// boundary (so `task-force` is untouched) and run over the key alphabet.
+fn redact_sk_keys(text: &str) -> String {
+    let is_key_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut prev: Option<char> = None;
+    while let Some(pos) = rest.find("sk-") {
+        let before = rest[..pos].chars().next_back().or(prev);
+        let boundary = before.is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+        let tail = &rest[pos + 3..];
+        let key_len = tail.find(|c: char| !is_key_char(c)).unwrap_or(tail.len());
+        if boundary && key_len > 0 {
+            out.push_str(&rest[..pos]);
+            out.push_str("[redacted]");
+            prev = Some(']');
+            rest = &tail[key_len..];
+        } else {
+            out.push_str(&rest[..pos + 3]);
+            prev = Some('-');
+            rest = tail;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Remove credentials from a CLI-reported message and bound its length.
+/// Redacts the configured API key wherever it occurs (including inside larger
+/// tokens) and any `sk-` style key, then caps the result.
+fn sanitize_cli_message(raw: &str, api_key: Option<&str>) -> String {
+    let mut text = raw.to_string();
+    if let Some(key) = api_key.filter(|key| !key.is_empty()) {
+        text = text.replace(key, "[redacted]");
+    }
+    let redacted = redact_sk_keys(&text);
+    let mut out = String::new();
+    push_bounded(&mut out, &redacted, STDOUT_ERROR_CAP);
+    out
+}
+
+/// Error text for a nonzero CLI exit: the structured stdout error when the
+/// CLI printed one (sanitized and bounded), otherwise the bounded stderr.
+fn nonzero_exit_message(
+    code: Option<i32>,
+    stdout_error: Option<&str>,
+    stderr: &str,
+    api_key: Option<&str>,
+) -> String {
+    match stdout_error.map(|e| sanitize_cli_message(e, api_key)) {
+        Some(message) if !message.is_empty() => {
+            format!("[claude-code][driver] exit {code:?}: {message}")
+        }
+        _ => format!(
+            "[claude-code][driver] exit {code:?} stderr={}",
+            sanitize_cli_message(stderr.trim(), api_key)
+        ),
+    }
+}
+
 use super::bridge::{ChatMessage, ChatResponse, ProviderDelta};
 use super::event_mapper::EventMapper;
 use super::input_builder::build_stdin;
@@ -612,14 +676,25 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
     let stderr_text = stderr_task.await.unwrap_or_default();
 
     if !status.success() {
+        // The CLI reports most failures (bad auth, unknown model, invalid
+        // session) as a structured `result`/`error` event on stdout and often
+        // leaves stderr empty. Prefer that message; fall back to stderr only
+        // when stdout carried none.
         anyhow::bail!(
-            "[claude-code][driver] exit {:?} stderr={}",
-            status.code(),
-            stderr_text.trim()
+            "{}",
+            nonzero_exit_message(
+                status.code(),
+                mapper.error.as_deref(),
+                &stderr_text,
+                ctx.anthropic_api_key.as_deref(),
+            )
         );
     }
     if let Some(err) = mapper.error.clone() {
-        anyhow::bail!("[claude-code][driver] {}", err);
+        anyhow::bail!(
+            "[claude-code][driver] {}",
+            sanitize_cli_message(&err, ctx.anthropic_api_key.as_deref())
+        );
     }
 
     // Do not make a session durable until Claude has accepted the launch and

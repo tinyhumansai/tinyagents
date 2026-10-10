@@ -160,3 +160,15 @@ fn final_assistant_message_is_skipped() {
     });
     assert!(deltas.is_empty());
 }
+
+#[test]
+fn is_error_result_carries_its_reason_as_the_error() {
+    let mut m = EventMapper::new();
+    m.handle(ClaudeCodeEvent::Result {
+        subtype: Some("success".into()),
+        usage: None,
+        total_cost_usd: None,
+        raw: json!({"type":"result","subtype":"success","is_error":true,"result":"Invalid API key"}),
+    });
+    assert_eq!(m.error.as_deref(), Some("Invalid API key"));
+}
