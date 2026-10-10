@@ -75,7 +75,8 @@ attempt; the same reason is logged (`[failover]` target lines) and drives:
 | `Format` (4xx without a better cause, adapter `Validation`/`Unsupported`, a 404 whose body does not name a model) | `Fallback`, never retried on the same model. 4xx rejections are often provider-specific (OpenAI strict schema, Gemini `Unknown name`, Anthropic `input_schema`); nothing is provably model-independent, so nothing surfaces |
 | `ContextOverflow` | `Fallback` only to a candidate whose profile `max_input_tokens` is strictly larger than the current model's (`FailoverState::larger_window_available`; unknown windows never qualify); otherwise `Surface` — compaction is the remedy |
 | Terminal `LimitExceeded` (run/provider budget) | `Surface` immediately; a configured fallback cannot bypass the exhausted budget |
-| `StreamIdleTimeout` | `Fallback` after the current model reaches its breaker threshold; a caller's subagent retry policy may retry the whole child attempt |
+| `LimitExceeded` | `Surface` immediately; exhausted run/provider budgets cannot be retried or bypassed through fallback |
+| `StreamIdleTimeout` | `Fallback` after the current model reaches its breaker threshold; same-model retries stop |
 
 A custom `RetryPolicy::retry_on` still vetoes retries for the transient
 reasons but cannot re-enable same-model retries for the permanent ones.

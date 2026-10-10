@@ -25,7 +25,7 @@
 //! | `AuthPermanent` | `Fallback` immediately, and the model is skipped for the rest of the run ([`FailoverReason::skips_model_for_run`]) |
 //! | `Format` | `Fallback` (never retried on the same model). A 4xx is often *provider*-specific — OpenAI strict-schema, Gemini `Unknown name`, Anthropic `input_schema` — so another model may accept the request. Nothing is provably model-independent, so nothing surfaces here |
 //! | `ContextOverflow` | `Fallback` only to a candidate whose profile `max_input_tokens` is strictly larger than the current model's ([`FailoverState::larger_window_available`]); otherwise `Surface` (compaction is the remedy) |
-//! | Terminal `LimitExceeded` (run/provider budget) | Surfaces immediately; fallback cannot bypass the exhausted budget |
+//! | `LimitExceeded` (run/provider budget) | Surfaces immediately; fallback cannot bypass the exhausted budget |
 //! | `StreamIdleTimeout` | Falls back after the current model reaches its breaker threshold |
 //!
 //! A custom [`RetryPolicy::retry_on`] predicate keeps authority over the
@@ -63,6 +63,8 @@ impl FailoverReason {
             Self::Billing => "billing",
             Self::RateLimit => "rate_limit",
             Self::Overloaded => "overloaded",
+            Self::LimitExceeded => "limit_exceeded",
+            Self::StreamIdleTimeout => "stream_idle_timeout",
             Self::Timeout => "timeout",
             Self::Format => "format",
             Self::ContextOverflow => "context_overflow",
@@ -97,7 +99,8 @@ impl FailoverReason {
             TinyAgentsError::EmptyResponse => Self::EmptyResponse,
             TinyAgentsError::CallTimeout(_) | TinyAgentsError::Timeout(_) => Self::Timeout,
             TinyAgentsError::RateLimited(_) => Self::RateLimit,
-            TinyAgentsError::StreamIdleTimeout(_) => Self::Timeout,
+            TinyAgentsError::LimitExceeded(_) => Self::LimitExceeded,
+            TinyAgentsError::StreamIdleTimeout(_) => Self::StreamIdleTimeout,
             TinyAgentsError::Validation(_) => Self::Format,
             _ => Self::Unknown,
         }
@@ -116,6 +119,8 @@ pub fn decide(reason: FailoverReason, state: FailoverState) -> FailoverDecision 
             }
         }
         Auth | AuthPermanent | Billing | ModelNotFound | Format => FailoverDecision::Fallback,
+        LimitExceeded => FailoverDecision::Surface,
+        StreamIdleTimeout => FailoverDecision::Fallback,
         ContextOverflow if state.larger_window_available => FailoverDecision::Fallback,
         ContextOverflow => FailoverDecision::Surface,
     }

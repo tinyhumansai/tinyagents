@@ -239,6 +239,10 @@ pub enum FailoverReason {
     RateLimit,
     /// The provider is at capacity (`503`, `529`, "overloaded").
     Overloaded,
+    /// A terminal run or provider budget was exhausted.
+    LimitExceeded,
+    /// The per-model stream idle breaker stopped this model's retry loop.
+    StreamIdleTimeout,
     /// The call or the provider timed out.
     Timeout,
     /// The request was rejected (`4xx` without a more specific cause, adapter
