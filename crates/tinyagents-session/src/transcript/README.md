@@ -86,6 +86,42 @@ Re-exported from `transcript::` (see `../transcript.rs`); reachable as
 - `read_transcript_display` — display projection: every record in file
   order, including pre-compaction history and interrupted partials.
 
+### Spend and cost provenance (`spend.rs`)
+
+- `transcript_spend(&SessionTranscript)` sums usage in the logical context.
+  Compaction removes older rows from that view; use
+  `thread_spend(workspace_dir, thread_id)` for the full append history.
+- `thread_spend` returns `ThreadSpend`: `root` contains the orchestrator's
+  own spend, and `subagents` groups descendant runs by archetype, including
+  children whose headers name a different worker thread. Retained root rows
+  across generations are counted once.
+- Each `TranscriptSpend` exposes `cost_split: CostSplit`. The existing
+  `cost_usd` remains the sum of all recorded costs for compatibility; it may
+  include legacy guesses and incomplete costs. Use the split for presentation.
+
+`MessageUsage::cost_source` serializes as `charged`, `estimated`, or
+`unknown`. `Charged` means every call's cost came from provider billing;
+`Estimated` means at least one call was priced from published list rates;
+`Unknown` means at least one call had no known cost, so the recorded cost is
+incomplete. An omitted source deserializes as `None` for legacy records and
+remains omitted when written back. Hosts must set provenance when producing
+usage; a nonzero cost alone does not establish its source.
+
+`CostSplit::priced_cost_usd` includes only `Charged` and `Estimated` turns.
+`priced_source` is `Estimated` if any included turn was estimated, `Charged`
+if all were charged, and `None` when no priced turns exist. `Unknown` and
+legacy `None` turns instead contribute to `unpriced_turns`,
+`unpriced_input_tokens`, `unpriced_output_tokens`, and
+`unpriced_cached_input_tokens`, even when their recorded cost is nonzero.
+`CostSplit::merge` preserves this contract across transcripts.
+
+For example, a charged $0.25 turn and a legacy $4.25 guess yield
+`priced_cost_usd == 0.25`, `priced_source == Some(UsageCostSource::Charged)`,
+and `unpriced_turns == 1`; the compatibility `cost_usd` is still $4.50.
+Present the known priced amount with its source and separately re-price the
+unpriced tokens at host-selected rates, or report their cost as unavailable.
+Do not describe an estimated amount as a provider charge.
+
 ### Paths and resume (`paths.rs`)
 
 - `resolve_keyed_transcript_path` — resolves/creates
@@ -131,6 +167,7 @@ Re-exported from `transcript::` (see `../transcript.rs`); reachable as
 | `reader.rs` | Model-context replay, display projection, meta-only/usage scans. |
 | `paths.rs` | Path resolution, sanitization, and the newest-transcript resume scan. |
 | `thread_lookup.rs` | Thread → root transcript lookup and usage summaries. |
+| `spend.rs` | Full-history thread spend and cost provenance splits. |
 | `markdown.rs` | Human-readable `.md` companion rendering (never read back). |
 | `legacy_md.rs` | Legacy HTML-comment `.md` reader (migration compat). |
 | `history.rs` | `TranscriptHistory` / `TranscriptRead` / `TranscriptLocator` seam. |

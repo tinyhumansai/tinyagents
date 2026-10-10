@@ -202,3 +202,8 @@ Remaining open question:
 
 - Should graph nodes support typed route enums as a stronger alternative to
   string-keyed conditional routing before further serialization work lands?
+
+Transcript accounting preserves cost provenance in durable usage records.
+Hosts should use `TranscriptSpend::cost_split` to separate charged or estimated
+amounts from unpriced usage, and `thread_spend` for full-history accounting.
+See the [transcript contract](../../crates/tinyagents-session/src/transcript/README.md#spend-and-cost-provenance-spendrs).

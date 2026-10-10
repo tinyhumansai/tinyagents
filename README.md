@@ -46,7 +46,9 @@ TinyAgents is a Cargo workspace, not one crate. Depend on the pieces you need:
   agents, graphs, and routers), plus an offline model price/capability catalog.
 - **`tinyagents-session`** — a SQLite-backed store for session history,
   messages, tool calls, cost, and run lineage, plus JSONL transcripts and the
-  `threads` chat thread/message store.
+  `threads` chat thread/message store. Transcript spend separates charged and
+  estimated costs from unknown or legacy usage; see the
+  [cost provenance contract](crates/tinyagents-session/src/transcript/README.md#spend-and-cost-provenance-spendrs).
 - **`tinyagents-definition`** — the host-owned agent definition vocabulary:
   identity, description, declared model/tools/delegates, and a read-only
   catalogue seam. Authorization, prompt construction, and execution stay with
