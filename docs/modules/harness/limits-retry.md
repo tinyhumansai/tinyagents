@@ -117,6 +117,8 @@ into a `FailoverReason` and applies `decide(reason, state)`:
 | `AuthPermanent` (revoked / deactivated / suspended / banned) | fall back immediately and skip the model for the rest of the run |
 | `Format` (non-specific 4xx, adapter validation, a 404 not naming a model) | fall back, never retried on the same model (4xx rejections are often provider-specific) |
 | `ContextOverflow` | fall back only to a candidate with a strictly larger declared `max_input_tokens`; otherwise surface (compaction handles it) |
+| `LimitExceeded` | surface immediately; retry and fallback cannot bypass an exhausted run/provider budget |
+| `StreamIdleTimeout` | fall back after the current model reaches its idle-breaker threshold; do not retry that model |
 
 Host impact: a context overflow no longer walks the whole chain (only strictly
 larger-window candidates are tried), and a rejected credential is attempted once per model per

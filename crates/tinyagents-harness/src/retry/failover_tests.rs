@@ -170,7 +170,15 @@ fn classifies_dedicated_error_variants() {
     );
     assert_eq!(
         reason_of(&TinyAgentsError::LimitExceeded("breaker".into())),
-        FailoverReason::Unknown
+        FailoverReason::LimitExceeded
+    );
+    assert_eq!(
+        reason_of(&TinyAgentsError::RateLimited("refillable".into())),
+        FailoverReason::RateLimit
+    );
+    assert_eq!(
+        reason_of(&TinyAgentsError::StreamIdleTimeout("stalled".into())),
+        FailoverReason::StreamIdleTimeout
     );
     assert_eq!(
         reason_of(&TinyAgentsError::ContextOverflow {
@@ -222,6 +230,18 @@ fn transient_reasons_retry_the_same_model_then_fall_back() {
             "{reason:?} the retry policy calls non-transient"
         );
     }
+}
+
+#[test]
+fn terminal_limits_surface_and_idle_breakers_fall_back_even_with_custom_retries() {
+    assert_eq!(
+        decide(FailoverReason::LimitExceeded, state(true, true, false)),
+        FailoverDecision::Surface
+    );
+    assert_eq!(
+        decide(FailoverReason::StreamIdleTimeout, state(true, true, false)),
+        FailoverDecision::Fallback
+    );
 }
 
 #[test]

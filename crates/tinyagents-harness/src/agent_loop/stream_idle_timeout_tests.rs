@@ -550,10 +550,10 @@ async fn breaker_fails_the_run_only_when_the_chain_is_exhausted() {
         .expect_err("every model stalled, so the run must fail");
 
     match &err {
-        TinyAgentsError::LimitExceeded(message) => {
+        TinyAgentsError::StreamIdleTimeout(message) => {
             assert!(message.contains("3 consecutive"), "{message}");
         }
-        other => panic!("expected LimitExceeded, got {other:?}"),
+        other => panic!("expected StreamIdleTimeout, got {other:?}"),
     }
     assert!(!crate::retry::is_retryable(&err));
     assert_eq!(primary.calls(), 3);
@@ -577,7 +577,10 @@ async fn breaker_without_a_fallback_fails_the_run_at_the_threshold() {
         .await
         .expect_err("the breaker must fail the run");
 
-    assert!(matches!(err, TinyAgentsError::LimitExceeded(_)), "{err:?}");
+    assert!(
+        matches!(err, TinyAgentsError::StreamIdleTimeout(_)),
+        "{err:?}"
+    );
     assert_eq!(model.calls(), 3);
 }
 
@@ -604,7 +607,10 @@ async fn reasoning_output_resets_the_breaker() {
         .await
         .expect_err("the breaker must eventually trip");
 
-    assert!(matches!(err, TinyAgentsError::LimitExceeded(_)), "{err:?}");
+    assert!(
+        matches!(err, TinyAgentsError::StreamIdleTimeout(_)),
+        "{err:?}"
+    );
     assert_eq!(model.calls(), 3);
 }
 
@@ -626,7 +632,10 @@ async fn usage_updates_do_not_reset_the_breaker() {
         .await
         .expect_err("the breaker must trip");
 
-    assert!(matches!(err, TinyAgentsError::LimitExceeded(_)), "{err:?}");
+    assert!(
+        matches!(err, TinyAgentsError::StreamIdleTimeout(_)),
+        "{err:?}"
+    );
     assert_eq!(model.calls(), 2);
 }
 
@@ -634,7 +643,7 @@ async fn usage_updates_do_not_reset_the_breaker() {
 async fn breaker_stops_retry_middleware_retries() {
     // With a `RetryMiddleware` registered the base call skips its own retry
     // loop and the middleware retries the whole call. The breaker's
-    // non-retryable `LimitExceeded` must stop it at the threshold, not at the
+    // `StreamIdleTimeout` must stop middleware retries at the threshold, not at the
     // middleware's much larger attempt cap.
     let model = ScriptedStreams::new(vec![vec![started(), Step::Hang]]);
     let mut harness = harness_with(
@@ -655,7 +664,10 @@ async fn breaker_stops_retry_middleware_retries() {
         .await
         .expect_err("the breaker must fail the run");
 
-    assert!(matches!(err, TinyAgentsError::LimitExceeded(_)), "{err:?}");
+    assert!(
+        matches!(err, TinyAgentsError::StreamIdleTimeout(_)),
+        "{err:?}"
+    );
     assert_eq!(model.calls(), 3);
 }
 
@@ -909,7 +921,10 @@ async fn scrubbed_tool_call_text_resets_the_breaker() {
         .await
         .expect_err("the breaker must eventually trip");
 
-    assert!(matches!(err, TinyAgentsError::LimitExceeded(_)), "{err:?}");
+    assert!(
+        matches!(err, TinyAgentsError::StreamIdleTimeout(_)),
+        "{err:?}"
+    );
     assert_eq!(model.calls(), 3);
 }
 
