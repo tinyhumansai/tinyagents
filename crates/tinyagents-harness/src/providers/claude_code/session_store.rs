@@ -180,6 +180,28 @@ impl SessionStore {
         self.persist(&guard)
     }
 
+    /// Forget a thread's session mapping, but only while it still maps to
+    /// `expected_uuid` (compare-and-remove under the store lock), so a newer
+    /// mapping written by a concurrent turn is never clobbered. The thread's
+    /// delivered-turn record goes with it: a replacement session has received
+    /// nothing. The removal is persisted first; if that fails the in-memory
+    /// state is left intact. Returns whether a mapping was removed.
+    pub fn remove_if(&self, thread_id: &str, expected_uuid: &str) -> std::io::Result<bool> {
+        let mut guard = self.lock();
+        if guard.sessions.get(thread_id).map(String::as_str) != Some(expected_uuid) {
+            return Ok(false);
+        }
+        let mut staged = StoreFile {
+            sessions: guard.sessions.clone(),
+            delivered: guard.delivered.clone(),
+        };
+        staged.sessions.remove(thread_id);
+        staged.delivered.remove(thread_id);
+        self.persist(&staged)?;
+        *guard = staged;
+        Ok(true)
+    }
+
     fn persist(&self, guard: &StoreFile) -> std::io::Result<()> {
         let serialized = serde_json::to_string_pretty(guard).map_err(std::io::Error::other)?;
         if let Some(parent) = self.path.parent() {

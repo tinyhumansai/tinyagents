@@ -488,6 +488,7 @@ fn append_transcript_turn_projects_full_display_shape() {
         cached_input: 0,
         context_window: 200_000,
         cost_usd: cost,
+        ..Default::default()
     };
 
     // Iteration 1 of the turn: the model reasons and emits a native tool call.

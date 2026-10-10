@@ -160,3 +160,42 @@ fn final_assistant_message_is_skipped() {
     });
     assert!(deltas.is_empty());
 }
+
+#[test]
+fn structured_result_errors_surface_as_mapper_error() {
+    let mut m = EventMapper::new();
+    m.handle(ClaudeCodeEvent::Result {
+        subtype: Some("error_during_execution".into()),
+        usage: None,
+        total_cost_usd: None,
+        raw: json!({"errors": ["No conversation found with session ID: abc"]}),
+    });
+    assert_eq!(
+        m.error.as_deref(),
+        Some("No conversation found with session ID: abc")
+    );
+}
+
+#[test]
+fn error_subtype_without_errors_array_is_not_a_failure_unless_plain_error() {
+    let mut m = EventMapper::new();
+    m.handle(ClaudeCodeEvent::Result {
+        subtype: Some("error_max_turns".into()),
+        usage: None,
+        total_cost_usd: None,
+        raw: Value::Null,
+    });
+    assert!(m.error.is_none());
+}
+
+#[test]
+fn is_error_result_carries_its_reason_as_the_error() {
+    let mut m = EventMapper::new();
+    m.handle(ClaudeCodeEvent::Result {
+        subtype: Some("success".into()),
+        usage: None,
+        total_cost_usd: None,
+        raw: json!({"type":"result","subtype":"success","is_error":true,"result":"Invalid API key"}),
+    });
+    assert_eq!(m.error.as_deref(), Some("Invalid API key"));
+}

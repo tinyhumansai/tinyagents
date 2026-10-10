@@ -37,6 +37,16 @@ fn parse_error_line_shape(line: &str) -> &'static str {
     }
 }
 
+/// True only when `message` is, in its entirety, the CLI's missing-session
+/// diagnostic for `session_id` (the id passed to `--resume`). A message that
+/// merely quotes the phrase, names another session, or carries extra text is
+/// not a confirmation that the saved session is gone.
+fn is_missing_session_error(message: &str, session_id: &str) -> bool {
+    let message = message.trim();
+    let message = message.strip_prefix("Error: ").unwrap_or(message);
+    message == format!("No conversation found with session ID: {session_id}")
+}
+
 fn parse_error_log_line(ev: &ClaudeCodeEvent) -> Option<String> {
     let ClaudeCodeEvent::ParseError { line, reason } = ev else {
         return None;
@@ -65,6 +75,70 @@ fn push_bounded(acc: &mut String, chunk: &str, max_bytes: usize) {
     if acc.len() > max_bytes {
         let keep = utf8_safe_prefix_at_byte_boundary(acc, max_bytes).len();
         acc.truncate(keep);
+    }
+}
+
+/// Upper bound on the structured stdout error carried into a returned error.
+const STDOUT_ERROR_CAP: usize = 2_048;
+
+/// Redact every `sk-` style key in `text`, wherever it sits (after `=`, `:`,
+/// quotes, URL separators, ...). A match must start at a non-identifier
+/// boundary (so `task-force` is untouched) and run over the key alphabet.
+fn redact_sk_keys(text: &str) -> String {
+    let is_key_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut prev: Option<char> = None;
+    while let Some(pos) = rest.find("sk-") {
+        let before = rest[..pos].chars().next_back().or(prev);
+        let boundary = before.is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+        let tail = &rest[pos + 3..];
+        let key_len = tail.find(|c: char| !is_key_char(c)).unwrap_or(tail.len());
+        if boundary && key_len > 0 {
+            out.push_str(&rest[..pos]);
+            out.push_str("[redacted]");
+            prev = Some(']');
+            rest = &tail[key_len..];
+        } else {
+            out.push_str(&rest[..pos + 3]);
+            prev = Some('-');
+            rest = tail;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Remove credentials from a CLI-reported message and bound its length.
+/// Redacts the configured API key wherever it occurs (including inside larger
+/// tokens) and any `sk-` style key, then caps the result.
+fn sanitize_cli_message(raw: &str, api_key: Option<&str>) -> String {
+    let mut text = raw.to_string();
+    if let Some(key) = api_key.filter(|key| !key.is_empty()) {
+        text = text.replace(key, "[redacted]");
+    }
+    let redacted = redact_sk_keys(&text);
+    let mut out = String::new();
+    push_bounded(&mut out, &redacted, STDOUT_ERROR_CAP);
+    out
+}
+
+/// Error text for a nonzero CLI exit: the structured stdout error when the
+/// CLI printed one (sanitized and bounded), otherwise the bounded stderr.
+fn nonzero_exit_message(
+    code: Option<i32>,
+    stdout_error: Option<&str>,
+    stderr: &str,
+    api_key: Option<&str>,
+) -> String {
+    match stdout_error.map(|e| sanitize_cli_message(e, api_key)) {
+        Some(message) if !message.is_empty() => {
+            format!("[claude-code][driver] exit {code:?}: {message}")
+        }
+        _ => format!(
+            "[claude-code][driver] exit {code:?} stderr={}",
+            sanitize_cli_message(stderr.trim(), api_key)
+        ),
     }
 }
 
@@ -622,14 +696,39 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
     let stderr_text = stderr_task.await.unwrap_or_default();
 
     if !status.success() {
+        let missing = is_missing_session_error(&stderr_text, &cc_session_id)
+            || mapper
+                .error
+                .as_deref()
+                .is_some_and(|e| is_missing_session_error(e, &cc_session_id));
+        if !is_new && missing && clear_missing_session(&ctx, &cc_session_id) {
+            return Box::pin(run_turn(ctx)).await;
+        }
+        // The CLI reports most failures (bad auth, unknown model, invalid
+        // session) as a structured `result`/`error` event on stdout and often
+        // leaves stderr empty. Prefer that message; fall back to stderr only
+        // when stdout carried none.
         anyhow::bail!(
-            "[claude-code][driver] exit {:?} stderr={}",
-            status.code(),
-            stderr_text.trim()
+            "{}",
+            nonzero_exit_message(
+                status.code(),
+                mapper.error.as_deref(),
+                &stderr_text,
+                ctx.anthropic_api_key.as_deref(),
+            )
         );
     }
     if let Some(err) = mapper.error.clone() {
-        anyhow::bail!("[claude-code][driver] {}", err);
+        if !is_new
+            && is_missing_session_error(&err, &cc_session_id)
+            && clear_missing_session(&ctx, &cc_session_id)
+        {
+            return Box::pin(run_turn(ctx)).await;
+        }
+        anyhow::bail!(
+            "[claude-code][driver] {}",
+            sanitize_cli_message(&err, ctx.anthropic_api_key.as_deref())
+        );
     }
 
     // Do not make a session durable until Claude has accepted the launch and
@@ -667,6 +766,29 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
     }
 
     Ok(mapper.into_response())
+}
+
+/// Drop the saved mapping that `--resume` just proved missing, but only if it
+/// still points at `failed_session_id`. Returns true when the caller may retry
+/// as a new session with the full history; false means this call did not remove
+/// the mapping (write failed, or a concurrent turn already replaced it)
+/// and the original failure must be surfaced.
+fn clear_missing_session(ctx: &TurnContext<'_>, failed_session_id: &str) -> bool {
+    tracing::warn!(
+        "[claude-code][driver] saved session is missing; clearing mapping and retrying with full history"
+    );
+    match ctx
+        .session_store
+        .remove_if(&ctx.thread_id, failed_session_id)
+    {
+        Ok(removed) => removed,
+        Err(error) => {
+            tracing::warn!(
+                "[claude-code][driver] failed to clear missing session mapping: {error}"
+            );
+            false
+        }
+    }
 }
 
 /// Select durable Claude session arguments only for requests that have an

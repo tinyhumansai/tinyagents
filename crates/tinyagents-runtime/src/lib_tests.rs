@@ -326,6 +326,7 @@ fn turn_usage() -> TurnUsage {
             cached_input: 3,
             context_window: 128,
             cost_usd: 0.42,
+            ..Default::default()
         },
         ts: "now".into(),
         reasoning_content: Some("because".into()),

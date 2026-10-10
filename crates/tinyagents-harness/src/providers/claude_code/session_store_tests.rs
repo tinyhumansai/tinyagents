@@ -28,6 +28,42 @@ fn roundtrip_set_and_get() {
 }
 
 #[test]
+fn remove_if_forgets_matching_mapping_across_reopen() {
+    let dir = tempdir().unwrap();
+    let store = SessionStore::open(dir.path());
+    store.set("thread_a", "session-a").unwrap();
+
+    assert!(store.remove_if("thread_a", "session-a").unwrap());
+
+    assert!(store.get("thread_a").is_none());
+    assert!(SessionStore::open(dir.path()).get("thread_a").is_none());
+}
+
+#[test]
+fn remove_if_keeps_a_newer_mapping() {
+    let dir = tempdir().unwrap();
+    let store = SessionStore::open(dir.path());
+    store.set("thread_a", "session-new").unwrap();
+
+    assert!(!store.remove_if("thread_a", "session-old").unwrap());
+    assert_eq!(store.get("thread_a").as_deref(), Some("session-new"));
+}
+
+#[test]
+fn remove_if_keeps_mapping_when_persistence_fails() {
+    let dir = tempdir().unwrap();
+    let store = SessionStore::open(dir.path());
+    store.set("thread_a", "session-a").unwrap();
+    // Make the store file unwritable by replacing it with a directory.
+    let path = dir.path().join("claude-code-sessions.json");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+
+    assert!(store.remove_if("thread_a", "session-a").is_err());
+    assert_eq!(store.get("thread_a").as_deref(), Some("session-a"));
+}
+
+#[test]
 fn delivered_turns_persist_and_reset_with_a_new_session() {
     let dir = tempdir().unwrap();
     let store = SessionStore::open(dir.path());
@@ -160,4 +196,21 @@ fn concurrent_writers_on_separate_instances_lose_no_updates() {
         h.join().unwrap();
     }
     assert_eq!(SessionStore::open(&path).delivered("t").len(), 8);
+}
+
+#[test]
+fn remove_if_also_forgets_the_delivered_record() {
+    let dir = tempdir().unwrap();
+    let store = SessionStore::open(dir.path());
+    store.set("t", "uuid-1").unwrap();
+    store.record_delivered("t", &["a".into()]).unwrap();
+
+    assert!(store.remove_if("t", "uuid-1").unwrap());
+    assert!(store.get("t").is_none());
+    assert!(store.delivered("t").is_empty());
+
+    // The removal is persisted for both the mapping and the record.
+    let reopened = SessionStore::open(dir.path());
+    assert!(reopened.get("t").is_none());
+    assert!(reopened.delivered("t").is_empty());
 }
