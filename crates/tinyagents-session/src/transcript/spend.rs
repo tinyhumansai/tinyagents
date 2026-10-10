@@ -25,10 +25,34 @@ pub struct TranscriptSpend {
     /// append, and omits an all-zero one, so this is "turns that spent".
     pub turns: usize,
     /// The newest record's model and window, for the caller's last-turn view.
+    /// `last_input_tokens` / `last_output_tokens` are that turn's spend, summed
+    /// over every call it made; they are not a context size.
     pub last_input_tokens: u64,
     pub last_output_tokens: u64,
+    /// Tokens the context held after the newest turn's final call (its input
+    /// plus its reply): the numerator of a context-window gauge. See
+    /// [`context_tokens_of`] for records written before the per-call fields.
+    pub last_context_tokens: u64,
     pub model: Option<String>,
     pub context_window: u64,
+}
+
+/// Context occupancy recorded by one turn's usage: the final call's input plus
+/// its reply.
+///
+/// A record written before `last_call_input` existed carries only the turn's
+/// summed spend. A single-call turn's sum *is* its call, so it is exact; a
+/// multi-call turn's is divided by its call count (`iteration`), the mean
+/// request size. That undercounts the final, largest request but stays inside
+/// the window, where the raw sum reported a 72-call turn at 5.7M tokens of a
+/// 1M window.
+pub fn context_tokens_of(usage: &TurnUsage) -> u64 {
+    let record = &usage.usage;
+    if record.last_call_input > 0 {
+        return record.last_call_input.saturating_add(record.last_call_output);
+    }
+    let calls = u64::from(usage.iteration.max(1));
+    record.input.saturating_add(record.output) / calls
 }
 
 /// Total one transcript's own recorded spend over its logical message set.
