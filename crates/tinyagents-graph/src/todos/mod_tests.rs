@@ -523,6 +523,59 @@ mod tool_tests {
         assert!(res.output().contains("pass `todos`"), "{}", res.output());
     }
 
+    /// Production captures: models name an item's text `title`, `item`,
+    /// `text`, `task` or `description` instead of `content`. Each is the
+    /// content; `content` wins when several are present, and an unrelated
+    /// `id` is ignored rather than rejected.
+    #[tokio::test]
+    async fn content_aliases_are_accepted() {
+        let tool = TodoTool::new(store());
+        let res = run(
+            &tool,
+            Some("t"),
+            json!({ "todos": [
+                { "id": 1, "title": "A", "status": "in_progress" },
+                { "id": "2", "item": "B" },
+                { "text": "C", "status": "pending" },
+                { "task": "D" },
+                { "description": "E" },
+                { "content": "F", "title": "ignored", "description": "also ignored" },
+                { "title": "  ", "task": "G" }
+            ] }),
+        )
+        .await;
+        assert!(!res.is_error, "{res:?}");
+        let contents: Vec<&str> = raw(&res)["todos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(contents, ["A", "B", "C", "D", "E", "F", "G"]);
+    }
+
+    /// The harness validates arguments against the schema before the tool
+    /// runs, so an alias the tool accepts must not be a schema error.
+    #[test]
+    fn schema_admits_content_aliases_and_a_missing_status() {
+        let tool = TodoTool::new(store());
+        let schema = tool.parameters_schema();
+        for item in [
+            json!({ "title": "A", "status": "pending" }),
+            json!({ "id": 1, "task": "B" }),
+            json!({ "content": "C" }),
+        ] {
+            let args = json!({ "todos": [item] });
+            tinyagents_harness::tool::validate_against_schema(&schema, &args)
+                .unwrap_or_else(|err| panic!("{args}: {err}"));
+        }
+        assert_eq!(
+            schema["properties"]["todos"]["items"]["properties"]["content"]["type"],
+            "string",
+            "`content` stays the canonical, advertised field"
+        );
+    }
+
     #[tokio::test]
     async fn invariant_violation_is_a_soft_error() {
         let tool = TodoTool::new(store());
