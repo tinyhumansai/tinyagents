@@ -117,7 +117,14 @@ impl CostSplit {
 /// the window, where the raw sum reported a 72-call turn at 5.7M tokens of a
 /// 1M window.
 pub fn context_tokens_of(usage: &TurnUsage) -> u64 {
-    context_input_tokens_of(usage).saturating_add(context_output_tokens_of(usage))
+    let record = &usage.usage;
+    if record.last_call_input > 0 || record.last_call_output > 0 {
+        return record
+            .last_call_input
+            .saturating_add(record.last_call_output);
+    }
+    let calls = u64::from(usage.iteration.max(1));
+    record.input.saturating_add(record.output) / calls
 }
 
 /// Input tokens of the final provider call, with an averaged legacy fallback.
