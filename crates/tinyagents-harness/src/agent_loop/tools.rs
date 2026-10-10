@@ -502,6 +502,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // The positions belong to this batch only; a later admission (a
         // deferred call resumed inline) must not match them.
         ctx.truncated_call_positions.clear();
+        ctx.truncated_repeat_positions.clear();
         Ok(deferred)
     }
 
@@ -592,8 +593,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 call_id = %call.id,
                 "[agent_loop] answering a possibly-truncated tool call with an error"
             );
+            let message = if ctx.truncated_repeat_positions.contains(&position) {
+                repeated_truncated_tool_call_message(&call.name)
+            } else {
+                truncated_tool_call_message(&call.name)
+            };
             return Ok(ResolvedToolCall::Answered(tinytools::ToolResult::error(
-                truncated_tool_call_message(&call.name),
+                message,
             )));
         }
         // The context's `LimitTracker` (synced with `RunPolicy::limits` at run
@@ -2096,11 +2102,32 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
 }
 
 /// The error a call from a length-truncated response is answered with.
+/// The corrective for a call a length stop cut off.
+///
+/// It used to end "Re-issue the tool call with complete arguments", and models
+/// did exactly that: production traces show the same multi-thousand-token
+/// call (a whole workflow document in one argument) re-sent turn after turn,
+/// each cut at the same host output cap. The output cap is fixed, so the only
+/// way forward is a smaller call; the wording says so and forbids the repeat.
 fn truncated_tool_call_message(tool_name: &str) -> String {
     format!(
-        "Tool call `{tool_name}` was not executed: your response hit the output token limit \
-         mid-turn, so its arguments may be truncated. Re-issue the tool call with complete \
-         arguments (split large content into smaller calls if needed)."
+        "Tool call `{tool_name}` was cut off at the output token limit: your response ended \
+         before its arguments were complete, so it was not run. Do not repeat this call; the \
+         same content will be cut off again at the same limit. Split the change into smaller \
+         incremental calls (for example create a minimal version first, then add or edit one \
+         part per call), each well under the limit."
+    )
+}
+
+/// The corrective when the same tool was also cut off on the previous
+/// truncated turn: the model ignored the first one, so the next oversized call
+/// of this tool ends the run (see `reject_truncated_tool_calls`).
+fn repeated_truncated_tool_call_message(tool_name: &str) -> String {
+    format!(
+        "Tool call `{tool_name}` was cut off at the output token limit again, so it was not \
+         run. Stop sending `{tool_name}` calls this large: the limit is fixed, and another \
+         oversized `{tool_name}` call will end the run. Make the change in several smaller \
+         incremental steps, one part per call."
     )
 }
 

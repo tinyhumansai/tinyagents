@@ -278,6 +278,8 @@ impl TurnRecovery {
     /// retry counter and the truncated-empty state (including the boosted cap).
     fn reset_truncation(&mut self) {
         self.truncated_tool_call_retries_used = 0;
+        self.truncated_tool_names.clear();
+        self.truncated_repeat_names.clear();
         self.reset_truncated_empty();
     }
 
