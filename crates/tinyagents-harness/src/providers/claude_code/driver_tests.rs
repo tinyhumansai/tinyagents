@@ -330,3 +330,58 @@ fn the_shape_of_the_line_is_reported() {
     assert!(shape("panic: claude-code crashed").contains("non-json"));
     assert!(shape("   ").contains("blank"));
 }
+
+// ---- one session shared by several callers (openhuman#5877) ----
+
+/// Two calls on one thread (parallel services, or loop iterations) carry the
+/// same pending user turn. The CLI must receive its text once.
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_session_receives_a_pending_user_turn_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join("stdin.log");
+    let bin = dir.path().join("claude");
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\ncat >> '{}'\necho '---' >> '{}'\necho '{{\"type\":\"result\",\"subtype\":\"success\"}}'\n",
+            log.display(),
+            log.display()
+        ),
+    )
+    .expect("script");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let store = Arc::new(SessionStore::open(&dir.path().join("ws")));
+    let messages = [ChatMessage::user("UNIQUE-PENDING-TURN")];
+
+    for _ in 0..3 {
+        run_turn(TurnContext {
+            bin_path: bin.clone(),
+            workspace_dir: dir.path().join("ws"),
+            project_dir: dir.path().join("project"),
+            thread_id: "t-5877".into(),
+            model: "sonnet".into(),
+            append_system_prompt: None,
+            messages: &messages,
+            session_store: store.clone(),
+            stream: None,
+            anthropic_api_key: None,
+            mcp_provider: None,
+        })
+        .await
+        .expect("turn");
+    }
+
+    let logged = std::fs::read_to_string(&log).expect("log");
+    assert_eq!(
+        logged.matches("UNIQUE-PENDING-TURN").count(),
+        1,
+        "pending user turn was re-sent to the shared session:\n{logged}"
+    );
+    assert_eq!(
+        logged.matches("---").count(),
+        3,
+        "every call still ran the CLI"
+    );
+}

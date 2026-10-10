@@ -63,7 +63,11 @@ impl SessionStore {
     }
 
     /// Record user-turn fingerprints delivered to `thread_id`'s session.
-    pub fn record_delivered(&self, thread_id: &str, fingerprints: &[String]) -> std::io::Result<()> {
+    pub fn record_delivered(
+        &self,
+        thread_id: &str,
+        fingerprints: &[String],
+    ) -> std::io::Result<()> {
         if fingerprints.is_empty() {
             return Ok(());
         }
@@ -94,7 +98,8 @@ impl SessionStore {
         self.persist(&guard)
     }
 
-    fn persist(&self, guard: &StoreFile) -> std::io::Result<()> {        let serialized = serde_json::to_string_pretty(guard).map_err(std::io::Error::other)?;
+    fn persist(&self, guard: &StoreFile) -> std::io::Result<()> {
+        let serialized = serde_json::to_string_pretty(guard).map_err(std::io::Error::other)?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
