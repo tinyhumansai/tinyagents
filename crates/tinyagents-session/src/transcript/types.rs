@@ -590,7 +590,13 @@ pub struct ToolFailure {
 }
 
 /// Per-message usage figures attributed to the last assistant turn.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// `input`, `output` and `cached_input` are the turn's *spend*: they sum every
+/// provider call the turn made, so a turn of 70 tool rounds reports roughly 70
+/// times its context. How full the context window was is a different figure,
+/// the size of one request, and lives in `last_call_input` /
+/// `last_call_output`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MessageUsage {
     pub input: u64,
     pub output: u64,
@@ -598,6 +604,14 @@ pub struct MessageUsage {
     #[serde(default)]
     pub context_window: u64,
     pub cost_usd: f64,
+    /// Input tokens of the turn's final provider call: the context the model
+    /// held when it last answered. `0` when the writer predates the field.
+    #[serde(default)]
+    pub last_call_input: u64,
+    /// Output tokens of the turn's final provider call. `0` when the writer
+    /// predates the field.
+    #[serde(default)]
+    pub last_call_output: u64,
 }
 
 /// Usage + provenance for one provider response, attached to the last
