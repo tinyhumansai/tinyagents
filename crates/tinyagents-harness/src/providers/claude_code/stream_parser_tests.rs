@@ -247,7 +247,7 @@ fn feed_bytes_still_replaces_genuinely_invalid_bytes() {
 #[test]
 fn error_event_with_object_payload_keeps_its_message() {
     let mut parser = StreamJsonParser::new();
-    let events = parser.feed(b"{\"type\":\"error\",\"error\":{\"message\":\"rate limited\"}}\n");
+    let events = parser.feed("{\"type\":\"error\",\"error\":{\"message\":\"rate limited\"}}\n");
     assert!(matches!(
         events.as_slice(),
         [ClaudeCodeEvent::Error { message }] if message == "rate limited"
