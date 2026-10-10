@@ -227,6 +227,9 @@ pub(crate) struct TurnContext<'a> {
     /// Caller-provided logical conversation id, used to look up or create a
     /// CC session UUID in `session_store`.
     pub thread_id: String,
+    /// Whether this request belongs to a durable conversation. One-shot
+    /// inference calls must not leave transcripts in the user's Claude tree.
+    pub persist_session: bool,
     /// Model name passed to `--model`.
     pub model: String,
     /// Combined system prompt (all `system` messages joined), written to a
@@ -351,7 +354,10 @@ fn append_system_prompt_args(
 /// `ProviderDelta`s through `ctx.stream` as they arrive and returns the
 /// aggregated `ChatResponse` when done.
 pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatResponse> {
-    let stored = ctx.session_store.get(&ctx.thread_id);
+    let stored = ctx
+        .persist_session
+        .then(|| ctx.session_store.get(&ctx.thread_id))
+        .flatten();
     let is_new = !stored.as_deref().map(is_uuid_v4).unwrap_or(false);
     let cc_session_id = if is_new {
         generate_uuid_v4()
@@ -429,15 +435,10 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
         // opt into `bypassPermissions` for the full toolset (see above).
         "--permission-mode".into(),
         permission_mode.to_string(),
-        if is_new {
-            "--session-id".into()
-        } else {
-            "--resume".into()
-        },
-        cc_session_id.clone(),
         "--model".into(),
         ctx.model.clone(),
     ];
+    append_session_args(&mut args, ctx.persist_session, is_new, &cc_session_id);
     args.extend(
         append_system_prompt_args(scratch.path(), ctx.append_system_prompt.as_deref())
             .map_err(|e| anyhow::anyhow!("write Claude Code system prompt file: {e}"))?,
@@ -625,7 +626,7 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
     // completed the turn. A spawn, input, timeout, or CLI validation failure
     // must leave the thread eligible for a fresh `--session-id` retry rather
     // than poisoning it with a UUID Claude never created.
-    if is_new {
+    if ctx.persist_session && is_new {
         let accepted_id = mapper.session_id.as_deref().unwrap_or(&cc_session_id);
         if let Err(error) = ctx.session_store.set(&ctx.thread_id, accepted_id) {
             tracing::warn!(
@@ -637,6 +638,18 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
     }
 
     Ok(mapper.into_response())
+}
+
+/// Select durable Claude session arguments only for requests that have an
+/// explicit conversation identity. Background one-shot inference calls use
+/// the CLI's persistence opt-out and cannot be discovered as source sessions.
+fn append_session_args(args: &mut Vec<String>, persist_session: bool, is_new: bool, id: &str) {
+    if !persist_session {
+        args.push("--no-session-persistence".into());
+    } else {
+        args.push(if is_new { "--session-id" } else { "--resume" }.into());
+        args.push(id.into());
+    }
 }
 
 #[cfg(test)]

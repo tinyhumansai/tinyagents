@@ -93,15 +93,12 @@ pub async fn answer_tool_search(
     policy: &ToolDiscoveryPolicy,
     arguments: &Value,
 ) -> SearchAnswer {
-    let query = arguments
-        .get("query")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim();
+    let query = search_query(arguments);
     if query.is_empty() {
         return SearchAnswer {
             result: ToolResult::error(format!(
-                "`{TOOL_SEARCH_NAME}` needs a `query` describing what you want to do."
+                "`{TOOL_SEARCH_NAME}` needs a `query`: what you want to do, in plain words. \
+                 Example: {{\"query\": \"send an email\"}}"
             )),
             matched: 0,
             matched_names: Vec::new(),
@@ -157,6 +154,21 @@ pub async fn answer_tool_search(
         matched_names: matches.iter().map(|schema| schema.name.clone()).collect(),
         ranking: Some(ranking),
     }
+}
+
+/// Keys a model puts the search text under instead of `query`, in priority
+/// order after it. All seen in production: the model copies a word from the
+/// task (`description`, `name`, `skill`) or abbreviates (`q`).
+const QUERY_ALIASES: &[&str] = &["q", "text", "description", "name", "skill", "search"];
+
+/// The search text: `query`, else the first non-blank alias.
+fn search_query(arguments: &Value) -> &str {
+    std::iter::once("query")
+        .chain(QUERY_ALIASES.iter().copied())
+        .filter_map(|key| arguments.get(key).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|query| !query.is_empty())
+        .unwrap_or_default()
 }
 
 fn clip(text: &str, max_chars: usize) -> String {
