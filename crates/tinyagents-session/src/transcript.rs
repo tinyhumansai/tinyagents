@@ -172,7 +172,7 @@ pub use types::{
     BackgroundAppend, BackgroundAppendOutcome, BackgroundOrigin, CompactionMarker, DisplayMessage,
     DisplayRecord, DisplaySessionTranscript, LegacyText, MessageUsage, SessionTranscript,
     ToolFailure, TranscriptMediaRef, TranscriptMessage, TranscriptMeta, TranscriptPart,
-    TranscriptToolCall, TurnUsage,
+    TranscriptToolCall, TurnUsage, UsageCostSource,
 };
 pub use writer::{
     append_interrupted_partial, append_tools_record, append_transcript_turn,
