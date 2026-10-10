@@ -144,7 +144,7 @@ fn nonzero_exit_message(
 
 use super::bridge::{ChatMessage, ChatResponse, ProviderDelta};
 use super::event_mapper::EventMapper;
-use super::input_builder::build_stdin;
+use super::input_builder::{build_stdin_with_delivered, pending_fingerprints};
 use super::session_store::{SessionStore, generate_uuid_v4, is_uuid_v4};
 use super::stream_parser::{ClaudeCodeEvent, StreamJsonParser};
 
@@ -532,7 +532,17 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
 
     // Validate input *before* spawning so we don't launch a process we
     // can't feed (CodeRabbit: validate before spawn).
-    let stdin_bytes = build_stdin(ctx.messages, is_new);
+    // Reserve this call's pending turns atomically (per store, re-read from
+    // disk) before spawning, so two calls on one resumed thread cannot both
+    // send the same turn. The claim is released if the turn fails.
+    let pending = pending_fingerprints(ctx.messages);
+    let (delivered, claim) = if is_new || !ctx.persist_session {
+        (std::collections::HashSet::new(), None)
+    } else {
+        let (already, claim) = ctx.session_store.claim_delivered(&ctx.thread_id, &pending);
+        (already, Some(claim))
+    };
+    let stdin_bytes = build_stdin_with_delivered(ctx.messages, is_new, &delivered);
     if stdin_bytes.is_empty() {
         anyhow::bail!("[claude-code][driver] no input messages to deliver");
     }
@@ -734,6 +744,25 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
                 error
             );
         }
+    }
+
+    // The session now holds every pending user turn of this call. Remember
+    // them so another service or loop iteration resuming the same thread does
+    // not deliver them again (concurrent callers are covered by the claim above).
+    // One-shot (non-durable) calls never resume, so they record nothing.
+    if ctx.persist_session {
+        let accepted_id = mapper.session_id.as_deref().unwrap_or(&cc_session_id);
+        if let Err(error) = ctx.session_store.record_delivered(&ctx.thread_id, &pending) {
+            tracing::warn!(
+                "[claude-code][driver] failed to record delivered turns for thread {} session {}: {}",
+                ctx.thread_id,
+                accepted_id,
+                error
+            );
+        }
+    }
+    if let Some(claim) = claim {
+        claim.commit();
     }
 
     Ok(mapper.into_response())

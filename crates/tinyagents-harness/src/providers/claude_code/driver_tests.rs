@@ -645,3 +645,86 @@ mod structured_exit {
         assert_ne!(store.get("t1").as_deref(), Some(saved));
     }
 }
+
+// ---- one session shared by several callers (openhuman#5877) ----
+
+/// Single-quote `s` for embedding in a `/bin/sh` script.
+#[cfg(unix)]
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Text of every user message the stub CLI received (one JSON object per line;
+/// the `---` separators the stub writes are skipped).
+#[cfg(unix)]
+fn received_user_texts(log: &str) -> Vec<String> {
+    log.lines()
+        .filter(|l| l.starts_with('{'))
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).expect("stdin line is json");
+            v["message"]["content"]
+                .as_array()
+                .expect("content blocks")
+                .iter()
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .collect()
+}
+
+/// Repeated calls on one thread (sequential services or loop iterations) carry
+/// the same pending user turn. The CLI must receive its text once. Concurrent
+/// callers are covered at the store level (`claim_delivered`).
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_session_receives_a_pending_user_turn_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join("stdin.log");
+    let bin = dir.path().join("claude");
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\ncat >> {log}\necho '---' >> {log}\necho '{{\"type\":\"result\",\"subtype\":\"success\"}}'\n",
+            log = sh_quote(&log.display().to_string())
+        ),
+    )
+    .expect("script");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let store = Arc::new(SessionStore::open(&dir.path().join("ws")));
+    let messages = [ChatMessage::user("UNIQUE-PENDING-TURN")];
+
+    for _ in 0..3 {
+        run_turn(TurnContext {
+            bin_path: bin.clone(),
+            workspace_dir: dir.path().join("ws"),
+            project_dir: dir.path().join("project"),
+            thread_id: "t-5877".into(),
+            persist_session: true,
+            model: "sonnet".into(),
+            append_system_prompt: None,
+            messages: &messages,
+            session_store: store.clone(),
+            stream: None,
+            anthropic_api_key: None,
+            mcp_provider: None,
+        })
+        .await
+        .expect("turn");
+    }
+
+    let logged = std::fs::read_to_string(&log).expect("log");
+    let texts = received_user_texts(&logged);
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|t| t.as_str() == "UNIQUE-PENDING-TURN")
+            .count(),
+        1,
+        "pending user turn was re-sent to the shared session:\n{logged}"
+    );
+    assert_eq!(texts.len(), 3, "every call still ran the CLI");
+    assert!(texts[1].contains("already delivered"), "{texts:?}");
+    assert_eq!(logged.matches("---").count(), 3);
+}
