@@ -612,6 +612,23 @@ pub struct MessageUsage {
     /// predates the field.
     #[serde(default)]
     pub last_call_output: u64,
+    /// Where `cost_usd` came from. `None` on records written before the field
+    /// existed: their cost may be a host's guessed rate, so a reader should
+    /// not present it as spend without re-pricing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_source: Option<UsageCostSource>,
+}
+
+/// Provenance of a recorded cost, least certain last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageCostSource {
+    /// Every call's cost is what the provider reported billing.
+    Charged,
+    /// At least one call was priced from published list rates.
+    Estimated,
+    /// At least one call had no known cost; `cost_usd` is incomplete.
+    Unknown,
 }
 
 /// Usage + provenance for one provider response, attached to the last
