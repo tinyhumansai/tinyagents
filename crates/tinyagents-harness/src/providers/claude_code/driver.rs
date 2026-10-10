@@ -653,10 +653,7 @@ pub(crate) async fn run_turn(ctx: TurnContext<'_>) -> anyhow::Result<ChatRespons
     // One-shot (non-durable) calls never resume, so they record nothing.
     if ctx.persist_session {
         let accepted_id = mapper.session_id.as_deref().unwrap_or(&cc_session_id);
-        if let Err(error) = ctx
-            .session_store
-            .record_delivered(&ctx.thread_id, &pending)
-        {
+        if let Err(error) = ctx.session_store.record_delivered(&ctx.thread_id, &pending) {
             tracing::warn!(
                 "[claude-code][driver] failed to record delivered turns for thread {} session {}: {}",
                 ctx.thread_id,
