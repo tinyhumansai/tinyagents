@@ -1735,17 +1735,19 @@ async fn truncated_empty_retries_exhausted_errors_when_guard_enabled() {
 }
 
 #[tokio::test]
-async fn truncated_empty_retry_disabled_by_zero_policy() {
+async fn truncated_empty_retry_disabled_by_zero_policy_even_with_clock() {
     // truncated_empty_retries=0 with truncated_empty_nudges=0 restores
     // exact-replay behavior: no retry, a single model call, blank final.
     let model = Arc::new(crate::testkit::ScriptedModel::new(vec![
         truncated_empty_response(2048),
+        text_response("unexpected recovery", 4, 3),
     ]));
     let mut harness: AgentHarness<()> = AgentHarness::new();
     harness.register_model("mock", Arc::clone(&model) as _);
     harness.with_policy(RunPolicy {
         truncated_empty_retries: 0,
         truncated_empty_nudges: 0,
+        limits: RunLimits::default().with_max_wall_clock_ms(Some(60_000)),
         ..RunPolicy::default()
     });
 
