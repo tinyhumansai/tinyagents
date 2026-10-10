@@ -32,7 +32,7 @@ const OPENHUMAN_DOMAIN_TYPES: &[&str] = &[
 // Physical file-and-line debt is enforced exclusively here; it is deliberately
 // line-specific, so a new, deleted, or moved bare `ChatMessage` reference
 // fails instead of being hidden by a module or path exclusion.
-const KNOWN_GENERIC_CLAUDE_CODE_CHAT_MESSAGE_DEBT: &[(
+const KNOWN_GENERIC_CLAUDE_CODE_CHAT_MESSAGE_DEBT: &[(&str, usize)] = &[
     (
         "crates/tinyagents-harness/src/providers/claude_code/bridge.rs",
         10,
