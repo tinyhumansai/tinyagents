@@ -31,7 +31,7 @@ serde_json = { workspace = true }
 sha2 = "0.11"
 thiserror = "2"
 tracing = { workspace = true }
-tinyagents-definition = { path = "../tinyagents-definition", version = "2.1.3" }
+tinyagents-definition = { path = "../tinyagents-definition", version = "2.1.4" }
 tinytools-agent = { path = "../../vendor/tinytools/crates/tinytools-agent", version = "0.5.0", default-features = false }
 tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.3.0" }
 tinyinference-core = { path = "../../vendor/tinyinference/crates/tinyinference-core", version = "0.3.0" }
@@ -39,6 +39,8 @@ tinyinference-embeddings = { path = "../../vendor/tinyinference/crates/tinyinfer
 tinyinference-image = { path = "../../vendor/tinyinference/crates/tinyinference-image", version = "0.3.0", optional = true }
 tinyinference-video = { path = "../../vendor/tinyinference/crates/tinyinference-video", version = "0.3.0", optional = true }
 tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.5.0" }
+# Shared URL admission for opt-in remote multimodal attachments.
+tinytools-std = { path = "../../vendor/tinytools/crates/tinytools-std", version = "0.5.0", optional = true }
 tokio = { workspace = true, features = ["sync", "time", "macros", "rt", "rt-multi-thread", "fs", "io-util", "process"] }
 # Storage ports (no database client): the `storage-drivers` adapters put
 # the harness `Store` / `AppendStore` on any tinystoragedrivers backend.
@@ -58,7 +60,7 @@ storage-drivers = ["dep:tinystoragedrivers-core"]
 # still spell out the old name keep compiling.
 tools = ["builtin-tools"]
 builtin-tools = ["dep:chrono-tz"]
-multimodal = ["dep:flate2", "dep:reqwest", "dep:tar", "dep:zip"]
+multimodal = ["dep:flate2", "dep:reqwest", "dep:tar", "dep:tinytools-std", "dep:zip"]
 # Lossless PNG re-compression (`multimodal::optimize_png_lossless`) through
 # `oxipng`. Off by default: without it the helper returns `None` and callers
 # keep the original bytes, and `oxipng`/`libdeflater` (a C build) are not linked.

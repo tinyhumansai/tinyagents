@@ -18,7 +18,7 @@ surfaced](#tool-calls-are-not-surfaced)).
 | `auth_status.rs` | `probe()` — the CLI's own auth state (API key env / subscription login / signed out / unknown), via `claude auth status --json`. |
 | `driver.rs` | `run_turn`: per-turn scratch dir, permission posture, macOS Seatbelt jail, MCP config, argv, stdin/stdout piping, `DEFAULT_TURN_TIMEOUT_SECS` (900, override `OPENHUMAN_CLAUDE_CODE_TURN_TIMEOUT_SECS`), stderr diagnostics cap. |
 | `event_mapper.rs` | `ClaudeCodeEvent` → `ProviderDelta` / aggregated `ChatResponse`. `tool_use` blocks are tracked only to keep their `input_json_delta`s out of the visible text and are **not** surfaced as tool calls: the CLI is self-executing, so a tool block in the stream has already run; surfacing it would make the harness try to dispatch `Read`/`Bash`/… and loop on "unknown tool". |
-| `input_builder.rs` | `build_stdin`: JSONL user turns for `--input-format stream-json` — full history folded into a text preamble on a new session, only the pending user turn(s) on `--resume`; inline images re-hydrated from `[IMAGE:...]`/`[OH_IMAGE:...]` markers (5 MiB cap). |
+| `input_builder.rs` | `build_stdin`: JSONL user turns for `--input-format stream-json` — full history folded into a text preamble on a new session, only the pending user turn(s) on `--resume`, minus any already delivered to that session (`session_store` keeps per-thread fingerprints, so services or loop iterations sharing a thread do not re-send a turn); inline images re-hydrated from `[IMAGE:...]`/`[OH_IMAGE:...]` markers (5 MiB cap). |
 | `session_store.rs` | `SessionStore`: thread key → CC session UUID v4, persisted in `<workspace_dir>/claude-code-sessions.json`. |
 | `settings.rs` | `ClaudeCodeSettings { full_access }` persisted in `<workspace_dir>/claude_code_settings.json`. |
 | `stream_parser.rs` | Line-buffered JSONL parser for `--output-format stream-json`; permissive `serde_json::Value` payloads so a minor CLI schema bump does not break parsing. |
@@ -60,6 +60,11 @@ new CC session and `--resume` afterwards; the UUID comes from
 transcripts. `cwd` is `project_dir` — the caller's
 project root, not this provider's own `workspace_dir` — so CC's file tools
 act on the user's code.
+
+If a resumed session fails with Claude's explicit `No conversation found with
+session ID` diagnostic, the driver clears that thread mapping and retries once
+as a new session with the full conversation history. Other CLI failures do not
+invalidate the mapping or retry.
 
 The thread key that selects a session comes from `thread_key_from_request`
 in `mod.rs`: it reads `metadata.thread_id` / `conversation_id` / `session_id`

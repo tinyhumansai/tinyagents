@@ -4,6 +4,100 @@
 use super::*;
 
 #[test]
+fn missing_session_error_is_recognized_precisely() {
+    let msg = "No conversation found with session ID: 1234";
+    assert!(is_missing_session_error(msg, "1234"));
+    assert!(is_missing_session_error(&format!("Error: {msg}\n"), "1234"));
+    // Different session, quoted phrase, or extra text must not match.
+    assert!(!is_missing_session_error(msg, "9999"));
+    assert!(!is_missing_session_error(
+        &format!("tool stderr: {msg}"),
+        "1234"
+    ));
+    assert!(!is_missing_session_error(&format!("{msg}\nboom"), "1234"));
+    assert!(!is_missing_session_error("authentication_failed", "1234"));
+}
+
+#[cfg(unix)]
+mod retry {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Fake `claude`: logs its args, fails `--resume` with `$FAIL_MSG` on
+    /// stderr, and answers `--session-id` runs with a result event.
+    fn fake_cli(dir: &std::path::Path, fail_msg: &str) -> PathBuf {
+        let bin = dir.join("claude");
+        let script = format!(
+            "#!/bin/sh\ncat >/dev/null\necho \"$@\" >> '{log}'\n\
+             case \"$*\" in *--resume*) echo '{fail_msg}' >&2; exit 1;; esac\n\
+             echo '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\"}}'\n",
+            log = dir.join("calls.log").display(),
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    async fn drive(
+        dir: &std::path::Path,
+        store: Arc<SessionStore>,
+        bin: PathBuf,
+    ) -> anyhow::Result<ChatResponse> {
+        let messages = vec![ChatMessage::user("hi")];
+        run_turn(TurnContext {
+            bin_path: bin,
+            workspace_dir: dir.to_path_buf(),
+            project_dir: dir.join("project"),
+            thread_id: "t1".into(),
+            persist_session: true,
+            model: "m".into(),
+            append_system_prompt: None,
+            messages: &messages,
+            session_store: store,
+            stream: None,
+            anthropic_api_key: None,
+            mcp_provider: None,
+        })
+        .await
+    }
+
+    const SAVED: &str = "11111111-1111-4111-8111-111111111111";
+
+    #[tokio::test]
+    async fn missing_resumed_session_clears_mapping_and_retries_as_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::open(dir.path()));
+        store.set("t1", SAVED).unwrap();
+        let bin = fake_cli(
+            dir.path(),
+            &format!("No conversation found with session ID: {SAVED}"),
+        );
+        drive(dir.path(), store.clone(), bin)
+            .await
+            .expect("retry succeeds");
+        let log = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 2, "one resume then one retry: {log}");
+        assert!(lines[0].contains("--resume"));
+        assert!(lines[1].contains("--session-id") && !lines[1].contains("--resume"));
+        let new_id = store.get("t1").expect("new mapping persisted");
+        assert_ne!(new_id, SAVED);
+    }
+
+    #[tokio::test]
+    async fn unrelated_failure_keeps_mapping_and_does_not_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::open(dir.path()));
+        store.set("t1", SAVED).unwrap();
+        let bin = fake_cli(dir.path(), "authentication_failed");
+        assert!(drive(dir.path(), store.clone(), bin).await.is_err());
+        let log = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
+        assert_eq!(log.lines().count(), 1);
+        assert_eq!(store.get("t1").as_deref(), Some(SAVED));
+    }
+}
+
+#[test]
 fn write_mcp_http_config_emits_http_url_with_bearer_header() {
     let dir = tempfile::tempdir().expect("tempdir");
     let addr: std::net::SocketAddr = "127.0.0.1:54321".parse().unwrap();
@@ -349,4 +443,288 @@ fn the_shape_of_the_line_is_reported() {
     assert!(shape("[1,2]").contains("json array"));
     assert!(shape("panic: claude-code crashed").contains("non-json"));
     assert!(shape("   ").contains("blank"));
+}
+
+// ---- nonzero exit with a structured stdout error (openhuman#5712) ----
+
+#[cfg(unix)]
+async fn run_fake_claude(script_body: &str, api_key: Option<&str>) -> anyhow::Result<ChatResponse> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin = dir.path().join("claude");
+    std::fs::write(&bin, format!("#!/bin/sh\ncat >/dev/null\n{script_body}\n")).expect("script");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let messages = [ChatMessage::user("hello")];
+    run_turn(TurnContext {
+        bin_path: bin,
+        workspace_dir: dir.path().join("ws"),
+        project_dir: dir.path().join("project"),
+        thread_id: "t-5712".into(),
+        model: "sonnet".into(),
+        append_system_prompt: None,
+        messages: &messages,
+        session_store: Arc::new(SessionStore::open(&dir.path().join("ws"))),
+        stream: None,
+        anthropic_api_key: api_key.map(str::to_string),
+        persist_session: false,
+        mcp_provider: None,
+    })
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nonzero_exit_surfaces_structured_stdout_error() {
+    let err = run_fake_claude(
+        r#"echo '{"type":"result","subtype":"success","is_error":true,"result":"Invalid API key - please run /login"}'; exit 1"#,
+        None,
+    )
+    .await
+    .expect_err("nonzero exit must fail");
+    let text = err.to_string();
+    assert!(
+        text.contains("Invalid API key - please run /login"),
+        "{text}"
+    );
+    assert!(text.contains("exit Some(1)"), "{text}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nonzero_exit_surfaces_error_event_message() {
+    let err = run_fake_claude(
+        r#"echo '{"type":"error","error":"model not found"}'; exit 2"#,
+        None,
+    )
+    .await
+    .expect_err("nonzero exit must fail");
+    assert!(err.to_string().contains("model not found"), "{err}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nonzero_exit_without_stdout_error_falls_back_to_stderr() {
+    let err = run_fake_claude(r#"echo 'boom on stderr' >&2; exit 1"#, None)
+        .await
+        .expect_err("nonzero exit must fail");
+    let text = err.to_string();
+    assert!(text.contains("stderr=boom on stderr"), "{text}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nonzero_exit_stdout_error_keeps_secrets_out() {
+    let err = run_fake_claude(
+        r#"echo '{"type":"result","is_error":true,"result":"auth failed for key sk-ant-live-key-1234 and my-configured-secret"}'; exit 1"#,
+        Some("my-configured-secret"),
+    )
+    .await
+    .expect_err("nonzero exit must fail");
+    let text = err.to_string();
+    assert!(text.contains("auth failed"), "{text}");
+    assert!(!text.contains("sk-ant-live-key-1234"), "{text}");
+    assert!(!text.contains("my-configured-secret"), "{text}");
+}
+
+#[test]
+fn stdout_error_is_bounded() {
+    let long = "e".repeat(STDOUT_ERROR_CAP * 3);
+    let message = nonzero_exit_message(Some(1), Some(&long), "", None);
+    assert!(message.len() < STDOUT_ERROR_CAP + 128, "{}", message.len());
+}
+
+#[test]
+fn sk_keys_are_redacted_after_separators() {
+    for raw in [
+        "key:sk-ant-abc123 failed",
+        "token=sk-ant-abc123",
+        "https://x.test/?k=sk-ant-abc123&y=1",
+        "\"sk-ant-abc123\"",
+        "ANTHROPIC_API_KEY=sk-ant-abc123,",
+    ] {
+        let out = sanitize_cli_message(raw, None);
+        assert!(!out.contains("abc123"), "{raw} -> {out}");
+        assert!(out.contains("[redacted]"), "{raw} -> {out}");
+    }
+    assert_eq!(
+        sanitize_cli_message("task-force ask-me sk-", None),
+        "task-force ask-me sk-"
+    );
+}
+
+#[test]
+fn configured_key_embedded_in_larger_token_is_redacted() {
+    let out = sanitize_cli_message("bad my-secret_suffix and pre-my-secret.", Some("my-secret"));
+    assert!(!out.contains("my-secret"), "{out}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn zero_exit_is_error_result_is_sanitized_and_bounded() {
+    let big = "x".repeat(5_000);
+    let script = format!(
+        r#"echo '{{"type":"result","subtype":"success","is_error":true,"result":"bad key topsecret99 sk-ant-zzz {big}"}}'; exit 0"#
+    );
+    let err = run_fake_claude(&script, Some("topsecret99"))
+        .await
+        .expect_err("is_error must fail");
+    let text = err.to_string();
+    assert!(
+        !text.contains("topsecret99") && !text.contains("sk-ant-zzz"),
+        "{text}"
+    );
+    assert!(text.len() < 2_300, "len {}", text.len());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nonzero_exit_stderr_fallback_is_redacted_and_bounded() {
+    let script = r#"echo "auth failed key=topsecret99 sk-ant-live-1234" >&2; head -c 5000 /dev/zero | tr '\0' x >&2; exit 1"#;
+    let err = run_fake_claude(script, Some("topsecret99"))
+        .await
+        .expect_err("nonzero exit must fail");
+    let text = err.to_string();
+    assert!(
+        !text.contains("topsecret99") && !text.contains("sk-ant-live-1234"),
+        "{text}"
+    );
+    assert!(text.len() < 2_300, "len {}", text.len());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nonzero_exit_surfaces_object_error_message_sanitized() {
+    let err = run_fake_claude(
+        r#"echo '{"type":"error","error":{"message":"denied for topsecret99 sk-ant-xyz"}}'; exit 2"#,
+        Some("topsecret99"),
+    )
+    .await
+    .expect_err("nonzero exit must fail");
+    let text = err.to_string();
+    assert!(text.contains("denied for"), "{text}");
+    assert!(
+        !text.contains("topsecret99") && !text.contains("sk-ant-xyz"),
+        "{text}"
+    );
+}
+
+#[cfg(unix)]
+mod structured_exit {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn nonzero_exit_with_structured_missing_session_error_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = "11111111-1111-4111-8111-111111111111";
+        let store = Arc::new(SessionStore::open(dir.path()));
+        store.set("t1", saved).unwrap();
+        let bin = dir.path().join("claude");
+        let script = format!(
+            "#!/bin/sh\ncat >/dev/null\ncase \"$*\" in *--resume*) echo '{{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"errors\":[\"No conversation found with session ID: {saved}\"]}}'; exit 1;; esac\necho '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\"}}'\n"
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let messages = vec![ChatMessage::user("hi")];
+        run_turn(TurnContext {
+            bin_path: bin,
+            workspace_dir: dir.path().to_path_buf(),
+            project_dir: dir.path().join("project"),
+            thread_id: "t1".into(),
+            persist_session: true,
+            model: "m".into(),
+            append_system_prompt: None,
+            messages: &messages,
+            session_store: store.clone(),
+            stream: None,
+            anthropic_api_key: None,
+            mcp_provider: None,
+        })
+        .await
+        .expect("retry succeeds");
+        assert_ne!(store.get("t1").as_deref(), Some(saved));
+    }
+}
+
+// ---- one session shared by several callers (openhuman#5877) ----
+
+/// Single-quote `s` for embedding in a `/bin/sh` script.
+#[cfg(unix)]
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Text of every user message the stub CLI received (one JSON object per line;
+/// the `---` separators the stub writes are skipped).
+#[cfg(unix)]
+fn received_user_texts(log: &str) -> Vec<String> {
+    log.lines()
+        .filter(|l| l.starts_with('{'))
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).expect("stdin line is json");
+            v["message"]["content"]
+                .as_array()
+                .expect("content blocks")
+                .iter()
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .collect()
+}
+
+/// Repeated calls on one thread (sequential services or loop iterations) carry
+/// the same pending user turn. The CLI must receive its text once. Concurrent
+/// callers are covered at the store level (`claim_delivered`).
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_session_receives_a_pending_user_turn_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join("stdin.log");
+    let bin = dir.path().join("claude");
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\ncat >> {log}\necho '---' >> {log}\necho '{{\"type\":\"result\",\"subtype\":\"success\"}}'\n",
+            log = sh_quote(&log.display().to_string())
+        ),
+    )
+    .expect("script");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let store = Arc::new(SessionStore::open(&dir.path().join("ws")));
+    let messages = [ChatMessage::user("UNIQUE-PENDING-TURN")];
+
+    for _ in 0..3 {
+        run_turn(TurnContext {
+            bin_path: bin.clone(),
+            workspace_dir: dir.path().join("ws"),
+            project_dir: dir.path().join("project"),
+            thread_id: "t-5877".into(),
+            persist_session: true,
+            model: "sonnet".into(),
+            append_system_prompt: None,
+            messages: &messages,
+            session_store: store.clone(),
+            stream: None,
+            anthropic_api_key: None,
+            mcp_provider: None,
+        })
+        .await
+        .expect("turn");
+    }
+
+    let logged = std::fs::read_to_string(&log).expect("log");
+    let texts = received_user_texts(&logged);
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|t| t.as_str() == "UNIQUE-PENDING-TURN")
+            .count(),
+        1,
+        "pending user turn was re-sent to the shared session:\n{logged}"
+    );
+    assert_eq!(texts.len(), 3, "every call still ran the CLI");
+    assert!(texts[1].contains("already delivered"), "{texts:?}");
+    assert_eq!(logged.matches("---").count(), 3);
 }

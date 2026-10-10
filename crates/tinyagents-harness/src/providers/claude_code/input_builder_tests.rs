@@ -248,3 +248,114 @@ fn invalid_native_images_use_the_text_fallback() {
     assert!(!s.contains("\"type\":\"image\""), "{s}");
     assert!(s.contains("an attached image could not be read"), "{s}");
 }
+
+// ---- delivered-turn tracking on resume (openhuman#5877) ----
+
+/// Text blocks of the single user message in `bytes`, one entry per block.
+fn emitted_blocks(bytes: &[u8]) -> Vec<String> {
+    let text = String::from_utf8(bytes.to_vec()).expect("utf8");
+    let line: Value = serde_json::from_str(text.trim()).expect("one json line");
+    line["message"]["content"]
+        .as_array()
+        .expect("content blocks")
+        .iter()
+        .filter_map(|b| b["text"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[test]
+fn resume_skips_pending_turn_the_session_already_received() {
+    let history = [ChatMessage::user("ship it")];
+    let delivered: HashSet<String> = pending_fingerprints(&history).into_iter().collect();
+
+    let out = emitted_blocks(&build_stdin_with_delivered(&history, false, &delivered));
+
+    assert_eq!(out, vec![ALREADY_DELIVERED_NOTICE.to_string()]);
+}
+
+#[test]
+fn resume_sends_only_the_turns_not_yet_delivered() {
+    let first = [ChatMessage::user("first")];
+    let delivered: HashSet<String> = pending_fingerprints(&first).into_iter().collect();
+    let queued = [ChatMessage::user("first"), ChatMessage::user("second")];
+
+    let out = emitted_blocks(&build_stdin_with_delivered(&queued, false, &delivered));
+
+    assert_eq!(out, vec!["second".to_string()]);
+}
+
+#[test]
+fn same_words_after_a_new_reply_are_a_new_turn() {
+    let first = [ChatMessage::user("continue")];
+    let delivered: HashSet<String> = pending_fingerprints(&first).into_iter().collect();
+    let again = [
+        ChatMessage::user("continue"),
+        ChatMessage::assistant("step one done"),
+        ChatMessage::user("continue"),
+    ];
+
+    let out = emitted_blocks(&build_stdin_with_delivered(&again, false, &delivered));
+
+    assert_eq!(out, vec!["continue".to_string()]);
+}
+
+#[test]
+fn identical_replies_do_not_collapse_repeated_turns() {
+    let first = [
+        ChatMessage::user("continue"),
+        ChatMessage::assistant("Done"),
+        ChatMessage::user("continue"),
+    ];
+    let second = [
+        ChatMessage::user("continue"),
+        ChatMessage::assistant("Done"),
+        ChatMessage::user("continue"),
+        ChatMessage::assistant("Done"),
+        ChatMessage::user("continue"),
+    ];
+    let delivered: HashSet<String> = pending_fingerprints(&first).into_iter().collect();
+    assert_ne!(pending_fingerprints(&first), pending_fingerprints(&second));
+    let out = emitted_blocks(&build_stdin_with_delivered(&second, false, &delivered));
+    assert_eq!(out, vec!["continue".to_string()]);
+}
+
+#[test]
+fn fingerprints_are_stable_when_an_earlier_pending_turn_is_absent() {
+    let both = [ChatMessage::user("one"), ChatMessage::user("two")];
+    let only_second = [ChatMessage::user("two")];
+    assert_eq!(
+        pending_fingerprints(&both)[1],
+        pending_fingerprints(&only_second)[0]
+    );
+}
+
+#[test]
+fn repeated_text_in_one_pending_batch_stays_distinct() {
+    let fps = pending_fingerprints(&[ChatMessage::user("go"), ChatMessage::user("go")]);
+    assert_ne!(fps[0], fps[1]);
+}
+
+#[test]
+fn fingerprints_ignore_unrelated_history_position() {
+    let short = [ChatMessage::assistant("ok"), ChatMessage::user("go")];
+    let long = [
+        ChatMessage::user("older"),
+        ChatMessage::assistant("ok"),
+        ChatMessage::user("go"),
+    ];
+    assert_eq!(pending_fingerprints(&short), pending_fingerprints(&long));
+}
+
+#[test]
+fn new_session_ignores_the_delivered_set() {
+    let history = [ChatMessage::user("hello")];
+    let delivered: HashSet<String> = pending_fingerprints(&history).into_iter().collect();
+    let out = emitted_blocks(&build_stdin_with_delivered(&history, true, &delivered));
+    assert_eq!(out, vec!["hello".to_string()]);
+}
+
+#[test]
+fn no_fingerprints_when_history_does_not_end_on_a_user_turn() {
+    let history = [ChatMessage::user("hi"), ChatMessage::assistant("hello")];
+    assert!(pending_fingerprints(&history).is_empty());
+}

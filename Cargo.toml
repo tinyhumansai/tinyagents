@@ -14,7 +14,7 @@ exclude = ["vendor", "worktrees"]
 resolver = "3"
 
 [workspace.package]
-version = "2.1.3"
+version = "2.1.4"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/tinyagents"
@@ -34,8 +34,8 @@ tokio = { version = "1", default-features = false, features = ["macros", "rt-mul
 tracing = "0.1"
 # Storage ports from the vendored tinystoragedrivers submodule. Hosts that
 # vendor tinyagents use this same copy, so there is one set of port types.
-tinystoragedrivers-core = { path = "vendor/tinystoragedrivers/crates/tinystoragedrivers-core", version = "0.4.0" }
-tinystoragedrivers-sqlite = { path = "vendor/tinystoragedrivers/crates/tinystoragedrivers-sqlite", version = "0.4.0" }
+tinystoragedrivers-core = { path = "vendor/tinystoragedrivers/crates/tinystoragedrivers-core", version = "0.5.0" }
+tinystoragedrivers-sqlite = { path = "vendor/tinystoragedrivers/crates/tinystoragedrivers-sqlite", version = "0.5.0" }
 uuid = { version = "1", features = ["v4"] }
 
 [workspace.lints.rust]
