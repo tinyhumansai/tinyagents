@@ -53,6 +53,16 @@ fn terminal_budget_refusals_never_retry_even_with_a_custom_predicate() {
 }
 
 #[test]
+fn stream_idle_breaker_errors_remain_retryable_for_child_attempts() {
+    let policy = retrying().with_retry(RetryPolicy::default().with_max_attempts(3).with_retry_on(
+        std::sync::Arc::new(|error| matches!(error, TinyAgentsError::StreamIdleTimeout(_))),
+    ));
+    let breaker = TinyAgentsError::StreamIdleTimeout("provider stalled".into());
+
+    assert!(may_retry(&policy, 0, &breaker, false));
+}
+
+#[test]
 fn does_not_retry_after_tools_ran_unless_the_policy_allows_it() {
     assert!(!may_retry(&retrying(), 0, &transient(), true));
     let allowed = retrying().with_retry_after_tool_calls(true);

@@ -28,6 +28,18 @@ fn tinyinference_budget_refusals_convert_to_terminal_limits() {
 
 #[test]
 fn refilling_rate_limit_errors_are_not_terminal_limits() {
-    let error = TinyAgentsError::LimitExceeded("rate limit: could not acquire 1 token".into());
+    let error = TinyAgentsError::RateLimited("could not acquire 1 token".into());
     assert!(!error.is_terminal_limit());
+}
+
+#[test]
+fn idle_breaker_errors_are_not_budget_limits() {
+    let error = TinyAgentsError::StreamIdleTimeout("provider stalled".into());
+    assert!(!error.is_terminal_limit());
+}
+
+#[test]
+fn limit_error_text_does_not_change_its_terminal_classification() {
+    let error = TinyAgentsError::LimitExceeded("rate limit: daily quota exhausted".into());
+    assert!(error.is_terminal_limit());
 }

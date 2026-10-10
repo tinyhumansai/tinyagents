@@ -173,6 +173,14 @@ fn classifies_dedicated_error_variants() {
         FailoverReason::Unknown
     );
     assert_eq!(
+        reason_of(&TinyAgentsError::RateLimited("refillable".into())),
+        FailoverReason::RateLimit
+    );
+    assert_eq!(
+        reason_of(&TinyAgentsError::StreamIdleTimeout("stalled".into())),
+        FailoverReason::Timeout
+    );
+    assert_eq!(
         reason_of(&TinyAgentsError::ContextOverflow {
             provider: "openai".into(),
             model: None,

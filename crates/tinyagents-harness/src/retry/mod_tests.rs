@@ -188,6 +188,15 @@ fn max_attempts_capped_at_takes_the_stricter_of_the_two_caps() {
 fn is_retryable_classification() {
     assert!(is_retryable(&TinyAgentsError::Model("5xx".into())));
     assert!(is_retryable(&TinyAgentsError::Tool("transient".into())));
+    assert!(is_retryable(&TinyAgentsError::RateLimited(
+        "bucket may refill".into()
+    )));
+    assert!(!is_retryable(&TinyAgentsError::StreamIdleTimeout(
+        "breaker tripped".into()
+    )));
+    assert!(!is_retryable(&TinyAgentsError::LimitExceeded(
+        "budget exhausted".into()
+    )));
 
     assert!(!is_retryable(&TinyAgentsError::Validation("bad".into())));
     assert!(!is_retryable(&TinyAgentsError::RecursionLimit(10)));

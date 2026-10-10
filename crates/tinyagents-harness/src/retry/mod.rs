@@ -350,6 +350,9 @@ pub fn retry_after_hint(error: &TinyAgentsError) -> Option<Duration> {
 /// | Variant | Retryable | Rationale |
 /// |---|---|---|
 /// | `Provider` | depends | Classified from [`tinyinference_llm::model::ProviderError::retryable`] — a 429/408/409/5xx is retryable, a 4xx like 401/400 is not. |
+/// | `RateLimited` | **yes** | A token bucket denied the call but has capacity and a positive refill rate. |
+/// | `StreamIdleTimeout` | **no** by default | A model's idle breaker tripped; an explicit caller predicate may retry a whole child attempt, while model middleware stops retrying that model. |
+/// | `LimitExceeded` | **no** | A configured run or provider budget is exhausted and cannot recover by retrying or selecting another model. |
 /// | `Model` | depends | No structured `ProviderError` to read, so the message text is run through [`classify_provider_failure`] — a 5xx / 429 / timeout is retryable, an `invalid api key` or `model not found` is not. |
 /// | `Tool` | yes | Tool execution may have hit a transient dependency. |
 /// | `CallTimeout` | **yes** | A per-call ceiling fired with run time still left; unlike `Timeout`, the run is not out of budget. |
@@ -393,6 +396,7 @@ pub fn is_retryable(err: &TinyAgentsError) -> bool {
         // run time still left — retryable, unlike a run-deadline `Timeout`
         // (see that variant's own retryability rationale above).
         TinyAgentsError::CallTimeout(_) => true,
+        TinyAgentsError::RateLimited(_) => true,
         _ => false,
     }
 }

@@ -168,7 +168,10 @@ impl PartialEq for RetryPolicy {
 /// fails.
 ///
 /// The harness will move to `next_after` the current model on non-retryable
-/// errors (or after retries are exhausted).
+/// errors (or after retries are exhausted). Terminal [`TinyAgentsError::LimitExceeded`]
+/// budget and run limits surface immediately, even when a fallback remains.
+/// Stream-idle breaker errors are distinct from those terminal limits and may
+/// still reach the next model.
 ///
 /// # Examples
 ///

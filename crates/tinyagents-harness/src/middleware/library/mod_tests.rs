@@ -403,8 +403,8 @@ async fn retry_middleware_honors_custom_retries_for_rate_limit_errors() {
 
     let base = FakeModelBase::new(|attempt, _req| {
         if attempt == 0 {
-            Err(TinyAgentsError::LimitExceeded(
-                "rate limit: could not acquire 1 token".to_string(),
+            Err(TinyAgentsError::RateLimited(
+                "could not acquire 1 token".to_string(),
             ))
         } else {
             Ok(ok_response())
@@ -445,7 +445,7 @@ async fn model_fallback_returns_last_error_when_all_fail() {
 #[tokio::test]
 async fn rate_limit_error_when_bucket_empty() {
     let (mut ctx, _recorder) = ctx_with_recorder();
-    let limiter = Arc::new(RateLimiter::new(1, 0.0)); // capacity 1, no refill
+    let limiter = Arc::new(RateLimiter::new(1, 10.0)); // capacity 1, refillable
     let mut stack: MiddlewareStack<()> = MiddlewareStack::new();
     stack.push_model_middleware(Arc::new(
         RateLimitMiddleware::new(limiter.clone()).with_behavior(RateLimitBehavior::Error),
@@ -463,7 +463,7 @@ async fn rate_limit_error_when_bucket_empty() {
         .run_wrapped_model(&mut ctx, &(), ModelRequest::default(), &base)
         .await
         .expect_err("second call rate limited");
-    assert!(matches!(err, TinyAgentsError::LimitExceeded(_)));
+    assert!(matches!(err, TinyAgentsError::RateLimited(_)));
     assert_eq!(base.calls(), 1);
 }
 

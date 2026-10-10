@@ -25,6 +25,8 @@
 //! | `AuthPermanent` | `Fallback` immediately, and the model is skipped for the rest of the run ([`FailoverReason::skips_model_for_run`]) |
 //! | `Format` | `Fallback` (never retried on the same model). A 4xx is often *provider*-specific — OpenAI strict-schema, Gemini `Unknown name`, Anthropic `input_schema` — so another model may accept the request. Nothing is provably model-independent, so nothing surfaces here |
 //! | `ContextOverflow` | `Fallback` only to a candidate whose profile `max_input_tokens` is strictly larger than the current model's ([`FailoverState::larger_window_available`]); otherwise `Surface` (compaction is the remedy) |
+//! | Terminal `LimitExceeded` (run/provider budget) | Surfaces immediately; fallback cannot bypass the exhausted budget |
+//! | `StreamIdleTimeout` | Falls back after the current model reaches its breaker threshold |
 //!
 //! A custom [`RetryPolicy::retry_on`] predicate keeps authority over the
 //! *transient* reasons (it can veto a retry), but it cannot turn a permanent
@@ -94,6 +96,8 @@ impl FailoverReason {
             TinyAgentsError::ModelNotFound(_) => Self::ModelNotFound,
             TinyAgentsError::EmptyResponse => Self::EmptyResponse,
             TinyAgentsError::CallTimeout(_) | TinyAgentsError::Timeout(_) => Self::Timeout,
+            TinyAgentsError::RateLimited(_) => Self::RateLimit,
+            TinyAgentsError::StreamIdleTimeout(_) => Self::Timeout,
             TinyAgentsError::Validation(_) => Self::Format,
             _ => Self::Unknown,
         }
