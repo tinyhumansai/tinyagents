@@ -850,7 +850,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     // wall-clock budget, so trying another model would just
                     // spin until the *next* deadline check fails identically.
                     if matches!(error, TinyAgentsError::Timeout(_))
-                        || matches!(error, TinyAgentsError::LimitExceeded(_)) && !idle_breaker_error
+                        || error.is_terminal_limit() && !idle_breaker_error
                     {
                         return Err(error);
                     }
