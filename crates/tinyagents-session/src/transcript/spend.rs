@@ -311,6 +311,7 @@ pub fn thread_spend(workspace_dir: &Path, thread_id: &str) -> ThreadSpend {
             if spend.turns > 0 {
                 out.root.last_input_tokens = spend.last_input_tokens;
                 out.root.last_output_tokens = spend.last_output_tokens;
+                out.root.last_context_tokens = spend.last_context_tokens;
             }
             if spend.context_window > 0 {
                 out.root.context_window = spend.context_window;
