@@ -234,3 +234,41 @@ fn large_trace_is_split_under_backend_request_limit() {
             .all(|request| request.to_string().len() < MAX_REQUEST_BYTES)
     );
 }
+
+#[test]
+fn a_failed_span_can_downgrade_its_level_to_warning() {
+    let root = span("root", None, SpanKind::Turn, "agent.turn:orchestrator");
+    let mut exit = span("exit", Some("root"), SpanKind::Tool, "tool.shell");
+    exit.status = SpanStatus::Error;
+    exit.attributes
+        .insert(OBSERVATION_LEVEL_ATTR.into(), json!("WARNING"));
+    exit.attributes
+        .insert("error.message".into(), json!("Command failed (exit code 1)"));
+    let mut broken = span("broken", Some("root"), SpanKind::Tool, "tool.web_fetch");
+    broken.status = SpanStatus::Error;
+    let mut bogus = span("bogus", Some("root"), SpanKind::Tool, "tool.file_read");
+    bogus.status = SpanStatus::Error;
+    bogus
+        .attributes
+        .insert(OBSERVATION_LEVEL_ATTR.into(), json!("CATASTROPHIC"));
+    let payloads = otlp_requests(&[root, exit, broken, bogus], "production", &BRAND);
+    let spans = payloads[0]["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        .as_array()
+        .unwrap();
+    let find = |name: &str| spans.iter().find(|item| item["name"] == name).unwrap();
+    let exit = find("tool.shell");
+    assert_eq!(attr(exit, "langfuse.observation.level"), Some("WARNING"));
+    assert_eq!(
+        attr(exit, "langfuse.observation.status_message"),
+        Some("Command failed (exit code 1)")
+    );
+    assert!(attr(exit, "langfuse.observation.metadata.observation_level").is_none());
+    assert_eq!(
+        attr(find("tool.web_fetch"), "langfuse.observation.level"),
+        Some("ERROR")
+    );
+    assert_eq!(
+        attr(find("tool.file_read"), "langfuse.observation.level"),
+        Some("ERROR")
+    );
+}
