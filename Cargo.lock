@@ -2187,7 +2187,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tinyinference-core",
- "tinystoragedrivers-core 0.7.0",
+ "tinystoragedrivers-core 0.8.0 (git+https://github.com/tinyhumansai/tinystoragedrivers?tag=v0.8.0)",
  "tokio",
  "tracing",
 ]
@@ -2260,8 +2260,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-core"
-version = "0.7.0"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers?tag=v0.7.0#6d1a1029de402f5937113fcc56e4023e0dc61c94"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -2273,6 +2272,7 @@ dependencies = [
 [[package]]
 name = "tinystoragedrivers-core"
 version = "0.8.0"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers?tag=v0.8.0#f4b73d358f2e7b2ae9993f8e696401b1d2639858"
 dependencies = [
  "async-trait",
  "serde",
@@ -2283,8 +2283,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-secrets"
-version = "0.7.0"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers?tag=v0.7.0#6d1a1029de402f5937113fcc56e4023e0dc61c94"
+version = "0.8.0"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers?tag=v0.8.0#f4b73d358f2e7b2ae9993f8e696401b1d2639858"
 dependencies = [
  "async-trait",
  "atomicwrites",
@@ -2296,7 +2296,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "tinystoragedrivers-core 0.7.0",
+ "tinystoragedrivers-core 0.8.0 (git+https://github.com/tinyhumansai/tinystoragedrivers?tag=v0.8.0)",
  "tokio",
  "winapi-util",
  "windows-permissions",
