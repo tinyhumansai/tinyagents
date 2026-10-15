@@ -537,6 +537,24 @@ async fn budget_notice_fires_once_at_each_threshold() {
     );
 }
 
+/// The notice says how many calls are left and to finish, but names no kind
+/// of task: a browsing or shopping agent has no files to edit.
+#[tokio::test]
+async fn budget_notice_names_no_kind_of_task() {
+    let mw = mw(sink_with(&[])).with_budget_notice([0.5]);
+    let mut ctx = RunContext::new(RunConfig::new("mw-test").with_max_model_calls(20), ());
+
+    let appended = appended_per_call(&mw, &mut ctx, 18).await;
+
+    let (call, notice) = &appended[0];
+    assert_eq!(*call, 10, "{appended:?}");
+    assert!(notice.contains("10 model calls left"), "{notice}");
+    assert!(notice.contains("finishing the task now"), "{notice}");
+    for word in ["file", "edit", "deliverable"] {
+        assert!(!notice.contains(word), "{word:?} in {notice}");
+    }
+}
+
 /// A notice must not report the turn as capped: only the conclusion does.
 #[tokio::test]
 async fn budget_notice_does_not_mark_the_turn_capped() {

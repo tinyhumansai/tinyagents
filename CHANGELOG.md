@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased: the budget notice names no kind of task
+
+`FinalCallWrapUpMiddleware::with_budget_notice` no longer tells the model to
+"make the actual changes, for example by editing the files". The same harness
+runs agents that browse or shop, which have no files to edit; the note now
+says to finish the task by taking the steps that complete it. It still states
+how many model calls are left and that the tools are withdrawn near the end.
+
 ## Unreleased: Langfuse v4 trace export over OTLP
 
 Langfuse v4 ingests traces only over OTLP, and Langfuse Cloud removes the

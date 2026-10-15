@@ -330,12 +330,16 @@ impl FinalCallWrapUpMiddleware {
 }
 
 /// The note [`FinalCallWrapUpMiddleware::with_budget_notice`] appends.
+///
+/// It names no kind of task. The same harness runs agents that write code,
+/// browse or shop, and an example of the wrong kind ("edit the files") steers
+/// a model that has no files away from what it was asked to do.
 fn budget_notice_text(remaining: usize, max: usize) -> String {
     format!(
         "Budget notice: {remaining} model calls left in this turn (of {max}). Stop gathering \
-         and start (or continue) producing the deliverable now: make the actual changes, for \
-         example by editing the files, rather than reading more. Near the end the tools are \
-         withdrawn, so anything not done by then will not get done."
+         and start (or continue) finishing the task now: take the steps that complete it \
+         rather than looking around more. Near the end the tools are withdrawn, so anything \
+         not done by then will not get done."
     )
 }
 
