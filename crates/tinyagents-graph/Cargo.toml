@@ -14,8 +14,8 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tinyagents-tasks = { path = "../tinyagents-tasks", version = "2.1.4", default-features = false }
-tinyagents-harness = { path = "../tinyagents-harness", version = "2.1.4", default-features = false, features = [
+tinyagents-tasks = { path = "../tinyagents-tasks", version = "2.9.1", default-features = false }
+tinyagents-harness = { path = "../tinyagents-harness", version = "2.9.1", default-features = false, features = [
     "langfuse",
 ] }
 tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.4.1" }
