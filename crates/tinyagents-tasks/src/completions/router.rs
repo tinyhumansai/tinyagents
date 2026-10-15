@@ -296,13 +296,13 @@ impl CompletionRouter {
     /// Withdraws a child's completion because the parent collected it itself
     /// (waited on it, or read its result). Suppresses routing from now on; a
     /// message already pushed onto a live queue is not retracted. A completion that has not arrived
-    /// yet is dropped when it does.
+    /// yet is dropped when it does. A withdrawn record keeps its id and state
+    /// but not its result.
     pub fn tombstone(&self, task_id: &str) -> Result<TombstoneOutcome> {
         let mut state = self.lock()?;
         let outcome = match self.store.get(task_id) {
             Some(mut existing) if existing.state == CompletionState::Pending => {
-                existing.state = CompletionState::Tombstoned;
-                existing.updated_at = SystemTime::now();
+                existing.settle(CompletionState::Tombstoned);
                 self.store.put(&existing)?;
                 state.leased.remove(task_id);
                 TombstoneOutcome::Suppressed
@@ -322,6 +322,8 @@ impl CompletionRouter {
     /// stopped parent. A message already pushed onto the parent's queue is not
     /// retracted (the host clears that queue when it stops the parent). The flag is stored durably, so it holds across a restart
     /// (until [`Self::compact`] drops it after its retention window). Returns how many pending records were withdrawn.
+    /// Withdrawn records lose their result at once, so a deleted parent's
+    /// content does not wait for compaction.
     pub fn cancel_parent(&self, parent_key: &str) -> Result<usize> {
         let mut state = self.lock()?;
         self.set_parent_marker(parent_key, CompletionState::Tombstoned)?;
@@ -329,8 +331,7 @@ impl CompletionRouter {
         let mut withdrawn = 0;
         for mut record in self.store.list(Some(parent_key)) {
             if record.state == CompletionState::Pending {
-                record.state = CompletionState::Tombstoned;
-                record.updated_at = SystemTime::now();
+                record.settle(CompletionState::Tombstoned);
                 self.store.put(&record)?;
                 state.leased.remove(&record.task_id);
                 withdrawn += 1;
@@ -446,7 +447,8 @@ impl CompletionRouter {
     }
 
     /// Settles claimed (or pulled) records as delivered. Returns how many
-    /// changed; records that are not pending are left alone.
+    /// changed; records that are not pending are left alone. A delivered
+    /// record keeps its id, state and attempts for dedupe but drops its result.
     pub fn mark_delivered<S: AsRef<str>>(&self, task_ids: &[S]) -> Result<usize> {
         let mut state = self.lock()?;
         let mut changed = 0;
@@ -456,8 +458,7 @@ impl CompletionRouter {
             if let Some(mut record) = self.store.get(id)
                 && record.state == CompletionState::Pending
             {
-                record.state = CompletionState::Delivered;
-                record.updated_at = SystemTime::now();
+                record.settle(CompletionState::Delivered);
                 self.store.put(&record)?;
                 changed += 1;
             }
@@ -470,6 +471,8 @@ impl CompletionRouter {
     /// claimed again, unless its attempts have reached [`Self::max_attempts`]:
     /// then it becomes [`CompletionState::GaveUp`] and is returned so the host
     /// can apply its own give-up policy (the router never delivers it again).
+    /// The returned record carries the full result; the stored one does not,
+    /// so the host's give-up writer is the result's last reader.
     pub fn mark_failed<S: AsRef<str>>(&self, task_ids: &[S]) -> Result<Vec<CompletionRecord>> {
         let mut state = self.lock()?;
         let mut gave_up = Vec::new();
@@ -482,9 +485,10 @@ impl CompletionRouter {
             if record.state != CompletionState::Pending || record.attempts < self.max_attempts {
                 continue;
             }
-            record.state = CompletionState::GaveUp;
-            record.updated_at = SystemTime::now();
+            let result = std::mem::take(&mut record.result);
+            record.settle(CompletionState::GaveUp);
             self.store.put(&record)?;
+            record.result = result;
             tracing::warn!(
                 task_id = %record.task_id,
                 parent_key = %record.parent_key,
@@ -496,8 +500,10 @@ impl CompletionRouter {
         Ok(gave_up)
     }
 
-    /// Drops settled records older than `retain` from the store (and, for the
-    /// JSONL store, the log). See [`CompletionStore::compact`].
+    /// Drops settled records older than `retain` from the store. Their results
+    /// went when they settled; this frees the dedupe entries too, so pick a
+    /// window longer than any child can outlive its parent's interest. See
+    /// [`CompletionStore::compact`].
     pub fn compact(&self, retain: Duration) -> Result<usize> {
         let dropped = self.store.compact(retain)?;
         tracing::debug!(dropped, "{LOG_PREFIX} compacted");

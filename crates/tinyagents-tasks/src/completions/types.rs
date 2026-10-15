@@ -148,7 +148,10 @@ pub struct CompletionRecord {
     pub label: Option<String>,
     /// How the child ended.
     pub status: CompletionStatus,
-    /// The child's output.
+    /// The child's output. Emptied once the record settles (`Delivered`,
+    /// `Tombstoned` or `GaveUp`): the store then keeps only the bookkeeping
+    /// that dedupe and tombstones need, so a withdrawn or delivered result does
+    /// not outlive its parent's interest in it.
     pub result: CompletionResult,
     /// When the child finished.
     pub finished_at: SystemTime,
@@ -205,6 +208,21 @@ impl CompletionRecord {
     pub fn with_finished_at(mut self, finished_at: SystemTime) -> Self {
         self.finished_at = finished_at;
         self
+    }
+
+    /// Moves the record to a terminal `state` now, dropping its result. The
+    /// task id, parent key, status, attempts and timestamps stay, which is all
+    /// dedupe, tombstones and compaction read; the payload has no reader once
+    /// the record is settled.
+    pub(crate) fn settle(&mut self, state: CompletionState) {
+        debug_assert_ne!(
+            state,
+            CompletionState::Pending,
+            "settle needs a terminal state"
+        );
+        self.state = state;
+        self.updated_at = SystemTime::now();
+        self.result = CompletionResult::default();
     }
 
     /// A tombstone for a task whose completion has not been recorded yet.

@@ -175,6 +175,111 @@ async fn mark_failed_on_a_settled_record_is_ignored() {
     assert!(router.mark_failed(&["t1", "unknown"]).unwrap().is_empty());
 }
 
+fn record_with_artifact(task: &str, parent: &str) -> CompletionRecord {
+    let mut record = record(task, parent).with_label("indexer");
+    record.result.omitted_chars = 42;
+    record.result.artifact = Some(CompletionArtifact {
+        id: "art-1".into(),
+        media_type: Some("text/plain".into()),
+        metadata: [("bytes".to_string(), "9000".to_string())].into(),
+    });
+    record
+}
+
+#[tokio::test]
+async fn a_delivered_record_keeps_its_bookkeeping_but_not_its_result() {
+    let store = Arc::new(InMemoryCompletionStore::new());
+    let router = CompletionRouter::new(store.clone());
+    let recorded = record_with_artifact("t1", "p");
+    router.record(recorded.clone()).await.unwrap();
+    router.claim_pending("p", 1).unwrap();
+    assert_eq!(store.get("t1").unwrap().result.text, "result of t1");
+    assert_eq!(router.mark_delivered(&["t1"]).unwrap(), 1);
+    let settled = store.get("t1").unwrap();
+    assert_eq!(settled.state, CompletionState::Delivered);
+    assert_eq!(settled.result, CompletionResult::default());
+    assert_eq!(settled.attempts, 1);
+    assert_eq!(settled.task_id, "t1");
+    assert_eq!(settled.parent_key, "p");
+    assert_eq!(settled.agent_id, "worker");
+    assert_eq!(settled.status, CompletionStatus::Success);
+    assert_eq!(settled.label.as_deref(), Some("indexer"));
+    assert_eq!(settled.finished_at, recorded.finished_at);
+    assert!(settled.updated_at >= recorded.updated_at);
+    // Dedupe and the tombstone guard still work on the emptied record.
+    assert_eq!(
+        router.record(record("t1", "p")).await.unwrap(),
+        RecordOutcome::Duplicate
+    );
+    assert_eq!(
+        router.tombstone("t1").unwrap(),
+        TombstoneOutcome::AlreadyFinal
+    );
+    assert!(router.pending_for("p").is_empty());
+    assert_eq!(router.restart_recovery_note("p", &[]), "");
+}
+
+#[tokio::test]
+async fn tombstone_and_cancel_parent_drop_the_withdrawn_result() {
+    let store = Arc::new(InMemoryCompletionStore::new());
+    let router = CompletionRouter::new(store.clone());
+    router
+        .record(record_with_artifact("waited", "p"))
+        .await
+        .unwrap();
+    router
+        .record(record_with_artifact("orphaned", "p"))
+        .await
+        .unwrap();
+    router.record(record("other", "q")).await.unwrap();
+    assert_eq!(
+        router.tombstone("waited").unwrap(),
+        TombstoneOutcome::Suppressed
+    );
+    assert_eq!(router.cancel_parent("p").unwrap(), 1);
+    for task in ["waited", "orphaned"] {
+        let withdrawn = store.get(task).unwrap();
+        assert_eq!(withdrawn.state, CompletionState::Tombstoned, "{task}");
+        assert_eq!(withdrawn.result, CompletionResult::default(), "{task}");
+        assert_eq!(withdrawn.parent_key, "p", "{task}");
+        assert_eq!(
+            router.record(record(task, "p")).await.unwrap(),
+            RecordOutcome::Suppressed,
+            "{task}"
+        );
+    }
+    assert_eq!(
+        store.get("other").unwrap().result.text,
+        "result of other",
+        "another parent's pending record is untouched"
+    );
+}
+
+#[tokio::test]
+async fn the_give_up_writer_gets_the_full_result_and_the_store_does_not() {
+    let store = Arc::new(InMemoryCompletionStore::new());
+    let router = CompletionRouter::new(store.clone()).with_max_attempts(1);
+    let recorded = record_with_artifact("t1", "p");
+    router.record(recorded.clone()).await.unwrap();
+    router.claim_pending("p", 1).unwrap();
+    let gave_up = router.mark_failed(&["t1"]).unwrap();
+    assert_eq!(gave_up.len(), 1);
+    assert_eq!(gave_up[0].state, CompletionState::GaveUp);
+    assert_eq!(gave_up[0].attempts, 1);
+    assert_eq!(gave_up[0].result, recorded.result);
+    let stored = store.get("t1").unwrap();
+    assert_eq!(stored.state, CompletionState::GaveUp);
+    assert_eq!(stored.attempts, 1);
+    assert_eq!(stored.updated_at, gave_up[0].updated_at);
+    assert_eq!(stored.result, CompletionResult::default());
+    assert!(router.claim_pending("p", 1).unwrap().is_empty());
+    assert_eq!(
+        router.record(record("t1", "p")).await.unwrap(),
+        RecordOutcome::Duplicate
+    );
+    assert!(router.mark_failed(&["t1"]).unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn followup_mode_pushes_onto_the_followup_lane_of_a_live_parent() {
     let router = router();

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased: settled completions drop their result (tinyagents#354)
+
+`CompletionRouter` now empties a record's `result` when the record settles:
+`mark_delivered`, `tombstone` and `cancel_parent` store the record with its
+id, parent key, status, state, attempts and timestamps but no text, artifact
+reference or omitted-character count, so a delivered child's output or a
+deleted parent's withdrawn completions do not sit in the store until
+`compact(retain)`. `mark_failed` still returns the full record to the host's
+give-up writer and stores the emptied one. Dedupe, tombstones and reopen
+behaviour are unchanged.
+
 ## Unreleased: locator-based transcript reads and writes (tinyagents#453)
 
 Hosts can now do through a `TranscriptLocator` everything they used the

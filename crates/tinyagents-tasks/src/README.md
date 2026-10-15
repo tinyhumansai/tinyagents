@@ -140,11 +140,15 @@ hand-off and nothing product-specific:
   `finished_at`, `attempts`, `notify_mode` and `state` (`Pending` /
   `Delivered` / `Tombstoned` / `GaveUp`).
 - `CompletionStore` — `InMemoryCompletionStore` and `DriverCompletionStore`.
-  The JSONL log is append-only, one `fsync`ed line per change, replayed to the
-  latest record per task id on open. A torn final line from a crash is dropped
-  and the file truncated back to the last whole line; an unreadable complete
-  line is skipped with a warning. `compact(retain)` rewrites the log through a
-  temp file and an atomic rename, dropping settled records older than `retain`.
+  The driver store keeps the latest record per task id as one document in a
+  `tinystoragedrivers` collection (`orchestration_completions` by default)
+  with `parentKey`, `state` and `updatedAtMs` projected for queries; an
+  unreadable document is skipped with a warning. A record that settles
+  (`Delivered`, `Tombstoned`, `GaveUp`, including the records `cancel_parent`
+  withdraws) is written back without its `result`, so a delivered or
+  withdrawn child's text does not sit in the store until compaction; the id,
+  state and attempts that dedupe and tombstones need stay. `compact(retain)`
+  drops settled records older than `retain`, dedupe entries included.
 - `CompletionRouter` — `record` (idempotent per task id), `tombstone(task_id)`
   (the parent waited on or collected the child, so nothing further is routed; a message already pushed to a live queue is not retracted; works
   before the completion exists), `claim_pending(parent, max)` /
@@ -152,7 +156,8 @@ hand-off and nothing product-specific:
   attempt; a claimed record is leased until resolved), `mark_delivered(ids)`,
   `mark_failed(ids)` (moves a record to `GaveUp` once `attempts >=
   max_attempts`, default `DEFAULT_MAX_ATTEMPTS` = 5, and returns those records
-  for the host's give-up policy), `pending_for(parent)`, `cancel_parent` /
+  with their full result for the host's give-up policy; the stored copy keeps
+  none), `pending_for(parent)`, `cancel_parent` /
   `resume_parent` (the flag is a durable marker record, so it survives a restart), `attach_parent` / `detach_parent`, `compact`, and
   `restart_recovery_note(parent, children)`.
 - `NotifyMode`, set per spawn: `Followup` (default) pushes onto the parent's
