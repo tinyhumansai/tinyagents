@@ -8,7 +8,7 @@ pub struct ModelPrice {
     /// `mistral`). Used as the `provider` field when pre-filling registry rows.
     pub provider: &'static str,
     /// Canonical, lower-case model id used for matching. Keep these distinctive
-    /// (no bare `gpt-5`) so substring matching stays unambiguous.
+    /// (no bare `gpt-5`) so a decorated id resolves to one row.
     pub model_id: &'static str,
     /// USD per million standard (cache-miss) input tokens.
     pub input_per_mtok_usd: f64,

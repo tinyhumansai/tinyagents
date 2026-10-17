@@ -33,15 +33,16 @@ fn normalize(model: &str) -> String {
 /// Resolve a concrete model string to its catalogued row, if known.
 ///
 /// Match order: exact canonical id → id with a leading `vendor/` segment
-/// stripped → longest canonical id that is a substring of the normalised
-/// request (handles dated/suffixed ids). Returns `None` for unknown models —
-/// callers should fall back to a tier estimate.
+/// stripped → longest canonical id that the request extends with a snapshot
+/// decoration only (`gpt-5.4-mini-2026-05-01`, `claude-sonnet-4-5-20250929`,
+/// `gemini-2.5-pro-preview-06-05`; see [`is_decorated_id`]). Returns `None`
+/// for unknown models — callers should fall back to a tier estimate.
 ///
-/// The inherited substring fallback can also match unlisted hyphenated variants
-/// to a base model (for example `gpt-4.1-nano` to `gpt-4.1`). This compatibility
-/// behavior is preserved during migration and is not authoritative provider-id
-/// validation. The snapshot also retains historical cached-rate assumptions
-/// and models no long-context estimate tiers except MiniMax M3.
+/// Any other suffix names a different model, not a snapshot of a listed one:
+/// `gpt-4.1-nano` is not priced like `gpt-4.1`, nor `o3-pro` like `o3`, so
+/// those resolve to `None` rather than inheriting a neighbour's rates. The
+/// snapshot also retains historical cached-rate assumptions and models no
+/// long-context estimate tiers except MiniMax M3.
 pub fn lookup(model: &str) -> Option<&'static ModelPrice> {
     let norm = normalize(model);
     if norm.is_empty() {
@@ -56,38 +57,36 @@ pub fn lookup(model: &str) -> Option<&'static ModelPrice> {
     }
     KNOWN_MODEL_PRICING
         .iter()
-        .filter(|p| {
-            contains_at_boundary(&norm, p.model_id) || contains_at_boundary(bare, p.model_id)
-        })
+        .filter(|p| is_decorated_id(&norm, p.model_id) || is_decorated_id(bare, p.model_id))
         .max_by_key(|p| p.model_id.len())
 }
 
-/// Whether `needle` occurs in `haystack` at a token boundary — i.e. the
-/// characters immediately flanking the match are non-alphanumeric (or the string
-/// ends). This keeps the longest-substring fallback matching dated/suffixed ids
-/// (`gpt-5.4-mini-2026-05-01` → `gpt-5.4-mini`, flanked by `-`/string end) while
-/// refusing spurious mid-token collisions for short canonical ids
-/// (`proto3-chat` must NOT match the `o3` row, `solo1-7b` must NOT match `o1`).
-/// A naive `contains` overmatches those and, since context-window lookup
-/// now routes windows through this catalog, that leaked a bogus 200K window
-/// (issue #4249 regression guard).
-fn contains_at_boundary(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
+/// Whether `candidate` is `canonical` followed by `-` and a snapshot
+/// decoration: `-`-separated tokens that are each a date or version fragment
+/// (`2026-05-01`, `20250929`, `06-05`, `001`) or a release-channel word
+/// (`latest`, `preview`, `exp`).
+///
+/// A prefix match alone is not enough: `gpt-4.1-nano` starts with `gpt-4.1`
+/// and `o3-pro` with `o3`, and both are different models with their own
+/// rates. Requiring the prefix also keeps short canonical ids out of unrelated
+/// tokens (`proto3-chat` must not match the `o3` row, `solo1-7b` must not
+/// match `o1`), which a plain substring search once got wrong and leaked a
+/// bogus 200K context window through this catalog (issue #4249).
+fn is_decorated_id(candidate: &str, canonical: &str) -> bool {
+    let Some(rest) = candidate.strip_prefix(canonical) else {
         return false;
-    }
-    let bytes = haystack.as_bytes();
-    let mut search_from = 0;
-    while let Some(rel) = haystack[search_from..].find(needle) {
-        let start = search_from + rel;
-        let end = start + needle.len();
-        let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
-        let after_ok = end == haystack.len() || !bytes[end].is_ascii_alphanumeric();
-        if before_ok && after_ok {
-            return true;
-        }
-        search_from = start + 1;
-    }
-    false
+    };
+    let Some(suffix) = rest.strip_prefix('-') else {
+        return false;
+    };
+    !suffix.is_empty() && suffix.split('-').all(is_decoration_token)
+}
+
+/// One token of a snapshot decoration.
+fn is_decoration_token(token: &str) -> bool {
+    const CHANNELS: &[&str] = &["latest", "preview", "exp"];
+    let dated = matches!(token.len(), 2 | 3 | 4 | 8) && token.bytes().all(|b| b.is_ascii_digit());
+    dated || CHANNELS.contains(&token)
 }
 
 /// Estimate the USD cost of a single model call from catalogued per-MTok rates.
