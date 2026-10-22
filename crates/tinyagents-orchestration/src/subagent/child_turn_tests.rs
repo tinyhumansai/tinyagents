@@ -152,7 +152,6 @@ fn totals(
         cache_creation_tokens: cache_create,
         reasoning_tokens: reasoning,
         charged_amount: Some(ChargedAmount::usd_micros(250)),
-        charged_amount_nanos: None,
         context_window_tokens: Some(32_000),
     });
     totals
