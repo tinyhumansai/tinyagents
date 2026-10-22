@@ -4,7 +4,147 @@ use crate::testkit::conformance::{
 };
 use crate::transcript::{SessionRef, TranscriptMessage, TranscriptMeta, TranscriptTurn};
 use serde_json::Value;
-use tinystoragedrivers_core::MemoryStorage;
+use tinystoragedrivers_core::{Capabilities, MemoryStorage, Scope, ScopedStorage};
+
+#[tokio::test]
+async fn registry_rebind_failure_keeps_every_provider_on_its_original_backend() {
+    let registry = SessionStoreRegistry::default();
+    let original: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let alice = RebindableSessionStores::new_in_tenant(
+        &registry,
+        Arc::clone(&original),
+        Scope::tenant("alice").unwrap(),
+        false,
+    )
+    .unwrap();
+    let bob = RebindableSessionStores::new_in_tenant(
+        &registry,
+        Arc::clone(&original),
+        Scope::tenant("bob").unwrap(),
+        false,
+    )
+    .unwrap();
+    let alice_live = alice.for_agent("agent");
+    let bob_live = bob.for_agent("agent");
+    let alice_fresh = alice.for_agent("fresh-agent");
+    let bob_fresh = bob.for_agent("fresh-agent");
+    for live in [&alice_live, &bob_live, &alice_fresh, &bob_fresh] {
+        live.kv
+            .put("marker", "backend", serde_json::json!("original"))
+            .await
+            .unwrap();
+    }
+    drop(alice_fresh);
+    drop(bob_fresh);
+
+    let candidate: Arc<dyn StorageBackend> = Arc::new(RejectBobBackend {
+        inner: MemoryStorage::new(),
+    });
+    assert!(registry.rebind(candidate).is_err());
+
+    for live in [&alice_live, &bob_live] {
+        assert_eq!(
+            live.kv.get("marker", "backend").await.unwrap(),
+            Some(serde_json::json!("original")),
+            "existing live handle must remain on the original backend"
+        );
+    }
+    for provider in [&alice, &bob] {
+        assert_eq!(
+            provider
+                .for_agent("fresh-agent")
+                .kv
+                .get("marker", "backend")
+                .await
+                .unwrap(),
+            Some(serde_json::json!("original")),
+            "provider current backend must remain original"
+        );
+    }
+}
+
+#[test]
+fn registry_keeps_independent_initial_backends_until_explicit_rebind() {
+    let registry = SessionStoreRegistry::default();
+    let first_backend: Arc<dyn StorageBackend> = Arc::new(NamedBackend {
+        inner: MemoryStorage::new(),
+        name: "first",
+    });
+    let second_backend: Arc<dyn StorageBackend> = Arc::new(NamedBackend {
+        inner: MemoryStorage::new(),
+        name: "second",
+    });
+    let first =
+        RebindableSessionStores::new_in(&registry, Arc::clone(&first_backend), false).unwrap();
+    let second = RebindableSessionStores::new_in(&registry, second_backend, false).unwrap();
+
+    assert!(
+        first
+            .for_agent("agent")
+            .transcripts
+            .destination_key()
+            .unwrap()
+            .starts_with("first://")
+    );
+    assert!(
+        second
+            .for_agent("agent")
+            .transcripts
+            .destination_key()
+            .unwrap()
+            .starts_with("second://"),
+        "registration alone must not rebind a provider to another provider's initial backend"
+    );
+}
+
+#[derive(Debug)]
+struct NamedBackend {
+    inner: MemoryStorage,
+    name: &'static str,
+}
+
+impl StorageBackend for NamedBackend {
+    fn driver(&self) -> &'static str {
+        self.name
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn for_scope(&self, scope: &Scope) -> std::result::Result<ScopedStorage, StorageError> {
+        let scoped = self.inner.for_scope(scope)?;
+        Ok(ScopedStorage::new(
+            scope.clone(),
+            self.name,
+            Arc::clone(scoped.documents()),
+            Arc::clone(scoped.streams()),
+            Arc::clone(scoped.blobs()),
+        ))
+    }
+}
+
+#[derive(Debug)]
+struct RejectBobBackend {
+    inner: MemoryStorage,
+}
+
+impl StorageBackend for RejectBobBackend {
+    fn driver(&self) -> &'static str {
+        self.inner.driver()
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn for_scope(&self, scope: &Scope) -> std::result::Result<ScopedStorage, StorageError> {
+        if scope.as_str().starts_with("u:bob") {
+            return Err(StorageError::invalid_input("injected bob scope failure"));
+        }
+        self.inner.for_scope(scope)
+    }
+}
 
 #[tokio::test]
 async fn rebound_provider_passes_full_session_store_conformance() {
@@ -325,6 +465,53 @@ struct BlockingStore {
 struct GateBackend {
     inner: MemoryStorage,
     gate: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+}
+
+#[tokio::test]
+async fn provider_registered_after_rebind_uses_registry_current_backend() {
+    let registry = SessionStoreRegistry::default();
+    let initial: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let provider =
+        RebindableSessionStores::new_unregistered(Arc::clone(&initial), Scope::local(), false)
+            .unwrap();
+    let candidate: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let candidate_stores = DriverSessionStores::new(Arc::clone(&candidate), Scope::local())
+        .unwrap()
+        .for_agent("agent");
+    candidate_stores
+        .kv
+        .put("marker", "backend", serde_json::json!("candidate"))
+        .await
+        .unwrap();
+
+    assert_eq!(registry.rebind(Arc::clone(&candidate)).unwrap(), 0);
+    let bob = RebindableSessionStores::new_in_tenant(
+        &registry,
+        Arc::clone(&candidate),
+        Scope::tenant("bob").unwrap(),
+        false,
+    )
+    .unwrap();
+    let _bob_live = bob.for_agent("agent");
+    assert!(
+        registry
+            .rebind(Arc::new(RejectBobBackend {
+                inner: MemoryStorage::new(),
+            }))
+            .is_err()
+    );
+    registry.register(&provider, Arc::clone(&initial)).unwrap();
+
+    assert_eq!(
+        provider
+            .for_agent("agent")
+            .kv
+            .get("marker", "backend")
+            .await
+            .unwrap(),
+        Some(serde_json::json!("candidate")),
+        "a provider registered after rebind must adopt the registry's current backend"
+    );
 }
 
 #[async_trait::async_trait]

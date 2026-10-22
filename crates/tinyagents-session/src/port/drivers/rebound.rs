@@ -6,7 +6,7 @@
 //! cloned `AgentStores` follow the new backend after `rebind` completes.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, Weak};
 
 use serde_json::Value;
 use tinyagents_harness::Result as HarnessResult;
@@ -26,34 +26,59 @@ use crate::turn_state::TurnLifecycle;
 /// stores without moving unrelated providers.
 #[derive(Default)]
 pub struct SessionStoreRegistry {
-    live: Mutex<Vec<Weak<RebindableSessionStores>>>,
+    state: Mutex<SessionStoreRegistryState>,
+}
+
+#[derive(Default)]
+struct SessionStoreRegistryState {
+    live: Vec<Weak<RebindableSessionStores>>,
+    current_backend: Option<Arc<dyn StorageBackend>>,
 }
 
 impl SessionStoreRegistry {
-    fn register(&self, stores: &Arc<RebindableSessionStores>) {
-        let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
-        live.retain(|weak| weak.strong_count() > 0);
-        live.push(Arc::downgrade(stores));
-    }
-
-    fn live(&self) -> Vec<Arc<RebindableSessionStores>> {
-        self.live
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .filter_map(Weak::upgrade)
-            .collect()
+    fn register(
+        &self,
+        stores: &Arc<RebindableSessionStores>,
+        initial_backend: Arc<dyn StorageBackend>,
+    ) -> Result<(), StorageError> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.live.retain(|weak| weak.strong_count() > 0);
+        if let Some(current_backend) = &state.current_backend
+            && !Arc::ptr_eq(current_backend, &initial_backend)
+        {
+            stores.rebind(Arc::clone(current_backend))?;
+        }
+        state.live.push(Arc::downgrade(stores));
+        Ok(())
     }
 
     /// Rebinds every provider registered here, returning the number moved.
+    ///
+    /// Every provider prepares its new backend and live agent handles before
+    /// any provider publishes them. If preparation fails, all providers keep
+    /// their current backend and live handles.
     pub fn rebind(
         &self,
         backend: Arc<dyn StorageBackend>,
     ) -> std::result::Result<usize, StorageError> {
-        let stores = self.live();
-        for store in &stores {
-            store.rebind(Arc::clone(&backend))?;
+        // Keep registrations stable across the batch: otherwise a provider
+        // could be registered after the snapshot and remain on the old
+        // backend when this call returns.
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.live.retain(|weak| weak.strong_count() > 0);
+        let stores = state
+            .live
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        let prepared = stores
+            .iter()
+            .map(|store| store.prepare_rebind(Arc::clone(&backend)))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for provider in prepared {
+            provider.commit();
         }
+        state.current_backend = Some(backend);
         Ok(stores.len())
     }
 }
@@ -102,16 +127,25 @@ impl RebindableSessionStores {
         tenant: Scope,
         recover_on_open: bool,
     ) -> std::result::Result<Arc<Self>, StorageError> {
+        let initial_backend = Arc::clone(&backend);
+        let this = Self::new_unregistered(backend, tenant, recover_on_open)?;
+        registry.register(&this, initial_backend)?;
+        Ok(this)
+    }
+
+    fn new_unregistered(
+        backend: Arc<dyn StorageBackend>,
+        tenant: Scope,
+        recover_on_open: bool,
+    ) -> std::result::Result<Arc<Self>, StorageError> {
         let driver =
             DriverSessionStores::new(backend, tenant.clone())?.recover_on_open(recover_on_open);
-        let this = Arc::new(Self {
+        Ok(Arc::new(Self {
             current: RwLock::new(Arc::new(driver)),
             live: Mutex::new(HashMap::new()),
             recover_on_open,
             tenant,
-        });
-        registry.register(&this);
-        Ok(this)
+        }))
     }
 
     fn current(&self) -> Arc<DriverSessionStores> {
@@ -126,9 +160,18 @@ impl RebindableSessionStores {
         &self,
         backend: Arc<dyn StorageBackend>,
     ) -> std::result::Result<(), StorageError> {
+        self.prepare_rebind(backend)?.commit();
+        Ok(())
+    }
+
+    fn prepare_rebind(
+        &self,
+        backend: Arc<dyn StorageBackend>,
+    ) -> Result<PreparedRebind<'_>, StorageError> {
         // Serialize publication with agent registration so a concurrent
-        // `for_agent` cannot attach to the old provider after this registry
-        // snapshot. This synchronous lock is never held over async I/O.
+        // `for_agent` cannot attach to the old provider after the batch
+        // snapshot. The guard remains held through commit. This synchronous
+        // lock is never held over async I/O.
         let mut live_registry = self.live.lock().unwrap_or_else(PoisonError::into_inner);
         live_registry.retain(|_, weak| weak.strong_count() > 0);
         let next = Arc::new(
@@ -151,14 +194,35 @@ impl RebindableSessionStores {
                     .map(|stores| (Arc::clone(binding), stores))
             })
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        for (binding, stores) in replacements {
+        Ok(PreparedRebind {
+            provider: self,
+            _live_registry: live_registry,
+            next,
+            replacements,
+        })
+    }
+}
+
+struct PreparedRebind<'a> {
+    provider: &'a RebindableSessionStores,
+    _live_registry: MutexGuard<'a, HashMap<String, Weak<LiveAgentStores>>>,
+    next: Arc<DriverSessionStores>,
+    replacements: Vec<(Arc<LiveAgentStores>, AgentStores)>,
+}
+
+impl PreparedRebind<'_> {
+    fn commit(self) {
+        for (binding, stores) in self.replacements {
             *binding
                 .current
                 .write()
                 .unwrap_or_else(PoisonError::into_inner) = stores;
         }
-        *self.current.write().unwrap_or_else(PoisonError::into_inner) = next;
-        Ok(())
+        *self
+            .provider
+            .current
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = self.next;
     }
 }
 
