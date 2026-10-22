@@ -488,7 +488,6 @@ fn model_response(response: ChatResponse) -> ModelResponse {
         cache_creation_tokens: value.cache_creation_tokens,
         reasoning_tokens: value.reasoning_tokens,
         charged_amount: None,
-        charged_amount_nanos: None,
         context_window_tokens: None,
     });
     ModelResponse {
