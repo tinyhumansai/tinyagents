@@ -2343,7 +2343,7 @@ dependencies = [
 
 [[package]]
 name = "tinyinference-core"
-version = "0.5.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "httpdate",
@@ -2353,7 +2353,7 @@ dependencies = [
 
 [[package]]
 name = "tinyinference-embeddings"
-version = "0.5.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "tinyinference-image"
-version = "0.5.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -2388,7 +2388,7 @@ dependencies = [
 
 [[package]]
 name = "tinyinference-llm"
-version = "0.5.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -2407,7 +2407,7 @@ dependencies = [
 
 [[package]]
 name = "tinyinference-providers"
-version = "0.5.0"
+version = "0.4.1"
 dependencies = [
  "base64 0.23.1",
  "rand 0.10.3",
@@ -2423,7 +2423,7 @@ dependencies = [
 
 [[package]]
 name = "tinyinference-video"
-version = "0.5.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "serde",

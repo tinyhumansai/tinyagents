@@ -22,7 +22,7 @@ parking_lot = "0.12"
 tinyagents-tasks = { path = "../tinyagents-tasks", version = "2.2.0", default-features = false }
 tinyagents-harness = { path = "../tinyagents-harness", version = "2.2.0", default-features = false }
 tinyagents-session = { path = "../tinyagents-session", version = "2.2.0", default-features = false }
-tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.5.0" }
+tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.4.1" }
 tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.6.0" }
 tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
 tracing = { workspace = true }

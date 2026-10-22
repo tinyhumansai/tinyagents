@@ -19,7 +19,7 @@ tinyagents-harness = { path = "../tinyagents-harness", version = "2.2.0" }
 tinyagents-hooks = { path = "../tinyagents-hooks", version = "2.2.0" }
 tinyagents-registry = { path = "../tinyagents-registry", version = "2.2.0" }
 tinyagents-session = { path = "../tinyagents-session", version = "2.2.0" }
-tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.5.0" }
+tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.4.1" }
 tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.6.0" }
 tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "sync", "time"] }
 tracing = { workspace = true }

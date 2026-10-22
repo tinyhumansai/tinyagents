@@ -25,8 +25,8 @@ tinyagents-session = { path = "../tinyagents-session" }
 tinyagents-tasks = { path = "../tinyagents-tasks" }
 tinystoragedrivers-core = { workspace = true }
 tinystoragedrivers-sqlite = { workspace = true }
-tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.5.0" }
-tinyinference-embeddings = { path = "../../vendor/tinyinference/crates/tinyinference-embeddings", version = "0.5.0" }
+tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.4.1" }
+tinyinference-embeddings = { path = "../../vendor/tinyinference/crates/tinyinference-embeddings", version = "0.4.1" }
 tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.6.0" }
 tokio = { workspace = true, default-features = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 
