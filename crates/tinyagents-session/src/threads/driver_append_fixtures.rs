@@ -90,11 +90,13 @@ impl Fault {
 struct Documents {
     inner: Arc<dyn DocumentStore>,
     fault: Arc<Fault>,
+    capabilities: Option<Capabilities>,
 }
 #[async_trait]
 impl DocumentStore for Documents {
     fn capabilities(&self) -> Capabilities {
-        self.inner.capabilities()
+        self.capabilities
+            .unwrap_or_else(|| self.inner.capabilities())
     }
     async fn ensure_collection(&self, _: &CollectionSpec) -> tinystoragedrivers_types::Result<()> {
         panic!("actor attempted DDL")
@@ -267,11 +269,26 @@ pub(super) fn faulted(
         docs: Arc::new(Documents {
             inner: store.docs.clone(),
             fault: fault.clone(),
+            capabilities: None,
         }),
         streams: Arc::new(Streams {
             inner: store.streams.clone(),
             fault,
         }),
+        validate_only: true,
+    }
+}
+pub(super) fn without_document_capability(
+    store: &DriverConversationStore,
+    capability: tinystoragedrivers_types::Capability,
+) -> DriverConversationStore {
+    DriverConversationStore {
+        docs: Arc::new(Documents {
+            inner: store.docs.clone(),
+            fault: Fault::new(Phase::Probe, Action::LoseAck),
+            capabilities: Some(store.docs.capabilities().without(capability)),
+        }),
+        streams: store.streams.clone(),
         validate_only: true,
     }
 }

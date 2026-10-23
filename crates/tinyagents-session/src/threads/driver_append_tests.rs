@@ -131,7 +131,40 @@ async fn reconstructed_memory_prepared_append_reopens_and_preserves_classic_dupl
 
 #[path = "driver_append_fixtures.rs"]
 mod fixtures;
-use fixtures::{Action, Fault, Phase, actor, faulted};
+use fixtures::{Action, Fault, Phase, actor, faulted, without_document_capability};
+
+#[tokio::test]
+async fn append_requires_conditional_stream_support_from_the_stream_port() {
+    let store = actor(&MemoryStorage::new()).await;
+    let store = without_document_capability(
+        &store,
+        tinystoragedrivers_types::Capability::ConditionalStreamAppend,
+    );
+    assert!(
+        store
+            .docs
+            .capabilities()
+            .contains(tinystoragedrivers_types::Capability::ValidatedBatch)
+    );
+    assert!(
+        !store
+            .docs
+            .capabilities()
+            .contains(tinystoragedrivers_types::Capability::ConditionalStreamAppend)
+    );
+    assert!(
+        store
+            .streams
+            .capabilities()
+            .contains(tinystoragedrivers_types::Capability::ConditionalStreamAppend)
+    );
+
+    let message = message("agent:stream-capability", "append succeeds");
+    assert_eq!(
+        store.append_message("same", message.clone()).await.unwrap(),
+        message
+    );
+}
 
 async fn canceled(backend: &dyn StorageBackend, phase: Phase) {
     let store = actor(backend).await;

@@ -35,17 +35,27 @@ impl DriverConversationStore {
         for spec in Self::append_collection_specs() {
             self.docs.validate_collection_spec(&spec).await?;
         }
-        for capability in [
-            Capability::ValidatedBatch,
-            Capability::ConditionalStreamAppend,
-        ] {
-            if !self.docs.capabilities().contains(capability) {
-                return Err(StorageError::unsupported(
-                    capability,
-                    "conversation append requires checked documents and conditional streams",
-                )
-                .into());
-            }
+        if !self
+            .docs
+            .capabilities()
+            .contains(Capability::ValidatedBatch)
+        {
+            return Err(StorageError::unsupported(
+                Capability::ValidatedBatch,
+                "conversation append requires checked documents and conditional streams",
+            )
+            .into());
+        }
+        if !self
+            .streams
+            .capabilities()
+            .contains(Capability::ConditionalStreamAppend)
+        {
+            return Err(StorageError::unsupported(
+                Capability::ConditionalStreamAppend,
+                "conversation append requires checked documents and conditional streams",
+            )
+            .into());
         }
         Ok(())
     }
