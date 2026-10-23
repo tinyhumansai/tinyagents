@@ -129,6 +129,21 @@ async fn reconstructed_memory_prepared_append_reopens_and_preserves_classic_dupl
     prepared_append(&backend).await;
 }
 
+#[tokio::test]
+async fn append_checks_conditional_stream_capability_on_the_stream_port() {
+    let store = actor(&MemoryStorage::new()).await;
+    let stream_capability_only = fixtures::hide_document_conditional_stream_append(&store);
+    let message = message("agent:capability", "conditional stream append is supported");
+
+    assert_eq!(
+        stream_capability_only
+            .append_message("same", message.clone())
+            .await
+            .unwrap(),
+        message
+    );
+}
+
 #[path = "driver_append_fixtures.rs"]
 mod fixtures;
 use fixtures::{Action, Fault, Phase, actor, faulted};

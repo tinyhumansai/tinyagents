@@ -1,7 +1,8 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tinyagents_storage_kit::{
-    Capabilities, Page, Query, ReadCheck, Sort, StreamEntry, Version, WriteOp, WriteResult,
+    Capabilities, Capability, Page, Query, ReadCheck, Sort, StreamEntry, Version, WriteOp,
+    WriteResult,
 };
 use tinystoragedrivers_api::StorageBackend;
 use tokio::sync::{Barrier, Notify};
@@ -90,11 +91,17 @@ impl Fault {
 struct Documents {
     inner: Arc<dyn DocumentStore>,
     fault: Arc<Fault>,
+    hide_conditional_stream_append: bool,
 }
 #[async_trait]
 impl DocumentStore for Documents {
     fn capabilities(&self) -> Capabilities {
-        self.inner.capabilities()
+        let capabilities = self.inner.capabilities();
+        if self.hide_conditional_stream_append {
+            capabilities.without(Capability::ConditionalStreamAppend)
+        } else {
+            capabilities
+        }
     }
     async fn ensure_collection(&self, _: &CollectionSpec) -> tinystoragedrivers_types::Result<()> {
         panic!("actor attempted DDL")
@@ -267,6 +274,7 @@ pub(super) fn faulted(
         docs: Arc::new(Documents {
             inner: store.docs.clone(),
             fault: fault.clone(),
+            hide_conditional_stream_append: false,
         }),
         streams: Arc::new(Streams {
             inner: store.streams.clone(),
@@ -275,6 +283,21 @@ pub(super) fn faulted(
         validate_only: true,
     }
 }
+
+pub(super) fn hide_document_conditional_stream_append(
+    store: &DriverConversationStore,
+) -> DriverConversationStore {
+    DriverConversationStore {
+        docs: Arc::new(Documents {
+            inner: store.docs.clone(),
+            fault: Fault::new(Phase::Probe, Action::Unsupported),
+            hide_conditional_stream_append: true,
+        }),
+        streams: store.streams.clone(),
+        validate_only: true,
+    }
+}
+
 pub(super) async fn actor(backend: &dyn StorageBackend) -> DriverConversationStore {
     let scope = Scope::new("alice").unwrap();
     let raw = backend.for_scope(&scope).unwrap();
