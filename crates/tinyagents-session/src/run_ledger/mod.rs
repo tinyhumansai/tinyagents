@@ -14,6 +14,7 @@ pub mod drivers;
 pub mod error;
 pub mod history;
 pub mod import;
+pub mod inbox;
 pub mod port;
 pub mod recovery;
 mod status_map;

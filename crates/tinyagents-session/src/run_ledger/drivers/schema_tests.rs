@@ -100,6 +100,7 @@ fn the_schemas_name_what_each_owner_declares() {
         "ledger.event_heads",
         "ledger.event_outbox",
         "ledger.events",
+        "ledger.inputs",
         "ledger.members",
         "ledger.tasks",
         "ledger.teams",

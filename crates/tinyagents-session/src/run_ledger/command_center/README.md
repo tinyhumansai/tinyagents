@@ -38,3 +38,25 @@ the host passes an agent-id to display-name closure and owns the RPC surface.
   returns `InvalidTransition` when the verb no longer applies.
 - `stop` stamps `completed_at` and stores the optional reason as `error`;
   `retry` and `continue` clear both; `follow_up` leaves the status unchanged.
+# Durable addressed input draft
+
+`run_ledger::inbox::RunInboxStore` is a separate optional capability implemented
+by `DriverRunLedger`. `enqueue_input` validates the exact persisted recipient
+lineage and commits the queued record, deduplication identity and `input_queued`
+event in one checked batch. Reusing the root/submission id for different content
+returns a conflict. Receipts survive process restart and list in event-sequence
+order. A backend without checked atomic batches returns its native error.
+
+`pending_inputs(root, recipient, after_sequence, limit)` returns at most 500
+records in ascending sequence order. Start with `None`, then pass the last
+receipt's sequence as `Some(sequence)` to read the next page. The cursor is
+exclusive; paging never consumes or acknowledges input. Each page validates
+the recipient's persisted root lineage, including empty pages.
+
+This is an admission draft, not a complete delivery implementation. No operation
+marks input delivered, changes a run to running, or launches a worker. Recipient
+integration must atomically commit admitted input into the durable session and
+record consumption before exposing delivery/resumption controls. Live job
+request-id deduplication alone is not sufficient for this contract. Entries have
+no implicit expiry; retention must preserve receipt identities while retries are
+possible. Core host consumption awaits upstream availability.
