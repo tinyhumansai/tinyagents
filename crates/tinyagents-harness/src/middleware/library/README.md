@@ -121,6 +121,9 @@ Grouped by extension shape:
   call-id map. It owns per-run no-progress, classified-recovery, and recoverable
   failure trackers, typed halts, and one-shot request nudges. Host policy also
   supplies lifecycle callbacks for stop-latch batch/refusal/progress evidence.
+  Before `finish_run` clears host evidence, `after_agent` preserves a current
+  classified halt cause on `AgentRun::failure_cause`, retaining any cause the
+  loop already recorded.
   Construct a **new driver per run** because its steering handle and
   halt-summary slot are run specific.
 - `run_output_ladder` — the shared compact, persist-or-cap, disclose sequence
