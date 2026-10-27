@@ -15,10 +15,10 @@ chrono = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.11"
 thiserror = "2"
-tinyagents-harness = { path = "../tinyagents-harness", version = "3.0.0" }
-tinyagents-hooks = { path = "../tinyagents-hooks", version = "3.0.0" }
-tinyagents-registry = { path = "../tinyagents-registry", version = "3.0.0" }
-tinyagents-session = { path = "../tinyagents-session", version = "3.0.0" }
+tinyagents-harness = { path = "../tinyagents-harness", version = "3.1.3" }
+tinyagents-hooks = { path = "../tinyagents-hooks", version = "3.1.3" }
+tinyagents-registry = { path = "../tinyagents-registry", version = "3.1.3" }
+tinyagents-session = { path = "../tinyagents-session", version = "3.1.3" }
 tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.5.0" }
 tinytools = { path = "../../vendor/tinytools/crates/tinytools", version = "0.6.0" }
 tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "sync", "time"] }
@@ -27,7 +27,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 tinyagents-storage-kit = { workspace = true }
-tinyagents-session = { path = "../tinyagents-session", version = "3.0.0", features = ["testkit"] }
+tinyagents-session = { path = "../tinyagents-session", version = "3.1.3", features = ["testkit"] }
 tinystoragedrivers-api = { workspace = true }
 tinystoragedrivers = { workspace = true }
 tinystoragedrivers-connect = { workspace = true }
