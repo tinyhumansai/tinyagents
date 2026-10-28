@@ -511,6 +511,11 @@ pub struct RunContext<Ctx = ()> {
     pub(crate) turns: crate::agent_loop::TurnTracker,
     /// Set by a no-progress / repeat guard that paused the run, holding its
     /// root-cause summary, so the loop can report `TerminalReason::Halted`.
+    /// One deliver-first nudge has been spent on a repeat/no-progress guard
+    /// halt: the model gets a final turn to write its deliverable before the
+    /// run ends. A second guard halt then ends the run for real. One-shot per
+    /// run so a model that ignores the nudge cannot loop on it.
+    pub(crate) deliver_first_attempted: bool,
     pub(crate) halted_by_guard: Option<String>,
     /// Typed classifier cause for a guard halt, preserved independently from
     /// the human-readable summary.

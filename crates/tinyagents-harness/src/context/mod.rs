@@ -336,6 +336,7 @@ impl<Ctx> RunContext<Ctx> {
             host_authority: None,
             terminal_observer: None,
             turns: crate::agent_loop::TurnTracker::default(),
+            deliver_first_attempted: false,
             halted_by_guard: None,
             halted_by_guard_cause: None,
             last_limit: std::sync::Mutex::new(None),
