@@ -14,6 +14,7 @@ async fn resolver_keeps_lead_pin_hint_and_fallback_precedence() {
             workload("hint-role", "hint:fast", None),
         ])
         .build()
+        .await
         .expect("models should build")
         .map_models(|purpose, model| {
             Arc::new(ProfileOverrideModel::new(
@@ -55,6 +56,7 @@ async fn summarizer_uses_a_distinct_model_and_error_slot() {
     let models = TurnModelSet::<()>::builder(&factory, &gate, "chat")
         .without_workload_tiers()
         .build()
+        .await
         .expect("models should build");
 
     let lead = models
@@ -81,6 +83,7 @@ async fn owned_resolver_outlives_borrowed_factory_gate_context_and_model_set() {
         let factory_port: &dyn ModelFactory<()> = &factory;
         let gate_port: &dyn ModelBuildGate = &gate;
         let models = TurnModelSet::<()>::build(factory_port, gate_port, "chat")
+            .await
             .expect("models should build");
         Arc::new(models.resolver())
     };
@@ -106,6 +109,7 @@ async fn host_model_mapping_wraps_each_model_once_and_keeps_route_and_error_slot
     let mut mapped = Vec::new();
     let models = TurnModelSet::<()>::builder(&factory, &gate, "chat")
         .build()
+        .await
         .expect("turn models should build")
         .map_models(|purpose, model| {
             mapped.push(purpose.clone());
@@ -214,6 +218,7 @@ async fn rejecting_host_wrapper_is_inside_primary_tier_and_summary_error_slots()
         },
     );
     let models = TurnModelSet::<()>::build(&factory, &gate, "chat")
+        .await
         .expect("models should build")
         .map_models(|_, model| budget.wrap_model(model));
 

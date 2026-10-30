@@ -19,8 +19,7 @@ use serde::{Deserialize, Serialize};
 /// [`BudgetLimited`](ThreadGoalStatus::BudgetLimited) are entered only by the
 /// system (host control and accounting respectively), and clearing deletes the
 /// row entirely rather than being a status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadGoalStatus {
     /// The graph may make progress and (when driven) auto-continue.
@@ -61,8 +60,7 @@ impl ThreadGoalStatus {
 }
 
 /// A single thread-scoped goal.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadGoal {
     /// The thread this goal belongs to (one goal per thread).

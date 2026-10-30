@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tinyinference_llm::model::{ChatModel, ResolvedModelRoute};
 
@@ -58,15 +59,22 @@ impl ModelBuildRequest {
 }
 
 /// Host policy hook called before every model construction.
-pub trait ModelBuildGate {
+///
+/// Implementations are `Sync` so a turn-model assembly future may cross a
+/// host task boundary while retaining the gate between model builds.
+pub trait ModelBuildGate: Sync {
     /// Authorize constructing the model described by `request`.
     fn check(&self, request: &ModelBuildRequest) -> Result<()>;
 }
 
 /// Host implementation that selects and constructs a provider model.
-pub trait ModelFactory<State: Send + Sync> {
+///
+/// Implementations are `Sync`, and [`build`](Self::build) returns a `Send`
+/// future so the harness can assemble turn models inside sendable host tasks.
+#[async_trait]
+pub trait ModelFactory<State: Send + Sync>: Sync {
     /// Construct a model and report the concrete route selected by the host.
-    fn build(
+    async fn build(
         &self,
         request: &ModelBuildRequest,
     ) -> Result<(Arc<dyn ChatModel<State>>, ResolvedModelRoute)>;

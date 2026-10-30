@@ -24,7 +24,7 @@ reqwest = { workspace = true, features = ["stream", "multipart"], optional = tru
 sha2 = { version = "0.11", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-schemars = { version = "1", features = ["derive"], optional = true }
+schemars = "1.2.3"
 tinyagents-harness = { path = "../tinyagents-harness", version = "3.0.0", default-features = false }
 tinyagents-tasks = { path = "../tinyagents-tasks", version = "3.0.0", default-features = false, optional = true }
 tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm", version = "0.5.0", optional = true }
@@ -48,7 +48,7 @@ goals = []
 skills = []
 state-block = ["goals", "todos", "dep:tinyinference-llm"]
 subagents = ["dep:tinyagents-orchestration", "dep:tinyagents-tasks", "dep:tinyinference-llm"]
-json-schema = ["dep:schemars"]
+json-schema = []
 fs = ["dep:base64", "dep:fs2", "dep:glob", "dep:libc", "dep:log", "dep:regex", "dep:walkdir", "tokio/fs", "tokio/io-util"]
 net = ["dep:futures-util", "dep:log", "dep:reqwest", "dep:sha2", "tokio/fs", "tokio/io-util"]
 exec = ["dep:rustix", "tokio/fs", "tokio/io-util", "tokio/process"]

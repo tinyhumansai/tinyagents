@@ -26,7 +26,7 @@ regex = "1"
 reqwest = { workspace = true, features = ["stream", "http2"], optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-schemars = { version = "1", features = ["derive"], optional = true }
+schemars = "1.2.3"
 sha2 = "0.11"
 thiserror = "2"
 tracing = { workspace = true }
@@ -79,7 +79,7 @@ claude-code = ["dep:wait-timeout", "dep:dirs"]
 # Gates the Langfuse observability exporter and its `reqwest` transport.
 langfuse = ["dep:reqwest"]
 # Optional schema support for public harness wire types such as `RunMode`.
-json-schema = ["dep:schemars"]
+json-schema = []
 # Tracing instrumentation is now always compiled in (via the `tracing` crate
 # dependency above). This feature is retained as a no-op so downstream
 # feature forwards keep compiling.

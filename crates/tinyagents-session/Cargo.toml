@@ -15,7 +15,7 @@ anyhow = { workspace = true }
 thiserror = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
-schemars = { version = "1", features = ["derive", "chrono04"] }
+schemars = { version = "1.2.3", features = ["chrono04"] }
 tinyagents-harness = { path = "../tinyagents-harness", version = "3.0.0", default-features = false, features = ["sqlite"] }
 # `OrchestrationTaskStatus` is the canonical lifecycle status the run-ledger and
 # transcript-view statuses convert to and from.

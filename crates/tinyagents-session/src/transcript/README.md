@@ -31,7 +31,8 @@ Re-exported from `transcript::` (see `../transcript.rs`).
 - `TranscriptMeta` / `SessionTranscript` — the `_meta` header and the
   model-context transcript (`meta` + exact message array). The optional
   `_meta.prefix_message_count` records how many leading messages were frozen
-  prompt tiers in this generation.
+  prompt tiers in this generation. `_meta.prefix_reset` distinguishes an
+  intentional context reset from a legacy transcript with no recorded boundary.
 - `MessageUsage` / `TurnUsage` — per-turn usage and provenance attached to
   the last assistant message of a turn. `input` / `output` / `cached_input`
   sum every provider call of the turn (its spend); `last_call_input` /
@@ -55,13 +56,16 @@ Re-exported from `transcript::` (see `../transcript.rs`).
   (`begin_generation`, `begin_generation_from_baseline`,
   `truncate_into_next_generation`). `destination_key()` names the durable
   destination so rebuilt locators over one store compare equal.
+  `adopt_messages_if_absent` atomically imports model-context history only
+  when the session has never been written.
 - `TranscriptHistory` / `TranscriptRead` — the write and read handles a turn
   path holds. `TranscriptRead` has no write methods, so a discovered
   transcript cannot be appended to by construction. `read_session()` is the
   model-context replay (compactions replace the accumulator, interrupted
   partials are skipped); `read_display()` is the display projection (every
   record, including pre-compaction history, compaction markers and interrupted
-  partials).
+  partials). `adopt_if_empty` is the storage-level atomic primitive used by
+  session import.
 - `TranscriptTurn` — the borrowed argument bundle for
   `TranscriptHistory::append_turn`.
 

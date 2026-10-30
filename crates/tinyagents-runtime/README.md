@@ -96,6 +96,13 @@ commit succeeds, the turn remains successful. `after_commit` and terminal
 hooks get the committed outcome, but their error or a cooperative cancellation
 cannot relabel it.
 
+`Session::reset_history()` seals the current generation and starts an empty
+successor for the same durable session. It preserves the sealed history for
+recovery, records an explicit prompt-reset marker, and is a no-op for an absent
+or already-empty session. A `SessionStateView` reports `prefix_is_frozen` so a
+host can distinguish imported history that still needs its first prompt from
+a session whose prompt boundary is already authoritative.
+
 ## Explicit prefix refresh
 
 Prefixes are frozen by default. A host deliberately changing a managed system

@@ -9,8 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Lifecycle state of a todo item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
     /// Not started.
@@ -41,8 +40,7 @@ impl TodoStatus {
 }
 
 /// One item on a thread's todo list.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TodoItem {
     /// The step, as the model wrote it.
@@ -76,7 +74,7 @@ impl TodoItem {
 }
 
 /// A per-thread list: the items in order plus a last-mutation stamp.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TodoList {
     /// The thread this list belongs to.
@@ -99,7 +97,7 @@ impl TodoList {
 }
 
 /// A single store outcome: the post-mutation items plus a markdown rendering.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TodosSnapshot {
     /// The thread the list belongs to.

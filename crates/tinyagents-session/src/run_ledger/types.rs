@@ -131,7 +131,7 @@ impl AgentRunStatus {
 }
 
 /// Lifecycle status of a single [`WorkflowRun`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowRunStatus {
     /// Created but not yet started.
@@ -227,7 +227,7 @@ pub struct AgentRun {
 
 /// A persisted workflow run: durable state for a multi-phase workflow
 /// definition, including a compare-and-swap driver lease.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowRun {
     /// Caller-supplied stable identifier.
@@ -264,7 +264,7 @@ pub struct WorkflowRun {
 /// A driver takes this lease before acting on a workflow so at most one
 /// process is ever advancing a given run; see
 /// `try_claim_workflow_run`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub enum WorkflowLeaseClaim {
     /// The lease was free (or expired) and is now held by the caller.
     Acquired(WorkflowRun),
@@ -319,7 +319,7 @@ pub struct RunTelemetry {
 ///
 /// `started_at` / `completed_at` are optional so an update can leave them
 /// untouched; `super::ops` fills `started_at` with "now" on first insert.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, schemars::JsonSchema)]
 pub struct AgentRunUpsert {
     pub id: String,
     pub kind: AgentRunKind,
@@ -342,7 +342,7 @@ pub struct AgentRunUpsert {
 ///
 /// `started_at` / `completed_at` are optional so an update can leave them
 /// untouched; `super::ops` fills `started_at` with "now" on first insert.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, schemars::JsonSchema)]
 pub struct WorkflowRunUpsert {
     pub id: String,
     pub definition_id: String,
@@ -360,7 +360,7 @@ pub struct WorkflowRunUpsert {
 ///
 /// `sequence` and `timestamp` are not here: they are assigned by the insert
 /// (see `super::ops::append_run_event`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, schemars::JsonSchema)]
 pub struct RunEventAppend {
     pub run_id: String,
     pub event_type: String,
@@ -373,7 +373,7 @@ pub struct RunEventAppend {
 /// `tool_count`) can leave the others alone; see `super::ops` for how the
 /// upsert coalesces `None` against the existing stored value rather than a
 /// column default.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, schemars::JsonSchema)]
 pub struct RunTelemetryUpsert {
     pub run_id: String,
     pub input_tokens: Option<u64>,
@@ -388,7 +388,7 @@ pub struct RunTelemetryUpsert {
 }
 
 /// Filter/pagination parameters for `super::ops::list_agent_runs`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRunListRequest {
     #[serde(default)]
@@ -415,7 +415,7 @@ pub struct AgentRunListResponse {
 }
 
 /// Filter/pagination parameters for `super::ops::list_workflow_runs`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowRunListRequest {
     #[serde(default)]
@@ -433,7 +433,7 @@ pub struct WorkflowRunListRequest {
 }
 
 /// Response shape for `super::ops::list_workflow_runs`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowRunListResponse {
     pub runs: Vec<WorkflowRun>,
@@ -442,7 +442,7 @@ pub struct WorkflowRunListResponse {
 }
 
 /// Filter/pagination parameters for `super::ops::list_recent_run_events`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RunEventListRequest {
     pub run_id: String,
@@ -468,7 +468,7 @@ pub struct RunEventListResponse {
 // ---------------------------------------------------------------------------
 
 /// Lifecycle of an agent team.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTeamStatus {
     /// The team is coordinating tasks.
@@ -497,7 +497,7 @@ impl AgentTeamStatus {
 }
 
 /// Lifecycle of a single team member.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTeamMemberStatus {
     /// Registered but not yet running.
@@ -534,7 +534,7 @@ impl AgentTeamMemberStatus {
 }
 
 /// Lifecycle of a coordination task within a team.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTeamTaskStatus {
     /// Not yet ready to be claimed (e.g. unmet dependencies).
@@ -576,7 +576,7 @@ impl AgentTeamTaskStatus {
 
 /// A persisted agent team: a lead agent coordinating a set of members against
 /// a shared pool of tasks.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTeam {
     pub id: String,
@@ -594,7 +594,7 @@ pub struct AgentTeam {
 }
 
 /// Fields a caller supplies to create or update an [`AgentTeam`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, schemars::JsonSchema)]
 pub struct AgentTeamUpsert {
     pub id: String,
     pub parent_thread_id: Option<String>,
@@ -606,7 +606,7 @@ pub struct AgentTeamUpsert {
 }
 
 /// A persisted member of an [`AgentTeam`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTeamMember {
     pub id: String,
@@ -629,7 +629,7 @@ pub struct AgentTeamMember {
 }
 
 /// Outcome of atomically reserving a team member for one task run.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub enum AgentTeamMemberRunAdmission {
     /// A pending or idle member was atomically moved to active.
     Started(AgentTeamMember),
@@ -642,7 +642,7 @@ pub enum AgentTeamMemberRunAdmission {
 }
 
 /// Fields a caller supplies to create or update an [`AgentTeamMember`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, schemars::JsonSchema)]
 pub struct AgentTeamMemberUpsert {
     pub id: String,
     pub team_id: String,
@@ -661,7 +661,7 @@ pub struct AgentTeamMemberUpsert {
 /// is `InProgress`; see `super::ops::claim_agent_team_task` and
 /// `super::ops::complete_agent_team_task` for the claim/completion protocol
 /// and why both fields are cleared whenever a task leaves that status.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTeamTask {
     pub id: String,
@@ -704,7 +704,7 @@ pub struct AgentTeamTask {
 /// Does not include `claimed_by_member_id` / `claim_token`: those are managed
 /// exclusively by the claim/completion/release operations in `super::ops`,
 /// never by a direct upsert.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, schemars::JsonSchema)]
 pub struct AgentTeamTaskUpsert {
     pub id: String,
     pub team_id: String,
@@ -722,7 +722,7 @@ pub struct AgentTeamTaskUpsert {
 }
 
 /// Filter/pagination parameters for `super::ops::list_agent_teams`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTeamListRequest {
     #[serde(default)]
@@ -739,7 +739,7 @@ pub struct AgentTeamListRequest {
 }
 
 /// Response shape for `super::ops::list_agent_teams`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTeamListResponse {
     pub teams: Vec<AgentTeam>,
@@ -748,7 +748,7 @@ pub struct AgentTeamListResponse {
 }
 
 /// Outcome of an atomic claim attempt on a team task.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ClaimOutcome {
     /// The claim succeeded; carries the freshly-claimed task. Boxed to keep the
@@ -768,7 +768,7 @@ pub enum ClaimOutcome {
 /// (dependencies done, claimer owns the task, evidence present when required).
 /// A failed gate leaves the task `in_progress` with `gate_status = "failed"`
 /// and the reasons recorded, so a teammate can fix and retry.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum CompletionOutcome {
     /// The task passed its quality gate and is now `done`. Boxed to keep the
@@ -784,7 +784,7 @@ pub enum CompletionOutcome {
 }
 
 /// Result of [`RunLedgerStore::transition_agent_run_status_from`](super::RunLedgerStore::transition_agent_run_status_from).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, schemars::JsonSchema)]
 pub enum RunTransition {
     /// The run was still in the expected status; it moved and the event (if
     /// any) was recorded. Carries the run as stored afterwards.

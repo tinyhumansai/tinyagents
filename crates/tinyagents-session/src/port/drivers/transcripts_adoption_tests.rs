@@ -314,6 +314,29 @@ fn an_existing_session_is_left_alone() {
 }
 
 #[test]
+fn imported_messages_are_adopted_once_without_replacing_a_written_session() {
+    let locator = locator();
+    let session = SessionRef::scoped("imported-thread", "planner");
+    let imported = vec![TranscriptMessage::user("legacy context")];
+
+    assert!(
+        locator
+            .adopt_messages_if_absent(&session, meta("imported-thread"), &imported)
+            .unwrap()
+    );
+    assert!(
+        !locator
+            .adopt_messages_if_absent(
+                &session,
+                meta("imported-thread"),
+                &[TranscriptMessage::user("new")]
+            )
+            .unwrap()
+    );
+    assert_eq!(contents(&locator, &session), vec!["legacy context"]);
+}
+
+#[test]
 fn a_reserved_stem_reports_nothing_adopted() {
     let locator = locator();
     write_root(

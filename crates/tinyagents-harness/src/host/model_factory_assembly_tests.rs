@@ -1,7 +1,26 @@
 use super::*;
 
-#[test]
-fn model_build_requests_round_trip_through_serde() {
+#[tokio::test]
+async fn assembly_awaits_async_primary_and_summarization_factories() {
+    let context = NonCloneContext {
+        primary_provider_override: None,
+    };
+    let factory = RecordingFactory::new(&context);
+    let gate = RecordingGate::default();
+
+    let models = TurnModelSet::<()>::builder(&factory, &gate, "chat")
+        .without_workload_tiers()
+        .build()
+        .await
+        .expect("models should build after async factory work completes");
+
+    assert_eq!(models.primary_route().model, "chat");
+    assert_eq!(models.summarizer_route().model, "chat");
+    assert_eq!(factory.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn model_build_requests_round_trip_through_serde() {
     let request = ModelBuildRequest {
         role: "summarization".into(),
         route: Some("hint:summarization".into()),
@@ -18,8 +37,8 @@ fn model_build_requests_round_trip_through_serde() {
     assert_eq!(decoded, request);
 }
 
-#[test]
-fn primary_override_stays_separate_from_default_workload_routes_and_summary() {
+#[tokio::test]
+async fn primary_override_stays_separate_from_default_workload_routes_and_summary() {
     let context = NonCloneContext {
         primary_provider_override: Some("provider-override".to_owned()),
     };
@@ -35,9 +54,10 @@ fn primary_override_stays_separate_from_default_workload_routes_and_summary() {
         .primary_model_pin("primary-model")
         .primary_opts(opts.clone())
         .build()
+        .await
         .expect("turn models should build");
 
-    let requests = factory.requests.borrow();
+    let requests = factory.requests.lock().unwrap();
     assert_eq!(requests[0].role, "chat");
     assert_eq!(requests[0].purpose, ModelPurpose::Primary);
     assert_eq!(requests[0].model_pin.as_deref(), Some("primary-model"));
@@ -84,11 +104,14 @@ fn primary_override_stays_separate_from_default_workload_routes_and_summary() {
         context.primary_provider_override.as_deref(),
         Some("provider-override")
     );
-    assert_eq!(gate.requests.borrow().as_slice(), requests.as_slice());
+    assert_eq!(
+        gate.requests.lock().unwrap().as_slice(),
+        requests.as_slice()
+    );
 }
 
-#[test]
-fn explicit_summary_role_pin_and_options_are_distinct() {
+#[tokio::test]
+async fn explicit_summary_role_pin_and_options_are_distinct() {
     let context = NonCloneContext {
         primary_provider_override: Some("primary-provider".to_owned()),
     };
@@ -105,9 +128,10 @@ fn explicit_summary_role_pin_and_options_are_distinct() {
         .summarization("summarization", Some("summary-model".to_owned()))
         .summarization_opts(summary_opts.clone())
         .build()
+        .await
         .expect("summary model should build");
 
-    let requests = factory.requests.borrow();
+    let requests = factory.requests.lock().unwrap();
     let summary = requests.last().expect("summary request");
     assert_eq!(summary.role, "summarization");
     assert_eq!(summary.model_pin.as_deref(), Some("summary-model"));
@@ -115,8 +139,8 @@ fn explicit_summary_role_pin_and_options_are_distinct() {
     assert_eq!(models.summarizer_route().model, "summary-model");
 }
 
-#[test]
-fn explicit_summary_role_does_not_inherit_the_primary_pin() {
+#[tokio::test]
+async fn explicit_summary_role_does_not_inherit_the_primary_pin() {
     let context = NonCloneContext {
         primary_provider_override: None,
     };
@@ -127,15 +151,16 @@ fn explicit_summary_role_does_not_inherit_the_primary_pin() {
         .primary_model_pin("pinned-chat")
         .summarization("summary-role", None)
         .build()
+        .await
         .expect("default summary role route should build");
 
-    let summary = factory.requests.borrow().last().unwrap().clone();
+    let summary = factory.requests.lock().unwrap().last().unwrap().clone();
     assert_eq!(summary.role, "summary-role");
     assert_eq!(summary.model_pin, None);
 }
 
-#[test]
-fn custom_workload_requests_preserve_order_and_skip_failed_or_gated_routes() {
+#[tokio::test]
+async fn custom_workload_requests_preserve_order_and_skip_failed_or_gated_routes() {
     let context = NonCloneContext {
         primary_provider_override: None,
     };
@@ -151,11 +176,13 @@ fn custom_workload_requests_preserve_order_and_skip_failed_or_gated_routes() {
     let models = TurnModelSet::<()>::builder(&factory, &gate, "chat")
         .workload_requests(requests)
         .build()
+        .await
         .expect("failed tiers should not fail the set");
 
     let built_routes = factory
         .requests
-        .borrow()
+        .lock()
+        .unwrap()
         .iter()
         .filter_map(|request| request.route.clone())
         .collect::<Vec<_>>();
@@ -166,8 +193,8 @@ fn custom_workload_requests_preserve_order_and_skip_failed_or_gated_routes() {
     assert!(models.workload_error_slot("hint:last").is_some());
 }
 
-#[test]
-fn denied_primary_never_calls_factory_and_failed_primary_is_fatal() {
+#[tokio::test]
+async fn denied_primary_never_calls_factory_and_failed_primary_is_fatal() {
     let context = NonCloneContext {
         primary_provider_override: None,
     };
@@ -176,21 +203,23 @@ fn denied_primary_never_calls_factory_and_failed_primary_is_fatal() {
     assert!(
         TurnModelSet::<()>::builder(&factory, &gate, "chat")
             .build()
+            .await
             .is_err()
     );
-    assert!(factory.requests.borrow().is_empty());
+    assert!(factory.requests.lock().unwrap().is_empty());
 
     let factory = RecordingFactory::new(&context).failing_primary();
     let gate = RecordingGate::default();
     assert!(
         TurnModelSet::<()>::builder(&factory, &gate, "chat")
             .build()
+            .await
             .is_err()
     );
 }
 
-#[test]
-fn denied_or_failed_summary_is_fatal_after_primary_build() {
+#[tokio::test]
+async fn denied_or_failed_summary_is_fatal_after_primary_build() {
     let context = NonCloneContext {
         primary_provider_override: None,
     };
@@ -200,9 +229,10 @@ fn denied_or_failed_summary_is_fatal_after_primary_build() {
         TurnModelSet::<()>::builder(&factory, &gate, "chat")
             .without_workload_tiers()
             .build()
+            .await
             .is_err()
     );
-    assert_eq!(factory.requests.borrow().len(), 1);
+    assert_eq!(factory.requests.lock().unwrap().len(), 1);
 
     let factory = RecordingFactory::new(&context).failing_summary();
     let gate = RecordingGate::default();
@@ -210,12 +240,13 @@ fn denied_or_failed_summary_is_fatal_after_primary_build() {
         TurnModelSet::<()>::builder(&factory, &gate, "chat")
             .without_workload_tiers()
             .build()
+            .await
             .is_err()
     );
 }
 
-#[test]
-fn different_workload_route_with_same_concrete_primary_pin_is_kept() {
+#[tokio::test]
+async fn different_workload_route_with_same_concrete_primary_pin_is_kept() {
     let context = NonCloneContext {
         primary_provider_override: None,
     };
@@ -229,19 +260,21 @@ fn different_workload_route_with_same_concrete_primary_pin_is_kept() {
             workload("same", "hint:same", Some("same-model")),
         ])
         .build()
+        .await
         .expect("turn models should build");
 
     let routes = factory
         .requests
-        .borrow()
+        .lock()
+        .unwrap()
         .iter()
         .filter_map(|request| request.route.clone())
         .collect::<Vec<_>>();
     assert_eq!(routes, ["hint:other", "hint:same"]);
 }
 
-#[test]
-fn shared_workload_options_forward_to_every_default_tier_with_route_override() {
+#[tokio::test]
+async fn shared_workload_options_forward_to_every_default_tier_with_route_override() {
     let context = NonCloneContext {
         primary_provider_override: None,
     };
@@ -262,11 +295,13 @@ fn shared_workload_options_forward_to_every_default_tier_with_route_override() {
         .workload_opts(common.clone())
         .workload_tier_opts("hint:vision", override_opts.clone())
         .build()
+        .await
         .expect("turn models should build");
 
     let tier_opts = factory
         .requests
-        .borrow()
+        .lock()
+        .unwrap()
         .iter()
         .filter(|request| matches!(request.purpose, ModelPurpose::WorkloadTier(_)))
         .map(|request| {
@@ -286,8 +321,9 @@ fn shared_workload_options_forward_to_every_default_tier_with_route_override() {
     }
 }
 
-#[test]
-fn default_workload_matching_primary_alias_is_skipped_but_other_alias_with_same_pin_is_kept() {
+#[tokio::test]
+async fn default_workload_matching_primary_alias_is_skipped_but_other_alias_with_same_pin_is_kept()
+{
     let context = NonCloneContext {
         primary_provider_override: None,
     };
@@ -296,11 +332,13 @@ fn default_workload_matching_primary_alias_is_skipped_but_other_alias_with_same_
     TurnModelSet::<()>::builder(&factory, &gate, "chat")
         .primary_model_pin("hint:chat")
         .build()
+        .await
         .expect("models should build");
     assert!(
         !factory
             .requests
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
             .any(|request| { request.purpose == ModelPurpose::WorkloadTier("hint:chat".into()) })
     );
@@ -314,11 +352,13 @@ fn default_workload_matching_primary_alias_is_skipped_but_other_alias_with_same_
             Some("shared-model"),
         )])
         .build()
+        .await
         .expect("models should build");
     assert!(
         factory
             .requests
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
             .any(|request| { request.route.as_deref() == Some("hint:alternate") })
     );
