@@ -13,6 +13,31 @@ during the 2.x migration are no longer part of the TinyAgents workspace.
 The unreleased entries below describe the changes accumulated before this
 major release.
 
+## Unreleased: tool hook denials answer the model
+
+**Breaking (behaviour).** A `tinyagents-hooks` tool-hook `Deny` no longer
+aborts the run. `ToolHooksMiddleware` now returns
+`TinyAgentsError::ToolFailed`, so the agent loop answers the call with a failed
+tool result carrying `tool hook '<hook>' denied <tool>: <reason>` and the run
+continues; the tool never runs. This matches `HookPermission::Deny`'s
+contract ("The agent is told why") and covers blank or invented tool names a
+host denies, which used to end the turn before the unknown-tool policy ran.
+
+Hosts that relied on a deny ending the run must set `continue_: Some(false)`
+on the decision. That form stops the run with the new
+`TinyAgentsError::ToolRefused`, classified as `TerminalReason::ToolRefused` and,
+for hosted callers, `HostedErrorKind::ToolRefused` with the message
+`hosted agent invocation stopped: host policy refused a tool call` instead of
+the generic `hosted agent invocation failed`. The refusal text never carries
+the call's arguments. `Ask` is unchanged and still fails the run with
+`TinyAgentsError::Tool`.
+
+An answered deny releases its tool-call slot like every other `before_tool`
+refusal, so a model that keeps calling a denied tool is bounded by
+`RunLimits::max_model_calls`. `TinyAgentsError`, `TerminalReason` and
+`HostedErrorKind` are `#[non_exhaustive]`, so the new variants are additive.
+See `docs/modules/hooks/README.md`.
+
 ## Unreleased: model observations report who served a call and its first token
 
 **Breaking.** `TurnObservation::Model` and `TurnObservation::ModelDispatch`

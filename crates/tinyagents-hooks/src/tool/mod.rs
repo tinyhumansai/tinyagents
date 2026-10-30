@@ -1,7 +1,11 @@
 //! Typed in-process hooks around tool execution.
 //!
-//! Hooks run in registration order. A denial or unresolved approval request
-//! refuses a call, while argument rewrites flow to subsequent hooks.
+//! Hooks run in registration order, and argument rewrites flow to subsequent
+//! hooks. A denial refuses the call without running it and answers the model
+//! with a failed tool result carrying the reason, so the run carries on. A
+//! denial with `continue_: Some(false)` stops the run with
+//! [`TinyAgentsError::ToolRefused`](tinyagents_harness::error::TinyAgentsError::ToolRefused).
+//! An unresolved approval request (`Ask`) fails the run.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -187,6 +191,7 @@ where
             let decision = hook.before_tool_decision(&ctx.data, &event).await;
             if decision.is_deny() || decision.is_ask() {
                 let ask = decision.is_ask();
+                let stop_run = decision.continue_ == Some(false);
                 let reason = decision
                     .agent_message
                     .or(decision.user_message)
@@ -196,11 +201,26 @@ where
                 } else {
                     "denied"
                 };
-                return Err(TinyAgentsError::Tool(format!(
+                let message = format!(
                     "tool hook '{}' {kind} {}: {reason}",
                     hook.name(),
                     event.tool_name
-                )));
+                );
+                tracing::debug!(
+                    hook = hook.name(),
+                    tool = %event.tool_name,
+                    call_id = %event.call_id,
+                    ask,
+                    stop_run,
+                    "[tool_hooks] refused tool call"
+                );
+                return Err(if ask {
+                    TinyAgentsError::Tool(message)
+                } else if stop_run {
+                    TinyAgentsError::ToolRefused(message)
+                } else {
+                    TinyAgentsError::ToolFailed(message)
+                });
             }
             if let Some(input) = decision.updated_input {
                 call.arguments = input.clone();
@@ -333,6 +353,10 @@ where
 #[cfg(test)]
 #[path = "tool_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tool_deny_tests.rs"]
+mod deny_tests;
 
 #[async_trait]
 impl<Ctx: HookIdentity + Send + Sync> ToolHook<Ctx> for crate::command::HookEngine {
