@@ -22,7 +22,7 @@
 //!   and the next sequence of a migrated run is recomputed from its events.
 
 use super::storage::{
-    EVENT_STREAM, HISTORY_OWNER, LEDGER_OWNER, SCHEMA_VERSION, history_specs, ledger_specs,
+    EVENT_STREAM, HISTORY_OWNER, INPUTS, LEDGER_OWNER, SCHEMA_VERSION, history_specs, ledger_specs,
 };
 use tinyagents_storage_kit::{Owner, Schema, ScopeClass};
 
@@ -33,7 +33,14 @@ pub fn ledger_storage_schema() -> Schema {
     let owner = Owner::new(LEDGER_OWNER).expect("`ledger` is a valid owner");
     let mut schema = Schema::new(owner);
     for spec in ledger_specs() {
-        schema = schema.collection_with(SCHEMA_VERSION, spec, ScopeClass::Agent);
+        // Inputs are new, with no legacy v1 envelope to migrate. Their initial
+        // schema is version one; declaring v2 would demand a nonexistent step.
+        let version = if spec.name == INPUTS {
+            1
+        } else {
+            SCHEMA_VERSION
+        };
+        schema = schema.collection_with(version, spec, ScopeClass::Agent);
     }
     schema = schema.stream(EVENT_STREAM, ScopeClass::Agent);
     for step in super::steps::steps() {
