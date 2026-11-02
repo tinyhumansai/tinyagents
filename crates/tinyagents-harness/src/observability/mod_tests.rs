@@ -427,19 +427,14 @@ async fn append_workers_share_one_drain_thread() {
 
     // A worker per run used to start its own OS thread and runtime; every
     // worker now drains on the one process-wide `tinyagents-drain` thread.
-    let threads: Arc<Mutex<Vec<(std::thread::ThreadId, Option<String>)>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let threads: Arc<Mutex<Vec<std::thread::Thread>>> = Arc::new(Mutex::new(Vec::new()));
     let workers: Vec<_> = (0..50)
         .map(|_| {
             let threads = Arc::clone(&threads);
             AppendWorker::spawn("test-shared", 8, move |_n: u64| {
                 let threads = Arc::clone(&threads);
                 async move {
-                    let current = std::thread::current();
-                    threads
-                        .lock()
-                        .unwrap()
-                        .push((current.id(), current.name().map(str::to_owned)));
+                    threads.lock().unwrap().push(std::thread::current());
                     Ok(())
                 }
             })
@@ -451,8 +446,8 @@ async fn append_workers_share_one_drain_thread() {
     }
     let threads = threads.lock().unwrap();
     assert_eq!(threads.len(), 50);
-    assert!(threads.iter().all(|(id, _)| *id == threads[0].0));
-    assert_eq!(threads[0].1.as_deref(), Some("tinyagents-drain"));
+    assert!(threads.iter().all(|t| t.id() == threads[0].id()));
+    assert_eq!(threads[0].name(), Some("tinyagents-drain"));
 }
 
 #[tokio::test]
