@@ -422,6 +422,35 @@ async fn append_worker_flush_persists_all_submissions_in_order() {
 }
 
 #[tokio::test]
+async fn append_workers_share_one_drain_thread() {
+    use std::sync::Mutex;
+
+    // A worker per run used to start its own OS thread and runtime; every
+    // worker now drains on the one process-wide `tinyagents-drain` thread.
+    let threads: Arc<Mutex<Vec<std::thread::Thread>>> = Arc::new(Mutex::new(Vec::new()));
+    let workers: Vec<_> = (0..50)
+        .map(|_| {
+            let threads = Arc::clone(&threads);
+            AppendWorker::spawn("test-shared", 8, move |_n: u64| {
+                let threads = Arc::clone(&threads);
+                async move {
+                    threads.lock().unwrap().push(std::thread::current());
+                    Ok(())
+                }
+            })
+        })
+        .collect();
+    for worker in &workers {
+        worker.submit(1);
+        worker.flush();
+    }
+    let threads = threads.lock().unwrap();
+    assert_eq!(threads.len(), 50);
+    assert!(threads.iter().all(|t| t.id() == threads[0].id()));
+    assert_eq!(threads[0].name(), Some("tinyagents-drain"));
+}
+
+#[tokio::test]
 async fn append_worker_drops_and_counts_when_queue_is_full() {
     // A slow backend cannot keep up with a burst; the bounded queue drops the
     // overflow rather than blocking the caller, and the drops are counted (not
