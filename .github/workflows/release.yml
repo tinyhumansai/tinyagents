@@ -1,28 +1,28 @@
 name: Release
 
+# A release is a `vX.Y.Z` tag on a commit already on main. The version bump
+# lands on main through a reviewed pull request first; this workflow never
+# commits, tags, or pushes. Dispatch with an existing tag to retry a release.
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
-      bump:
-        description: Version bump to release
-        type: choice
+      tag:
+        description: Existing release tag (vX.Y.Z) on a commit on main
+        type: string
         required: true
-        options:
-          - patch
-          - minor
-          - major
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   publish-rust:
     name: Release Rust Crate
-    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     environment: Production
     env:
@@ -33,10 +33,13 @@ jobs:
       # it via `tinyagents-harness`, which is always present and shares the
       # workspace-inherited version.
       CRATE_NAME: tinyagents-harness
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
+          persist-credentials: false
           # Required to resolve the `vendor/tinytools` path dependency.
           submodules: recursive
 
@@ -47,6 +50,37 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
+
+      - name: Verify the release tag is on main and matches the crate version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Release must be dispatched from main" >&2
+            exit 1
+          fi
+          if ! [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tag '${RELEASE_TAG}' is not vX.Y.Z" >&2
+            exit 1
+          fi
+
+          tag_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          if [[ "$(git rev-parse HEAD)" != "$tag_commit" ]]; then
+            echo "Checked-out commit is not ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$tag_commit" FETCH_HEAD; then
+            echo "${RELEASE_TAG} (${tag_commit}) is not on main; merge the version bump through a pull request and tag the merged commit" >&2
+            exit 1
+          fi
+
+          crate_version="$(cargo metadata --format-version 1 --no-deps | jq -r --arg crate "$CRATE_NAME" '.packages[] | select(.name == $crate) | .version')"
+          if [[ "v${crate_version}" != "$RELEASE_TAG" ]]; then
+            echo "${RELEASE_TAG} does not match ${CRATE_NAME} version ${crate_version}" >&2
+            exit 1
+          fi
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -73,69 +107,6 @@ jobs:
         uses: bnjbvr/cargo-machete@main
         continue-on-error: true
 
-      - name: Compute next version
-        id: version
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          current_version="$(cargo metadata --format-version 1 --no-deps | jq -r --arg crate "$CRATE_NAME" '.packages[] | select(.name == $crate) | .version')"
-          if [[ -z "$current_version" ]]; then
-            echo "Could not resolve current version for crate $CRATE_NAME" >&2
-            exit 1
-          fi
-
-          # The workspace version can lag the latest tag (releases are cut
-          # from tags), so the next version is derived from the highest of
-          # the two; see the script.
-          git fetch --tags origin
-          mapfile -t existing_tags < <(git tag --list 'v*')
-          versions="$(.github/scripts/next-release-version.sh "${{ inputs.bump }}" "$current_version" "${existing_tags[@]}")"
-          read -r base_version next_version <<< "$versions"
-          tag="v${next_version}"
-
-          if git rev-parse --verify --quiet "refs/tags/${tag}"; then
-            echo "Tag ${tag} already exists" >&2
-            exit 1
-          fi
-
-          {
-            echo "current_version=${current_version}"
-            echo "base_version=${base_version}"
-            echo "next_version=${next_version}"
-            echo "tag=${tag}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Update crate version
-        env:
-          CURRENT_VERSION: ${{ steps.version.outputs.current_version }}
-          NEXT_VERSION: ${{ steps.version.outputs.next_version }}
-        run: |
-          perl -0pi -e 's/(\[workspace\.package\][\s\S]*?\nversion = ")[^"]+(")/$1$ENV{NEXT_VERSION}$2/' Cargo.toml
-
-          # Intra-workspace path dependencies (e.g. `tinyagents-tracing =
-          # { path = "...", version = "2.1.1" }`) pin the workspace version
-          # as a caret requirement. On a major bump the old requirement no
-          # longer matches the new version, so keep them in lockstep with
-          # the workspace bump or `cargo update` fails to resolve.
-          perl -pi -e 's/(tinyagents-[\w-]+\s*=\s*\{[^}]*version\s*=\s*")\Q$ENV{CURRENT_VERSION}\E(")/$1$ENV{NEXT_VERSION}$2/g' crates/*/Cargo.toml
-
-          # Refresh every workspace member's Cargo.lock entry (not just
-          # $CRATE_NAME) so later `--locked` commands don't see a stale
-          # lockfile.
-          cargo update --workspace
-
-      - name: Commit version bump and tag
-        env:
-          NEXT_VERSION: ${{ steps.version.outputs.next_version }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock crates/*/Cargo.toml
-          git commit -m "Release ${RELEASE_TAG}"
-          git tag -a "${RELEASE_TAG}" -m "Release ${RELEASE_TAG}"
-
       - name: Check crates.io publishability
         id: publishable
         run: |
@@ -152,15 +123,6 @@ jobs:
       - name: Package crate
         if: steps.publishable.outputs.publishable == 'true'
         run: cargo package --locked -p "$CRATE_NAME"
-
-      # Only the tag is pushed. The "Protect main" ruleset requires a pull
-      # request for every change to main, so pushing the release commit there
-      # is always rejected (GH013). The tag points at the release commit, which
-      # stays off main; the next version is computed from the tags.
-      - name: Push release tag
-        env:
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-        run: git push origin "refs/tags/${RELEASE_TAG}"
 
       - name: Publish to crates.io
         if: steps.publishable.outputs.publishable == 'true'

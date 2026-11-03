@@ -109,6 +109,22 @@ Good issues include:
 Feature requests should explain the agent workflow they unlock, the public API
 shape they imply, and any safety or observability concerns.
 
+## Releasing
+
+A release is a `vX.Y.Z` tag on a commit that is already on `main`.
+
+1. Open a pull request that sets `[workspace.package].version` in `Cargo.toml`
+   to the new version, updates the matching `version = "..."` requirements on
+   the `tinyagents-*` path dependencies in `crates/*/Cargo.toml` and the
+   workspace entries in `Cargo.lock`, and adds a `CHANGELOG.md` entry. Pick a
+   version above every existing `v*` tag.
+2. After it merges, tag the merge commit on `main` and push the tag:
+   `git tag -s vX.Y.Z <merge-commit> && git push origin vX.Y.Z`.
+3. The **Release** workflow runs on the tag. It refuses a tag whose commit is
+   not on `main` or whose version differs from the workspace version, then
+   runs the checks and publishes. It never commits, tags, or pushes. To retry,
+   dispatch **Release** from `main` with the existing tag.
+
 ## Security
 
 Do not report vulnerabilities through public issues. Use the process in

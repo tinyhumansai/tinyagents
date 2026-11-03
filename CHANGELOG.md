@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.1.4
+
+- Releases are cut from `main`: the version bump merges through a pull request
+  and the **Release** workflow runs on a `vX.Y.Z` tag of a commit on `main`,
+  checking that the tag matches the workspace version. The workflow no longer
+  commits a version bump or pushes a tag, so release tags stay on `main`.
+- Bump the workspace crates to 3.1.4, above the v3.1.0 to v3.1.3 tags that
+  were cut off `main`.
+
 ## 3.0.0 — 2026-10-22
 
 **Breaking.** This release completes the TinyAgents slim-down: generic tool
