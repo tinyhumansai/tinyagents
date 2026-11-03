@@ -2541,6 +2541,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "thiserror",
  "tinyinference-core",
  "tinyinference-embeddings",
