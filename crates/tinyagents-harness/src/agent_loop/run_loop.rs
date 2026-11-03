@@ -10,6 +10,15 @@ use super::model_call::ModelCallBase;
 use super::types::{MixedStructuredTurn, ResponseTurn, TruncationOutcome, TurnFlow, TurnRecovery};
 use super::*;
 
+/// Final-turn nudge when a repeat/no-progress guard halts the run: the model
+/// was stopped mid-loop, possibly with its deliverable unwritten, so it is
+/// given one last turn to produce its output before the run ends.
+const DELIVER_FIRST_NUDGE: &str = "You were stopped because you kept repeating the same \
+steps without making progress. This is your last turn before the run ends. If you have \
+enough to finish, write your final output now to the exact file or location the task \
+requires, then stop. Do not re-issue calls you already have results for -- act on what \
+you already have, or state plainly what is blocking you.";
+
 impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// Drives the loop body, returning `Ok(())` on a clean finish or the first
     /// error encountered. The caller owns lifecycle bookkeeping (final status
@@ -290,6 +299,36 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     return Err(TinyAgentsError::Cancelled);
                 }
                 crate::steering::SteeringOutcome::Pause => {
+                    // A repeat/no-progress guard halt (not a human/orchestrator pause)
+                    // gets one deliver-first turn before it ends the run: the model was
+                    // stopped mid-loop with its deliverable possibly unwritten. Nudge it
+                    // to write its final output, lift the guard's pause latch, and loop
+                    // once more. One-shot per run; a second guard halt ends it for real.
+                    if ctx.halted_by_guard.is_some()
+                        && !ctx.deliver_first_attempted
+                        && ctx.limits.remaining_model_calls() > 0
+                    {
+                        ctx.deliver_first_attempted = true;
+                        let _ = ctx.take_halted_by_guard();
+                        let _ = ctx.take_halted_by_guard_cause();
+                        if let Some(handle) = ctx.steering.as_ref() {
+                            handle.resume();
+                        }
+                        messages.push(Message::user(DELIVER_FIRST_NUDGE.to_string()));
+                        let record = ctx.emit(AgentEvent::ControlApplied {
+                            control: "deliver_first_nudge".to_string(),
+                            detail: "repeat/no-progress guard halt; granting a final turn \
+                                     to write the deliverable before ending"
+                                .to_string(),
+                        });
+                        status.set_last_event(record.id);
+                        tracing::info!(
+                            target: "tinyagents::agent_loop",
+                            run_id = %ctx.run_id(),
+                            "[agent_loop] guard halt: granting one deliver-first turn before ending"
+                        );
+                        continue;
+                    }
                     let pause = ctx
                         .steering
                         .as_ref()
