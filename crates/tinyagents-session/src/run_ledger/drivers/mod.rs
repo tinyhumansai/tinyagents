@@ -12,6 +12,7 @@ mod events;
 mod history;
 mod history_retention;
 mod imports;
+mod inbox;
 mod legacy_state;
 mod retention;
 mod schema;

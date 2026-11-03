@@ -3,6 +3,7 @@
 //! assembly (including the timeout and error-propagation paths).
 
 use super::*;
+#[cfg(unix)]
 use tinyinference_llm::tool::ToolCall;
 
 #[test]

@@ -263,3 +263,60 @@ async fn remove_where_with_no_match_removes_nothing() {
     assert_eq!(removed, 0);
     assert_eq!(queue.status().await.total, 2);
 }
+
+#[tokio::test]
+async fn editing_changes_only_the_first_pending_match_in_delivery_order() {
+    let queue = RunQueue::new();
+    queue.push(QueueLane::Steer, 1).await;
+    queue.push(QueueLane::Followup, 1).await;
+    assert!(
+        queue
+            .edit_first_where(|item| *item == 1, |item| *item = 2)
+            .await
+    );
+    assert_eq!(
+        queue.snapshot().await,
+        vec![(QueueLane::Steer, 2), (QueueLane::Followup, 1)]
+    );
+    queue.drain(QueueLane::Steer).await;
+    assert!(
+        !queue
+            .edit_first_where(
+                |item| *item == 2,
+                |_| panic!("consumed item must not be edited")
+            )
+            .await
+    );
+}
+
+#[tokio::test]
+async fn moving_can_reorder_and_promote_a_followup_without_dropping_other_items() {
+    let queue = RunQueue::new();
+    for item in [1, 2, 3] {
+        queue.push(QueueLane::Followup, item).await;
+    }
+    assert!(
+        queue
+            .move_first_where(|item| *item == 3, QueueLane::Followup, 0)
+            .await
+    );
+    assert!(
+        queue
+            .move_first_where(|item| *item == 2, QueueLane::Steer, usize::MAX)
+            .await
+    );
+    assert_eq!(
+        queue.snapshot().await,
+        vec![
+            (QueueLane::Steer, 2),
+            (QueueLane::Followup, 3),
+            (QueueLane::Followup, 1)
+        ]
+    );
+    assert!(
+        !queue
+            .move_first_where(|item| *item == 99, QueueLane::Collect, 0)
+            .await
+    );
+    assert_eq!(queue.status().await.total, 3);
+}

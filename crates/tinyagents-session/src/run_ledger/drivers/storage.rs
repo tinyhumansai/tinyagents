@@ -33,6 +33,7 @@ pub(super) const EFFECTS: &str = "ledger.tool_effects";
 pub(super) const EVENTS: &str = "ledger.event_outbox";
 pub(super) const EVENT_HEADS: &str = "ledger.event_heads";
 pub(super) const TASKS: &str = "ledger.tasks";
+pub(super) const INPUTS: &str = "ledger.inputs";
 /// The per-run event stream family: `ledger.events/<run>`.
 pub(super) const EVENT_STREAM: &str = "ledger.events";
 pub(super) const HIST_SESSIONS: &str = "history.sessions";
@@ -81,6 +82,9 @@ pub(super) fn eq_nonblank(filter: Filter, field: &str, value: Option<&str>) -> F
 /// metadata, so none declares a TTL.
 pub(super) fn ledger_specs() -> Vec<CollectionSpec> {
     vec![
+        CollectionSpec::new(INPUTS)
+            .index(IndexSpec::new("recipient_sequence", ["recipient_run_id", "sequence"]).unique())
+            .index(IndexSpec::new("root", ["root_thread_id"])),
         CollectionSpec::new(EVENT_HEADS),
         CollectionSpec::new(EVENTS)
             .index(IndexSpec::new("run_sequence", ["run_id", "sequence"]).unique()),

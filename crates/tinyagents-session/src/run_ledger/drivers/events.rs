@@ -22,13 +22,14 @@ pub(super) fn head_after(highest: u64) -> Option<u64> {
     (highest < i64::MAX as u64).then_some(highest + 1)
 }
 
-struct EventCommit {
-    event: RunEvent,
-    writes: Vec<WriteOp>,
+pub(super) struct EventCommit {
+    pub(super) event: RunEvent,
+    pub(super) writes: Vec<WriteOp>,
 }
 
 impl DriverRunLedger {
-    async fn event_commit(&self, input: &RunEventAppend) -> Result<EventCommit> {
+    /// Prepare an event and head update for the caller's atomic document batch.
+    pub(super) async fn event_commit(&self, input: &RunEventAppend) -> Result<EventCommit> {
         let head = self.read::<EventHead>(EVENT_HEADS, &input.run_id).await?;
         let sequence = match &head {
             // A run migrated from v1 has events but no head (the v1 head's id

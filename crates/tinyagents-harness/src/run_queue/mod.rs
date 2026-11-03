@@ -60,8 +60,7 @@ pub struct RunQueue<T> {
     inner: Mutex<RunQueueInner<T>>,
 }
 
-/// The three lanes behind [`RunQueue`]'s lock, each an append-only FIFO until
-/// drained.
+/// The three FIFO lanes behind [`RunQueue`]'s lock.
 #[derive(Debug)]
 struct RunQueueInner<T> {
     /// Immediate steering messages, consumed as soon as the loop reaches a
@@ -125,9 +124,9 @@ impl<T> RunQueue<T> {
         }
     }
 
-    /// Locks the lanes. A panic while the lock was held cannot leave a lane
-    /// half-updated (every operation is a single vector call), so a poisoned
-    /// lock is recovered rather than propagated.
+    /// Locks the lanes, recovering a poisoned lock. Vector invariants remain
+    /// valid after unwinding; an editing callback must keep its payload valid
+    /// even when it panics because callback changes are not rolled back.
     fn lock(&self) -> MutexGuard<'_, RunQueueInner<T>> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -465,6 +464,76 @@ impl<T> RunQueue<T> {
         inner.collects.retain(|item| !pred(&item.value));
         let after = inner.steers.len() + inner.followups.len() + inner.collects.len();
         before - after
+    }
+
+    /// Edits the first matching pending item in delivery order, atomically
+    /// with respect to delivery, removal, and other queue mutations.
+    ///
+    /// Returns `false` if the item has already been consumed. `edit` runs
+    /// under the queue lock: it must be brief and must not call this queue.
+    /// Hosts retain responsibility for validating the replacement payload.
+    pub async fn edit_first_where(
+        &self,
+        pred: impl Fn(&T) -> bool,
+        edit: impl FnOnce(&mut T),
+    ) -> bool {
+        let mut inner = self.lock();
+        let RunQueueInner {
+            steers,
+            followups,
+            collects,
+        } = &mut *inner;
+        let item = steers
+            .iter_mut()
+            .chain(followups.iter_mut())
+            .chain(collects.iter_mut())
+            .find(|item| pred(item));
+        match item {
+            Some(item) => {
+                edit(item);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Moves the first matching pending item to `lane` at `index`, atomically
+    /// with respect to delivery. `index` addresses the destination after the
+    /// item is removed and is clamped to that lane's length.
+    ///
+    /// Moving a follow-up into the steer lane requests delivery at the next
+    /// safe boundary; it never interrupts a tool batch. Returns `false` when
+    /// the item has already been consumed. All other items retain their order.
+    pub async fn move_first_where(
+        &self,
+        pred: impl Fn(&T) -> bool,
+        lane: QueueLane,
+        index: usize,
+    ) -> bool {
+        let mut inner = self.lock();
+        let item = {
+            let RunQueueInner {
+                steers,
+                followups,
+                collects,
+            } = &mut *inner;
+            [steers, followups, collects].into_iter().find_map(|items| {
+                items
+                    .iter()
+                    .position(&pred)
+                    .map(|position| items.remove(position))
+            })
+        };
+        let Some(item) = item else {
+            return false;
+        };
+        let target = match lane {
+            QueueLane::Steer => &mut inner.steers,
+            QueueLane::Followup => &mut inner.followups,
+            QueueLane::Collect => &mut inner.collects,
+        };
+        target.insert(index.min(target.len()), item);
+        true
     }
 }
 

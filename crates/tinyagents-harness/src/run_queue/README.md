@@ -33,6 +33,11 @@ stops, pauses, and deferrals leave the queue untouched. Details:
   `QueueMode`-aware form;
   `status()` snapshots per-lane depth; `clear()` empties every lane and
   returns how many items were dropped.
+  `edit_first_where(predicate, edit)` changes one pending payload in place;
+  `move_first_where(predicate, lane, index)` relocates one pending item to
+  a destination lane and position. Both return `false` if delivery already
+  consumed the item. Indices address the destination after removal and clamp
+  to its length. Other items keep their relative order.
 - [`QueueLane`] — which lane an item belongs to: `Steer` (inject at the next
   safe boundary as an instruction), `Followup` (dispatch as a fresh turn once
   the active run completes), `Collect` (handed back to the host at run end as
@@ -54,11 +59,14 @@ stops, pauses, and deferrals leave the queue untouched. Details:
 ## Operational constraints
 
 - Every method serializes through a single `std::sync::Mutex` guarding all
-  three lanes together. It is held only for one vector operation and never
+  three lanes together. It is held only for in-memory operations and never
   across an `.await`, so the `async` methods never block a runtime thread for
   long and the synchronous `push_now`/`drain_now` are safe anywhere. The
   queue is meant to hold a handful of pending items, not a high-throughput
   channel.
+- Edit callbacks run under that lock. Validate replacement data before calling,
+  keep callbacks brief, and never call back into the queue. A move to `Steer`
+  still waits for a safe runtime boundary; it does not cancel an active tool.
 - `SteeringForwarderGuard` drains and delivers under its shutdown gate and
   requeues residual (delivered-but-unapplied) steers synchronously in `Drop`,
   so once the guard has dropped, every steer the run did not apply is back in
