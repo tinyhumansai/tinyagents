@@ -71,6 +71,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
         # The verification runs before anything is built or published.
         self.assertLess(self.workflow.index(VERIFY_STEP), self.workflow.index("- name: Run tests"))
         self.assertLess(self.workflow.index(VERIFY_STEP), self.workflow.index("cargo publish"))
+        # A retry skips publishing a version crates.io already has.
+        self.assertIn('"https://crates.io/api/v1/crates/${CRATE_NAME}/${RELEASE_TAG#v}"', self.workflow)
+        self.assertLess(
+            self.workflow.index("api/v1/crates"), self.workflow.index("- name: Publish to crates.io")
+        )
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()

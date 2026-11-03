@@ -116,6 +116,12 @@ jobs:
           if [[ "$publish" == "[]" ]]; then
             echo "publishable=false" >> "$GITHUB_OUTPUT"
             echo "::notice::${CRATE_NAME} has publish = false; skipping crates.io package/publish steps."
+          # A retried release whose earlier run already uploaded this version
+          # would fail `cargo publish`; skip it instead.
+          elif curl -fsS -o /dev/null -A "tinyagents-release (https://github.com/tinyhumansai/tinyagents)" \
+            "https://crates.io/api/v1/crates/${CRATE_NAME}/${RELEASE_TAG#v}"; then
+            echo "publishable=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${CRATE_NAME} ${RELEASE_TAG#v} is already on crates.io; skipping crates.io package/publish steps."
           else
             echo "publishable=true" >> "$GITHUB_OUTPUT"
           fi
