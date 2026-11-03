@@ -64,8 +64,8 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Release version script
-        run: .github/scripts/next-release-version.test.sh
+      - name: Release workflow
+        run: python3 -B .github/scripts/test-release-workflow.py -v
 
       - name: Ensure storage engines stay out of library trees
         run: bash .github/scripts/check-storage-engine-trees.sh

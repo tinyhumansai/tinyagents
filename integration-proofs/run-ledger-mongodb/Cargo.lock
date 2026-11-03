@@ -2387,7 +2387,7 @@ dependencies = [
 
 [[package]]
 name = "tinyagents-definition"
-version = "3.0.0"
+version = "3.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2400,7 +2400,7 @@ dependencies = [
 
 [[package]]
 name = "tinyagents-harness"
-version = "3.0.0"
+version = "3.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2451,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "tinyagents-session"
-version = "3.0.0"
+version = "3.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2476,7 +2476,7 @@ dependencies = [
 
 [[package]]
 name = "tinyagents-storage-kit"
-version = "3.0.0"
+version = "3.1.4"
 dependencies = [
  "data-encoding",
  "serde",
@@ -2490,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "tinyagents-tasks"
-version = "3.0.0"
+version = "3.1.4"
 dependencies = [
  "serde",
  "serde_json",
