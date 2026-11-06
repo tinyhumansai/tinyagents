@@ -45,6 +45,14 @@ Grouped by extension shape:
   provider metadata before dispatch, preserves control outcomes and complete
   responses, and skips estimates for cache-served or provider-charged calls.
 
+### Reference-only history (`Middleware` lifecycle hooks)
+
+- `StoredContentStubMiddleware` — sends a reference in place of content a tool
+  has stored: a named argument of a call that has run, and a named result once
+  it belongs to an earlier turn. The host names the tools and renders the stub
+  (a `StubRenderer`, which must be pure). Only the outgoing request changes, so
+  the transcript stays whole and a resume renders the same bytes.
+
 ### Tool policy / selection (`Middleware` lifecycle hooks)
 
 - `ToolAllowlistMiddleware` — rejects `before_tool` calls whose name is not on

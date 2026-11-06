@@ -84,6 +84,7 @@ mod research_budget;
 mod resilience;
 mod response_shape;
 mod shell_turn_budget;
+mod stored_content_stub;
 mod tool_exposure_shadow;
 mod tool_outcome_capture;
 mod tool_policy;
@@ -163,6 +164,7 @@ pub use shell_turn_budget::{
     ShellTimeoutClampMiddleware, ShellTimeoutNoteMiddleware, ShellTurnBudget, clamp_shell_timeout,
     install_time_notes,
 };
+pub use stored_content_stub::{StoredContent, StoredContentStubMiddleware, StubRenderer};
 pub use tool_exposure_shadow::{ExposureDivergence, ToolExposureShadowMiddleware};
 pub use tool_outcome_capture::ToolOutcomeCaptureMiddleware;
 pub use transcript_snapshot::{
@@ -227,6 +229,9 @@ mod repeat_escalation_test;
 #[cfg(test)]
 #[path = "repeat_progress_tests.rs"]
 mod repeat_progress_test;
+#[cfg(test)]
+#[path = "stored_content_stub_tests.rs"]
+mod stored_content_stub_test;
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod test;
