@@ -548,6 +548,12 @@ pub struct RunPolicy {
     /// with [`crate::context::RunConfig::result_expiry`]. See
     /// [`crate::result_expiry`].
     pub result_expiry: crate::result_expiry::ToolResultExpiryPolicy,
+    /// Which turns' reasoning the requests carry. [`ReasoningReplay::All`] by
+    /// default, so a request is byte-identical unless the host opts in; a
+    /// session overrides it per run with
+    /// [`crate::context::RunConfig::replay_reasoning`]. The stored transcript
+    /// always keeps every reasoning block. See [`crate::reasoning_replay`].
+    pub replay_reasoning: crate::reasoning_replay::ReasoningReplay,
 }
 
 /// See [`RunPolicy::structured_strategy_override`].
@@ -719,6 +725,7 @@ impl Default for RunPolicy {
             queue_mode: QueueMode::default(),
             tool_result_durations: false,
             result_expiry: crate::result_expiry::ToolResultExpiryPolicy::default(),
+            replay_reasoning: crate::reasoning_replay::ReasoningReplay::default(),
         }
     }
 }

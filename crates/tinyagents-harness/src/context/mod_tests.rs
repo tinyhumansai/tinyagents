@@ -119,6 +119,28 @@ fn run_config_result_expiry_overrides_default_to_empty_and_round_trip() {
 }
 
 #[test]
+fn run_config_replay_reasoning_defaults_to_unset_and_round_trips() {
+    use crate::reasoning_replay::ReasoningReplay;
+
+    // An old persisted config has no such field and keeps today's behaviour,
+    // and a default config does not write one.
+    let old: RunConfig = serde_json::from_value(serde_json::json!({"run_id": "old"})).unwrap();
+    assert_eq!(old.replay_reasoning, None);
+    assert!(
+        serde_json::to_value(RunConfig::new("fresh"))
+            .unwrap()
+            .get("replay_reasoning")
+            .is_none()
+    );
+
+    let config = RunConfig::new("set").with_replay_reasoning(ReasoningReplay::CurrentTurn);
+    let json = serde_json::to_value(&config).unwrap();
+    assert_eq!(json["replay_reasoning"], "current_turn");
+    let back: RunConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(back.replay_reasoning, Some(ReasoningReplay::CurrentTurn));
+}
+
+#[test]
 fn context_exposes_run_and_thread_ids() {
     let config = RunConfig::new("run-4").with_thread("thread-4");
     let ctx: RunContext = RunContext::new(config, ());
