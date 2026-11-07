@@ -57,6 +57,7 @@ pub struct Session<C: Clone + Send + Sync + 'static = ()> {
     /// The `tools` record currently in force in the bound transcript file.
     recorded_tools_json: Option<serde_json::Value>,
     retain_recorded_tools: bool,
+    prune_retired_tools: bool,
 }
 
 impl<C: Clone + Send + Sync + 'static> Session<C> {
@@ -93,11 +94,16 @@ impl<C: Clone + Send + Sync + 'static> Session<C> {
             recorded_tools: None,
             recorded_tools_json: None,
             retain_recorded_tools: false,
+            prune_retired_tools: false,
         }
     }
 
     pub(crate) fn set_retain_recorded_tools(&mut self, retain: bool) {
         self.retain_recorded_tools = retain;
+    }
+
+    pub(crate) fn set_prune_retired_tools(&mut self, prune: bool) {
+        self.prune_retired_tools = prune;
     }
 
     /// Tool declarations this session last sent (restored on resume).
@@ -1075,12 +1081,28 @@ impl<C: Clone + Send + Sync + 'static> Session<C> {
         else {
             return Ok(tools);
         };
-        let (merged, retained) = tools.with_retained(recorded)?;
+        let (merged, retained) = if self.prune_retired_tools {
+            tools.with_retained_offered(recorded)?
+        } else {
+            tools.with_retained(recorded)?
+        };
         if retained != 0 {
             tracing::info!(
                 "[session] retained {retained} recorded tool declaration(s) the host did not re-supply (sending {})",
                 merged.specs().len()
             );
+        }
+        if self.prune_retired_tools {
+            let pruned = recorded
+                .specs()
+                .iter()
+                .filter(|spec| !merged.offers(&spec.name))
+                .count();
+            if pruned != 0 {
+                tracing::info!(
+                    "[session] pruned {pruned} recorded tool declaration(s) the host no longer offers"
+                );
+            }
         }
         Ok(merged)
     }

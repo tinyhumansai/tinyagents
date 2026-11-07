@@ -1,6 +1,6 @@
 use std::{
     any::TypeId,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     sync::Arc,
 };
@@ -74,6 +74,9 @@ impl ToolSnapshotExtensions {
 pub struct ToolSnapshot {
     specs: Vec<ToolSpec>,
     exact: bool,
+    /// Names the host still offers without declaring them in `specs` (a
+    /// deferred catalogue the model discovers). In memory only.
+    offered: BTreeSet<String>,
     extensions: ToolSnapshotExtensions,
 }
 
@@ -98,6 +101,7 @@ impl ToolSnapshot {
         Ok(Self {
             specs: names.into_values().collect(),
             exact: false,
+            offered: BTreeSet::new(),
             extensions: ToolSnapshotExtensions::default(),
         })
     }
@@ -116,6 +120,24 @@ impl ToolSnapshot {
     /// Returns the frozen declarations in stable name order.
     pub fn specs(&self) -> &[ToolSpec] {
         &self.specs
+    }
+
+    /// Names tools the host still offers without declaring them here, such as
+    /// a deferred catalogue the model discovers. They are never serialized;
+    /// they only tell [`Self::with_retained_offered`] which recorded
+    /// declarations are not retired.
+    pub fn with_offered_names<N: Into<String>>(
+        mut self,
+        names: impl IntoIterator<Item = N>,
+    ) -> Self {
+        self.offered.extend(names.into_iter().map(Into::into));
+        self
+    }
+
+    /// Whether the host still offers `name`: declared here or named through
+    /// [`Self::with_offered_names`].
+    pub fn offers(&self, name: &str) -> bool {
+        self.offered.contains(name) || self.specs.iter().any(|spec| spec.name == name)
     }
 
     /// Attaches an immutable, host-defined value keyed by its Rust type.
@@ -140,6 +162,7 @@ impl ToolSnapshot {
                 .cloned()
                 .collect(),
             exact: self.exact,
+            offered: self.offered.clone(),
             extensions: self.extensions.clone(),
         }
     }
@@ -164,6 +187,25 @@ impl ToolSnapshot {
         &self,
         recorded: &ToolSnapshot,
     ) -> Result<(Self, usize), ToolSnapshotError> {
+        self.merge_recorded(recorded, |_| true)
+    }
+
+    /// Like [`Self::with_retained`], but a recorded declaration is kept only
+    /// if the host still offers its name through
+    /// [`Self::with_offered_names`]. A name the host neither declares nor
+    /// offers is retired and dropped.
+    pub fn with_retained_offered(
+        &self,
+        recorded: &ToolSnapshot,
+    ) -> Result<(Self, usize), ToolSnapshotError> {
+        self.merge_recorded(recorded, |spec| self.offered.contains(&spec.name))
+    }
+
+    fn merge_recorded(
+        &self,
+        recorded: &ToolSnapshot,
+        keep: impl Fn(&ToolSpec) -> bool,
+    ) -> Result<(Self, usize), ToolSnapshotError> {
         if self.exact {
             return Ok((self.clone(), 0));
         }
@@ -171,6 +213,7 @@ impl ToolSnapshot {
             .specs
             .iter()
             .filter(|spec| !self.specs.iter().any(|live| live.name == spec.name))
+            .filter(|spec| keep(spec))
             .cloned()
             .collect();
         if retained.is_empty() {
@@ -178,6 +221,7 @@ impl ToolSnapshot {
         }
         let count = retained.len();
         let mut merged = Self::new(self.specs.iter().cloned().chain(retained).collect())?;
+        merged.offered = self.offered.clone();
         merged.extensions = self.extensions.clone();
         Ok((merged, count))
     }
