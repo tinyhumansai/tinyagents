@@ -66,6 +66,30 @@ fn run_config_reads_legacy_depth_fields_into_lineage() {
 }
 
 #[test]
+fn run_config_discovery_overrides_default_to_empty_and_round_trip() {
+    use crate::tool::discover::DiscoveryOverrides;
+
+    // An old persisted config has no such field and keeps today's behaviour,
+    // and a default config does not write one.
+    let old: RunConfig = serde_json::from_value(serde_json::json!({"run_id": "old"})).unwrap();
+    assert!(old.discovery.is_empty());
+    assert!(
+        serde_json::to_value(RunConfig::new("fresh"))
+            .unwrap()
+            .get("discovery")
+            .is_none()
+    );
+
+    let config = RunConfig::new("set").with_discovery_overrides(DiscoveryOverrides {
+        promote_found_tools: Some(false),
+        compact_search_results: None,
+    });
+    let back: RunConfig = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+    assert_eq!(back.discovery, config.discovery);
+    assert_eq!(back.discovery.promote_found_tools, Some(false));
+}
+
+#[test]
 fn context_exposes_run_and_thread_ids() {
     let config = RunConfig::new("run-4").with_thread("thread-4");
     let ctx: RunContext = RunContext::new(config, ());

@@ -95,6 +95,41 @@ transcript tool-change patch; resume restores only tools still admitted by
 the current host allow-list. A new match changes the provider's tools prefix
 once. Later requests keep that prefix until another tool is discovered.
 
+#### Keeping found tools in the result (`promote_found_tools`)
+
+Promotion is a cache trade-off. The `tools` list sits at the front of the
+prompt, so every promotion changes the provider's cached prefix: in production
+traces the cached share of input fell from about 97% before a search to about
+14% after it, and a promoted tool then ratchets into every later turn.
+
+Set `promote_found_tools` to `false` to opt out. A search then changes nothing
+on the wire: `promote_discovered` has nothing to promote, no tool-change patch
+is written, and `tools` stays byte-identical for the whole run. The model reads
+each match's full schema from the search result and calls the tool by its own
+name. Admission is the one rule it always was: a deferred tool is callable by
+name whether or not it was matched, `Hidden` tools never are, and arguments
+are validated against the tool's real schema. The cost is that the model has
+no typed declaration to lean on, so malformed calls are likelier. That is the
+trade, a stable prefix against typed arguments. Declarations already recorded
+in a resumed transcript stay on the wire, since the history declares them.
+
+`compact_search_results` (default `false`) renders the search result's JSON
+payload on one line instead of pretty-printed: the same fields, fewer tokens.
+
+Both options default to today's behaviour because changing either mid-thread
+changes the bytes of every later prompt. They are therefore **per session**:
+`ToolDiscoveryPolicy` carries the harness-wide default, and
+`RunConfig::discovery` (a `DiscoveryOverrides`, every field `Option<bool>`)
+overrides it for one run, so a host can give a new thread the new behaviour
+while an older thread keeps the old.
+
+```rust,ignore
+let config = RunConfig::new("run-1").with_discovery_overrides(DiscoveryOverrides {
+    promote_found_tools: Some(false),
+    compact_search_results: Some(true),
+});
+```
+
 ### What the bridge does not cover
 
 The deferred catalogue is fixed at run start from the registry and the host

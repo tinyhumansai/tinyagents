@@ -6,7 +6,7 @@ this file is the map of the module.
 
 | File          | Owns                                                                 |
 |---------------|----------------------------------------------------------------------|
-| `types.rs`    | `ToolDiscoveryPolicy` (the knobs, the host `ranker` and `DiscoveryRankMode`), `DeferredCatalog` (a run's deferred schemas, BM25-indexed, name-sorted, ranked through the policy), `DeferredTool`, `RankedSearch` |
+| `types.rs`    | `ToolDiscoveryPolicy` (the knobs, the host `ranker` and `DiscoveryRankMode`), `DiscoveryOverrides` (the per-session overrides), `DeferredCatalog` (a run's deferred schemas, BM25-indexed, name-sorted, ranked through the policy), `DeferredTool`, `RankedSearch` |
 | `manifest.rs` | `render_manifest` — the budgeted listing inside `tool_search`'s description: full → names → count |
 | `bridge.rs`   | The one intrinsic tool, `tool_search`: `bridge_schemas`, `answer_tool_search` (async; returns a `SearchAnswer`) |
 | `embedding_ranker.rs` | `EmbeddingToolRanker` — a semantic `tinytools::ToolRanker` over any `EmbeddingModel`, cached in memory and optionally through `EmbeddingCache` or disk by embedding-space signature |
@@ -20,8 +20,12 @@ called by its own name, so every `before_tool` gate sees the real tool as is.
 
 Invariants worth keeping:
 
-- The `tools` array never changes within a run because of discovery. Revealed
-  schemas travel in a tool result, not in `tools` (cache stability).
+- By default a search promotes its matches into `tools` (one cache-prefix
+  change per newly found tool). With `promote_found_tools: false` the `tools`
+  array never changes within a run because of discovery: revealed schemas
+  travel in a tool result only (cache stability). Both that and
+  `compact_search_results` are per-session options, read as
+  `ToolDiscoveryPolicy::with_overrides(&RunConfig::discovery)`.
 - Everything rendered from the catalogue is name-sorted and deterministic.
 - Discovery only subtracts: a deferred tool is callable by name whether or not
   the bridge is enabled; a `Hidden` tool is never callable by the model.

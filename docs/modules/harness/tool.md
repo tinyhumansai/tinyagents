@@ -117,7 +117,11 @@ budgets (see [tool-discovery.md](tool-discovery.md#schema-budgets)).
 
 `ToolExposure::Direct` tools go on the initial wire request. `Deferred` tools are indexed
 into a per-run catalogue and reached through the intrinsic `tool_search`
-bridge and called by their own name; searched matches are promoted into later typed requests.
+bridge and called by their own name; searched matches are promoted into later typed requests
+by default. A session can instead keep them in the search result only
+(`promote_found_tools: false`), which holds the `tools` list, and so the
+provider's cached prefix, byte-stable at the cost of typed declarations; see
+[tool-discovery.md](tool-discovery.md#keeping-found-tools-in-the-result-promote_found_tools).
 `Hidden` tools are host-only. See [tool-discovery.md](tool-discovery.md).
 
 ## Tool Call Formats

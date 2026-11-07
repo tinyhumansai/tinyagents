@@ -22,6 +22,7 @@ use crate::ids::{CallId, RunId, ThreadId};
 use crate::limits::LimitTracker;
 use crate::steering::SteeringHandle;
 use crate::store::StoreRegistry;
+use crate::tool::discover::DiscoveryOverrides;
 
 /// One-shot observer invoked with a cheap summary of the accumulated run when
 /// a driver completes or is dropped. Kept crate-private: it is runtime
@@ -166,6 +167,14 @@ pub struct RunConfig {
     /// model call. Child sub-agent runs inherit the same cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turn_output_tokens: Option<u32>,
+    /// This session's overrides of the harness-wide
+    /// [`crate::tool::discover::ToolDiscoveryPolicy`] options that shape the
+    /// prompt (whether found tools are promoted, how search results render).
+    /// Empty by default, which keeps the policy as the harness set it, so an
+    /// existing thread never changes under a user; a host sets it for the
+    /// threads that should get new behaviour.
+    #[serde(default, skip_serializing_if = "DiscoveryOverrides::is_empty")]
+    pub discovery: DiscoveryOverrides,
     /// Recursive ancestry and depth cap for this run.
     pub lineage: RunLineage,
 }

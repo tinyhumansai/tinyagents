@@ -34,7 +34,8 @@ pub use embedding_ranker::{EmbeddingCache, EmbeddingToolRanker};
 pub use manifest::{MANIFEST_DESCRIPTION_CHARS, first_sentence, render_manifest};
 pub use tinytools::rank::{Bm25Index, tokenize};
 pub use types::{
-    DeferredCatalog, DeferredTool, DiscoveryRankMode, RankedSearch, ToolDiscoveryPolicy,
+    DeferredCatalog, DeferredTool, DiscoveryOverrides, DiscoveryRankMode, RankedSearch,
+    ToolDiscoveryPolicy,
 };
 
 #[cfg(test)]
