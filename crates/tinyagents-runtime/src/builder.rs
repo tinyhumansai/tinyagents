@@ -20,6 +20,7 @@ pub struct SessionBuilder<C: Clone + Send + Sync + 'static = ()> {
     prefix: PrefixSnapshot,
     tools: ToolSnapshot,
     retain_recorded_tools: bool,
+    prune_retired_tools: bool,
     transcript: Option<TranscriptConfig>,
 }
 
@@ -43,6 +44,7 @@ impl<C: Clone + Send + Sync + 'static> SessionBuilder<C> {
             prefix: PrefixSnapshot::default(),
             tools: ToolSnapshot::default(),
             retain_recorded_tools: false,
+            prune_retired_tools: false,
             transcript: None,
         }
     }
@@ -134,6 +136,24 @@ impl<C: Clone + Send + Sync + 'static> SessionBuilder<C> {
         self
     }
 
+    /// With [`Self::retain_recorded_tools`] on, keeps a recorded declaration
+    /// only while the host still offers its name, and drops the rest from the
+    /// turn's tools and from the next `{"kind":"tools"}` record.
+    ///
+    /// Without pruning, a retired tool is merged back on every turn and
+    /// recorded again, so it ratchets forward for the life of the thread and
+    /// the model keeps calling a tool the host now refuses. The host's live
+    /// catalogue is the turn's [`ToolSnapshot`]: its declarations plus any
+    /// name added with [`ToolSnapshot::with_offered_names`], which is how a
+    /// deferred (discoverable) tool stays retained.
+    ///
+    /// Off by default, so an existing thread keeps its recorded tools until a
+    /// host opts in. It has no effect while retention is off.
+    pub fn prune_retired_tools(mut self, prune: bool) -> Self {
+        self.prune_retired_tools = prune;
+        self
+    }
+
     /// Enables append-only transcript persistence through a session-owned
     /// locator, stem, and neutral metadata seed.
     pub fn transcript(
@@ -213,6 +233,7 @@ impl<C: Clone + Send + Sync + 'static> SessionBuilder<C> {
             identity,
         );
         session.set_retain_recorded_tools(self.retain_recorded_tools);
+        session.set_prune_retired_tools(self.prune_retired_tools);
         Ok(session)
     }
 }

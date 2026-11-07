@@ -89,3 +89,71 @@ fn exact_snapshot_never_retains_recorded_declarations() {
         ["live"]
     );
 }
+
+fn names(snapshot: &ToolSnapshot) -> Vec<&str> {
+    snapshot
+        .specs()
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect()
+}
+
+#[test]
+fn live_retention_keeps_only_recorded_declarations_the_host_still_offers() {
+    let live = ToolSnapshot::new(vec![spec("live", "new description")])
+        .unwrap()
+        .with_offered_names(["deferred"]);
+    let recorded = ToolSnapshot::new(vec![
+        spec("live", "old description"),
+        spec("deferred", "deferred"),
+        spec("retired", "retired"),
+    ])
+    .unwrap();
+
+    let (merged, count) = live.with_retained_offered(&recorded).unwrap();
+
+    assert_eq!(count, 1);
+    assert_eq!(names(&merged), ["deferred", "live"]);
+    let live_spec = merged.specs().iter().find(|s| s.name == "live").unwrap();
+    assert_eq!(live_spec.description, "new description");
+}
+
+#[test]
+fn live_retention_drops_everything_when_nothing_is_offered() {
+    let live = ToolSnapshot::new(vec![spec("live", "live")]).unwrap();
+    let recorded = ToolSnapshot::new(vec![spec("retired", "retired")]).unwrap();
+
+    let (merged, count) = live.with_retained_offered(&recorded).unwrap();
+
+    assert_eq!(count, 0);
+    assert_eq!(names(&merged), ["live"]);
+}
+
+#[test]
+fn exact_snapshot_ignores_live_retention() {
+    let exact = ToolSnapshot::new(vec![spec("live", "live")])
+        .unwrap()
+        .with_offered_names(["recorded"])
+        .exact();
+    let recorded = ToolSnapshot::new(vec![spec("recorded", "recorded")]).unwrap();
+
+    let (merged, count) = exact.with_retained_offered(&recorded).unwrap();
+
+    assert_eq!(count, 0);
+    assert_eq!(names(&merged), ["live"]);
+}
+
+#[test]
+fn offered_names_survive_copies_and_stay_out_of_the_json() {
+    let snapshot = ToolSnapshot::new(vec![spec("live", "live")])
+        .unwrap()
+        .with_offered_names(["deferred"]);
+    let narrowed = snapshot.retaining(|_| true);
+
+    for copy in [&snapshot.clone(), &narrowed] {
+        assert!(copy.offers("deferred"));
+        assert!(copy.offers("live"));
+        assert!(!copy.offers("retired"));
+    }
+    assert_eq!(snapshot.to_json().as_array().unwrap().len(), 1);
+}
