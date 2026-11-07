@@ -581,6 +581,7 @@ fn discovery_defaults_keep_promotion_on_and_pretty_results() {
     let policy = ToolDiscoveryPolicy::default();
     assert!(policy.promote_found_tools);
     assert!(!policy.compact_search_results);
+    assert!(!policy.collapse_search_results);
 }
 
 #[test]
@@ -588,6 +589,26 @@ fn policy_equality_includes_the_session_options() {
     let base = ToolDiscoveryPolicy::default();
     assert_ne!(base, base.clone().with_promote_found_tools(false));
     assert_ne!(base, base.clone().with_compact_search_results(true));
+    assert_ne!(base, base.clone().with_collapse_search_results(true));
+}
+
+#[test]
+fn collapse_override_is_resolved_per_session_in_both_directions() {
+    let off = ToolDiscoveryPolicy::default();
+    let on = off.clone().with_collapse_search_results(true);
+    let switch = |value| DiscoveryOverrides {
+        collapse_search_results: Some(value),
+        ..DiscoveryOverrides::default()
+    };
+    assert!(off.with_overrides(&switch(true)).collapse_search_results);
+    assert!(!on.with_overrides(&switch(false)).collapse_search_results);
+    // Unset keeps the harness-wide value.
+    assert!(
+        on.with_overrides(&DiscoveryOverrides::default())
+            .collapse_search_results
+    );
+    assert!(!DiscoveryOverrides::default().eq(&switch(true)));
+    assert!(!switch(true).is_empty());
 }
 
 #[test]
@@ -600,15 +621,15 @@ fn overrides_replace_only_the_options_a_session_set() {
     );
     let overrides = DiscoveryOverrides {
         promote_found_tools: Some(false),
-        compact_search_results: None,
+        ..DiscoveryOverrides::default()
     };
     let effective = policy.with_overrides(&overrides);
     assert!(!effective.promote_found_tools);
     assert!(effective.compact_search_results);
     // The reverse direction: a session can also switch an option on.
     let on = DiscoveryOverrides {
-        promote_found_tools: None,
         compact_search_results: Some(false),
+        ..DiscoveryOverrides::default()
     };
     assert!(!policy.with_overrides(&on).compact_search_results);
 }

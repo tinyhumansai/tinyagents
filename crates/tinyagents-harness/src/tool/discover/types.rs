@@ -20,8 +20,9 @@ use tinytools::{Bm25Ranker, RankCandidate, RankContext, RankError, ToolRanker};
 /// [`Self::promote_found_tools`] to `false`: the schema then travels only in
 /// the search result and the model calls the tool by name.
 ///
-/// The two result-shaping options, [`Self::promote_found_tools`] and
-/// [`Self::compact_search_results`], are harness-wide defaults. A session
+/// The three result-shaping options, [`Self::promote_found_tools`],
+/// [`Self::compact_search_results`] and [`Self::collapse_search_results`], are
+/// harness-wide defaults. A session
 /// overrides them per run with [`DiscoveryOverrides`] on
 /// [`crate::context::RunConfig::discovery`], so a new thread can get new
 /// behaviour while an existing thread keeps the old.
@@ -76,6 +77,16 @@ pub struct ToolDiscoveryPolicy {
     /// `false`: switching it mid-thread changes the bytes of every later
     /// prompt, so a host turns it on for new threads.
     pub compact_search_results: bool,
+    /// Whether a `tool_search` result is rewritten, once the run that wrote
+    /// it ends, to the query plus only the schemas of the matched tools the
+    /// run went on to call (or, when none was called, one line naming the
+    /// matches). See [`collapse_search_results`](super::collapse_search_results).
+    ///
+    /// Defaults to `false`, today's behaviour. It applies only to results the
+    /// run wrote after the option was on; a result already in the history is
+    /// never rewritten, so an older thread keeps its stored prefix and its
+    /// provider cache. A host turns it on for new threads.
+    pub collapse_search_results: bool,
 }
 
 /// Per-session overrides of the [`ToolDiscoveryPolicy`] options that change
@@ -93,6 +104,9 @@ pub struct DiscoveryOverrides {
     /// Overrides [`ToolDiscoveryPolicy::compact_search_results`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compact_search_results: Option<bool>,
+    /// Overrides [`ToolDiscoveryPolicy::collapse_search_results`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collapse_search_results: Option<bool>,
 }
 
 impl DiscoveryOverrides {
@@ -102,6 +116,18 @@ impl DiscoveryOverrides {
         *self == Self::default()
     }
 }
+
+/// The un-collapsed `tool_search` results a history already held when a run
+/// began, counted per `(tool_call_id, text)` pair.
+///
+/// [`collapse_search_results`](super::collapse_search_results) leaves exactly
+/// these alone, so a thread's stored prefix is never rewritten under it.
+/// Capture it before the run adds anything, with [`Self::of`]. A history is
+/// append-only, so when a later result repeats an earlier one's id and text
+/// (a provider that numbers its calls, the same query asked again), the
+/// earlier occurrences are the prior ones and the last is the run's own.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PriorSearchResults(pub(super) std::collections::BTreeMap<(String, String), usize>);
 
 /// How a `tool_search` answer is produced when a host ranker is installed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -162,6 +188,13 @@ impl ToolDiscoveryPolicy {
         self
     }
 
+    /// Sets [`Self::collapse_search_results`].
+    #[must_use]
+    pub fn with_collapse_search_results(mut self, collapse: bool) -> Self {
+        self.collapse_search_results = collapse;
+        self
+    }
+
     /// This policy with a session's `overrides` applied: the policy the run
     /// should actually use. An override left `None` keeps the policy's value.
     #[must_use]
@@ -172,6 +205,9 @@ impl ToolDiscoveryPolicy {
         }
         if let Some(compact) = overrides.compact_search_results {
             effective.compact_search_results = compact;
+        }
+        if let Some(collapse) = overrides.collapse_search_results {
+            effective.collapse_search_results = collapse;
         }
         effective
     }
@@ -200,6 +236,7 @@ impl Default for ToolDiscoveryPolicy {
             rank_context: RankContext::empty(),
             promote_found_tools: true,
             compact_search_results: false,
+            collapse_search_results: false,
         }
     }
 }
@@ -215,6 +252,7 @@ impl fmt::Debug for ToolDiscoveryPolicy {
             .field("rank_mode", &self.rank_mode)
             .field("promote_found_tools", &self.promote_found_tools)
             .field("compact_search_results", &self.compact_search_results)
+            .field("collapse_search_results", &self.collapse_search_results)
             .finish()
     }
 }
@@ -231,6 +269,7 @@ impl PartialEq for ToolDiscoveryPolicy {
             && self.rank_context == other.rank_context
             && self.promote_found_tools == other.promote_found_tools
             && self.compact_search_results == other.compact_search_results
+            && self.collapse_search_results == other.collapse_search_results
             && self.ranker.as_ref().map(|r| r.kind()) == other.ranker.as_ref().map(|r| r.kind())
     }
 }

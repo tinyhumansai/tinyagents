@@ -937,3 +937,132 @@ async fn the_cap_pause_is_reported_to_the_recorder() {
 
     assert_eq!(*seen.lock().unwrap(), vec![(2, 2)]);
 }
+
+/// A deferred tool the model can only find through `tool_search`.
+struct DeferredTool {
+    name: &'static str,
+    description: &'static str,
+}
+
+#[async_trait]
+impl Tool for DeferredTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        self.description
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"]
+        })
+    }
+    fn exposure(&self) -> tinytools::ToolExposure {
+        tinytools::ToolExposure::Deferred
+    }
+    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::success(format!("{} ran", self.name)))
+    }
+}
+
+/// A session's committed history, the transcript the next turn resumes from,
+/// holds the collapsed search result; the next turn calls the kept tool
+/// directly, and a thread's earlier turns are never rewritten.
+#[tokio::test]
+async fn a_committed_session_keeps_only_the_winning_search_schema_for_the_next_turn() {
+    use tinyagents_harness::context::RunConfig;
+    use tinyagents_harness::tool::discover::{DiscoveryOverrides, TOOL_SEARCH_NAME};
+
+    let search = ToolCall::new(
+        "s1",
+        TOOL_SEARCH_NAME,
+        serde_json::json!({"query": "price of a ticker", "limit": 3}),
+    );
+    let quote = |id: &str| ToolCall::new(id, "stock_quote", serde_json::json!({"symbol": "A"}));
+    let model = Arc::new(ScriptedModel::new(vec![
+        tool_call_response(search),
+        tool_call_response(quote("q1")),
+        text_response("done"),
+        tool_call_response(quote("q2")),
+        text_response("done again"),
+    ]));
+    let tools: Vec<Box<dyn Tool>> = vec![
+        Box::new(DeferredTool {
+            name: "stock_quote",
+            description: "Fetch the latest price for a ticker symbol.",
+        }),
+        Box::new(DeferredTool {
+            name: "stock_history",
+            description: "Fetch the price history for a ticker symbol.",
+        }),
+        Box::new(DeferredTool {
+            name: "stock_news",
+            description: "Fetch headlines and the price move for a ticker symbol.",
+        }),
+        Box::new(DeferredTool {
+            name: "weather_forecast",
+            description: "Report the weather for a city.",
+        }),
+    ];
+    let mut session = session(
+        &model,
+        tools,
+        &[],
+        Arc::new(|plan| plan.enforce_tool_snapshot = false),
+    );
+    let collapsing = || {
+        let config = RunConfig::new("session").with_discovery_overrides(DiscoveryOverrides {
+            collapse_search_results: Some(true),
+            ..DiscoveryOverrides::default()
+        });
+        TurnOptions {
+            run_context: RunContext::new(config, ()),
+            ..TurnOptions::default()
+        }
+    };
+
+    session
+        .turn(
+            SessionTurnRequest::new(Message::user("price?")),
+            collapsing(),
+        )
+        .await
+        .unwrap();
+    let committed = |session: &Session<()>| -> String {
+        session
+            .history()
+            .iter()
+            .find(|message| matches!(message, Message::Tool(t) if t.tool_call_id == "s1"))
+            .expect("the search result is committed")
+            .text()
+    };
+    let stored = committed(&session);
+    assert!(stored.starts_with("tool_search \"price of a ticker\" \u{2192} used stock_quote\n"));
+    assert!(stored.contains("\"stock_quote\"") && !stored.contains("stock_news"));
+
+    session
+        .turn(
+            SessionTurnRequest::new(Message::user("again")),
+            collapsing(),
+        )
+        .await
+        .unwrap();
+
+    // The second turn's first request replayed the collapsed result, and its
+    // direct call to the kept tool ran.
+    let requests = model.requests();
+    let replayed = all_text(&requests[3]);
+    assert!(replayed.contains("\u{2192} used stock_quote"));
+    assert!(!replayed.contains("stock_news"));
+    assert!(session.history().iter().any(
+        |message| matches!(message, Message::Tool(t) if t.tool_call_id == "q2")
+            && message.text() == "stock_quote ran"
+    ));
+    assert_eq!(
+        committed(&session),
+        stored,
+        "an earlier turn is not rewritten"
+    );
+}
