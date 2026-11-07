@@ -541,6 +541,13 @@ pub struct RunPolicy {
     /// carries. Defaults to `false`, so a transcript stays byte-identical
     /// unless the host opts in.
     pub tool_result_durations: bool,
+    /// Whether, and how, a run replaces tool results older than a number of
+    /// user turns with a one-line note in the transcript it stores, whatever
+    /// the context window has left. Off by default, so a transcript is
+    /// byte-identical unless the host opts in; a session overrides it per run
+    /// with [`crate::context::RunConfig::result_expiry`]. See
+    /// [`crate::result_expiry`].
+    pub result_expiry: crate::result_expiry::ToolResultExpiryPolicy,
 }
 
 /// See [`RunPolicy::structured_strategy_override`].
@@ -711,6 +718,7 @@ impl Default for RunPolicy {
             structured_strategy_override: None,
             queue_mode: QueueMode::default(),
             tool_result_durations: false,
+            result_expiry: crate::result_expiry::ToolResultExpiryPolicy::default(),
         }
     }
 }

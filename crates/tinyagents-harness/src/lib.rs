@@ -73,6 +73,7 @@ pub mod oneshot;
 pub mod progress;
 pub mod prompt;
 pub mod providers;
+pub mod result_expiry;
 pub mod retry;
 pub mod run_queue;
 pub mod runtime;

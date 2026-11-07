@@ -164,6 +164,9 @@ mod model_switch_test;
 #[path = "nested_tests.rs"]
 mod nested_test;
 #[cfg(test)]
+#[path = "result_expiry_tests.rs"]
+mod result_expiry_test;
+#[cfg(test)]
 #[path = "rich_tool_tests.rs"]
 mod rich_tool_test;
 #[cfg(test)]

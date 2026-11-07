@@ -44,6 +44,18 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // model call. Restart it here, at the true top of the run (M-8).
         ctx.limits.restart();
         let mut messages = input;
+        // Age out old tool results once, here at the start of the turn, so the
+        // stored prefix moves once per turn and not once per model call. The
+        // rewrite is in place, so the transcript the run hands back is the one
+        // a resume replays. Before the snapshot below, which must describe the
+        // history as the run sees it.
+        let expiry = self
+            .policy
+            .result_expiry
+            .with_overrides(&ctx.config.result_expiry);
+        if expiry.enabled {
+            crate::result_expiry::expire_tool_results(&mut messages, &expiry);
+        }
         // Results the history already holds are never rewritten, so the
         // snapshot is taken before the run adds any. `None` when the session
         // does not collapse search results.
