@@ -20,8 +20,9 @@ use tinytools::{Bm25Ranker, RankCandidate, RankContext, RankError, ToolRanker};
 /// [`Self::promote_found_tools`] to `false`: the schema then travels only in
 /// the search result and the model calls the tool by name.
 ///
-/// The three result-shaping options, [`Self::promote_found_tools`],
-/// [`Self::compact_search_results`] and [`Self::collapse_search_results`], are
+/// The result-shaping options, [`Self::promote_found_tools`],
+/// [`Self::compact_search_results`] and [`Self::collapse_search_results`], and
+/// the call-repair option [`Self::repair_tool_call_wrapper`], are
 /// harness-wide defaults. A session
 /// overrides them per run with [`DiscoveryOverrides`] on
 /// [`crate::context::RunConfig::discovery`], so a new thread can get new
@@ -87,6 +88,17 @@ pub struct ToolDiscoveryPolicy {
     /// never rewritten, so an older thread keeps its stored prefix and its
     /// provider cache. A host turns it on for new threads.
     pub collapse_search_results: bool,
+    /// Whether a call a model buries inside a pseudo `tool_call` tool (or
+    /// `call_tool`, `function_call`, `tool_use`, `invoke`, ...) is retargeted
+    /// at the real tool it names, before any rule, hook or gate runs.
+    ///
+    /// Defaults to `true`, today's behaviour. When `false` the wrapper gets
+    /// the ordinary unknown-tool corrective. Older threads hold wrapped calls
+    /// in their history and the model keeps imitating them, so a host turns
+    /// this off only for new threads (or everywhere, once its metrics show no
+    /// wrapped calls). A tool registered under a wrapper name is never
+    /// affected: it was never repaired.
+    pub repair_tool_call_wrapper: bool,
 }
 
 /// Per-session overrides of the [`ToolDiscoveryPolicy`] options that change
@@ -107,6 +119,9 @@ pub struct DiscoveryOverrides {
     /// Overrides [`ToolDiscoveryPolicy::collapse_search_results`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collapse_search_results: Option<bool>,
+    /// Overrides [`ToolDiscoveryPolicy::repair_tool_call_wrapper`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_tool_call_wrapper: Option<bool>,
 }
 
 impl DiscoveryOverrides {
@@ -195,6 +210,13 @@ impl ToolDiscoveryPolicy {
         self
     }
 
+    /// Sets [`Self::repair_tool_call_wrapper`].
+    #[must_use]
+    pub fn with_repair_tool_call_wrapper(mut self, repair: bool) -> Self {
+        self.repair_tool_call_wrapper = repair;
+        self
+    }
+
     /// This policy with a session's `overrides` applied: the policy the run
     /// should actually use. An override left `None` keeps the policy's value.
     #[must_use]
@@ -208,6 +230,9 @@ impl ToolDiscoveryPolicy {
         }
         if let Some(collapse) = overrides.collapse_search_results {
             effective.collapse_search_results = collapse;
+        }
+        if let Some(repair) = overrides.repair_tool_call_wrapper {
+            effective.repair_tool_call_wrapper = repair;
         }
         effective
     }
@@ -237,6 +262,7 @@ impl Default for ToolDiscoveryPolicy {
             promote_found_tools: true,
             compact_search_results: false,
             collapse_search_results: false,
+            repair_tool_call_wrapper: true,
         }
     }
 }
@@ -253,6 +279,7 @@ impl fmt::Debug for ToolDiscoveryPolicy {
             .field("promote_found_tools", &self.promote_found_tools)
             .field("compact_search_results", &self.compact_search_results)
             .field("collapse_search_results", &self.collapse_search_results)
+            .field("repair_tool_call_wrapper", &self.repair_tool_call_wrapper)
             .finish()
     }
 }
@@ -270,6 +297,7 @@ impl PartialEq for ToolDiscoveryPolicy {
             && self.promote_found_tools == other.promote_found_tools
             && self.compact_search_results == other.compact_search_results
             && self.collapse_search_results == other.collapse_search_results
+            && self.repair_tool_call_wrapper == other.repair_tool_call_wrapper
             && self.ranker.as_ref().map(|r| r.kind()) == other.ranker.as_ref().map(|r| r.kind())
     }
 }

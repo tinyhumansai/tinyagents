@@ -179,6 +179,9 @@ mod terminal_outcome_test;
 #[path = "mod_tests.rs"]
 mod test;
 #[cfg(test)]
+#[path = "tool_call_option_tests.rs"]
+mod tool_call_option_test;
+#[cfg(test)]
 #[path = "tool_rules_tests.rs"]
 mod tool_rules_test;
 #[cfg(test)]

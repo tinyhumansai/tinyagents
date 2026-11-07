@@ -709,8 +709,15 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // `tool_call_wrapper`). Retargeted before the discovery bridge and
         // every rule, hook and gate below, so each of them sees the real tool
         // name and arguments exactly as if the model had called it directly.
-        // A registered tool under a wrapper name keeps it.
-        if self.tools.dispatch(&call.name).is_none()
+        // A registered tool under a wrapper name keeps it. A session can turn
+        // the repair off (`repair_tool_call_wrapper`), leaving the wrapper to
+        // the unknown-tool corrective.
+        if ctx
+            .config
+            .discovery
+            .repair_tool_call_wrapper
+            .unwrap_or(self.policy.discovery.repair_tool_call_wrapper)
+            && self.tools.dispatch(&call.name).is_none()
             && super::tool_call_wrapper::is_wrapper_name(&call.name)
         {
             let is_callable = |name: &str| {
