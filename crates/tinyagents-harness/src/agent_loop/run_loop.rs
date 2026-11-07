@@ -11,6 +11,20 @@ use super::types::{MixedStructuredTurn, ResponseTurn, TruncationOutcome, TurnFlo
 use super::*;
 
 impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
+    /// Whether this run collapses the `tool_search` results it wrote when it
+    /// ends: discovery is on and the session's overrides resolve
+    /// [`ToolDiscoveryPolicy::collapse_search_results`] to `true`.
+    ///
+    /// [`ToolDiscoveryPolicy::collapse_search_results`]: crate::tool::discover::ToolDiscoveryPolicy::collapse_search_results
+    fn collapses_search_results(&self, ctx: &RunContext<Ctx>) -> bool {
+        self.policy.discovery.enabled
+            && self
+                .policy
+                .discovery
+                .with_overrides(&ctx.config.discovery)
+                .collapse_search_results
+    }
+
     /// Drives the loop body, returning `Ok(())` on a clean finish or the first
     /// error encountered. The caller owns lifecycle bookkeeping (final status
     /// transition, `RunFailed`/`on_error` on error).
@@ -30,6 +44,12 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // model call. Restart it here, at the true top of the run (M-8).
         ctx.limits.restart();
         let mut messages = input;
+        // Results the history already holds are never rewritten, so the
+        // snapshot is taken before the run adds any. `None` when the session
+        // does not collapse search results.
+        let prior_searches = self
+            .collapses_search_results(ctx)
+            .then(|| crate::tool::discover::PriorSearchResults::of(&messages));
         // The body borrows the working transcript rather than owning it so the
         // transcript survives **every** exit path, not just the successful one.
         // A mid-turn tool failure used to drop everything accumulated so far,
@@ -42,6 +62,20 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // Announce whatever the final turn appended and close it, on every
         // exit path, before the transcript moves onto the run.
         ctx.close_turn(self.policy.capture, &messages);
+        // The run is over, so the matches it did not use are dead weight in
+        // every later prompt. Collapsing here, on every exit path, keeps the
+        // stored transcript the one a resume replays.
+        if let Some(prior) = &prior_searches {
+            let collapsed = crate::tool::discover::collapse_search_results(&mut messages, prior);
+            if collapsed > 0 {
+                tracing::debug!(
+                    target: "tinyagents::agent_loop",
+                    run_id = %ctx.run_id(),
+                    collapsed,
+                    "[agent_loop] collapsed tool_search results to the tools the run used"
+                );
+            }
+        }
         run.messages = std::mem::take(&mut messages);
         // A4: the `Collect` lane is delivered on the run, never on the
         // transcript, and on every exit path — a host that pushed

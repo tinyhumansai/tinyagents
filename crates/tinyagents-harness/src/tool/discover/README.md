@@ -8,9 +8,10 @@ this file is the map of the module.
 |---------------|----------------------------------------------------------------------|
 | `types.rs`    | `ToolDiscoveryPolicy` (the knobs, the host `ranker` and `DiscoveryRankMode`), `DiscoveryOverrides` (the per-session overrides), `DeferredCatalog` (a run's deferred schemas, BM25-indexed, name-sorted, ranked through the policy), `DeferredTool`, `RankedSearch` |
 | `manifest.rs` | `render_manifest` — the budgeted listing inside `tool_search`'s description: full → names → count |
+| `collapse.rs` | `collapse_search_results` / `PriorSearchResults` — rewrite a finished run's own `tool_search` results to the query plus the used tools' schemas (per-session `collapse_search_results`) |
 | `bridge.rs`   | The one intrinsic tool, `tool_search`: `bridge_schemas`, `answer_tool_search` (async; returns a `SearchAnswer`) |
 | `embedding_ranker.rs` | `EmbeddingToolRanker` — a semantic `tinytools::ToolRanker` over any `EmbeddingModel`, cached in memory and optionally through `EmbeddingCache` or disk by embedding-space signature |
-| `mod_tests.rs` | Unit tests for all of the above                                      |
+| `mod_tests.rs`, `collapse_tests.rs` | Unit tests for all of the above                         |
 
 The agent loop (`agent_loop/run_loop.rs`, `agent_loop/tools.rs`) is the only
 consumer: it builds the catalogue once per run, appends the `tool_search`
@@ -23,9 +24,13 @@ Invariants worth keeping:
 - By default a search promotes its matches into `tools` (one cache-prefix
   change per newly found tool). With `promote_found_tools: false` the `tools`
   array never changes within a run because of discovery: revealed schemas
-  travel in a tool result only (cache stability). Both that and
-  `compact_search_results` are per-session options, read as
+  travel in a tool result only (cache stability). Both that,
+  `compact_search_results` and `collapse_search_results` are per-session
+  options, read as
   `ToolDiscoveryPolicy::with_overrides(&RunConfig::discovery)`.
+- Collapsing rewrites only results the run itself wrote, once it ends; the
+  history a run starts from is never touched, so switching it on cannot change
+  an existing thread's stored prefix.
 - Everything rendered from the catalogue is name-sorted and deterministic.
 - Discovery only subtracts: a deferred tool is callable by name whether or not
   the bridge is enabled; a `Hidden` tool is never callable by the model.

@@ -82,11 +82,13 @@ fn run_config_discovery_overrides_default_to_empty_and_round_trip() {
 
     let config = RunConfig::new("set").with_discovery_overrides(DiscoveryOverrides {
         promote_found_tools: Some(false),
-        compact_search_results: None,
+        collapse_search_results: Some(true),
+        ..DiscoveryOverrides::default()
     });
     let back: RunConfig = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
     assert_eq!(back.discovery, config.discovery);
     assert_eq!(back.discovery.promote_found_tools, Some(false));
+    assert_eq!(back.discovery.collapse_search_results, Some(true));
 }
 
 #[test]
