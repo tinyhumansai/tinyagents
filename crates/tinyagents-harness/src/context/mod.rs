@@ -53,6 +53,7 @@ use crate::error::Result;
 use crate::events::{AgentEvent, EventRecord, EventSink};
 use crate::ids::{RunId, ThreadId};
 use crate::limits::{LimitTracker, RunLimits};
+use crate::result_expiry::ExpiryOverrides;
 use crate::store::StoreRegistry;
 use crate::tool::discover::DiscoveryOverrides;
 
@@ -75,6 +76,8 @@ struct RunConfigWire {
     max_turn_output_tokens: Option<u32>,
     #[serde(default)]
     discovery: DiscoveryOverrides,
+    #[serde(default)]
+    result_expiry: ExpiryOverrides,
     // Legacy wire fields, accepted only while reading old persisted configs.
     #[serde(default)]
     depth: Option<usize>,
@@ -105,6 +108,7 @@ impl<'de> serde::Deserialize<'de> for RunConfig {
             max_tool_calls: wire.max_tool_calls,
             max_turn_output_tokens: wire.max_turn_output_tokens,
             discovery: wire.discovery,
+            result_expiry: wire.result_expiry,
             lineage,
         })
     }
@@ -144,6 +148,7 @@ impl RunConfig {
             max_tool_calls: None,
             max_turn_output_tokens: None,
             discovery: DiscoveryOverrides::default(),
+            result_expiry: ExpiryOverrides::default(),
         }
     }
 
@@ -214,6 +219,13 @@ impl RunConfig {
     /// [`RunConfig::discovery`].
     pub fn with_discovery_overrides(mut self, overrides: DiscoveryOverrides) -> Self {
         self.discovery = overrides;
+        self
+    }
+
+    /// Sets this session's tool-result expiry overrides. See
+    /// [`RunConfig::result_expiry`].
+    pub fn with_result_expiry_overrides(mut self, overrides: ExpiryOverrides) -> Self {
+        self.result_expiry = overrides;
         self
     }
 

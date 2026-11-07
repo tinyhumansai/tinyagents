@@ -94,6 +94,31 @@ fn run_config_discovery_overrides_default_to_empty_and_round_trip() {
 }
 
 #[test]
+fn run_config_result_expiry_overrides_default_to_empty_and_round_trip() {
+    use crate::result_expiry::ExpiryOverrides;
+
+    // An old persisted config has no such field and keeps today's behaviour,
+    // and a default config does not write one.
+    let old: RunConfig = serde_json::from_value(serde_json::json!({"run_id": "old"})).unwrap();
+    assert!(old.result_expiry.is_empty());
+    assert!(
+        serde_json::to_value(RunConfig::new("fresh"))
+            .unwrap()
+            .get("result_expiry")
+            .is_none()
+    );
+
+    let config = RunConfig::new("set").with_result_expiry_overrides(ExpiryOverrides {
+        enabled: Some(true),
+        max_age_turns: Some(2),
+        exempt_tools: Some(vec!["tool_search".to_string()]),
+    });
+    let back: RunConfig = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+    assert_eq!(back.result_expiry, config.result_expiry);
+    assert_eq!(back.result_expiry.max_age_turns, Some(2));
+}
+
+#[test]
 fn context_exposes_run_and_thread_ids() {
     let config = RunConfig::new("run-4").with_thread("thread-4");
     let ctx: RunContext = RunContext::new(config, ());

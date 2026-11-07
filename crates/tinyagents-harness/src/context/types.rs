@@ -20,6 +20,7 @@ use crate::cancel::CancellationToken;
 use crate::events::EventSink;
 use crate::ids::{CallId, RunId, ThreadId};
 use crate::limits::LimitTracker;
+use crate::result_expiry::ExpiryOverrides;
 use crate::steering::SteeringHandle;
 use crate::store::StoreRegistry;
 use crate::tool::discover::DiscoveryOverrides;
@@ -175,6 +176,14 @@ pub struct RunConfig {
     /// threads that should get new behaviour.
     #[serde(default, skip_serializing_if = "DiscoveryOverrides::is_empty")]
     pub discovery: DiscoveryOverrides,
+    /// This session's overrides of the harness-wide
+    /// [`crate::result_expiry::ToolResultExpiryPolicy`]: whether the run
+    /// replaces old tool results in its stored transcript with a note, after
+    /// how many user turns, and which tools are exempt. Empty by default,
+    /// which keeps the policy as the harness set it (off unless the host
+    /// enabled it), so an existing thread never changes under a user.
+    #[serde(default, skip_serializing_if = "ExpiryOverrides::is_empty")]
+    pub result_expiry: ExpiryOverrides,
     /// Recursive ancestry and depth cap for this run.
     pub lineage: RunLineage,
 }
