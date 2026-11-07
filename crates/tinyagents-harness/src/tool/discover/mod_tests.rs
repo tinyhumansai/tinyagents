@@ -582,6 +582,7 @@ fn discovery_defaults_keep_promotion_on_and_pretty_results() {
     assert!(policy.promote_found_tools);
     assert!(!policy.compact_search_results);
     assert!(!policy.collapse_search_results);
+    assert!(policy.repair_tool_call_wrapper);
 }
 
 #[test]
@@ -590,6 +591,24 @@ fn policy_equality_includes_the_session_options() {
     assert_ne!(base, base.clone().with_promote_found_tools(false));
     assert_ne!(base, base.clone().with_compact_search_results(true));
     assert_ne!(base, base.clone().with_collapse_search_results(true));
+    assert_ne!(base, base.clone().with_repair_tool_call_wrapper(false));
+}
+
+#[test]
+fn wrapper_repair_override_is_resolved_per_session_in_both_directions() {
+    let on = ToolDiscoveryPolicy::default();
+    let off = on.clone().with_repair_tool_call_wrapper(false);
+    let switch = |value| DiscoveryOverrides {
+        repair_tool_call_wrapper: Some(value),
+        ..DiscoveryOverrides::default()
+    };
+    assert!(!on.with_overrides(&switch(false)).repair_tool_call_wrapper);
+    assert!(off.with_overrides(&switch(true)).repair_tool_call_wrapper);
+    // Unset keeps the harness-wide value.
+    let unset = DiscoveryOverrides::default();
+    assert!(on.with_overrides(&unset).repair_tool_call_wrapper);
+    assert!(!off.with_overrides(&unset).repair_tool_call_wrapper);
+    assert!(!switch(false).is_empty());
 }
 
 #[test]

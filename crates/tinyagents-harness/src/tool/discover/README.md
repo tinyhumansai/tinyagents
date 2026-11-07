@@ -31,6 +31,11 @@ Invariants worth keeping:
 - Collapsing rewrites only results the run itself wrote, once it ends; the
   history a run starts from is never touched, so switching it on cannot change
   an existing thread's stored prefix.
+- `repair_tool_call_wrapper` (default `true`) rides the same per-session
+  overrides, though the repair itself lives in the agent loop: with it `false`
+  a call wrapped in a pseudo `tool_call` tool gets the unknown-tool corrective
+  instead of being retargeted. A tool registered under a wrapper name is never
+  repaired either way.
 - Everything rendered from the catalogue is name-sorted and deterministic.
 - Discovery only subtracts: a deferred tool is callable by name whether or not
   the bridge is enabled; a `Hidden` tool is never callable by the model.
