@@ -11,7 +11,7 @@ use crate::runtime::AgentHarness;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tinyinference_llm::model::ModelRequest;
 
 /// Explicit consent for capturing model messages and tool input/output.
@@ -37,7 +37,48 @@ pub struct ObservedUsage {
     /// Provider charge in USD, never a local estimate.
     pub cost_usd: Option<f64>,
 }
+/// A named step a host runs between receiving a turn and its first model
+/// request. Names are fixed strings, never user data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SetupPhase {
+    /// Re-reading the saved transcript into a cold agent.
+    TranscriptResume,
+    /// Refreshing the system prompt.
+    PromptRefresh,
+    /// Rendering the memory block.
+    MemoryBlock,
+    /// Opening or constructing the agent.
+    AgentOpen,
+    /// A host-defined phase; the name must be a static label, not user data.
+    Other(&'static str),
+}
+impl SetupPhase {
+    /// Stable snake_case name, suitable for a span name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TranscriptResume => "transcript_resume",
+            Self::PromptRefresh => "prompt_refresh",
+            Self::MemoryBlock => "memory_block",
+            Self::AgentOpen => "agent_open",
+            Self::Other(name) => name,
+        }
+    }
+}
+/// How a setup phase ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetupOutcome {
+    /// The phase ran to completion.
+    Completed,
+    /// The phase failed; the turn went on without its result.
+    Failed,
+    /// The phase was skipped, for example a block that missed its deadline.
+    Skipped,
+}
 /// A curated model/tool observation. No raw errors or arbitrary metadata.
+///
+/// Not `#[non_exhaustive]`: matches written before [`Self::Setup`] existed must
+/// add an arm (a `Setup { .. }` arm, or a wildcard).
 #[derive(Clone, Debug, PartialEq)]
 pub enum TurnObservation {
     /// One model pipeline returned, even if later answer validation rejects it.
@@ -128,6 +169,21 @@ pub enum TurnObservation {
         /// Langfuse exporter's `output_bytes` for the same call.
         output_bytes: Option<u64>,
     },
+    /// A host-reported setup phase that ran before the first model request.
+    /// Carries no message text, identifiers or user data.
+    Setup {
+        /// Harness run identifier, once the run has started. Setup normally
+        /// precedes the run, so hosts correlate by order and by their own scope.
+        run_id: Option<String>,
+        /// Which phase this was.
+        phase: SetupPhase,
+        /// Wall-clock time in milliseconds.
+        duration_ms: u64,
+        /// Whether the phase failed.
+        failed: bool,
+        /// Whether the phase was skipped.
+        skipped: bool,
+    },
 }
 /// Synchronous, nonblocking host callback. Queue export work in the host.
 pub trait Observer: Send + Sync {
@@ -156,6 +212,18 @@ impl ObserverScope {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+    /// Report one setup phase the host ran before the first model request.
+    /// Call it once per phase, in the order the phases ran; each call emits one
+    /// [`TurnObservation::Setup`] to the host observer immediately.
+    pub fn report_setup(&self, phase: SetupPhase, duration: Duration, outcome: SetupOutcome) {
+        self.observer.on_event(&TurnObservation::Setup {
+            run_id: self.run_id(),
+            phase,
+            duration_ms: millis(duration),
+            failed: outcome == SetupOutcome::Failed,
+            skipped: outcome == SetupOutcome::Skipped,
+        });
+    }
     fn payload(&self, value: &Option<Value>) -> Option<Value> {
         (self.capture == TraceContent::Include)
             .then(|| value.clone())
@@ -166,6 +234,14 @@ tokio::task_local! { static OBSERVER: Arc<ObserverScope>; }
 /// Capture the current scope before dispatch crosses a runtime/task boundary.
 pub fn current_scope() -> Option<Arc<ObserverScope>> {
     OBSERVER.try_with(Arc::clone).ok()
+}
+
+/// Report a setup phase to the current turn's observer scope, if a host
+/// scoped one around this task. Quietly does nothing otherwise.
+pub fn report_setup(phase: SetupPhase, duration: Duration, outcome: SetupOutcome) {
+    if let Some(scope) = current_scope() {
+        scope.report_setup(phase, duration, outcome);
+    }
 }
 
 impl std::fmt::Debug for ObserverScope {
@@ -461,7 +537,7 @@ impl<Ctx: Send + Sync + 'static> ModelMiddleware<(), Ctx> for ObserverScope {
     }
 }
 /// `duration` in whole milliseconds, saturating at `u64::MAX`.
-fn millis(duration: std::time::Duration) -> u64 {
+fn millis(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 

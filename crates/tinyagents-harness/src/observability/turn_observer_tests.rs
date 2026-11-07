@@ -445,3 +445,124 @@ async fn langfuse_output_bytes_equals_the_observations() {
     );
     assert_eq!(output_bytes, Some(RESULT_BYTES));
 }
+
+fn setup_phases(seen: &[TurnObservation]) -> Vec<(&'static str, bool, bool)> {
+    seen.iter()
+        .filter_map(|o| match o {
+            TurnObservation::Setup {
+                phase,
+                failed,
+                skipped,
+                ..
+            } => Some((phase.as_str(), *failed, *skipped)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn setup_phases_arrive_in_order_before_the_first_model_event() {
+    use crate::testkit::{ScriptedModel, text_response};
+    use std::time::Duration;
+
+    let recorder = Arc::new(Recorder::default());
+    let scope = ObserverScope::new(recorder.clone(), TraceContent::MetadataOnly);
+    // The host times its own setup, then reports each phase on the turn's scope.
+    scope.report_setup(
+        SetupPhase::TranscriptResume,
+        Duration::from_millis(12),
+        SetupOutcome::Completed,
+    );
+    scope.report_setup(
+        SetupPhase::MemoryBlock,
+        Duration::from_millis(5_000),
+        SetupOutcome::Skipped,
+    );
+    scope.report_setup(
+        SetupPhase::Other("warm_cache"),
+        Duration::from_millis(3),
+        SetupOutcome::Failed,
+    );
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.with_model_resolver(Arc::new(crate::host::FixedModelResolver::named(
+        "mock",
+        Arc::new(ScriptedModel::new(vec![text_response("done")])),
+    )));
+    harness.push_model_middleware(Arc::new(InstalledObserverMiddleware(scope.clone())));
+    let ctx = RunContext::new(crate::context::RunConfig::new("setup"), ());
+    harness
+        .invoke_in_context(
+            &(),
+            ctx,
+            vec![tinyinference_llm::message::Message::user("go")],
+        )
+        .await
+        .expect("run succeeds");
+
+    let seen = recorder.0.lock().unwrap().clone();
+    assert_eq!(
+        setup_phases(&seen),
+        vec![
+            ("transcript_resume", false, false),
+            ("memory_block", false, true),
+            ("warm_cache", true, false),
+        ],
+        "one event per phase, in the order reported"
+    );
+    let first_model = seen
+        .iter()
+        .position(|o| matches!(o, TurnObservation::Model { .. }))
+        .expect("a model observation");
+    assert_eq!(first_model, 3, "every setup event precedes the first model");
+    assert!(matches!(
+        &seen[1],
+        TurnObservation::Setup {
+            duration_ms: 5_000,
+            run_id: None,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn setup_reported_through_the_task_local_scope_reaches_the_host() {
+    use std::time::Duration;
+
+    let recorder = Arc::new(Recorder::default());
+    let scope = ObserverScope::new(recorder.clone(), TraceContent::MetadataOnly);
+    // No scope: reporting is a quiet no-op.
+    report_setup(
+        SetupPhase::AgentOpen,
+        Duration::ZERO,
+        SetupOutcome::Completed,
+    );
+    with_observer(scope, async {
+        report_setup(
+            SetupPhase::PromptRefresh,
+            Duration::from_millis(7),
+            SetupOutcome::Completed,
+        );
+    })
+    .await;
+    let seen = recorder.0.lock().unwrap().clone();
+    assert_eq!(setup_phases(&seen), vec![("prompt_refresh", false, false)]);
+}
+
+#[test]
+fn setup_duration_saturates_instead_of_wrapping() {
+    let recorder = Arc::new(Recorder::default());
+    let scope = ObserverScope::new(recorder.clone(), TraceContent::MetadataOnly);
+    scope.report_setup(
+        SetupPhase::AgentOpen,
+        std::time::Duration::MAX,
+        SetupOutcome::Completed,
+    );
+    assert!(matches!(
+        &recorder.0.lock().unwrap()[0],
+        TurnObservation::Setup {
+            duration_ms: u64::MAX,
+            ..
+        }
+    ));
+}
