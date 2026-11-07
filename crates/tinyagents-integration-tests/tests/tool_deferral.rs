@@ -12,12 +12,14 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use tinyagents_harness::context::RunContext;
+use tinyagents_harness::context::{RunConfig, RunContext};
 use tinyagents_harness::events::{AgentEvent, RecordingListener};
 use tinyagents_harness::middleware::Middleware;
 use tinyagents_harness::runtime::{AgentHarness, RunPolicy, UnknownToolPolicy};
 use tinyagents_harness::testkit::FakeTool;
-use tinyagents_harness::tool::discover::{TOOL_SEARCH_NAME, ToolDiscoveryPolicy};
+use tinyagents_harness::tool::discover::{
+    DiscoveryOverrides, TOOL_SEARCH_NAME, ToolDiscoveryPolicy,
+};
 use tinyinference_llm::message::{AssistantMessage, ContentBlock, Message};
 use tinyinference_llm::model::{ChatModel, ModelRequest, ModelResponse};
 use tinyinference_llm::tool::ToolCall;
@@ -748,4 +750,226 @@ async fn a_deferred_event_is_emitted_only_for_a_deferred_tool_called_by_name() {
         })
         .collect();
     assert_eq!(deferred_events, vec!["stock_quote"]);
+}
+
+/// A harness over one read tool, a matched deferred tool and an unmatched one,
+/// scripted with `model`.
+fn discovery_harness(
+    model: &Arc<RecordingModel>,
+    discovery: ToolDiscoveryPolicy,
+) -> (AgentHarness<()>, Arc<ExposedTool>, Arc<ExposedTool>) {
+    let stock = ExposedTool::new(
+        "stock_quote",
+        "Fetch the latest price for a ticker symbol.",
+        ToolExposure::Deferred,
+    );
+    let weather = ExposedTool::new(
+        "weather_forecast",
+        "Report the weather for a city.",
+        ToolExposure::Deferred,
+    );
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness
+        .with_model_resolver(Arc::new(
+            tinyagents_harness::host::FixedModelResolver::named("mock", model.clone()),
+        ))
+        .register_tool(Arc::new(FakeTool::returning("read_file", "contents")))
+        .register_tool(stock.clone())
+        .register_tool(weather.clone())
+        .with_policy(RunPolicy {
+            discovery,
+            ..RunPolicy::default()
+        });
+    (harness, stock, weather)
+}
+
+fn search_then_call_script(arguments: Value) -> Vec<ModelResponse> {
+    vec![
+        tool_call(
+            "c1",
+            TOOL_SEARCH_NAME,
+            json!({"query": "price of a ticker", "limit": 1}),
+        ),
+        tool_call("c2", "stock_quote", arguments),
+        text("done"),
+    ]
+}
+
+fn tool_messages(messages: &[Message]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|message| matches!(message, Message::Tool(_)))
+        .map(Message::text)
+        .collect()
+}
+
+#[tokio::test]
+async fn promotion_off_keeps_the_tools_list_byte_identical_and_validates_direct_calls() {
+    let model = RecordingModel::new(vec![
+        tool_call(
+            "c1",
+            TOOL_SEARCH_NAME,
+            json!({"query": "price of a ticker", "limit": 1}),
+        ),
+        // Wrong type: the matched tool's schema still validates a direct call.
+        tool_call("c2", "stock_quote", json!({"symbol": 5})),
+        tool_call("c3", "stock_quote", json!({"symbol": "ACME"})),
+        text("done"),
+    ]);
+    let (harness, stock, _) = discovery_harness(
+        &model,
+        ToolDiscoveryPolicy::default().with_promote_found_tools(false),
+    );
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("what is ACME trading at?")])
+        .await
+        .expect("run succeeds");
+
+    let seen = model.tools_seen();
+    assert_eq!(seen.len(), 4);
+    assert!(
+        seen.iter().all(|tools| tools == &seen[0]),
+        "tools never change"
+    );
+    assert_eq!(tool_names(&seen[0]), vec!["read_file", TOOL_SEARCH_NAME]);
+    // No tool-change patch was written to the transcript either.
+    assert!(
+        tinyinference_llm::message::replay_system_state(&run.messages)
+            .1
+            .is_empty()
+    );
+
+    let results = tool_messages(&run.messages);
+    // The schema travels in the search result instead.
+    assert!(results[0].contains("\"name\": \"stock_quote\""));
+    assert!(results[0].contains("\"symbol\""));
+    // The invalid call was refused by schema validation and never ran; the
+    // valid one reached the tool.
+    assert!(results[1].contains("invalid arguments for tool `stock_quote`"));
+    assert!(results[2].contains("stock_quote \u{2192} ACME"));
+    assert_eq!(
+        stock.calls.lock().unwrap().clone(),
+        vec![json!({"symbol": "ACME"})]
+    );
+}
+
+#[tokio::test]
+async fn promotion_off_admits_an_unmatched_deferred_tool_exactly_as_promotion_on_does() {
+    // Admission never depended on a prior search: a deferred tool is callable
+    // by its own name whether or not it was matched (see `tool-discovery.md`).
+    // Turning promotion off must not change that rule in either direction.
+    let script = || {
+        vec![
+            tool_call(
+                "c1",
+                TOOL_SEARCH_NAME,
+                json!({"query": "price of a ticker", "limit": 1}),
+            ),
+            tool_call("c2", "weather_forecast", json!({"symbol": "Oslo"})),
+            text("done"),
+        ]
+    };
+    let mut outcomes = Vec::new();
+    for promote in [true, false] {
+        let model = RecordingModel::new(script());
+        let (harness, _, weather) = discovery_harness(
+            &model,
+            ToolDiscoveryPolicy::default().with_promote_found_tools(promote),
+        );
+        let run = harness
+            .invoke_default(&(), vec![Message::user("weather?")])
+            .await
+            .expect("run succeeds");
+        outcomes.push((
+            tool_messages(&run.messages)[1].clone(),
+            weather.calls.lock().unwrap().len(),
+        ));
+    }
+    assert_eq!(outcomes[0], outcomes[1]);
+    assert_eq!(outcomes[1].1, 1, "the unmatched tool still ran once");
+}
+
+#[tokio::test]
+async fn sessions_in_one_process_each_keep_their_own_promotion_setting() {
+    // One harness, one process: the harness-wide policy promotes (today's
+    // behaviour), and a session opts out through its run config. The sessions
+    // run back to back on the same harness; each keeps its own behaviour.
+    let mut script = search_then_call_script(json!({"symbol": "A"}));
+    script.extend(search_then_call_script(json!({"symbol": "B"})));
+    let model = RecordingModel::new(script);
+    let (harness, _, _) = discovery_harness(&model, ToolDiscoveryPolicy::default());
+
+    harness
+        .invoke(
+            &(),
+            (),
+            RunConfig::new("promoting"),
+            vec![Message::user("a")],
+        )
+        .await
+        .expect("promoting session");
+    let off = RunConfig::new("quiet").with_discovery_overrides(DiscoveryOverrides {
+        promote_found_tools: Some(false),
+        ..DiscoveryOverrides::default()
+    });
+    harness
+        .invoke(&(), (), off, vec![Message::user("b")])
+        .await
+        .expect("quiet session");
+
+    let seen = model.tools_seen();
+    assert_eq!(seen.len(), 6);
+    assert_eq!(
+        tool_names(&seen[1]),
+        vec!["read_file", "stock_quote", TOOL_SEARCH_NAME]
+    );
+    assert!(seen[3..].iter().all(|tools| tools == &seen[3]));
+    assert_eq!(tool_names(&seen[3]), vec!["read_file", TOOL_SEARCH_NAME]);
+}
+
+#[tokio::test]
+async fn a_session_override_beats_the_harness_wide_policy_in_both_directions() {
+    // Harness-wide: promotion off. The session opts in.
+    let model = RecordingModel::new(search_then_call_script(json!({"symbol": "A"})));
+    let (harness, _, _) = discovery_harness(
+        &model,
+        ToolDiscoveryPolicy::default().with_promote_found_tools(false),
+    );
+    let on = RunConfig::new("on").with_discovery_overrides(DiscoveryOverrides {
+        promote_found_tools: Some(true),
+        ..DiscoveryOverrides::default()
+    });
+    harness
+        .invoke(&(), (), on, vec![Message::user("a")])
+        .await
+        .expect("run succeeds");
+    assert_eq!(
+        tool_names(&model.tools_seen()[1]),
+        vec!["read_file", "stock_quote", TOOL_SEARCH_NAME]
+    );
+}
+
+#[tokio::test]
+async fn compact_search_results_are_a_per_session_option() {
+    let mut rendered = Vec::new();
+    for compact in [false, true] {
+        let model = RecordingModel::new(search_then_call_script(json!({"symbol": "A"})));
+        let (harness, _, _) = discovery_harness(&model, ToolDiscoveryPolicy::default());
+        let config = RunConfig::new("r").with_discovery_overrides(DiscoveryOverrides {
+            compact_search_results: Some(compact),
+            ..DiscoveryOverrides::default()
+        });
+        let run = harness
+            .invoke(&(), (), config, vec![Message::user("a")])
+            .await
+            .expect("run succeeds");
+        rendered.push(tool_messages(&run.messages)[0].clone());
+    }
+    assert!(rendered[0].contains("\n  "), "default stays pretty-printed");
+    assert_eq!(
+        rendered[1].lines().count(),
+        2,
+        "compact is one payload line"
+    );
 }

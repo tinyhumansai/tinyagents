@@ -487,13 +487,16 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             return Ok(None);
         }
         {
-            let answer = crate::tool::discover::answer_tool_search(
-                &catalog,
-                &self.policy.discovery,
-                &call.arguments,
-            )
-            .await;
-            promoted_names.extend(answer.matched_names.iter().cloned());
+            // The session's overrides decide how this answer renders and
+            // whether its matches reach the wire, so one harness serves
+            // sessions that differ.
+            let discovery = self.policy.discovery.with_overrides(&ctx.config.discovery);
+            let answer =
+                crate::tool::discover::answer_tool_search(&catalog, &discovery, &call.arguments)
+                    .await;
+            if discovery.promote_found_tools {
+                promoted_names.extend(answer.matched_names.iter().cloned());
+            }
             let ranking = answer.ranking;
             // `query` is model-supplied tool-call content, same privacy
             // class as a normal tool call's arguments, so it honors the same
