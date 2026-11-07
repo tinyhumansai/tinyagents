@@ -20,6 +20,7 @@ use crate::cancel::CancellationToken;
 use crate::events::EventSink;
 use crate::ids::{CallId, RunId, ThreadId};
 use crate::limits::LimitTracker;
+use crate::reasoning_replay::ReasoningReplay;
 use crate::result_expiry::ExpiryOverrides;
 use crate::steering::SteeringHandle;
 use crate::store::StoreRegistry;
@@ -184,6 +185,12 @@ pub struct RunConfig {
     /// enabled it), so an existing thread never changes under a user.
     #[serde(default, skip_serializing_if = "ExpiryOverrides::is_empty")]
     pub result_expiry: ExpiryOverrides,
+    /// This session's override of [`crate::runtime::RunPolicy::replay_reasoning`]:
+    /// whether the run's requests carry earlier turns' reasoning. `None` by
+    /// default, which keeps the policy as the harness set it (replay all), so
+    /// an existing thread never changes under a user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_reasoning: Option<ReasoningReplay>,
     /// Recursive ancestry and depth cap for this run.
     pub lineage: RunLineage,
 }
