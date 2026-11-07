@@ -184,6 +184,7 @@ fn journal_observation_content_follows_capture_gate() {
                 input: Some(json!({"query": "secret"})),
                 output: Some(json!("secret result")),
                 duration_ms: Some(20),
+                input_bytes: None,
                 output_bytes: Some(13),
                 error: None,
                 metadata: None,

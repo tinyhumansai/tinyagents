@@ -528,6 +528,34 @@ async fn nested_events_carry_the_parent_call_id() {
 }
 
 #[tokio::test]
+async fn a_nested_completion_carries_argument_and_result_sizes() {
+    let caller = Caller::new("caller", vec![("leaf", json!({"n": 7}))]);
+    let mut harness = harness_with(vec![parent_call("p1", "caller")], enabled());
+    harness.register_tool(Leaf::new("leaf"));
+    harness.register_tool(Arc::new(caller));
+
+    let recorder = EventRecorder::new();
+    run(&harness, &recorder).await.expect("run succeeds");
+
+    let sizes = recorder
+        .events()
+        .into_iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolCompleted {
+                call_id,
+                input_bytes,
+                output_bytes,
+                input,
+                ..
+            } if call_id.as_str() == "p1/1" => Some((input_bytes, output_bytes, input)),
+            _ => None,
+        })
+        .expect("the nested call completed");
+    // `{"n":7}` is 7 bytes and `leaf-out` is 8; no content is captured.
+    assert_eq!(sizes, (Some(7), Some(8), None));
+}
+
+#[tokio::test]
 async fn nested_calls_are_summarised_in_parent_metadata_not_the_transcript() {
     let caller = Caller::new(
         "caller",
