@@ -120,6 +120,13 @@ pub enum TurnObservation {
         input: Option<Value>,
         /// Result, only with explicit capture consent.
         output: Option<Value>,
+        /// Size in bytes of the serialized arguments, set on completion.
+        /// Reported whatever the capture consent: a size is not content.
+        input_bytes: Option<u64>,
+        /// Size in bytes of the result text the model is shown, set on
+        /// completion. Reported whatever the capture consent, and equal to the
+        /// Langfuse exporter's `output_bytes` for the same call.
+        output_bytes: Option<u64>,
     },
 }
 /// Synchronous, nonblocking host callback. Queue export work in the host.
@@ -227,38 +234,61 @@ impl EventListener for ObserverScope {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(run_id.to_string());
         }
-        let (call_id, name, failed, duration_ms, input, output) = match &record.event {
-            AgentEvent::ToolStarted {
-                call_id,
-                tool_name,
-                input,
-                ..
-            } => (call_id, tool_name, None, None, self.payload(input), None),
-            AgentEvent::ToolCompleted {
-                call_id,
-                tool_name,
-                error,
-                duration_ms,
-                input,
-                output,
-                ..
-            } => (
-                call_id,
-                tool_name,
-                Some(error.is_some()),
-                *duration_ms,
-                self.payload(input),
-                self.payload(output),
-            ),
-            AgentEvent::ToolFailed {
-                call_id,
-                tool_name,
-                duration_ms,
-                ..
-            } => (call_id, tool_name, Some(true), *duration_ms, None, None),
-            // Deltas, errors, metadata, and custom events can contain payloads.
-            _ => return,
-        };
+        let (call_id, name, failed, duration_ms, input, output, input_bytes, output_bytes) =
+            match &record.event {
+                AgentEvent::ToolStarted {
+                    call_id,
+                    tool_name,
+                    input,
+                    ..
+                } => (
+                    call_id,
+                    tool_name,
+                    None,
+                    None,
+                    self.payload(input),
+                    None,
+                    None,
+                    None,
+                ),
+                AgentEvent::ToolCompleted {
+                    call_id,
+                    tool_name,
+                    error,
+                    duration_ms,
+                    input,
+                    output,
+                    input_bytes,
+                    output_bytes,
+                    ..
+                } => (
+                    call_id,
+                    tool_name,
+                    Some(error.is_some()),
+                    *duration_ms,
+                    self.payload(input),
+                    self.payload(output),
+                    *input_bytes,
+                    *output_bytes,
+                ),
+                AgentEvent::ToolFailed {
+                    call_id,
+                    tool_name,
+                    duration_ms,
+                    ..
+                } => (
+                    call_id,
+                    tool_name,
+                    Some(true),
+                    *duration_ms,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                // Deltas, errors, metadata, and custom events can contain payloads.
+                _ => return,
+            };
         self.observer.on_event(&TurnObservation::Tool {
             run_id: self.run_id(),
             call_id: call_id.to_string(),
@@ -267,6 +297,8 @@ impl EventListener for ObserverScope {
             duration_ms,
             input,
             output,
+            input_bytes,
+            output_bytes,
         });
     }
 }

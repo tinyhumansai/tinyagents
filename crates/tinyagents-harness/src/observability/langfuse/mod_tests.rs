@@ -240,6 +240,7 @@ fn populates_generation_and_tool_io_when_captured() {
                         input: Some(json!({ "query": "weather" })),
                         output: Some(json!("sunny")),
                         duration_ms: Some(250),
+                        input_bytes: Some(19),
                         output_bytes: Some(5),
                         error: None,
                         metadata: None,
@@ -274,6 +275,7 @@ fn populates_generation_and_tool_io_when_captured() {
     assert_eq!(tool["body"]["endTime"], iso_ms(1_704_067_199_750));
     // Result size rides metadata even though this fixture also captured output.
     assert_eq!(tool["body"]["metadata"]["output_bytes"], 5);
+    assert_eq!(tool["body"]["metadata"]["input_bytes"], 19);
 
     // Both the generation and the tool span nest under the run's span, which
     // itself sits directly under the trace — the LangChain run-tree shape.
@@ -344,6 +346,7 @@ fn call_scoped_observation_ids_are_unique_per_trace() {
                             input: None,
                             output: None,
                             duration_ms: None,
+                            input_bytes: None,
                             output_bytes: None,
                             error: None,
                             metadata: None,
@@ -402,6 +405,7 @@ fn nested_tool_span_nests_under_its_parent_call_span() {
         input: None,
         output: None,
         duration_ms: None,
+        input_bytes: None,
         output_bytes: None,
         error: None,
         metadata: None,

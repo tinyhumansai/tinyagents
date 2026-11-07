@@ -148,6 +148,7 @@ fn agent_latency_metrics_include_model_tool_and_run_elapsed() {
                 input: None,
                 output: None,
                 duration_ms: None,
+                input_bytes: None,
                 output_bytes: None,
                 error: None,
                 metadata: None,

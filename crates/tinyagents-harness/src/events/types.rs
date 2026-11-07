@@ -289,6 +289,12 @@ pub enum AgentEvent {
         /// events serialized before this field existed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
+        /// Size, in bytes, of the serialized arguments the tool was invoked
+        /// with. Present even in payload-free mode (unlike `input`), so a host
+        /// can attribute argument cost without capturing the body. `None` for
+        /// older events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_bytes: Option<u64>,
         /// Size, in bytes, of the tool's textual result content. Present even in
         /// payload-free mode (unlike `output`), so an exporter can show result
         /// size without capturing the body. `None` for older events.

@@ -718,6 +718,7 @@ fn observation_event(
             input,
             output,
             duration_ms,
+            input_bytes,
             output_bytes,
             error,
             // The tool's host-only result metadata (B2) is not exported: the
@@ -740,8 +741,13 @@ fn observation_event(
             // overwrites earlier tool spans onto the newest trace. Namespace with
             // the per-trace id; keep the raw call_id in metadata for correlation.
             let mut tool_metadata = with_call_id(metadata.clone(), call_id.as_str());
-            if let (Some(map), Some(bytes)) = (tool_metadata.as_object_mut(), output_bytes) {
-                map.insert("output_bytes".into(), json!(bytes));
+            if let Some(map) = tool_metadata.as_object_mut() {
+                if let Some(bytes) = input_bytes {
+                    map.insert("input_bytes".into(), json!(bytes));
+                }
+                if let Some(bytes) = output_bytes {
+                    map.insert("output_bytes".into(), json!(bytes));
+                }
             }
             json!({
                 "id": obs.event_id.as_str(),
