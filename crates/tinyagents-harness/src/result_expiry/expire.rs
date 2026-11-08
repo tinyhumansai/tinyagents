@@ -47,11 +47,20 @@ pub fn expire_tool_results(messages: &mut [Message], policy: &ToolResultExpiryPo
             continue;
         }
         let body = messages[index].text();
-        if is_note(&body) {
+        let call = call_for_result(messages, index);
+        let name = call
+            .map(effective_call_name)
+            .unwrap_or_else(|| UNKNOWN_TOOL.to_string());
+        if is_note(&body, &name) {
             continue;
         }
-        let name = effective_tool_name(messages, index);
-        if policy.exempt_tools.iter().any(|exempt| exempt == &name) {
+        // A registered tool that is itself named like a wrapper keeps its own
+        // name, and a repaired call runs as its target, so either name exempts.
+        if policy
+            .exempt_tools
+            .iter()
+            .any(|exempt| exempt == &name || call.is_some_and(|call| exempt == &call.name))
+        {
             continue;
         }
         let note = note_for(&name, &body);
@@ -104,22 +113,22 @@ pub(crate) fn call_for_result(messages: &[Message], index: usize) -> Option<&Too
     nth.or_else(|| matching.next_back())
 }
 
-/// The name of the tool that actually ran for the result at `index`: the
-/// target a pseudo `tool_call` wrapper was repaired to, else the called name.
+/// The name of the tool a call ran as: the target a pseudo `tool_call` wrapper
+/// resolves to, else the called name.
 pub(crate) fn effective_call_name(call: &ToolCall) -> String {
-    if crate::agent_loop::tool_call_wrapper::is_wrapper_name(&call.name)
-        && let Some((target, _)) =
-            crate::agent_loop::tool_call_wrapper::unwrap_wrapped_call(&call.arguments, &|_| true)
-    {
-        return target;
-    }
-    call.name.clone()
+    effective_call(call).0
 }
 
-fn effective_tool_name(messages: &[Message], index: usize) -> String {
-    call_for_result(messages, index)
-        .map(effective_call_name)
-        .unwrap_or_else(|| UNKNOWN_TOOL.to_string())
+/// The tool name and arguments a call ran with: a pseudo `tool_call` wrapper is
+/// read as the call it wraps, any other call as itself.
+pub(crate) fn effective_call(call: &ToolCall) -> (String, serde_json::Value) {
+    if crate::agent_loop::tool_call_wrapper::is_wrapper_name(&call.name)
+        && let Some(inner) =
+            crate::agent_loop::tool_call_wrapper::unwrap_wrapped_call(&call.arguments, &|_| true)
+    {
+        return inner;
+    }
+    (call.name.clone(), call.arguments.clone())
 }
 
 /// `[used <tool>: <first 120 chars of body on one line>]`, with ` …` before the
@@ -136,17 +145,16 @@ fn note_for(tool: &str, body: &str) -> String {
     format!("[used {tool}: {head}{cut}]")
 }
 
-/// Slack over the note head for the tool name and the `[used ` / ` …]` frame.
-const NOTE_FRAME_CHARS: usize = 128;
-
-/// Whether `body` is a note this module wrote. A note is one line no longer
-/// than its head plus the frame, so a large body that merely starts with
+/// Whether `body` is a note this module wrote for `tool`: one line, no longer
+/// than `[used <tool>: <head> …]`, so a large body that merely starts with
 /// `[used ` and ends with `]` is still expired.
-fn is_note(body: &str) -> bool {
+fn is_note(body: &str, tool: &str) -> bool {
+    // `[used ` + tool + `: ` + head + ` …]`.
+    let longest = "[used ".len() + tool.chars().count() + ": ".len() + EXPIRY_NOTE_CHARS + 3;
     body.starts_with("[used ")
         && body.ends_with(']')
         && !body.contains('\n')
-        && body.chars().count() <= EXPIRY_NOTE_CHARS + NOTE_FRAME_CHARS
+        && body.chars().count() <= longest
 }
 
 #[cfg(test)]

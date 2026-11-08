@@ -90,10 +90,12 @@ fn collapsed_text(
         return None;
     }
     let call = crate::result_expiry::call_for_result(messages, index)?;
-    if call.name != TOOL_SEARCH_NAME {
+    // A search wrapped in a pseudo `tool_call` is read as the search it ran.
+    let (name, arguments) = crate::result_expiry::effective_call(call);
+    if name != TOOL_SEARCH_NAME {
         return None;
     }
-    let query = serde_json::to_string(search_query(&call.arguments)).ok()?;
+    let query = serde_json::to_string(search_query(&arguments)).ok()?;
 
     let called = names_called(&messages[index + 1..]);
     let used: Vec<&Value> = hits

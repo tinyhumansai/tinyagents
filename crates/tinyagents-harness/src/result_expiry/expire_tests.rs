@@ -245,3 +245,40 @@ fn an_oversized_body_shaped_like_a_note_still_expires() {
     assert_eq!(expire_tool_results(&mut messages, &on(0)), 1);
     assert!(tool_text(&messages, "call-1").chars().count() < 400);
 }
+
+#[test]
+fn a_note_for_a_long_tool_name_is_recognised_and_not_rewritten_again() {
+    let tool = "t".repeat(120);
+    let mut messages = turn(1, &tool, &"x".repeat(500));
+    messages.push(Message::user("now"));
+    assert_eq!(expire_tool_results(&mut messages, &on(0)), 1);
+    let first = tool_text(&messages, "call-1");
+    assert_eq!(expire_tool_results(&mut messages, &on(0)), 0);
+    assert_eq!(tool_text(&messages, "call-1"), first);
+}
+
+#[test]
+fn a_tool_named_like_a_wrapper_is_exempt_under_its_own_name() {
+    let wrapper = Message::Assistant(AssistantMessage {
+        id: None,
+        content: Vec::new(),
+        tool_calls: vec![ToolCall::new(
+            "w1",
+            "tool_call",
+            json!({"name": "lookup", "arguments": {}}),
+        )],
+        usage: None,
+        origin: None,
+    });
+    let mut messages = vec![
+        Message::user("q"),
+        wrapper,
+        Message::tool("w1", "kept body"),
+        Message::user("now"),
+    ];
+    let policy = ToolResultExpiryPolicy {
+        exempt_tools: vec!["tool_call".to_string()],
+        ..on(0)
+    };
+    assert_eq!(expire_tool_results(&mut messages, &policy), 0);
+}

@@ -5,8 +5,9 @@ use tinyinference_llm::message::{ContentBlock, Message};
 /// Removes reasoning blocks from every assistant message that precedes the
 /// last user message and returns how many blocks it removed.
 ///
-/// A user message that directly follows a tool result is a tool's follow-up
-/// content, not a new user turn, so it does not end the current turn.
+/// A user message in a run of user messages that directly follows a tool
+/// result is a tool's follow-up content (a batch can append several), not a new
+/// user turn, so it does not end the current turn.
 ///
 /// The current turn, the messages after the last user message, is left
 /// untouched, because a provider that signs thinking (Anthropic) or requires
@@ -16,8 +17,7 @@ use tinyinference_llm::message::{ContentBlock, Message};
 pub fn drop_past_turn_reasoning(messages: &mut Vec<Message>) -> usize {
     // With no user message the whole history is the current turn.
     let Some(current_turn_start) = messages.iter().enumerate().rposition(|(at, message)| {
-        matches!(message, Message::User(_))
-            && !(at > 0 && matches!(messages[at - 1], Message::Tool(_)))
+        matches!(message, Message::User(_)) && !is_tool_follow_up(messages, at)
     }) else {
         return 0;
     };
@@ -48,6 +48,16 @@ pub fn drop_past_turn_reasoning(messages: &mut Vec<Message>) -> usize {
         );
     }
     dropped
+}
+
+/// Whether the user message at `at` belongs to the follow-ups appended after a
+/// tool result: the nearest earlier non-user message is a tool result.
+fn is_tool_follow_up(messages: &[Message], at: usize) -> bool {
+    messages[..at]
+        .iter()
+        .rev()
+        .find(|message| !matches!(message, Message::User(_)))
+        .is_some_and(|message| matches!(message, Message::Tool(_)))
 }
 
 fn is_reasoning(block: &ContentBlock) -> bool {

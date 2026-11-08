@@ -391,3 +391,23 @@ async fn a_duplicate_call_id_is_matched_to_its_own_search_call() {
     assert!(text_at(&messages, 3).contains("price of a ticker"));
     assert_eq!(text_at(&messages, 2), "file body");
 }
+
+#[tokio::test]
+async fn a_search_wrapped_in_a_tool_call_collapses_like_a_direct_one() {
+    let mut messages = vec![
+        Message::user("start"),
+        assistant_calling(vec![ToolCall::new(
+            "s1",
+            "tool_call",
+            json!({"name": "tool_search", "arguments": {"query": "price of a ticker"}}),
+        )]),
+        Message::tool("s1", search_result("price of a ticker").await),
+        Message::assistant("done"),
+    ];
+    assert_eq!(
+        collapse_search_results(&mut messages, &PriorSearchResults::default()),
+        1
+    );
+    assert!(text_at(&messages, 2).contains("price of a ticker"));
+    assert!(text_at(&messages, 2).contains("none used"));
+}

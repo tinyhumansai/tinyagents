@@ -165,3 +165,23 @@ fn a_tool_follow_up_user_message_does_not_end_the_current_turn() {
 
     assert_eq!(assistant_blocks(&messages)[0].len(), 1);
 }
+
+#[test]
+fn every_follow_up_of_a_tool_batch_stays_in_the_current_turn() {
+    let mut messages = vec![
+        Message::user("ask"),
+        assistant(
+            vec![thinking("why", Some("sig"))],
+            vec![
+                ToolCall::new("a", "lookup", json!({})),
+                ToolCall::new("b", "lookup", json!({})),
+            ],
+        ),
+        Message::tool("a", "ra"),
+        Message::tool("b", "rb"),
+        Message::user("follow-up a"),
+        Message::user("follow-up b"),
+    ];
+
+    assert_eq!(drop_past_turn_reasoning(&mut messages), 0);
+}
