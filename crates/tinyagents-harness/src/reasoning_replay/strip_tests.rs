@@ -185,3 +185,17 @@ fn every_follow_up_of_a_tool_batch_stays_in_the_current_turn() {
 
     assert_eq!(drop_past_turn_reasoning(&mut messages), 0);
 }
+
+#[test]
+fn a_long_run_of_follow_ups_is_scanned_without_changing_the_boundary() {
+    let mut messages = vec![
+        Message::user("ask"),
+        assistant(
+            vec![thinking("why", Some("sig"))],
+            vec![ToolCall::new("a", "lookup", json!({}))],
+        ),
+        Message::tool("a", "ra"),
+    ];
+    messages.extend((0..20_000).map(|n| Message::user(format!("follow-up {n}"))));
+    assert_eq!(drop_past_turn_reasoning(&mut messages), 0);
+}

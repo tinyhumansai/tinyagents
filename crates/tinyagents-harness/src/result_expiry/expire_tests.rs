@@ -282,3 +282,40 @@ fn a_tool_named_like_a_wrapper_is_exempt_under_its_own_name() {
     };
     assert_eq!(expire_tool_results(&mut messages, &policy), 0);
 }
+
+#[test]
+fn a_tools_own_note_shaped_output_is_still_replaced_by_a_note_for_that_tool() {
+    let mut messages = turn(1, "lookup", "[used other: cached]");
+    messages.push(Message::user("now"));
+    assert_eq!(expire_tool_results(&mut messages, &on(0)), 1);
+    assert_eq!(
+        tool_text(&messages, "call-1"),
+        "[used lookup: [used other: cached]]"
+    );
+    assert_eq!(expire_tool_results(&mut messages, &on(0)), 0);
+}
+
+#[test]
+fn a_long_wrapped_target_name_is_bounded_in_the_note() {
+    let long = "n".repeat(400);
+    let wrapped = Message::Assistant(AssistantMessage {
+        id: None,
+        content: Vec::new(),
+        tool_calls: vec![ToolCall::new(
+            "w1",
+            "tool_call",
+            json!({"name": long, "arguments": {}}),
+        )],
+        usage: None,
+        origin: None,
+    });
+    let mut messages = vec![
+        Message::user("q"),
+        wrapped,
+        Message::tool("w1", "short"),
+        Message::user("now"),
+    ];
+    assert_eq!(expire_tool_results(&mut messages, &on(0)), 1);
+    assert!(tool_text(&messages, "w1").chars().count() < 100);
+    assert_eq!(expire_tool_results(&mut messages, &on(0)), 0);
+}

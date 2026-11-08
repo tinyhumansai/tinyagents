@@ -9,6 +9,12 @@ use tinyinference_llm::message::{ContentBlock, Message};
 /// result is a tool's follow-up content (a batch can append several), not a new
 /// user turn, so it does not end the current turn.
 ///
+/// Known limit: a user prompt that directly follows a tool row (a turn a
+/// terminating tool ended without an assistant message) is read as a follow-up
+/// too. Messages carry no provenance to tell them apart, and wrongly dropping
+/// an active loop's signed reasoning fails the request, while keeping a stale
+/// turn's reasoning only costs tokens, so the check errs toward keeping.
+///
 /// The current turn, the messages after the last user message, is left
 /// untouched, because a provider that signs thinking (Anthropic) or requires
 /// `reasoning_content` back (DeepSeek) validates it across a tool loop. An
@@ -16,9 +22,7 @@ use tinyinference_llm::message::{ContentBlock, Message};
 /// reasoning) is removed, since providers reject an empty assistant message.
 pub fn drop_past_turn_reasoning(messages: &mut Vec<Message>) -> usize {
     // With no user message the whole history is the current turn.
-    let Some(current_turn_start) = messages.iter().enumerate().rposition(|(at, message)| {
-        matches!(message, Message::User(_)) && !is_tool_follow_up(messages, at)
-    }) else {
+    let Some(current_turn_start) = current_turn_start(messages) else {
         return 0;
     };
     let mut dropped = 0;
@@ -50,14 +54,29 @@ pub fn drop_past_turn_reasoning(messages: &mut Vec<Message>) -> usize {
     dropped
 }
 
-/// Whether the user message at `at` belongs to the follow-ups appended after a
-/// tool result: the nearest earlier non-user message is a tool result.
-fn is_tool_follow_up(messages: &[Message], at: usize) -> bool {
-    messages[..at]
-        .iter()
-        .rev()
-        .find(|message| !matches!(message, Message::User(_)))
-        .is_some_and(|message| matches!(message, Message::Tool(_)))
+/// The index of the last user message that starts a turn, found in one
+/// reverse pass. A run of user messages directly after a tool result is the
+/// tool's follow-ups, so the whole run is skipped; any other run ends at the
+/// turn's first message.
+fn current_turn_start(messages: &[Message]) -> Option<usize> {
+    let mut end = messages.len();
+    while end > 0 {
+        if !matches!(messages[end - 1], Message::User(_)) {
+            end -= 1;
+            continue;
+        }
+        let last = end - 1;
+        let mut start = last;
+        while start > 0 && matches!(messages[start - 1], Message::User(_)) {
+            start -= 1;
+        }
+        if start > 0 && matches!(messages[start - 1], Message::Tool(_)) {
+            end = start;
+        } else {
+            return Some(last);
+        }
+    }
+    None
 }
 
 fn is_reasoning(block: &ContentBlock) -> bool {

@@ -48,8 +48,9 @@ impl PriorSearchResults {
 pub fn collapse_search_results(messages: &mut [Message], prior: &PriorSearchResults) -> usize {
     let mut unclaimed = prior.0.clone();
     let mut rewritten = 0;
+    let calls = crate::result_expiry::call_index(messages);
     for index in 0..messages.len() {
-        let Some(collapsed) = collapsed_text(messages, index, &mut unclaimed) else {
+        let Some(collapsed) = collapsed_text(messages, &calls, index, &mut unclaimed) else {
             continue;
         };
         if let Message::Tool(tool) = &mut messages[index] {
@@ -73,6 +74,7 @@ fn parsed_answer(message: &Message) -> Option<((String, String), Vec<Value>)> {
 
 fn collapsed_text(
     messages: &[Message],
+    calls: &[Option<(usize, usize)>],
     index: usize,
     unclaimed: &mut BTreeMap<(String, String), usize>,
 ) -> Option<String> {
@@ -89,7 +91,7 @@ fn collapsed_text(
     if tool.trusted_verbatim {
         return None;
     }
-    let call = crate::result_expiry::call_for_result(messages, index)?;
+    let call = crate::result_expiry::call_for_result(messages, calls, index)?;
     // A search wrapped in a pseudo `tool_call` is read as the search it ran.
     let (name, arguments) = crate::result_expiry::effective_call(call);
     if name != TOOL_SEARCH_NAME {

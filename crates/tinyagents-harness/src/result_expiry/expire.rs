@@ -31,6 +31,7 @@ pub fn expire_tool_results(messages: &mut [Message], policy: &ToolResultExpiryPo
     }
     let mut expired = 0;
     let mut age = 0usize;
+    let calls = call_index(messages);
     // Walk newest to oldest so the age is a running count of user messages.
     for index in (0..messages.len()).rev() {
         if matches!(messages[index], Message::User(_)) {
@@ -47,7 +48,7 @@ pub fn expire_tool_results(messages: &mut [Message], policy: &ToolResultExpiryPo
             continue;
         }
         let body = messages[index].text();
-        let call = call_for_result(messages, index);
+        let call = call_for_result(messages, &calls, index);
         let name = call
             .map(effective_call_name)
             .unwrap_or_else(|| UNKNOWN_TOOL.to_string());
@@ -80,37 +81,57 @@ pub fn expire_tool_results(messages: &mut [Message], policy: &ToolResultExpiryPo
     expired
 }
 
-/// The assistant call that produced the tool result at `index`.
+/// For every message, where the call that produced it sits: the index of the
+/// assistant message and of the call within it. `None` for any message that is
+/// not a tool result with a call. Built in one forward pass.
 ///
-/// The call comes from the nearest earlier assistant message that holds one
-/// with the result's id. When that message repeats the id, the result is
-/// paired by occurrence: the n-th result carrying the id answers the n-th call
-/// carrying it, so duplicate provider ids cannot point two results at one call.
-pub(crate) fn call_for_result(messages: &[Message], index: usize) -> Option<&ToolCall> {
-    let Message::Tool(result) = messages.get(index)? else {
-        return None;
-    };
-    let id = result.tool_call_id.as_str();
-    let (assistant_at, assistant) =
-        messages[..index]
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(at, message)| match message {
-                Message::Assistant(assistant)
-                    if assistant.tool_calls.iter().any(|call| call.id == id) =>
-                {
-                    Some((at, assistant))
+/// A result pairs with the nearest earlier assistant message holding a call
+/// with its id. When that message repeats the id, the n-th result carrying the
+/// id answers the n-th call carrying it (the last call once they run out), so
+/// duplicate provider ids cannot point two results at one call.
+pub(crate) fn call_index(messages: &[Message]) -> Vec<Option<(usize, usize)>> {
+    use std::collections::HashMap;
+    // id -> (assistant index, call positions with that id, results seen so far)
+    let mut open: HashMap<&str, (usize, Vec<usize>, usize)> = HashMap::new();
+    let mut index = vec![None; messages.len()];
+    for (at, message) in messages.iter().enumerate() {
+        match message {
+            Message::Assistant(assistant) => {
+                let mut fresh: HashMap<&str, Vec<usize>> = HashMap::new();
+                for (position, call) in assistant.tool_calls.iter().enumerate() {
+                    fresh.entry(call.id.as_str()).or_default().push(position);
                 }
-                _ => None,
-            })?;
-    let occurrence = messages[assistant_at + 1..index]
-        .iter()
-        .filter(|message| matches!(message, Message::Tool(tool) if tool.tool_call_id == id))
-        .count();
-    let mut matching = assistant.tool_calls.iter().filter(|call| call.id == id);
-    let nth = matching.clone().nth(occurrence);
-    nth.or_else(|| matching.next_back())
+                for (id, positions) in fresh {
+                    open.insert(id, (at, positions, 0));
+                }
+            }
+            Message::Tool(result) => {
+                if let Some((assistant_at, positions, seen)) =
+                    open.get_mut(result.tool_call_id.as_str())
+                {
+                    let position = positions[(*seen).min(positions.len() - 1)];
+                    *seen += 1;
+                    index[at] = Some((*assistant_at, position));
+                }
+            }
+            _ => {}
+        }
+    }
+    index
+}
+
+/// The assistant call that produced the tool result at `index`, using the
+/// pairing [`call_index`] built.
+pub(crate) fn call_for_result<'a>(
+    messages: &'a [Message],
+    calls: &[Option<(usize, usize)>],
+    index: usize,
+) -> Option<&'a ToolCall> {
+    let (assistant_at, position) = (*calls.get(index)?)?;
+    match messages.get(assistant_at)? {
+        Message::Assistant(assistant) => assistant.tool_calls.get(position),
+        _ => None,
+    }
 }
 
 /// The name of the tool a call ran as: the target a pseudo `tool_call` wrapper
@@ -134,6 +155,7 @@ pub(crate) fn effective_call(call: &ToolCall) -> (String, serde_json::Value) {
 /// `[used <tool>: <first 120 chars of body on one line>]`, with ` …` before the
 /// bracket when the body was cut.
 fn note_for(tool: &str, body: &str) -> String {
+    let tool = bounded_name(tool);
     let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = flat.chars();
     let head: String = chars.by_ref().take(EXPIRY_NOTE_CHARS).collect();
@@ -145,13 +167,23 @@ fn note_for(tool: &str, body: &str) -> String {
     format!("[used {tool}: {head}{cut}]")
 }
 
-/// Whether `body` is a note this module wrote for `tool`: one line, no longer
-/// than `[used <tool>: <head> …]`, so a large body that merely starts with
-/// `[used ` and ends with `]` is still expired.
+/// The longest tool name a note carries, so a model-supplied wrapper target
+/// cannot make a note larger than the result it replaces.
+const NOTE_NAME_CHARS: usize = 64;
+
+fn bounded_name(tool: &str) -> String {
+    tool.chars().take(NOTE_NAME_CHARS).collect()
+}
+
+/// Whether `body` is a note this module wrote for `tool`: it opens
+/// `[used <tool>: `, is one line and is no longer than a note can be, so a
+/// large body that merely starts with `[used ` and ends with `]`, or a tool's
+/// own `[used other: ...]` output, is still expired.
 fn is_note(body: &str, tool: &str) -> bool {
-    // `[used ` + tool + `: ` + head + ` …]`.
-    let longest = "[used ".len() + tool.chars().count() + ": ".len() + EXPIRY_NOTE_CHARS + 3;
-    body.starts_with("[used ")
+    let prefix = format!("[used {}: ", bounded_name(tool));
+    // prefix + head + ` …]`.
+    let longest = prefix.chars().count() + EXPIRY_NOTE_CHARS + 3;
+    body.starts_with(&prefix)
         && body.ends_with(']')
         && !body.contains('\n')
         && body.chars().count() <= longest
