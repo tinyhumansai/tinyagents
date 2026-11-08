@@ -93,6 +93,7 @@ fn latency_metrics_correlate_started_and_completed_by_call_id() {
                 input: None,
                 output: None,
                 duration_ms: None,
+                input_bytes: None,
                 output_bytes: None,
                 error: None,
                 metadata: None,

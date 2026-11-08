@@ -21,12 +21,14 @@
 //!   description.
 
 mod bridge;
+mod collapse;
 mod embedding_cache;
 mod embedding_ranker;
 mod manifest;
 mod types;
 
 pub use bridge::{SearchAnswer, TOOL_SEARCH_NAME, answer_tool_search, bridge_schemas};
+pub use collapse::collapse_search_results;
 pub use embedding_cache::DriverEmbeddingCache;
 pub use embedding_ranker::{EmbeddingCache, EmbeddingToolRanker};
 // The BM25 arithmetic lives in `tinytools::rank` now, so a host ranks with the
@@ -34,7 +36,8 @@ pub use embedding_ranker::{EmbeddingCache, EmbeddingToolRanker};
 pub use manifest::{MANIFEST_DESCRIPTION_CHARS, first_sentence, render_manifest};
 pub use tinytools::rank::{Bm25Index, tokenize};
 pub use types::{
-    DeferredCatalog, DeferredTool, DiscoveryRankMode, RankedSearch, ToolDiscoveryPolicy,
+    DeferredCatalog, DeferredTool, DiscoveryOverrides, DiscoveryRankMode, PriorSearchResults,
+    RankedSearch, ToolDiscoveryPolicy,
 };
 
 #[cfg(test)]

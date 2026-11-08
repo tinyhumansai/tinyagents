@@ -487,13 +487,16 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             return Ok(None);
         }
         {
-            let answer = crate::tool::discover::answer_tool_search(
-                &catalog,
-                &self.policy.discovery,
-                &call.arguments,
-            )
-            .await;
-            promoted_names.extend(answer.matched_names.iter().cloned());
+            // The session's overrides decide how this answer renders and
+            // whether its matches reach the wire, so one harness serves
+            // sessions that differ.
+            let discovery = self.policy.discovery.with_overrides(&ctx.config.discovery);
+            let answer =
+                crate::tool::discover::answer_tool_search(&catalog, &discovery, &call.arguments)
+                    .await;
+            if discovery.promote_found_tools {
+                promoted_names.extend(answer.matched_names.iter().cloned());
+            }
             let ranking = answer.ranking;
             // `query` is model-supplied tool-call content, same privacy
             // class as a normal tool call's arguments, so it honors the same
@@ -706,8 +709,15 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // `tool_call_wrapper`). Retargeted before the discovery bridge and
         // every rule, hook and gate below, so each of them sees the real tool
         // name and arguments exactly as if the model had called it directly.
-        // A registered tool under a wrapper name keeps it.
-        if self.tools.dispatch(&call.name).is_none()
+        // A registered tool under a wrapper name keeps it. A session can turn
+        // the repair off (`repair_tool_call_wrapper`), leaving the wrapper to
+        // the unknown-tool corrective.
+        if ctx
+            .config
+            .discovery
+            .repair_tool_call_wrapper
+            .unwrap_or(self.policy.discovery.repair_tool_call_wrapper)
+            && self.tools.dispatch(&call.name).is_none()
             && super::tool_call_wrapper::is_wrapper_name(&call.name)
         {
             let is_callable = |name: &str| {
@@ -1641,6 +1651,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // `is_error` is a reported tool failure, distinct from execution Err.
         let duration_ms = crate::ids::now_ms().saturating_sub(prepared.started_at_ms);
         let argument_bytes = serde_json::to_vec(&prepared.call.arguments).unwrap_or_default();
+        let input_bytes = argument_bytes.len() as u64;
         let args_digest = sha2::Sha256::digest(argument_bytes)
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -1672,6 +1683,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             input: prepared.captured_input,
             output: captured_output,
             duration_ms: Some(duration_ms),
+            input_bytes: Some(input_bytes),
             output_bytes: Some(output_bytes),
             error,
             metadata: result.metadata.clone(),

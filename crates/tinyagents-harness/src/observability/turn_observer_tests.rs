@@ -292,3 +292,277 @@ async fn an_earlier_calls_first_output_is_not_reported_as_this_calls() {
         })
     ));
 }
+
+/// Runs one real tool call through the agent loop with an observer scope on the
+/// run's event stream. Returns the observations and the journal-shaped events.
+async fn run_observed_tool(
+    capture: TraceContent,
+) -> (Vec<TurnObservation>, Vec<crate::events::AgentEvent>) {
+    use crate::events::RecordingListener;
+    use crate::testkit::{FakeTool, ScriptedModel, text_response, tool_call_response};
+    use tinyinference_llm::tool::ToolCall;
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.with_model_resolver(Arc::new(crate::host::FixedModelResolver::named(
+        "mock",
+        Arc::new(ScriptedModel::new(vec![
+            tool_call_response(ToolCall::new(
+                "c1",
+                "lookup",
+                serde_json::json!({"q": "weather"}),
+            )),
+            text_response("done"),
+        ])),
+    )));
+    harness.register_tool(Arc::new(FakeTool::returning("lookup", "sunny day")));
+
+    let recorder = Arc::new(Recorder::default());
+    let scope = ObserverScope::new(recorder.clone(), capture);
+    let events = Arc::new(RecordingListener::new());
+    let ctx = RunContext::new(crate::context::RunConfig::new("sizes"), ());
+    ctx.events.subscribe(scope);
+    ctx.events.subscribe(events.clone());
+    harness
+        .invoke_in_context(
+            &(),
+            ctx,
+            vec![tinyinference_llm::message::Message::user("go")],
+        )
+        .await
+        .expect("run succeeds");
+    let observed = recorder.0.lock().unwrap().clone();
+    let journal = events.events().into_iter().map(|r| r.event).collect();
+    (observed, journal)
+}
+
+fn completed_tool_observation(seen: &[TurnObservation]) -> TurnObservation {
+    seen.iter()
+        .find(|o| {
+            matches!(
+                o,
+                TurnObservation::Tool {
+                    failed: Some(_),
+                    ..
+                }
+            )
+        })
+        .cloned()
+        .expect("a completed tool observation")
+}
+
+/// `{"q":"weather"}` is 15 bytes; `sunny day` is 9.
+const ARGUMENT_BYTES: u64 = 15;
+const RESULT_BYTES: u64 = 9;
+
+#[tokio::test]
+async fn tool_observation_carries_argument_and_result_sizes() {
+    let (seen, _) = run_observed_tool(TraceContent::Include).await;
+    let TurnObservation::Tool {
+        input_bytes,
+        output_bytes,
+        ..
+    } = completed_tool_observation(&seen)
+    else {
+        unreachable!()
+    };
+    assert_eq!(input_bytes, Some(ARGUMENT_BYTES));
+    assert_eq!(output_bytes, Some(RESULT_BYTES));
+}
+
+#[tokio::test]
+async fn tool_observation_reports_sizes_without_content_when_capture_is_off() {
+    let (seen, _) = run_observed_tool(TraceContent::MetadataOnly).await;
+    let TurnObservation::Tool {
+        input,
+        output,
+        input_bytes,
+        output_bytes,
+        ..
+    } = completed_tool_observation(&seen)
+    else {
+        unreachable!()
+    };
+    assert_eq!(input_bytes, Some(ARGUMENT_BYTES));
+    assert_eq!(output_bytes, Some(RESULT_BYTES));
+    assert!(input.is_none() && output.is_none(), "sizes are not content");
+}
+
+#[tokio::test]
+async fn tool_start_observation_has_no_sizes() {
+    let (seen, _) = run_observed_tool(TraceContent::MetadataOnly).await;
+    let start = seen
+        .iter()
+        .find(|o| matches!(o, TurnObservation::Tool { failed: None, .. }))
+        .expect("a tool start observation");
+    assert!(matches!(
+        start,
+        TurnObservation::Tool {
+            input_bytes: None,
+            output_bytes: None,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn langfuse_output_bytes_equals_the_observations() {
+    use crate::observability::AgentObservation;
+    use crate::observability::langfuse::{LangfuseClient, LangfuseTraceConfig};
+
+    let (seen, journal) = run_observed_tool(TraceContent::MetadataOnly).await;
+    let TurnObservation::Tool { output_bytes, .. } = completed_tool_observation(&seen) else {
+        unreachable!()
+    };
+    let completed = journal
+        .into_iter()
+        .find(|e| matches!(e, AgentEvent::ToolCompleted { .. }))
+        .expect("a ToolCompleted event");
+    let client =
+        LangfuseClient::proxy("https://backend.test/telemetry/langfuse/ingestion", "t").unwrap();
+    let batch = client
+        .build_ingestion_batch(
+            LangfuseTraceConfig::default(),
+            &[AgentObservation {
+                event_id: crate::ids::EventId::new("evt-1"),
+                run_id: RunId::new("sizes"),
+                parent_run_id: None,
+                root_run_id: RunId::new("sizes"),
+                offset: 0,
+                ts_ms: 1_704_067_200_000,
+                event: completed,
+            }],
+        )
+        .unwrap();
+    let span = batch["batch"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == "span-create" && e["body"]["name"] == "lookup")
+        .expect("the tool span");
+    assert_eq!(
+        span["body"]["metadata"]["output_bytes"].as_u64(),
+        output_bytes
+    );
+    assert_eq!(output_bytes, Some(RESULT_BYTES));
+}
+
+fn setup_phases(seen: &[TurnObservation]) -> Vec<(&'static str, bool, bool)> {
+    seen.iter()
+        .filter_map(|o| match o {
+            TurnObservation::Setup {
+                phase,
+                failed,
+                skipped,
+                ..
+            } => Some((phase.as_str(), *failed, *skipped)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn setup_phases_arrive_in_order_before_the_first_model_event() {
+    use crate::testkit::{ScriptedModel, text_response};
+    use std::time::Duration;
+
+    let recorder = Arc::new(Recorder::default());
+    let scope = ObserverScope::new(recorder.clone(), TraceContent::MetadataOnly);
+    // The host times its own setup, then reports each phase on the turn's scope.
+    scope.report_setup(
+        SetupPhase::TranscriptResume,
+        Duration::from_millis(12),
+        SetupOutcome::Completed,
+    );
+    scope.report_setup(
+        SetupPhase::MemoryBlock,
+        Duration::from_millis(5_000),
+        SetupOutcome::Skipped,
+    );
+    scope.report_setup(
+        SetupPhase::Other("warm_cache"),
+        Duration::from_millis(3),
+        SetupOutcome::Failed,
+    );
+
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.with_model_resolver(Arc::new(crate::host::FixedModelResolver::named(
+        "mock",
+        Arc::new(ScriptedModel::new(vec![text_response("done")])),
+    )));
+    harness.push_model_middleware(Arc::new(InstalledObserverMiddleware(scope.clone())));
+    let ctx = RunContext::new(crate::context::RunConfig::new("setup"), ());
+    harness
+        .invoke_in_context(
+            &(),
+            ctx,
+            vec![tinyinference_llm::message::Message::user("go")],
+        )
+        .await
+        .expect("run succeeds");
+
+    let seen = recorder.0.lock().unwrap().clone();
+    assert_eq!(
+        setup_phases(&seen),
+        vec![
+            ("transcript_resume", false, false),
+            ("memory_block", false, true),
+            ("warm_cache", true, false),
+        ],
+        "one event per phase, in the order reported"
+    );
+    let first_model = seen
+        .iter()
+        .position(|o| matches!(o, TurnObservation::Model { .. }))
+        .expect("a model observation");
+    assert_eq!(first_model, 3, "every setup event precedes the first model");
+    assert!(matches!(
+        &seen[1],
+        TurnObservation::Setup {
+            duration_ms: 5_000,
+            run_id: None,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn setup_reported_through_the_task_local_scope_reaches_the_host() {
+    use std::time::Duration;
+
+    let recorder = Arc::new(Recorder::default());
+    let scope = ObserverScope::new(recorder.clone(), TraceContent::MetadataOnly);
+    // No scope: reporting is a quiet no-op.
+    report_setup(
+        SetupPhase::AgentOpen,
+        Duration::ZERO,
+        SetupOutcome::Completed,
+    );
+    with_observer(scope, async {
+        report_setup(
+            SetupPhase::PromptRefresh,
+            Duration::from_millis(7),
+            SetupOutcome::Completed,
+        );
+    })
+    .await;
+    let seen = recorder.0.lock().unwrap().clone();
+    assert_eq!(setup_phases(&seen), vec![("prompt_refresh", false, false)]);
+}
+
+#[test]
+fn setup_duration_saturates_instead_of_wrapping() {
+    let recorder = Arc::new(Recorder::default());
+    let scope = ObserverScope::new(recorder.clone(), TraceContent::MetadataOnly);
+    scope.report_setup(
+        SetupPhase::AgentOpen,
+        std::time::Duration::MAX,
+        SetupOutcome::Completed,
+    );
+    assert!(matches!(
+        &recorder.0.lock().unwrap()[0],
+        TurnObservation::Setup {
+            duration_ms: u64::MAX,
+            ..
+        }
+    ));
+}

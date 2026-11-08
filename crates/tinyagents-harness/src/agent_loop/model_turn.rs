@@ -33,7 +33,18 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         if !tool_schemas.is_empty() {
             prompt.push_tools_segment("tools", tool_schemas.to_vec());
         }
-        let mut request = prompt.build(messages[system_end..].to_vec());
+        let mut history = messages[system_end..].to_vec();
+        // Omit completed turns' reasoning from the request only: `messages`,
+        // and so the stored transcript, keeps every block. The current turn's
+        // stays, since a provider validates it across the tool loop.
+        let replay = ctx
+            .config
+            .replay_reasoning
+            .unwrap_or(self.policy.replay_reasoning);
+        if replay == crate::reasoning_replay::ReasoningReplay::CurrentTurn {
+            crate::reasoning_replay::drop_past_turn_reasoning(&mut history);
+        }
+        let mut request = prompt.build(history);
         mark_empty_frozen_prefix(&mut request, ctx.frozen_system_prefix_len);
         // Provider adapters that maintain an external conversation (for
         // example Claude Code's resumable CLI session) need the caller's

@@ -3617,6 +3617,17 @@ async fn one_file_turn(
     retain: bool,
     turn: usize,
 ) -> (Arc<Driver>, Option<ToolSnapshot>) {
+    file_turn(locator, sent, retain, false, turn).await
+}
+
+/// [`one_file_turn`] with the retired-tool pruning option under test control.
+async fn file_turn(
+    locator: Arc<dyn TranscriptLocator>,
+    sent: ToolSnapshot,
+    retain: bool,
+    prune: bool,
+    turn: usize,
+) -> (Arc<Driver>, Option<ToolSnapshot>) {
     // The test codec decodes every stored row as a user message.
     let mut history: Vec<Message> = (0..turn * 2).map(|_| Message::user("x")).collect();
     history.extend([Message::user("x"), Message::assistant("x")]);
@@ -3626,6 +3637,7 @@ async fn one_file_turn(
         .codec(Arc::new(Codec::default()))
         .hooks(hook)
         .retain_recorded_tools(retain)
+        .prune_retired_tools(prune)
         .session(locator, recorded_tools_session(), meta())
         .build()
         .unwrap();
@@ -3689,6 +3701,74 @@ async fn a_resumed_session_keeps_tools_the_new_process_did_not_rebuild() {
         .unwrap();
     assert_eq!(
         tool_names(&ToolSnapshot::from_json(&stored).unwrap()),
+        vec!["alpha", "beta"]
+    );
+}
+
+/// The declarations a transcript's `tools` record currently holds.
+fn stored_tool_names(locator: &dyn TranscriptLocator) -> Vec<String> {
+    let stored = read(locator, &recorded_tools_stem(locator)).tools.unwrap();
+    tool_names(&ToolSnapshot::from_json(&stored).unwrap())
+}
+
+#[tokio::test]
+async fn pruning_drops_a_recorded_tool_the_host_no_longer_offers() {
+    let locator = memory();
+    file_turn(locator.clone(), two_tools(), true, true, 0).await;
+
+    // A host that has retired `beta`.
+    let (driver, recorded) = file_turn(locator.clone(), tools("alpha"), true, true, 1).await;
+
+    assert_eq!(
+        tool_names(&driver.requests.lock().unwrap()[0].tools),
+        vec!["alpha"]
+    );
+    assert_eq!(tool_names(&recorded.unwrap()), vec!["alpha"]);
+    assert_eq!(stored_tool_names(locator.as_ref()), vec!["alpha"]);
+}
+
+#[tokio::test]
+async fn pruning_keeps_a_recorded_tool_still_in_the_deferred_catalogue() {
+    let locator = memory();
+    file_turn(locator.clone(), two_tools(), true, true, 0).await;
+
+    // `beta` is no longer declared directly but the host still offers it
+    // through discovery.
+    let live = tools("alpha").with_offered_names(["beta"]);
+    let (driver, recorded) = file_turn(locator.clone(), live, true, true, 1).await;
+
+    assert_eq!(
+        tool_names(&driver.requests.lock().unwrap()[0].tools),
+        vec!["alpha", "beta"]
+    );
+    assert_eq!(tool_names(&recorded.unwrap()), vec!["alpha", "beta"]);
+    assert_eq!(stored_tool_names(locator.as_ref()), vec!["alpha", "beta"]);
+}
+
+#[tokio::test]
+async fn pruning_leaves_tools_the_host_re_supplies_unchanged() {
+    let locator = memory();
+    file_turn(locator.clone(), two_tools(), true, true, 0).await;
+
+    let (driver, recorded) = file_turn(locator.clone(), two_tools(), true, true, 1).await;
+
+    assert_eq!(
+        tool_names(&driver.requests.lock().unwrap()[0].tools),
+        vec!["alpha", "beta"]
+    );
+    assert_eq!(tool_names(&recorded.unwrap()), vec!["alpha", "beta"]);
+    assert_eq!(stored_tool_names(locator.as_ref()), vec!["alpha", "beta"]);
+}
+
+#[tokio::test]
+async fn retention_without_pruning_still_keeps_a_retired_tool() {
+    let locator = memory();
+    file_turn(locator.clone(), two_tools(), true, false, 0).await;
+
+    let (driver, _) = file_turn(locator.clone(), tools("alpha"), true, false, 1).await;
+
+    assert_eq!(
+        tool_names(&driver.requests.lock().unwrap()[0].tools),
         vec!["alpha", "beta"]
     );
 }

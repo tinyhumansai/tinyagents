@@ -737,6 +737,8 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     .await;
                 let output = result.output_for_llm(options.prefer_markdown);
                 let output_bytes = output.len() as u64;
+                let input_bytes =
+                    serde_json::to_vec(&call.arguments).map_or(0, |bytes| bytes.len() as u64);
                 let duration_ms = crate::ids::now_ms().saturating_sub(started_at_ms);
                 guard.settle();
                 ctx.emit(AgentEvent::ToolCompleted {
@@ -750,6 +752,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                         .tool_io
                         .then(|| Value::String(output.clone())),
                     duration_ms: Some(duration_ms),
+                    input_bytes: Some(input_bytes),
                     output_bytes: Some(output_bytes),
                     error: result.is_error.then_some(output),
                     metadata: result.metadata.clone(),

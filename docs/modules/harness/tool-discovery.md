@@ -95,6 +95,80 @@ transcript tool-change patch; resume restores only tools still admitted by
 the current host allow-list. A new match changes the provider's tools prefix
 once. Later requests keep that prefix until another tool is discovered.
 
+#### Keeping found tools in the result (`promote_found_tools`)
+
+Promotion is a cache trade-off. The `tools` list sits at the front of the
+prompt, so every promotion changes the provider's cached prefix: in production
+traces the cached share of input fell from about 97% before a search to about
+14% after it, and a promoted tool then ratchets into every later turn.
+
+Set `promote_found_tools` to `false` to opt out. A search then changes nothing
+on the wire: `promote_discovered` has nothing to promote, no tool-change patch
+is written, and `tools` stays byte-identical for the whole run. The model reads
+each match's full schema from the search result and calls the tool by its own
+name. Admission is the one rule it always was: a deferred tool is callable by
+name whether or not it was matched, `Hidden` tools never are, and arguments
+are validated against the tool's real schema. The cost is that the model has
+no typed declaration to lean on, so malformed calls are likelier. That is the
+trade, a stable prefix against typed arguments. Declarations already recorded
+in a resumed transcript stay on the wire, since the history declares them.
+
+`compact_search_results` (default `false`) renders the search result's JSON
+payload on one line instead of pretty-printed: the same fields, fewer tokens.
+
+#### Collapsing a result after use (`collapse_search_results`)
+
+A search result carries the full schema of every match and stays in the
+history, so it is re-sent on every later call even though the model usually
+calls one match and never reads the rest. With `collapse_search_results` on,
+the loop rewrites each search result when the run that wrote it ends (on every
+exit path, so the transcript a resume replays is the collapsed one):
+
+```text
+tool_search "price of a ticker" → used stock_quote
+[{"name":"stock_quote","description":"…","parameters":{…}}]
+```
+
+A match counts as used when a later assistant message in the run calls it by
+name. Only those matches keep their schema, compact, as the search returned it;
+the rest are dropped. When nothing was called, the result is one line:
+`tool_search "<query>" → none used; matched a, b, c`. While the run is going the
+model still sees every matched schema, and a later turn can call a kept tool
+directly: admission and argument validation read the registered tool, not this
+text. A tool whose schema was dropped is reached by searching again, or by its
+own name, as before.
+
+Cache effect: the rewrite changes one message, so the provider's cached prefix
+stays valid up to that message and only the messages after it are read again,
+once. Nothing before it changes by a byte. This is unlike promotion, which
+changes the `tools` list at the front of the prompt.
+
+It only ever touches results the current run wrote. The history a run starts
+from is never rewritten, so a thread that already holds uncollapsed results
+keeps its stored prefix (and its cache) when the option is switched on; its new
+results collapse, the old ones stay byte-identical. The rewrite is idempotent (a
+collapsed result no longer reads as a search answer) and skips anything that is
+not an answer the bridge rendered: a no-match line, an error, a host's own
+`tool_search`, a result marked `trusted_verbatim`, or one a middleware reshaped.
+The primitives are `PriorSearchResults::of` (capture before the run) and
+`collapse_search_results` (apply after), both in `tool::discover`.
+
+The three options default to today's behaviour because changing any of them mid-thread
+changes the bytes of every later prompt. They are therefore **per session**:
+`ToolDiscoveryPolicy` carries the harness-wide default, and
+`RunConfig::discovery` (a `DiscoveryOverrides`, every field `Option<bool>`)
+overrides it for one run, so a host can give a new thread the new behaviour
+while an older thread keeps the old.
+
+```rust,ignore
+let config = RunConfig::new("run-1").with_discovery_overrides(DiscoveryOverrides {
+    promote_found_tools: Some(false),
+    compact_search_results: Some(true),
+    collapse_search_results: Some(true),
+    repair_tool_call_wrapper: None,
+});
+```
+
 ### What the bridge does not cover
 
 The deferred catalogue is fixed at run start from the registry and the host

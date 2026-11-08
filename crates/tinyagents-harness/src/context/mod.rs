@@ -53,7 +53,10 @@ use crate::error::Result;
 use crate::events::{AgentEvent, EventRecord, EventSink};
 use crate::ids::{RunId, ThreadId};
 use crate::limits::{LimitTracker, RunLimits};
+use crate::reasoning_replay::ReasoningReplay;
+use crate::result_expiry::ExpiryOverrides;
 use crate::store::StoreRegistry;
+use crate::tool::discover::DiscoveryOverrides;
 
 #[derive(serde::Deserialize)]
 struct RunConfigWire {
@@ -72,6 +75,12 @@ struct RunConfigWire {
     max_tool_calls: Option<usize>,
     #[serde(default)]
     max_turn_output_tokens: Option<u32>,
+    #[serde(default)]
+    discovery: DiscoveryOverrides,
+    #[serde(default)]
+    result_expiry: ExpiryOverrides,
+    #[serde(default)]
+    replay_reasoning: Option<ReasoningReplay>,
     // Legacy wire fields, accepted only while reading old persisted configs.
     #[serde(default)]
     depth: Option<usize>,
@@ -101,6 +110,9 @@ impl<'de> serde::Deserialize<'de> for RunConfig {
             max_model_calls: wire.max_model_calls,
             max_tool_calls: wire.max_tool_calls,
             max_turn_output_tokens: wire.max_turn_output_tokens,
+            discovery: wire.discovery,
+            result_expiry: wire.result_expiry,
+            replay_reasoning: wire.replay_reasoning,
             lineage,
         })
     }
@@ -139,6 +151,9 @@ impl RunConfig {
             max_model_calls: None,
             max_tool_calls: None,
             max_turn_output_tokens: None,
+            discovery: DiscoveryOverrides::default(),
+            result_expiry: ExpiryOverrides::default(),
+            replay_reasoning: None,
         }
     }
 
@@ -202,6 +217,27 @@ impl RunConfig {
     /// Sets the maximum output tokens requested for each model turn.
     pub fn with_max_turn_output_tokens(mut self, n: u32) -> Self {
         self.max_turn_output_tokens = Some(n);
+        self
+    }
+
+    /// Sets this session's discovery overrides. See
+    /// [`RunConfig::discovery`].
+    pub fn with_discovery_overrides(mut self, overrides: DiscoveryOverrides) -> Self {
+        self.discovery = overrides;
+        self
+    }
+
+    /// Sets this session's tool-result expiry overrides. See
+    /// [`RunConfig::result_expiry`].
+    pub fn with_result_expiry_overrides(mut self, overrides: ExpiryOverrides) -> Self {
+        self.result_expiry = overrides;
+        self
+    }
+
+    /// Sets this session's reasoning replay override. See
+    /// [`RunConfig::replay_reasoning`].
+    pub fn with_replay_reasoning(mut self, replay: ReasoningReplay) -> Self {
+        self.replay_reasoning = Some(replay);
         self
     }
 

@@ -336,6 +336,7 @@ fn make_trajectory() -> Vec<AgentEvent> {
             input: None,
             output: None,
             duration_ms: None,
+            input_bytes: None,
             output_bytes: None,
             error: None,
             metadata: None,
