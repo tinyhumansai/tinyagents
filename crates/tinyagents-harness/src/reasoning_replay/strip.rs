@@ -5,6 +5,9 @@ use tinyinference_llm::message::{ContentBlock, Message};
 /// Removes reasoning blocks from every assistant message that precedes the
 /// last user message and returns how many blocks it removed.
 ///
+/// A user message that directly follows a tool result is a tool's follow-up
+/// content, not a new user turn, so it does not end the current turn.
+///
 /// The current turn, the messages after the last user message, is left
 /// untouched, because a provider that signs thinking (Anthropic) or requires
 /// `reasoning_content` back (DeepSeek) validates it across a tool loop. An
@@ -12,10 +15,10 @@ use tinyinference_llm::message::{ContentBlock, Message};
 /// reasoning) is removed, since providers reject an empty assistant message.
 pub fn drop_past_turn_reasoning(messages: &mut Vec<Message>) -> usize {
     // With no user message the whole history is the current turn.
-    let Some(current_turn_start) = messages
-        .iter()
-        .rposition(|message| matches!(message, Message::User(_)))
-    else {
+    let Some(current_turn_start) = messages.iter().enumerate().rposition(|(at, message)| {
+        matches!(message, Message::User(_))
+            && !(at > 0 && matches!(messages[at - 1], Message::Tool(_)))
+    }) else {
         return 0;
     };
     let mut dropped = 0;

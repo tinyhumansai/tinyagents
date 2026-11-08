@@ -72,6 +72,11 @@ pub struct ToolDiscoveryPolicy {
     /// validated against its schema; the model reads that schema from the
     /// search result. Tools promoted in an earlier run and recorded in a
     /// resumed transcript stay on the wire either way.
+    ///
+    /// Known limit: text-dialect recovery (P-Format, Python, TypeScript) reads
+    /// schemas from the offered tools, so with promotion off those dialects
+    /// cannot recover a call to a tool found only by search. Native tool calls
+    /// are unaffected.
     pub promote_found_tools: bool,
     /// Whether the `tool_search` result carries its JSON payload on one line
     /// instead of pretty-printed. Same content, fewer bytes. Defaults to

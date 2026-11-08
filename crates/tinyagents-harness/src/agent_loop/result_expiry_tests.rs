@@ -172,3 +172,24 @@ async fn a_session_exempt_list_keeps_that_tools_results() {
     .await;
     assert_eq!(stored, unchanged());
 }
+
+#[tokio::test]
+async fn a_rewritten_seed_tells_transcript_mirrors_to_resynchronise() {
+    use crate::events::AgentEvent;
+    let harness = harness(RunPolicy::default());
+    let config = expiry_config(ExpiryOverrides {
+        enabled: Some(true),
+        max_age_turns: Some(0),
+        exempt_tools: None,
+    });
+    let recorder = crate::testkit::EventRecorder::new();
+    let ctx = RunContext::new(config, ()).with_events(recorder.sink());
+    harness
+        .invoke_in_context_with_status(&(), ctx, history())
+        .await
+        .expect("the run finishes");
+    assert!(recorder.events().iter().any(|event| matches!(
+        event,
+        AgentEvent::TranscriptRewritten { reason, .. } if reason == "result_expiry"
+    )));
+}

@@ -10,6 +10,7 @@
 //! cached prefix stays valid up to it.
 
 use tinyinference_llm::message::{ContentBlock, Message};
+use tinyinference_llm::tool::ToolCall;
 
 use super::types::{EXPIRY_NOTE_CHARS, ToolResultExpiryPolicy};
 
@@ -49,11 +50,11 @@ pub fn expire_tool_results(messages: &mut [Message], policy: &ToolResultExpiryPo
         if is_note(&body) {
             continue;
         }
-        let name = tool_name(&messages[..index], &tool.tool_call_id);
-        if policy.exempt_tools.iter().any(|exempt| exempt == name) {
+        let name = effective_tool_name(messages, index);
+        if policy.exempt_tools.iter().any(|exempt| exempt == &name) {
             continue;
         }
-        let note = note_for(name, &body);
+        let note = note_for(&name, &body);
         if let Message::Tool(tool) = &mut messages[index] {
             tool.content = vec![ContentBlock::Text(note)];
             expired += 1;
@@ -70,21 +71,55 @@ pub fn expire_tool_results(messages: &mut [Message], policy: &ToolResultExpiryPo
     expired
 }
 
-/// The name of the tool the call `tool_call_id` (made before `earlier`'s end)
-/// invoked.
-fn tool_name<'a>(earlier: &'a [Message], tool_call_id: &str) -> &'a str {
-    earlier
+/// The assistant call that produced the tool result at `index`.
+///
+/// The call comes from the nearest earlier assistant message that holds one
+/// with the result's id. When that message repeats the id, the result is
+/// paired by occurrence: the n-th result carrying the id answers the n-th call
+/// carrying it, so duplicate provider ids cannot point two results at one call.
+pub(crate) fn call_for_result(messages: &[Message], index: usize) -> Option<&ToolCall> {
+    let Message::Tool(result) = messages.get(index)? else {
+        return None;
+    };
+    let id = result.tool_call_id.as_str();
+    let (assistant_at, assistant) =
+        messages[..index]
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(at, message)| match message {
+                Message::Assistant(assistant)
+                    if assistant.tool_calls.iter().any(|call| call.id == id) =>
+                {
+                    Some((at, assistant))
+                }
+                _ => None,
+            })?;
+    let occurrence = messages[assistant_at + 1..index]
         .iter()
-        .rev()
-        .find_map(|message| match message {
-            Message::Assistant(assistant) => assistant
-                .tool_calls
-                .iter()
-                .find(|call| call.id == tool_call_id)
-                .map(|call| call.name.as_str()),
-            _ => None,
-        })
-        .unwrap_or(UNKNOWN_TOOL)
+        .filter(|message| matches!(message, Message::Tool(tool) if tool.tool_call_id == id))
+        .count();
+    let mut matching = assistant.tool_calls.iter().filter(|call| call.id == id);
+    let nth = matching.clone().nth(occurrence);
+    nth.or_else(|| matching.next_back())
+}
+
+/// The name of the tool that actually ran for the result at `index`: the
+/// target a pseudo `tool_call` wrapper was repaired to, else the called name.
+pub(crate) fn effective_call_name(call: &ToolCall) -> String {
+    if crate::agent_loop::tool_call_wrapper::is_wrapper_name(&call.name)
+        && let Some((target, _)) =
+            crate::agent_loop::tool_call_wrapper::unwrap_wrapped_call(&call.arguments, &|_| true)
+    {
+        return target;
+    }
+    call.name.clone()
+}
+
+fn effective_tool_name(messages: &[Message], index: usize) -> String {
+    call_for_result(messages, index)
+        .map(effective_call_name)
+        .unwrap_or_else(|| UNKNOWN_TOOL.to_string())
 }
 
 /// `[used <tool>: <first 120 chars of body on one line>]`, with ` …` before the
@@ -101,8 +136,17 @@ fn note_for(tool: &str, body: &str) -> String {
     format!("[used {tool}: {head}{cut}]")
 }
 
+/// Slack over the note head for the tool name and the `[used ` / ` …]` frame.
+const NOTE_FRAME_CHARS: usize = 128;
+
+/// Whether `body` is a note this module wrote. A note is one line no longer
+/// than its head plus the frame, so a large body that merely starts with
+/// `[used ` and ends with `]` is still expired.
 fn is_note(body: &str) -> bool {
-    body.starts_with("[used ") && body.ends_with(']')
+    body.starts_with("[used ")
+        && body.ends_with(']')
+        && !body.contains('\n')
+        && body.chars().count() <= EXPIRY_NOTE_CHARS + NOTE_FRAME_CHARS
 }
 
 #[cfg(test)]

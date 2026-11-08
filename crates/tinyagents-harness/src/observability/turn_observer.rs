@@ -162,6 +162,10 @@ pub enum TurnObservation {
         /// Result, only with explicit capture consent.
         output: Option<Value>,
         /// Size in bytes of the serialized arguments, set on completion.
+        ///
+        /// **Breaking for exhaustive hosts:** `input_bytes` and `output_bytes`
+        /// were added to this variant, so an exhaustive `Tool { .. }` pattern
+        /// needs `..` and a constructor must supply both.
         /// Reported whatever the capture consent: a size is not content.
         input_bytes: Option<u64>,
         /// Size in bytes of the result text the model is shown, set on

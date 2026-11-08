@@ -93,6 +93,7 @@ fn only_reasoning_is_removed_from_a_past_turn() {
             vec![ToolCall::new("call-1", "lookup", json!({"q": 1}))],
         ),
         Message::tool("call-1", "result"),
+        assistant(vec![ContentBlock::Text("answered".into())], Vec::new()),
         Message::user("second"),
     ];
 
@@ -145,4 +146,22 @@ fn a_history_without_reasoning_is_unchanged_and_the_rewrite_is_idempotent() {
     let once = messages.clone();
     assert_eq!(drop_past_turn_reasoning(&mut messages), 0);
     assert_eq!(messages, once);
+}
+
+#[test]
+fn a_tool_follow_up_user_message_does_not_end_the_current_turn() {
+    let mut messages = vec![
+        Message::user("ask"),
+        assistant(
+            vec![thinking("why", Some("sig"))],
+            vec![ToolCall::new("call-1", "lookup", json!({}))],
+        ),
+        Message::tool("call-1", "result"),
+        // A tool's follow-up content lands as a user message after the rows.
+        Message::user("follow-up content"),
+    ];
+
+    assert_eq!(drop_past_turn_reasoning(&mut messages), 0);
+
+    assert_eq!(assistant_blocks(&messages)[0].len(), 1);
 }

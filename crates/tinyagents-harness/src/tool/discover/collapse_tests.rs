@@ -352,3 +352,42 @@ async fn a_repeat_of_an_old_result_with_the_same_id_and_text_is_the_runs_own() {
     assert_eq!(messages[..old.len()], old[..]);
     assert!(text_at(&messages, old.len() + 1).contains("none used"));
 }
+
+#[tokio::test]
+async fn a_call_repaired_out_of_a_wrapper_counts_as_use() {
+    let mut messages = vec![
+        Message::user("start"),
+        assistant_calling(vec![search_call("s1", "price of a ticker")]),
+        Message::tool("s1", search_result("price of a ticker").await),
+        assistant_calling(vec![ToolCall::new(
+            "w1",
+            "tool_call",
+            json!({"name": "stock_quote", "arguments": {"symbol": "ACME"}}),
+        )]),
+        Message::tool("w1", "ok"),
+        Message::assistant("done"),
+    ];
+    collapse_search_results(&mut messages, &PriorSearchResults::default());
+    assert!(text_at(&messages, 2).contains("used stock_quote"));
+}
+
+#[tokio::test]
+async fn a_duplicate_call_id_is_matched_to_its_own_search_call() {
+    let first = search_result("price of a ticker").await;
+    let mut messages = vec![
+        Message::user("start"),
+        assistant_calling(vec![
+            ToolCall::new("dup", "read_file", json!({})),
+            search_call("dup", "price of a ticker"),
+        ]),
+        Message::tool("dup", "file body"),
+        Message::tool("dup", first),
+        Message::assistant("done"),
+    ];
+    assert_eq!(
+        collapse_search_results(&mut messages, &PriorSearchResults::default()),
+        1
+    );
+    assert!(text_at(&messages, 3).contains("price of a ticker"));
+    assert_eq!(text_at(&messages, 2), "file body");
+}

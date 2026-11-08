@@ -134,7 +134,7 @@ mod response_recovery;
 mod run_loop;
 pub(crate) mod stream;
 mod structured_plan;
-mod tool_call_wrapper;
+pub(crate) mod tool_call_wrapper;
 mod tool_changes;
 mod tool_surface;
 mod tool_timing;

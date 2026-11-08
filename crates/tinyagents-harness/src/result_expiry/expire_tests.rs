@@ -181,3 +181,67 @@ fn overrides_apply_per_field_and_default_to_empty() {
     assert!(!off.enabled);
     assert_eq!(off.max_age_turns, 2);
 }
+
+#[test]
+fn a_repaired_wrapper_call_is_exempt_under_the_tool_it_ran() {
+    let wrapped = Message::Assistant(AssistantMessage {
+        id: None,
+        content: Vec::new(),
+        tool_calls: vec![ToolCall::new(
+            "w1",
+            "tool_call",
+            json!({"name": "lookup", "arguments": {}}),
+        )],
+        usage: None,
+        origin: None,
+    });
+    let mut messages = vec![
+        Message::user("q"),
+        wrapped,
+        Message::tool("w1", "kept body"),
+        Message::user("now"),
+    ];
+    let policy = ToolResultExpiryPolicy {
+        exempt_tools: vec!["lookup".to_string()],
+        ..on(0)
+    };
+    assert_eq!(expire_tool_results(&mut messages, &policy), 0);
+    assert_eq!(tool_text(&messages, "w1"), "kept body");
+}
+
+#[test]
+fn duplicate_call_ids_are_paired_with_their_own_call_by_occurrence() {
+    let both = Message::Assistant(AssistantMessage {
+        id: None,
+        content: Vec::new(),
+        tool_calls: vec![
+            ToolCall::new("dup", "ordinary", json!({})),
+            ToolCall::new("dup", "lookup", json!({})),
+        ],
+        usage: None,
+        origin: None,
+    });
+    let mut messages = vec![
+        Message::user("q"),
+        both,
+        Message::tool("dup", "first body"),
+        Message::tool("dup", "second body"),
+        Message::user("now"),
+    ];
+    let policy = ToolResultExpiryPolicy {
+        exempt_tools: vec!["lookup".to_string()],
+        ..on(0)
+    };
+    assert_eq!(expire_tool_results(&mut messages, &policy), 1);
+    assert_eq!(messages[2].text(), "[used ordinary: first body]");
+    assert_eq!(messages[3].text(), "second body");
+}
+
+#[test]
+fn an_oversized_body_shaped_like_a_note_still_expires() {
+    let body = format!("[used x: {}]", "y".repeat(5000));
+    let mut messages = turn(1, "lookup", &body);
+    messages.push(Message::user("now"));
+    assert_eq!(expire_tool_results(&mut messages, &on(0)), 1);
+    assert!(tool_text(&messages, "call-1").chars().count() < 400);
+}

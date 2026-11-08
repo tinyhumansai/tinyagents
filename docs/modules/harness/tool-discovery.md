@@ -165,6 +165,7 @@ let config = RunConfig::new("run-1").with_discovery_overrides(DiscoveryOverrides
     promote_found_tools: Some(false),
     compact_search_results: Some(true),
     collapse_search_results: Some(true),
+    repair_tool_call_wrapper: None,
 });
 ```
 

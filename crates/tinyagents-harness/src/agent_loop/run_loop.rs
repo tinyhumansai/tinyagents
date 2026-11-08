@@ -53,9 +53,11 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             .policy
             .result_expiry
             .with_overrides(&ctx.config.result_expiry);
-        if expiry.enabled {
-            crate::result_expiry::expire_tool_results(&mut messages, &expiry);
-        }
+        let expired = if expiry.enabled {
+            crate::result_expiry::expire_tool_results(&mut messages, &expiry)
+        } else {
+            0
+        };
         // Results the history already holds are never rewritten, so the
         // snapshot is taken before the run adds any. `None` when the session
         // does not collapse search results.
@@ -68,6 +70,12 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // leaving the caller unable to inspect, repair, or resume from the
         // partial conversation.
         ctx.reset_turn_tracker(messages.len());
+        // The seed is rewritten before the tracker sees it, so a transcript
+        // mirror built from the caller's history would keep the old bodies.
+        // Tell it, so it resynchronises from the run's final transcript.
+        if expired > 0 {
+            ctx.rebase_transcript(messages.len(), "result_expiry");
+        }
         let outcome = self
             .run_loop_body(state, ctx, run, status, &mut messages, streaming)
             .await;
@@ -80,6 +88,9 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         if let Some(prior) = &prior_searches {
             let collapsed = crate::tool::discover::collapse_search_results(&mut messages, prior);
             if collapsed > 0 {
+                // The original answers were already announced as appended, so
+                // a mirror must drop them and take the collapsed transcript.
+                ctx.rebase_transcript(messages.len(), "search_collapse");
                 tracing::debug!(
                     target: "tinyagents::agent_loop",
                     run_id = %ctx.run_id(),

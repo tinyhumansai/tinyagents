@@ -89,16 +89,7 @@ fn collapsed_text(
     if tool.trusted_verbatim {
         return None;
     }
-    let call = messages[..index]
-        .iter()
-        .rev()
-        .find_map(|message| match message {
-            Message::Assistant(assistant) => assistant
-                .tool_calls
-                .iter()
-                .find(|call| call.id == tool.tool_call_id),
-            _ => None,
-        })?;
+    let call = crate::result_expiry::call_for_result(messages, index)?;
     if call.name != TOOL_SEARCH_NAME {
         return None;
     }
@@ -110,7 +101,7 @@ fn collapsed_text(
         .filter(|hit| {
             hit["name"]
                 .as_str()
-                .is_some_and(|name| called.contains(&name))
+                .is_some_and(|name| called.iter().any(|called| called == name))
         })
         .collect();
     if used.is_empty() {
@@ -129,14 +120,23 @@ fn collapsed_text(
     ))
 }
 
-fn names_called(messages: &[Message]) -> Vec<&str> {
+/// Every tool name the assistant messages in `messages` called, with a call
+/// wrapped in a pseudo `tool_call` counted under the tool it was repaired to.
+fn names_called(messages: &[Message]) -> Vec<String> {
     messages
         .iter()
         .filter_map(|message| match message {
-            Message::Assistant(assistant) => {
-                Some(assistant.tool_calls.iter().map(|call| call.name.as_str()))
-            }
+            Message::Assistant(assistant) => Some(assistant.tool_calls.iter()),
             _ => None,
+        })
+        .flatten()
+        .flat_map(|call| {
+            let direct = call.name.clone();
+            let repaired = crate::result_expiry::effective_call_name(call);
+            [
+                Some(direct.clone()),
+                (repaired != direct).then_some(repaired),
+            ]
         })
         .flatten()
         .collect()
