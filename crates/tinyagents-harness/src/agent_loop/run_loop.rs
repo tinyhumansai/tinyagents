@@ -1140,6 +1140,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                         messages,
                         &mut turn_recovery,
                         &mut surface.promoted_names,
+                        &mut output_retry_attempts,
                         mixed,
                     )
                     .await?
