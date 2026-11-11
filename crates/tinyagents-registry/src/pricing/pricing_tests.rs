@@ -21,11 +21,8 @@ fn lookup_strips_vendor_prefix_openrouter_style() {
         lookup("anthropic/claude-sonnet-4-6").unwrap().model_id,
         "claude-sonnet-4-6"
     );
-    assert_eq!(
-        lookup("deepseek/deepseek-chat").unwrap().model_id,
-        "deepseek-chat"
-    );
-    assert_eq!(lookup("qwen/qwen3-max").unwrap().model_id, "qwen3-max");
+    assert_eq!(lookup("moonshot/kimi-k2.6").unwrap().model_id, "kimi-k2.6");
+    assert_eq!(lookup("qwen/qwen-plus").unwrap().model_id, "qwen-plus");
 }
 
 #[test]
@@ -182,12 +179,49 @@ fn short_ids_do_not_match_inside_unrelated_tokens() {
 }
 
 #[test]
-fn flat_metadata_projection_is_distinct_from_tier_aware_call_estimates() {
-    let row = lookup("minimax-m3").unwrap();
-    let entry = flat_catalog_entry(row, "consumer");
-    assert_eq!(entry.pricing.input_per_token, Some(0.60 / 1_000_000.0));
+fn catalogue_tiers_and_call_estimates_agree_at_every_step() {
+    use tinyagents_harness::cost::{ModelPricing, estimate_cost};
+    use tinyinference_llm::usage::Usage;
+    for tier in LONG_CONTEXT_TIERS {
+        let row = lookup(tier.model_id).unwrap();
+        let pricing: ModelPricing = flat_catalog_entry(row, "consumer").pricing;
+        assert_eq!(pricing.tiers.len(), 2, "{}", tier.model_id);
+        for input in [1_000, tier.above_input_tokens, tier.above_input_tokens + 1] {
+            let usage = Usage {
+                cache_read_tokens: input / 2,
+                ..Usage::new(input, 1_000)
+            };
+            approx(
+                estimate_cost(&pricing, &usage).total_cost,
+                estimate_cost_usd(tier.model_id, input, 1_000, input / 2),
+            );
+        }
+    }
+}
+
+#[test]
+fn long_context_steps_bill_the_whole_call_at_the_higher_rate() {
+    approx(estimate_cost_usd("gpt-5.5", 272_000, 0, 0), 1.36);
+    approx(estimate_cost_usd("gpt-5.5", 272_001, 0, 0), 2.72001);
+    approx(
+        estimate_cost_usd("gemini-2.5-pro", 200_001, 1_000, 0),
+        0.5150025,
+    );
+    approx(estimate_cost_usd("gpt-5.4-mini", 400_000, 0, 0), 0.30);
+}
+
+#[test]
+fn rows_without_a_step_have_no_catalogue_tiers() {
+    let entry = flat_catalog_entry(lookup("claude-opus-4-8").unwrap(), "consumer");
     assert!(entry.pricing.tiers.is_empty());
-    approx(estimate_cost_usd("minimax-m3", 100_000, 0, 0), 0.03);
+    assert!(long_context_tier("claude-opus-4-8").is_none());
+    for tier in LONG_CONTEXT_TIERS {
+        assert!(
+            lookup(tier.model_id).is_some(),
+            "{} has no row",
+            tier.model_id
+        );
+    }
 }
 
 #[test]
@@ -225,6 +259,74 @@ fn free_model_pricing_is_zero_and_does_not_change_reported_charges() {
 
 #[test]
 fn approximate_cached_rates_do_not_advertise_prompt_caching() {
-    let mistral = flat_catalog_entry(lookup("mistral-large").unwrap(), "consumer");
+    let mistral = flat_catalog_entry(lookup("mistral-small").unwrap(), "consumer");
     assert!(!mistral.capabilities.prompt_caching);
+}
+
+#[test]
+fn gpt5_and_gemini_cache_reads_are_a_tenth_of_input() {
+    // #393: these were filled in as 0.25× input; the published rate is 0.1×.
+    for id in [
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.4-nano",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+    ] {
+        let row = lookup(id).unwrap();
+        approx(row.cached_input_per_mtok_usd, row.input_per_mtok_usd / 10.0);
+    }
+}
+
+#[test]
+fn retired_models_are_gone_and_renamed_mistral_ids_carry_their_new_models() {
+    for id in [
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "kimi-k2.5",
+        "qwen3-max",
+        "minimax-m2.7",
+        "minimax-m2.7-highspeed",
+        "mistral-medium",
+    ] {
+        assert!(lookup(id).is_none(), "{id} is retired");
+        approx(estimate_cost_usd(id, 1_000, 1_000, 0), 0.0);
+    }
+    for (id, input, cached, output, window) in [
+        ("mistral-large", 0.70, 0.07, 2.10, 1_000_000),
+        ("mistral-small", 0.15, 0.015, 0.60, 256_000),
+        ("ministral-8b", 0.15, 0.015, 0.15, 256_000),
+    ] {
+        let row = lookup(id).unwrap();
+        approx(row.input_per_mtok_usd, input);
+        approx(row.cached_input_per_mtok_usd, cached);
+        approx(row.output_per_mtok_usd, output);
+        assert_eq!(row.context_window, window, "{id}");
+    }
+    assert_eq!(
+        lookup("ministral-8b-2512").unwrap().model_id,
+        "ministral-8b"
+    );
+}
+
+#[test]
+fn mistral_large_4_ids_price_like_mistral_large() {
+    let alias = lookup("mistral-large").unwrap();
+    for id in [
+        "mistral-large-4",
+        "mistral-large-4-0",
+        "mistral/mistral-large-4-0",
+    ] {
+        let row = lookup(id).unwrap_or_else(|| panic!("{id} has no row"));
+        approx(row.input_per_mtok_usd, alias.input_per_mtok_usd);
+        approx(
+            row.cached_input_per_mtok_usd,
+            alias.cached_input_per_mtok_usd,
+        );
+        approx(row.output_per_mtok_usd, alias.output_per_mtok_usd);
+        assert_eq!(row.context_window, alias.context_window, "{id}");
+        assert!(estimate_cost_usd(id, 1_000_000, 0, 0) > 0.0, "{id}");
+    }
 }
