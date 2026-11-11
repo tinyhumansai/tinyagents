@@ -226,11 +226,71 @@ impl Middleware<(), ()> for HostPauseAtHalt {
     }
 }
 
+/// Sends a host pause from inside the deliver-first turn, after its model call.
+struct HostPauseInFinalTurn(SteeringHandle);
+
+#[async_trait]
+impl Middleware<(), ()> for HostPauseInFinalTurn {
+    fn name(&self) -> &str {
+        "host_pause_in_final_turn"
+    }
+
+    async fn after_model(
+        &self,
+        ctx: &mut RunContext<()>,
+        _state: &(),
+        _response: &mut ModelResponse,
+    ) -> TaResult<()> {
+        if ctx.deferred_halt.is_some() {
+            self.0.send(crate::steering::SteeringCommand::PauseWith {
+                reason: "host review".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// A second guard that halts on the same call as the repeat guard: it marks
+/// the run and pauses the way the library guards do.
+struct GuardPauseAtHalt(SteeringHandle);
+
+#[async_trait]
+impl Middleware<(), ()> for GuardPauseAtHalt {
+    fn name(&self) -> &str {
+        "guard_pause_at_halt"
+    }
+
+    async fn after_tool(
+        &self,
+        ctx: &mut RunContext<()>,
+        _state: &(),
+        _invocation: &ToolInvocationIdentity,
+        result: &mut ToolResult,
+    ) -> TaResult<()> {
+        if repeat_guard_marker(result) == Some("halted") && !ctx.deliver_first_attempted {
+            ctx.halted_by_guard
+                .get_or_insert_with(|| "second guard".into());
+            ctx.guard_pauses += 1;
+            self.0.send(crate::steering::SteeringCommand::Pause);
+        }
+        Ok(())
+    }
+}
+
+/// What else a deliver-first run has registered next to its repeat guard.
+#[derive(Clone, Copy, PartialEq)]
+enum Alongside {
+    Nothing,
+    HostPauseAtHalt,
+    HostPauseInFinalTurn,
+    SecondGuard,
+}
+
 /// A run whose guard halts on attempt 6, with the deliver-first turn turned
 /// on; `after_halt` are the model's responses from the deliver-first turn on.
 async fn deliver_first_run(
     after_halt: Vec<ModelResponse>,
-    host_pause: bool,
+    alongside: Alongside,
 ) -> (crate::middleware::AgentRun, u32) {
     let steering = SteeringHandle::allow_all();
     let tool = Arc::new(CountingTool {
@@ -256,8 +316,17 @@ async fn deliver_first_run(
         Arc::new(Mutex::new(None)),
         Arc::new(|_| false),
     )));
-    if host_pause {
-        harness.push_middleware(Arc::new(HostPauseAtHalt(steering.clone())));
+    match alongside {
+        Alongside::Nothing => {}
+        Alongside::HostPauseAtHalt => {
+            harness.push_middleware(Arc::new(HostPauseAtHalt(steering.clone())));
+        }
+        Alongside::HostPauseInFinalTurn => {
+            harness.push_middleware(Arc::new(HostPauseInFinalTurn(steering.clone())));
+        }
+        Alongside::SecondGuard => {
+            harness.push_middleware(Arc::new(GuardPauseAtHalt(steering.clone())));
+        }
     }
     let ctx = RunContext::new(RunConfig::new("deliver-first"), ()).with_steering(steering);
     let run = harness
@@ -278,7 +347,11 @@ fn nudges(run: &crate::middleware::AgentRun) -> usize {
 
 #[tokio::test]
 async fn an_opted_in_guard_halt_grants_one_turn_to_deliver() {
-    let (run, _) = deliver_first_run(vec![ModelResponse::assistant("final answer")], false).await;
+    let (run, _) = deliver_first_run(
+        vec![ModelResponse::assistant("final answer")],
+        Alongside::Nothing,
+    )
+    .await;
 
     assert_eq!(nudges(&run), 1);
     assert_eq!(run.messages.last().unwrap().text(), "final answer");
@@ -295,7 +368,7 @@ async fn the_deliver_first_turn_is_the_last_one_even_when_it_calls_a_tool() {
     new_call.message.tool_calls = vec![ToolCall::new("call-6", "lookup", json!({"id": 2}))];
     let (run, runs) = deliver_first_run(
         vec![new_call, ModelResponse::assistant("never asked for")],
-        false,
+        Alongside::Nothing,
     )
     .await;
 
@@ -314,10 +387,46 @@ async fn the_deliver_first_turn_is_the_last_one_even_when_it_calls_a_tool() {
 
 #[tokio::test]
 async fn a_host_pause_at_the_halting_checkpoint_is_not_lifted() {
-    let (run, runs) =
-        deliver_first_run(vec![ModelResponse::assistant("never asked for")], true).await;
+    let (run, runs) = deliver_first_run(
+        vec![ModelResponse::assistant("never asked for")],
+        Alongside::HostPauseAtHalt,
+    )
+    .await;
 
     assert_eq!(nudges(&run), 0, "no deliver-first turn over a host pause");
     assert_eq!(runs, 4);
     assert!(run.paused.is_some());
+}
+
+#[tokio::test]
+async fn two_guards_halting_together_still_grant_the_deliver_first_turn() {
+    let (run, _) = deliver_first_run(
+        vec![ModelResponse::assistant("final answer")],
+        Alongside::SecondGuard,
+    )
+    .await;
+
+    assert_eq!(nudges(&run), 1, "two guard pauses are not a host pause");
+    assert_eq!(run.messages.last().unwrap().text(), "final answer");
+}
+
+#[tokio::test]
+async fn a_host_pause_in_the_deliver_first_turn_still_reports_the_guard_halt() {
+    use crate::terminal::TerminalReason;
+    let (run, _) = deliver_first_run(
+        vec![ModelResponse::assistant("final answer")],
+        Alongside::HostPauseInFinalTurn,
+    )
+    .await;
+
+    assert_eq!(nudges(&run), 1);
+    assert_eq!(
+        run.paused
+            .as_ref()
+            .and_then(|pause| pause.reason.as_deref()),
+        Some("host review"),
+        "the host's pause is kept"
+    );
+    assert_eq!(run.terminal.unwrap().reason, TerminalReason::Halted);
+    assert!(run.failure_cause.is_some(), "the guard's cause is reported");
 }

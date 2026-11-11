@@ -374,6 +374,7 @@ impl<Ctx> RunContext<Ctx> {
             turns: crate::agent_loop::TurnTracker::default(),
             deliver_first_attempted: false,
             deferred_halt: None,
+            guard_pauses: 0,
             halted_by_guard: None,
             halted_by_guard_cause: None,
             last_limit: std::sync::Mutex::new(None),

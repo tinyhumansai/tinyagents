@@ -138,6 +138,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // One typed answer to "how did the loop end", derived once here so the
         // event, `run.terminal` and the legacy fields cannot disagree.
         let mut terminal = TerminalOutcome::from_loop_exit(&exit, ctx.provider_started());
+        // A pause that ends the deliver-first turn (a host pause at its natural
+        // finish, say) still reports the guard halt that turn deferred.
+        if matches!(exit, LoopExit::Paused(_))
+            && let Some(halt) = ctx.deferred_halt.take()
+        {
+            ctx.halted_by_guard = Some(halt.summary);
+            ctx.halted_by_guard_cause = halt.cause;
+        }
         // A repeat / no-progress guard halts by pausing; its marker says so.
         if matches!(exit, LoopExit::Paused(_))
             && let Some(summary) = ctx.halted_by_guard.take()
@@ -383,15 +391,15 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     // A repeat/no-progress guard halt may first grant one
                     // deliver-first turn (`RunPolicy::deliver_first_on_guard_halt`):
                     // the model was stopped mid-loop with its deliverable possibly
-                    // unwritten. Only the guard's own pause is lifted; a host pause
-                    // at the same checkpoint still ends the run. The halt is kept
-                    // and restored at the next checkpoint, after that one turn.
-                    let lone_guard_pause = ctx
+                    // unwritten. Only guard pauses are lifted; a host pause at the
+                    // same checkpoint still ends the run. The halt is kept and
+                    // restored at the next checkpoint, after that one turn.
+                    let only_guard_pauses = ctx
                         .steering
                         .as_ref()
-                        .is_some_and(|handle| handle.pause_requests() == 1);
+                        .is_some_and(|handle| handle.pause_requests() == ctx.guard_pauses);
                     if !(self.policy.deliver_first_on_guard_halt
-                        && lone_guard_pause
+                        && only_guard_pauses
                         && ctx.halted_by_guard.is_some()
                         && !ctx.deliver_first_attempted
                         && ctx.limits.remaining_model_calls() > 0)
@@ -399,6 +407,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                         return Ok(LoopExit::Paused(pause));
                     }
                     ctx.deliver_first_attempted = true;
+                    ctx.guard_pauses = 0;
                     ctx.deferred_halt = Some(crate::context::DeferredHalt {
                         summary: ctx.take_halted_by_guard().unwrap_or_default(),
                         cause: ctx.take_halted_by_guard_cause(),

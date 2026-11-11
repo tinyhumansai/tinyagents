@@ -328,6 +328,7 @@ impl<Ctx: Send + Sync> FailureScopeMiddleware<Ctx> {
             ctx.halted_by_guard = Some(first);
             ctx.halted_by_guard_cause = owns_first.then_some(cause).flatten();
         }
+        ctx.guard_pauses += 1;
         self.handle.send(SteeringCommand::Pause);
     }
 
