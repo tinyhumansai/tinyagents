@@ -140,10 +140,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 return Ok(TurnFlow::Exit(exit));
             }
             ctx.close_turn(self.policy.capture, messages);
-            if let ControlEffect::Exit(exit) =
-                self.apply_pending_control(ctx, run, status, messages)?
-            {
-                return Ok(TurnFlow::Exit(exit));
+            // The tools ran, so this is a resolved tool turn: a later
+            // dropped-call or truncation turn starts with its full budget.
+            turn_recovery.reset_after_tool_turn(false);
+            match self.apply_pending_control(ctx, run, status, messages)? {
+                ControlEffect::None => {}
+                ControlEffect::ContinueLoop => return Ok(TurnFlow::NextTurn),
+                ControlEffect::Exit(exit) => return Ok(TurnFlow::Exit(exit)),
             }
             run.final_response = Some(response);
             return self.settle_natural_finish(ctx, status, messages).await;

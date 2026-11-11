@@ -9765,3 +9765,61 @@ async fn a_dead_call_retry_preserves_configured_reasoning_effort() {
         recorder.kinds()
     );
 }
+
+/// Asks for a fresh model call from the first tool result it sees.
+struct JumpToModelOnce(std::sync::atomic::AtomicBool);
+
+#[async_trait]
+impl Middleware<(), ()> for JumpToModelOnce {
+    fn name(&self) -> &str {
+        "jump-to-model-once"
+    }
+
+    async fn after_tool(
+        &self,
+        ctx: &mut RunContext<()>,
+        _state: &(),
+        _invocation: &ToolInvocationIdentity,
+        _result: &mut ToolResult,
+    ) -> Result<()> {
+        if !self.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            ctx.request_control(crate::context::MiddlewareControl::JumpTo(
+                crate::context::LoopTarget::Model,
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn graceful_mixed_turn_honours_a_jump_back_to_the_model() {
+    // A control point asked for another model call after the mixed turn's
+    // tools ran; Graceful must take it rather than finish on the first answer.
+    let tool = Arc::new(FakeTool::new("lookup", "found"));
+    let mut response = multi_tool_call_response(vec![("s1", "answer"), ("c1", "lookup")]);
+    response.message.tool_calls[0].arguments = json!({"value": "first"});
+    let model = ScriptedStructuredModel::new(vec![
+        response,
+        tool_call_response("s2", "answer", json!({"value": "second"})),
+    ]);
+    let mut harness = structured_mixed_harness(
+        model,
+        Arc::clone(&tool),
+        crate::runtime::EndStrategy::Graceful,
+    );
+    harness.push_middleware(Arc::new(JumpToModelOnce(
+        std::sync::atomic::AtomicBool::new(false),
+    )));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("answer")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(run.model_calls, 2, "the jump back to the model was taken");
+    assert_eq!(
+        run.structured.expect("structured output present")["value"],
+        "second"
+    );
+    assert_eq!(*tool.calls.lock().unwrap(), 1);
+}
