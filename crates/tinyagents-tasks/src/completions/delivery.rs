@@ -294,7 +294,7 @@ impl CompletionDelivery {
             if !admitted.admitted() {
                 return DeliveryOutcome::Fenced;
             }
-            let delivery_result = deliver(&batch).await;
+            let delivery_result = renewing(target.router, &batch, deliver(&batch)).await;
             if !admitted.admitted() {
                 return DeliveryOutcome::Fenced;
             }
@@ -303,9 +303,9 @@ impl CompletionDelivery {
                     let receipts: Vec<_> =
                         batch.iter().filter_map(CompletionRecord::receipt).collect();
                     match target.router.mark_delivered(&receipts) {
-                        Ok(_) => {
+                        Ok(settled) => {
                             claim.clear();
-                            delivered_total += batch.len();
+                            delivered_total += settled;
                         }
                         Err(error) => {
                             tracing::warn!(parent_key = target.parent_key, error = %error, "completion acknowledgement failed");
@@ -395,6 +395,28 @@ impl CompletionDelivery {
                         }
                     };
                     claim.replace(&batch);
+                }
+            }
+        }
+    }
+}
+
+/// Runs one delivery turn, renewing the batch's claims every half visibility,
+/// so a turn that outlasts one claim is neither reclaimed nor repeated.
+async fn renewing<T>(
+    router: &CompletionRouter,
+    batch: &[CompletionRecord],
+    turn: impl Future<Output = T>,
+) -> T {
+    let receipts: Vec<_> = batch.iter().filter_map(CompletionRecord::receipt).collect();
+    let every = (router.claim_visibility() / 2).max(Duration::from_millis(1));
+    tokio::pin!(turn);
+    loop {
+        tokio::select! {
+            result = &mut turn => return result,
+            () = tokio::time::sleep(every) => {
+                if let Err(error) = router.renew_claims(&receipts) {
+                    tracing::warn!(error = %error, "completion claim renewal failed");
                 }
             }
         }

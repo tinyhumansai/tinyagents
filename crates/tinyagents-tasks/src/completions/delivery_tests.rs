@@ -1,7 +1,7 @@
 use super::*;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
 
@@ -692,4 +692,109 @@ async fn fence_notification_interrupts_a_long_delivery_delay() {
             .unwrap(),
         DeliveryOutcome::Fenced
     );
+}
+
+/// How a delivery turn relates to the record's claim. The router's claim is
+/// shortened to [`CLAIM`] so a turn can outlast it in real time.
+#[derive(Clone, Copy)]
+enum SlowTurn {
+    WithinClaim,
+    OutlivesClaim,
+    OutlivesClaimAndIsReclaimed,
+}
+
+const CLAIM: Duration = Duration::from_secs(1);
+
+/// Every hand-off of the record to a consumer (the drain's `deliver` and, for
+/// the reclaim case, a concurrent `claim_pending` such as `begin_turn`/`pull`
+/// would make), plus the drain's outcome.
+async fn handoffs(turn: SlowTurn) -> (Vec<String>, DeliveryOutcome) {
+    let store = Arc::new(InMemoryCompletionStore::new());
+    let router = CompletionRouter::new(store).with_claim_visibility(CLAIM);
+    router
+        .record(CompletionRecord::new(
+            "slow",
+            "parent",
+            "worker",
+            CompletionStatus::Success,
+            CompletionResult::text("child result"),
+        ))
+        .await
+        .unwrap();
+    let delivery = CompletionDelivery::new(
+        CompletionDeliveryConfig {
+            debounce: Duration::ZERO,
+            recovery_delay: Duration::ZERO,
+            retry_backoff: Duration::ZERO,
+            busy_poll: Duration::ZERO,
+            max_busy_polls: 0,
+            batch_size: 8,
+        },
+        ThreadDeliveryLeases::default(),
+    );
+    let handed = Mutex::new(Vec::new());
+    let turns = Mutex::new(0);
+    let outcome = delivery
+        .deliver_once(
+            target(&router),
+            || false,
+            || true,
+            |batch| {
+                *turns.lock().unwrap() += 1;
+                let first = *turns.lock().unwrap() == 1;
+                handed.lock().unwrap().extend(
+                    batch
+                        .iter()
+                        .map(|record| format!("deliver:{}", record.task_id)),
+                );
+                let (handed, router) = (&handed, &router);
+                async move {
+                    if first && !matches!(turn, SlowTurn::WithinClaim) {
+                        tokio::time::sleep(CLAIM * 9 / 5).await;
+                        if matches!(turn, SlowTurn::OutlivesClaimAndIsReclaimed) {
+                            let other = router.claim_pending("parent", 8).unwrap();
+                            handed.lock().unwrap().extend(
+                                other
+                                    .iter()
+                                    .map(|record| format!("claim:{}", record.task_id)),
+                            );
+                        }
+                        tokio::time::sleep(CLAIM * 7 / 10).await;
+                    }
+                    Ok::<(), &'static str>(())
+                }
+            },
+            |_| {},
+        )
+        .await;
+    (handed.into_inner().unwrap(), outcome)
+}
+
+#[tokio::test]
+async fn a_delivery_within_its_claim_hands_the_record_over_once() {
+    let (handed, outcome) = handoffs(SlowTurn::WithinClaim).await;
+    assert_eq!(handed, ["deliver:slow"]);
+    assert_eq!(outcome, DeliveryOutcome::Delivered { count: 1 });
+}
+
+#[tokio::test]
+async fn a_delivery_that_outlives_its_claim_hands_the_record_over_once() {
+    let (handed, outcome) = handoffs(SlowTurn::OutlivesClaim).await;
+    assert_eq!(
+        handed,
+        ["deliver:slow"],
+        "redelivered after the claim expired"
+    );
+    assert_eq!(outcome, DeliveryOutcome::Delivered { count: 1 });
+}
+
+#[tokio::test]
+async fn a_reclaimed_slow_delivery_hands_the_record_over_once() {
+    let (handed, outcome) = handoffs(SlowTurn::OutlivesClaimAndIsReclaimed).await;
+    assert_eq!(
+        handed,
+        ["deliver:slow"],
+        "handed to a second consumer after the claim expired"
+    );
+    assert_eq!(outcome, DeliveryOutcome::Delivered { count: 1 });
 }
