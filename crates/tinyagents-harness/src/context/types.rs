@@ -541,9 +541,6 @@ pub struct RunContext<Ctx = ()> {
     /// The guard halt a deliver-first turn deferred. The loop restores it at
     /// the next checkpoint, so the run still ends halted after that one turn.
     pub(crate) deferred_halt: Option<DeferredHalt>,
-    /// Pauses the repeat / no-progress guards sent since the last resume, so
-    /// the loop can tell guard pauses from a host's at the same checkpoint.
-    pub(crate) guard_pauses: usize,
     /// Set by a no-progress / repeat guard that paused the run, holding its
     /// root-cause summary, so the loop can report `TerminalReason::Halted`.
     pub(crate) halted_by_guard: Option<String>,

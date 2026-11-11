@@ -270,7 +270,7 @@ impl Middleware<(), ()> for GuardPauseAtHalt {
         if repeat_guard_marker(result) == Some("halted") && !ctx.deliver_first_attempted {
             ctx.halted_by_guard
                 .get_or_insert_with(|| "second guard".into());
-            ctx.guard_pauses += 1;
+            self.0.note_guard_pause();
             self.0.send(crate::steering::SteeringCommand::Pause);
         }
         Ok(())

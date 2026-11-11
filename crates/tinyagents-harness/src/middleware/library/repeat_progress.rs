@@ -216,7 +216,7 @@ impl RepeatProgressMiddleware {
             ctx.halted_by_guard = Some(first.clone());
             ctx.halted_by_guard_cause = cause.filter(|cause| cause.summary == first);
         }
-        ctx.guard_pauses += 1;
+        self.handle.note_guard_pause();
         self.handle.send(SteeringCommand::Pause);
     }
 }

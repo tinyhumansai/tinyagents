@@ -397,7 +397,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     let only_guard_pauses = ctx
                         .steering
                         .as_ref()
-                        .is_some_and(|handle| handle.pause_requests() == ctx.guard_pauses);
+                        .is_some_and(|handle| handle.pause_requests() == handle.guard_pauses());
                     if !(self.policy.deliver_first_on_guard_halt
                         && only_guard_pauses
                         && ctx.halted_by_guard.is_some()
@@ -407,7 +407,6 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                         return Ok(LoopExit::Paused(pause));
                     }
                     ctx.deliver_first_attempted = true;
-                    ctx.guard_pauses = 0;
                     ctx.deferred_halt = Some(crate::context::DeferredHalt {
                         summary: ctx.take_halted_by_guard().unwrap_or_default(),
                         cause: ctx.take_halted_by_guard_cause(),
