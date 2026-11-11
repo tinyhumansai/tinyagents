@@ -62,3 +62,17 @@ fn a_non_provider_failure_has_no_provider_class() {
         None
     );
 }
+
+#[test]
+fn a_local_rate_limiter_denial_is_not_blamed_on_the_provider() {
+    let local = TinyAgentsError::RateLimited("token bucket empty".into());
+    let hosted = hosted_error(&local, failed_run(&local));
+    assert_eq!(hosted.kind, HostedErrorKind::RateLimited);
+    assert_eq!(hosted.provider_failure(), None);
+
+    let upstream = provider(429, "too many requests");
+    assert_eq!(
+        hosted_error(&upstream, failed_run(&upstream)).provider_failure(),
+        Some(FailoverReason::RateLimit)
+    );
+}
