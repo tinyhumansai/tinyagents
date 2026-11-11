@@ -675,3 +675,22 @@ async fn a_rule_can_withhold_tool_search_itself() {
     assert!(answer.contains("rule 'no-discovery'"), "{answer}");
     assert!(!answer.contains("deferred_open"), "{answer}");
 }
+
+#[tokio::test]
+async fn a_toolset_tool_search_suppresses_the_intrinsic_bridge() {
+    let model = Arc::new(ScriptedModel::new(vec![ModelResponse::assistant("done")]));
+    let mut harness = harness_with(model.clone(), ToolRulePolicy::default());
+    harness.register_tool(RuleTool::deferred("helper"));
+    let mut extra: crate::tool::ToolRegistry<(), ()> = crate::tool::ToolRegistry::new();
+    extra.register(RuleTool::new("tool_search"));
+    harness.with_toolset(Arc::new(extra));
+
+    run(&harness, "toolset-search").await;
+
+    let names = tool_names(&model.requests()[0]);
+    assert_eq!(
+        names.iter().filter(|name| *name == "tool_search").count(),
+        1,
+        "{names:?}"
+    );
+}
