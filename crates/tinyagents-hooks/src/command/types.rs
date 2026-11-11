@@ -508,7 +508,8 @@ pub struct HookOutput {
     /// Text appended to a tool result or to the session's system context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
-    /// `false` aborts prompt submission on `beforeSubmitPrompt`.
+    /// `false` aborts prompt submission on `beforeSubmitPrompt`. On a
+    /// tool-hook deny, `false` stops the run instead of answering the model.
     #[serde(default, rename = "continue", skip_serializing_if = "Option::is_none")]
     pub continue_: Option<bool>,
     /// Injects another user turn on `stop` / `subagentStop`.

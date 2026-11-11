@@ -60,7 +60,7 @@ pub use pairing::{
     advance_past_orphan_tools, find_safe_cutoff_point, is_tool_calling_assistant,
     retract_orphan_tool_calls, tool_pairing_is_intact,
 };
-pub use render::render_message_for_summary;
+pub use render::{render_message_for_summary, render_message_for_summary_with};
 pub use resilient::FaultTolerantCachingSummarizer;
 pub use response_overflow::{ResponseOverflowDetection, detect_response_overflow};
 pub use split_turn::{SPLIT_TURN_HEADING, split_turn_start, summarize_split_turn};

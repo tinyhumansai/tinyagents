@@ -150,9 +150,9 @@ impl<'a, State: Send + Sync + 'static, F: ModelFactory<State> + ?Sized, G: Model
 
     /// Builds all requested models. Primary and summarization failures are
     /// fatal; failed workload routes are logged and omitted.
-    pub fn build(self) -> Result<TurnModelSet<State>> {
+    pub async fn build(self) -> Result<TurnModelSet<State>> {
         self.gate.check(&self.primary)?;
-        let (primary_model, primary_route) = self.factory.build(&self.primary)?;
+        let (primary_model, primary_route) = self.factory.build(&self.primary).await?;
         let primary = Arc::new(RouteRecordingModel::new(
             primary_model,
             primary_route.clone(),
@@ -182,7 +182,7 @@ impl<'a, State: Send + Sync + 'static, F: ModelFactory<State> + ?Sized, G: Model
                 tracing::debug!(route = ?request.route, %error, "skipping gated workload model");
                 continue;
             }
-            match self.factory.build(&request) {
+            match self.factory.build(&request).await {
                 Ok((model, route)) => {
                     let slot = Arc::new(Mutex::new(None));
                     let recorded = Arc::new(RouteRecordingModel::new(model, route))
@@ -215,7 +215,7 @@ impl<'a, State: Send + Sync + 'static, F: ModelFactory<State> + ?Sized, G: Model
             opts: self.summarization_opts.unwrap_or(self.primary.opts),
         };
         self.gate.check(&summary_request)?;
-        let (summary_model, summary_route) = self.factory.build(&summary_request)?;
+        let (summary_model, summary_route) = self.factory.build(&summary_request).await?;
         let summary_error_slot = Arc::new(Mutex::new(None));
         let summarizer = Arc::new(RouteRecordingModel::new(
             summary_model,
@@ -251,12 +251,12 @@ pub struct TurnModelSet<State: Send + Sync> {
 
 impl<State: Send + Sync + 'static> TurnModelSet<State> {
     /// Builds a turn's primary, canonical workload routes, and summarizer.
-    pub fn build<F, G>(factory: &F, gate: &G, primary_role: impl Into<String>) -> Result<Self>
+    pub async fn build<F, G>(factory: &F, gate: &G, primary_role: impl Into<String>) -> Result<Self>
     where
         F: ModelFactory<State> + ?Sized,
         G: ModelBuildGate + ?Sized,
     {
-        Self::builder(factory, gate, primary_role).build()
+        Self::builder(factory, gate, primary_role).build().await
     }
 
     /// Starts building a model set using the standard workload aliases.

@@ -170,6 +170,20 @@ pub enum TinyAgentsError {
     #[error("permanent tool failure: {0}")]
     ToolFailed(String),
 
+    /// Host policy refused a tool call and asked for the **run** to stop,
+    /// rather than for the model to be told and carry on.
+    ///
+    /// A `before_tool` refusal answered to the model is
+    /// [`Self::ToolFailed`]; this variant is the fatal form, raised for
+    /// example by a `tinyagents-hooks` deny carrying `continue: false`. The
+    /// payload names the refusing hook, the tool and the reason, never the
+    /// call's arguments. The run ends with
+    /// [`crate::terminal::TerminalReason::ToolRefused`], and a hosted caller
+    /// sees [`crate::runtime::HostedErrorKind::ToolRefused`]. Never retried by
+    /// [`crate::retry::is_retryable`].
+    #[error("tool call refused: {0}")]
+    ToolRefused(String),
+
     /// A tool (from [`tinytools::Tool::execute`]) or a `before_tool`
     /// middleware asked for **human approval** before this call runs (A2).
     ///

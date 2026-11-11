@@ -6,6 +6,12 @@ The `reason` identifies the specific cause, while `class` provides a stable
 coarse-grained category for hosts that need only success, timeout,
 cancellation, failure, or suspension.
 
+`TerminalReason::ToolRefused` (class `Failure`) marks a run that host tool
+policy stopped (`TinyAgentsError::ToolRefused`, such as a hook deny with
+`continue_: Some(false)`). A refusal answered to the model does not end the
+run. The full error-to-reason mapping and merge precedence live in the
+`terminal` module docs.
+
 Outcomes preserve the legacy human-readable message. Timeout outcomes also
 record whether the deadline landed before a provider call, during one, or
 after a call. Provider-start state is tracked separately so a host can tell a

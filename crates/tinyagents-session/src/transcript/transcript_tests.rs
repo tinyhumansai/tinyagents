@@ -53,9 +53,9 @@ fn frozen_prefix_count_round_trips_in_meta() {
 }
 
 #[test]
-fn reset_context_marker_round_trips_in_meta() {
+fn intentional_prefix_reset_is_distinct_from_legacy_missing_boundary() {
     let dir = tempdir().unwrap();
-    let path = resolve_keyed_transcript_path(dir.path(), "reset-context").unwrap();
+    let path = resolve_keyed_transcript_path(dir.path(), "prefix-reset").unwrap();
     let mut seed = meta();
     seed.prefix_message_count = None;
     seed.prefix_reset = true;
@@ -119,6 +119,11 @@ fn unknown_jsonl_records_are_ignored() {
     let header = serde_json::json!({"_meta": {"agent": "agent", "dispatcher": "native", "created": "", "updated": "", "turn_count": 0, "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "charged_amount_usd": 0.0}});
     std::fs::write(&path, format!("{header}\n{{\"kind\":\"future\",\"payload\":true}}\n{{\"role\":\"user\",\"content\":\"hello\"}}\n")).unwrap();
     let loaded = read_transcript(&path).unwrap();
+    assert!(
+        !loaded.meta.prefix_reset,
+        "old metadata defaults to no reset"
+    );
+    assert_eq!(loaded.meta.prefix_message_count, None);
     assert_eq!(
         loaded.messages,
         vec![TranscriptMessage {

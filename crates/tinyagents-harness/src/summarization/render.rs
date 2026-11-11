@@ -25,6 +25,8 @@
 
 use tinyinference_llm::message::{ContentBlock, Message};
 
+use super::ToolRendering;
+
 /// Maximum characters rendered for a single tool-call argument blob or tool
 /// result body before it is elided.
 ///
@@ -33,6 +35,10 @@ use tinyinference_llm::message::{ContentBlock, Message};
 /// row counts) intact, which is what a later turn usually needs to refer back
 /// to.
 const MAX_RENDERED_PAYLOAD_CHARS: usize = 2_000;
+
+/// Most characters of a tool call's arguments shown in a
+/// [`ToolRendering::Markers`] line, the ellipsis included.
+const MARKER_ARGUMENT_CHARS: usize = 120;
 
 /// The role label used when rendering a message for summarization.
 fn role_label(message: &Message) -> &'static str {
@@ -147,3 +153,57 @@ pub fn render_message_for_summary(message: &Message) -> String {
 
     format!("{}: {}", role_label(message), parts.join(" "))
 }
+
+/// Renders a single message for a summary transcript in the given
+/// [`ToolRendering`] mode, or `None` when the mode leaves the message out.
+///
+/// [`ToolRendering::Full`] is exactly [`render_message_for_summary`].
+/// [`ToolRendering::Markers`] renders system, user, assistant and custom
+/// content the same way, but:
+///
+/// - each assistant tool call becomes its own line,
+///   `[used <name>: <arguments>]`, without its call id and with the arguments'
+///   JSON cut to 120 characters (an ellipsis marks the cut);
+/// - an assistant turn that only called tools is just those lines;
+/// - a tool result ([`Message::Tool`]) is omitted: `None`;
+/// - so is an assistant turn with neither prose nor tool calls.
+pub fn render_message_for_summary_with(
+    message: &Message,
+    rendering: ToolRendering,
+) -> Option<String> {
+    match (rendering, message) {
+        (ToolRendering::Full, _) => Some(render_message_for_summary(message)),
+        (ToolRendering::Markers, Message::Tool(_)) => None,
+        (ToolRendering::Markers, Message::Assistant(assistant)) => {
+            let parts = render_content(&assistant.content);
+            let prose = (!parts.is_empty())
+                .then(|| format!("{}: {}", role_label(message), parts.join(" ")));
+            let markers = assistant.tool_calls.iter().map(|call| {
+                format!(
+                    "[used {}: {}]",
+                    call.name,
+                    shorten(&call.arguments.to_string(), MARKER_ARGUMENT_CHARS)
+                )
+            });
+            let lines = prose.into_iter().chain(markers).collect::<Vec<_>>();
+            (!lines.is_empty()).then(|| lines.join("\n"))
+        }
+        (ToolRendering::Markers, _) => Some(render_message_for_summary(message)),
+    }
+}
+
+/// Cuts `text` to at most `max_chars` characters, the last of them an
+/// ellipsis when anything was dropped. Counts characters, so a cut never
+/// splits one.
+fn shorten(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut kept: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    kept.push('…');
+    kept
+}
+
+#[cfg(test)]
+#[path = "render_tests.rs"]
+mod tests;

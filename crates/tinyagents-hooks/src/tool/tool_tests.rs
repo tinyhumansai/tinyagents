@@ -444,23 +444,65 @@ async fn before_hook_can_rewrite_input_and_append_context_together() {
 }
 
 #[tokio::test]
-async fn deny_and_ask_both_refuse_calls() {
-    for decision in [
-        HookOutput::deny("blocked"),
-        HookOutput {
-            permission: Some(crate::command::HookPermission::Ask),
-            agent_message: Some("approval".into()),
-            ..Default::default()
-        },
-    ] {
-        let middleware = middleware(decision, Arc::default());
-        let mut context = run("one");
-        assert!(
-            Middleware::before_tool(&middleware, &mut context, &(), &mut call("id"))
-                .await
-                .is_err()
-        );
-    }
+async fn deny_answers_the_model_and_ask_fails_the_call() {
+    let middleware = middleware(HookOutput::deny("blocked"), Arc::default());
+    let mut context = run("one");
+    let error = Middleware::before_tool(&middleware, &mut context, &(), &mut call("id"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, tinyagents_harness::error::TinyAgentsError::ToolFailed(message)
+            if message == "tool hook 'test' denied read: blocked"),
+        "{error:?}"
+    );
+
+    let ask = HookOutput {
+        permission: Some(crate::command::HookPermission::Ask),
+        agent_message: Some("approval".into()),
+        ..Default::default()
+    };
+    let middleware = middleware_for(ask);
+    let error = Middleware::before_tool(&middleware, &mut run("one"), &(), &mut call("id"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, tinyagents_harness::error::TinyAgentsError::Tool(message)
+            if message == "tool hook 'test' requires approval for read: approval"),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn deny_with_continue_false_stops_the_run() {
+    let decision = HookOutput {
+        continue_: Some(false),
+        ..HookOutput::deny("blocked")
+    };
+    let error = Middleware::before_tool(
+        &middleware_for(decision),
+        &mut run("one"),
+        &(),
+        &mut call("id"),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&error, tinyagents_harness::error::TinyAgentsError::ToolRefused(message)
+            if message == "tool hook 'test' denied read: blocked"),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn denied_call_leaves_no_pending_post_hook_state() {
+    let middleware = middleware_for(HookOutput::deny("blocked"));
+    let mut context = run("one");
+    let _ = Middleware::before_tool(&middleware, &mut context, &(), &mut call("id")).await;
+    assert!(middleware.arguments.lock().unwrap().is_empty());
+}
+
+fn middleware_for(decision: HookOutput) -> ToolHooksMiddleware<Host> {
+    middleware(decision, Arc::default())
 }
 
 #[tokio::test]

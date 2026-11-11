@@ -122,7 +122,10 @@ built-in catalog:
   `ContextCompressionMiddleware`: blanks the bodies of older tool-result
   messages (keeping the newest `keep_recent` verbatim) instead of summarizing
   chat history, optionally gated on a token budget to preserve the
-  prompt-cache prefix.
+  prompt-cache prefix. It only rewrites the outgoing request and, with a token
+  budget, only near the window. To expire old tool results by age in the stored
+  transcript instead, see `result_expiry` (`RunPolicy::result_expiry`); the two
+  compose, and microcompact then has fewer bodies left to blank.
 - `PromptCacheGuardMiddleware` — computes the request's
   `cache::PromptCacheLayout` in `before_model` and records a
   `CacheLayoutEvent` whenever the cacheable segment ids or content change from

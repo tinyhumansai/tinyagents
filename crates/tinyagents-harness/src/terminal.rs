@@ -25,6 +25,7 @@
 //! | `TinyAgentsError::StreamIdleTimeout` (breaker threshold) | `ProviderFailed(Some(StreamIdleTimeout))` | `Timeout` |
 //! | provider / model / overflow / empty-response errors | `ProviderFailed(reason)` | `Failure` |
 //! | tool errors | `ToolFailed` | `Failure` |
+//! | `TinyAgentsError::ToolRefused` (host policy stopped the run) | `ToolRefused` | `Failure` |
 //! | run caps, depth caps | `LimitReached(..)` | `Failure` |
 //! | steering pause | `Paused` | `Suspended` |
 //! | deferred tool calls | `Deferred` | `Suspended` |
@@ -42,7 +43,7 @@
 //! 3. idle / provider-call timeout (`ProviderFailed(Some(Timeout))`)
 //! 4. limits (`LimitReached`)
 //! 5. no-progress / repeat guard (`Halted`)
-//! 6. other failures (`ProviderFailed`, `ToolFailed`, `Internal`)
+//! 6. other failures (`ProviderFailed`, `ToolFailed`, `ToolRefused`, `Internal`)
 //! 7. suspension (`Paused`, `Deferred`)
 //! 8. success (`Completed`)
 //!
@@ -118,6 +119,9 @@ pub enum TerminalReason {
     ProviderFailed(Option<FailoverReason>),
     /// A tool failed in a way that ended the run.
     ToolFailed,
+    /// Host policy refused a tool call and stopped the run
+    /// ([`TinyAgentsError::ToolRefused`]).
+    ToolRefused,
     /// Anything the other reasons do not name.
     Internal,
 }
@@ -137,6 +141,7 @@ impl TerminalReason {
             | Self::Halted
             | Self::ProviderFailed(_)
             | Self::ToolFailed
+            | Self::ToolRefused
             | Self::Internal => TerminalClass::Failure,
         }
     }
@@ -151,7 +156,7 @@ impl TerminalReason {
             )) => 2,
             Self::LimitReached(_) => 3,
             Self::Halted => 4,
-            Self::ProviderFailed(_) | Self::ToolFailed | Self::Internal => 5,
+            Self::ProviderFailed(_) | Self::ToolFailed | Self::ToolRefused | Self::Internal => 5,
             Self::Paused | Self::Deferred => 6,
             Self::Completed => 7,
         }
@@ -285,6 +290,7 @@ impl TerminalOutcome {
             E::Tool(_) | E::ToolFailed(_) | E::ToolNotFound(_) | E::ModelRetry(_) => {
                 Self::new(TerminalReason::ToolFailed, message)
             }
+            E::ToolRefused(_) => Self::new(TerminalReason::ToolRefused, message),
             E::LimitExceeded(_)
             | E::RecursionLimit(_)
             | E::SubAgentDepth(_)

@@ -23,7 +23,7 @@ use tinyinference_llm::model::{ChatModel, ModelRequest};
 use super::types::ModelSummarizer;
 use super::{
     CompressionProvenance, SummarizationPolicy, Summarizer, SummaryKind, SummaryRecord,
-    SummaryRequest, estimate_tokens, render_message_for_summary,
+    SummaryRequest, ToolRendering, estimate_tokens, render_message_for_summary_with,
 };
 use crate::error::{Result, TinyAgentsError};
 use crate::token_estimation::estimate_slice_tokens;
@@ -52,7 +52,26 @@ impl ModelSummarizer {
             model,
             model_id: model_id.into(),
             threshold_fraction: DEFAULT_SUMMARIZE_THRESHOLD_FRACTION,
+            tool_rendering: ToolRendering::Full,
+            max_output_tokens: None,
         }
+    }
+
+    /// Choose how tool calls and results are rendered into the transcript the
+    /// model summarizes. The default, [`ToolRendering::Full`], sends them all.
+    #[must_use]
+    pub fn with_tool_rendering(mut self, rendering: ToolRendering) -> Self {
+        self.tool_rendering = rendering;
+        self
+    }
+
+    /// Cap the summary's length: the request carries `max_tokens` set to
+    /// `max_output_tokens`. Unset by default, which leaves the provider's own
+    /// default in force.
+    #[must_use]
+    pub fn with_max_output_tokens(mut self, max_output_tokens: u32) -> Self {
+        self.max_output_tokens = Some(max_output_tokens);
+        self
     }
 
     /// Override the threshold fraction recorded in summary provenance. Use the
@@ -99,7 +118,7 @@ impl ModelSummarizer {
 
         let transcript = messages
             .iter()
-            .map(render_message_for_summary)
+            .filter_map(|message| render_message_for_summary_with(message, self.tool_rendering))
             .collect::<Vec<_>>()
             .join("\n");
         let (system_prompt, request_text) = match kind {
@@ -120,10 +139,11 @@ impl ModelSummarizer {
             "[tinyagents::summarize] dispatching context-window summary"
         );
 
-        let request = ModelRequest::new(vec![
+        let mut request = ModelRequest::new(vec![
             Message::system(system_prompt),
             Message::user(request_text),
         ]);
+        request.max_tokens = self.max_output_tokens;
         let (summary, usage) = self.summarize_once(request).await.map_err(|failure| {
             let (error, usage) = *failure;
             match usage {
@@ -369,6 +389,13 @@ Produce exactly these sections (write \"None\" when a section is empty):\n\
 \n\
 ## Goal\n\
 What the user is ultimately trying to accomplish.\n\
+\n\
+## About the User\n\
+Every fact the user shared about themselves (name, places, people, preferences, routines), \
+stated as they gave it.\n\
+\n\
+## Commitments\n\
+What the assistant promised or scheduled (reminders, follow-ups, deadlines), with when.\n\
 \n\
 ## Completed Actions\n\
 Numbered list of what has already been done, with key results/outputs.\n\

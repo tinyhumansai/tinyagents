@@ -134,7 +134,7 @@ mod response_recovery;
 mod run_loop;
 pub(crate) mod stream;
 mod structured_plan;
-mod tool_call_wrapper;
+pub(crate) mod tool_call_wrapper;
 mod tool_changes;
 mod tool_surface;
 mod tool_timing;
@@ -164,6 +164,12 @@ mod model_switch_test;
 #[path = "nested_tests.rs"]
 mod nested_test;
 #[cfg(test)]
+#[path = "reasoning_replay_tests.rs"]
+mod reasoning_replay_test;
+#[cfg(test)]
+#[path = "result_expiry_tests.rs"]
+mod result_expiry_test;
+#[cfg(test)]
 #[path = "rich_tool_tests.rs"]
 mod rich_tool_test;
 #[cfg(test)]
@@ -178,6 +184,9 @@ mod terminal_outcome_test;
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod test;
+#[cfg(test)]
+#[path = "tool_call_option_tests.rs"]
+mod tool_call_option_test;
 #[cfg(test)]
 #[path = "tool_rules_tests.rs"]
 mod tool_rules_test;

@@ -14,7 +14,7 @@ use tinyinference_llm::usage::Usage;
 use super::{
     DEFAULT_SUMMARIZE_KEEP_LAST, DEFAULT_SUMMARIZE_THRESHOLD_FRACTION,
     FaultTolerantCachingSummarizer, ModelSummarizer, SummarizationPolicy, Summarizer,
-    SummaryRecord, SummaryRequest, summarization_policy, summarization_policy_with,
+    SummaryRecord, SummaryRequest, ToolRendering, summarization_policy, summarization_policy_with,
 };
 use crate::error::{Result, TinyAgentsError};
 use crate::testkit::ScriptedModel;
@@ -360,6 +360,23 @@ async fn pending_work_is_handed_on_as_in_progress_not_stale() {
     assert!(prompt.contains("already answered"), "{prompt}");
 }
 
+/// A compaction must not cost what the user told the assistant about
+/// themselves: the checkpoint keeps those facts, and the commitments the
+/// assistant made, in sections of their own.
+#[tokio::test]
+async fn the_checkpoint_keeps_facts_about_the_user_and_commitments() {
+    let model = Arc::new(ScriptedModel::replies(vec!["## Goal\nx"]));
+    let summarizer = ModelSummarizer::new(model.clone(), "m");
+    summarizer
+        .summarize(&[Message::user("I live in Pune"), Message::assistant("noted")])
+        .await
+        .unwrap();
+
+    let prompt = model.requests()[0].messages[0].text();
+    assert!(prompt.contains("## About the User"), "{prompt}");
+    assert!(prompt.contains("## Commitments"), "{prompt}");
+}
+
 #[tokio::test]
 async fn a_turn_prefix_request_uses_its_own_prompt() {
     let model = Arc::new(ScriptedModel::replies(vec![
@@ -397,4 +414,95 @@ async fn a_turn_prefix_request_uses_its_own_prompt() {
             .text()
             .contains("beginning of a turn")
     );
+}
+
+/// A short exchange around one tool call: the user's ask, a call with a long
+/// argument, its result carrying a sentinel, and the assistant's reply.
+fn cron_exchange() -> Vec<Message> {
+    vec![
+        Message::user("remind me to water the plants"),
+        Message::Assistant(AssistantMessage {
+            id: None,
+            content: Vec::new(),
+            tool_calls: vec![ToolCall::new(
+                "cron-1",
+                "cron",
+                json!({"schedule": "0 9 * * *", "note": format!("water the plants {}", "z".repeat(300))}),
+            )],
+            usage: None,
+            origin: None,
+        }),
+        Message::tool("cron-1", "SENTINEL-TOOL-RESULT job 42 created"),
+        Message::assistant("Done, I will remind you at 9 every morning."),
+    ]
+}
+
+#[tokio::test]
+async fn the_default_rendering_is_unchanged() {
+    let expected = "user: remind me to water the plants\n\
+assistant: <reasoning>I should inspect the matching records.</reasoning> \
+<tool_call id=\"lookup-1\" name=\"lookup\">{\"query\":\"open issues\"}</tool_call>\n\
+tool: <tool_result id=\"lookup-1\"><json>{\"matches\":2}</json></tool_result>\n\
+assistant: There are 2.";
+    let mut messages = vec![Message::user("remind me to water the plants")];
+    messages.extend(tool_call_messages(json!({"query": "open issues"})));
+    messages.push(Message::assistant("There are 2."));
+
+    for rendering in [None, Some(ToolRendering::Full)] {
+        let model = Arc::new(ScriptedModel::replies(vec!["## Goal\nx"]));
+        let mut summarizer = ModelSummarizer::new(model.clone(), "m");
+        if let Some(rendering) = rendering {
+            summarizer = summarizer.with_tool_rendering(rendering);
+        }
+        summarizer.summarize(&messages).await.unwrap();
+        let request = &model.requests()[0];
+        let sent = request.messages[1].text();
+        assert!(
+            sent.contains(&format!("<transcript>\n{expected}\n</transcript>")),
+            "{sent}"
+        );
+        assert_eq!(request.max_tokens, None);
+        assert_eq!(request.temperature, None);
+    }
+}
+
+#[tokio::test]
+async fn markers_send_the_conversation_without_tool_output() {
+    let model = Arc::new(ScriptedModel::replies(vec!["## Goal\nx"]));
+    let summarizer =
+        ModelSummarizer::new(model.clone(), "m").with_tool_rendering(ToolRendering::Markers);
+    summarizer.summarize(&cron_exchange()).await.unwrap();
+
+    let sent = model.requests()[0].messages[1].text();
+    assert!(
+        sent.contains("user: remind me to water the plants"),
+        "{sent}"
+    );
+    assert!(
+        sent.contains("assistant: Done, I will remind you at 9 every morning."),
+        "{sent}"
+    );
+    assert!(sent.contains("[used cron: "), "{sent}");
+    assert!(!sent.contains("SENTINEL-TOOL-RESULT"), "{sent}");
+    assert!(!sent.contains("<tool_call"), "{sent}");
+    assert!(!sent.contains("<tool_result"), "{sent}");
+    assert!(!sent.contains("cron-1"), "call ids are dropped: {sent}");
+    let marker = sent
+        .lines()
+        .find(|line| line.starts_with("[used cron: "))
+        .expect("one marker line");
+    let shown = &marker["[used cron: ".len()..marker.len() - 1];
+    assert!(shown.chars().count() <= 120, "{marker}");
+    assert!(!sent.contains(&"z".repeat(120)), "{sent}");
+}
+
+#[tokio::test]
+async fn max_output_tokens_rides_the_request() {
+    let model = Arc::new(ScriptedModel::replies(vec!["## Goal\nx"]));
+    let summarizer = ModelSummarizer::new(model.clone(), "m").with_max_output_tokens(512);
+    summarizer.summarize(&[Message::user("x")]).await.unwrap();
+
+    let request = &model.requests()[0];
+    assert_eq!(request.max_tokens, Some(512));
+    assert_eq!(request.temperature, None);
 }

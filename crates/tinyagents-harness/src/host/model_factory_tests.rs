@@ -31,7 +31,7 @@ struct NonCloneContext {
 
 struct RecordingFactory<'a> {
     context: &'a NonCloneContext,
-    requests: RefCell<Vec<ModelBuildRequest>>,
+    requests: std::sync::Mutex<Vec<ModelBuildRequest>>,
     failed_route: Option<String>,
     fail_primary: bool,
     fail_summary: bool,
@@ -43,7 +43,7 @@ impl<'a> RecordingFactory<'a> {
     fn new(context: &'a NonCloneContext) -> Self {
         Self {
             context,
-            requests: RefCell::new(Vec::new()),
+            requests: std::sync::Mutex::new(Vec::new()),
             failed_route: None,
             fail_primary: false,
             fail_summary: false,
@@ -73,12 +73,14 @@ impl<'a> RecordingFactory<'a> {
     }
 }
 
+#[async_trait::async_trait]
 impl ModelFactory<()> for RecordingFactory<'_> {
-    fn build(
+    async fn build(
         &self,
         request: &ModelBuildRequest,
     ) -> Result<(Arc<dyn ChatModel<()>>, ResolvedModelRoute)> {
-        self.requests.borrow_mut().push(request.clone());
+        tokio::task::yield_now().await;
+        self.requests.lock().unwrap().push(request.clone());
         if (self.fail_primary && request.purpose == ModelPurpose::Primary)
             || (self.fail_summary && request.purpose == ModelPurpose::Summarization)
             || self
@@ -154,7 +156,7 @@ impl ChatModel<()> for FailingCallModel {
 
 #[derive(Default)]
 struct RecordingGate {
-    requests: RefCell<Vec<ModelBuildRequest>>,
+    requests: std::sync::Mutex<Vec<ModelBuildRequest>>,
     denied_role: Option<String>,
     denied_route: Option<String>,
     denied_purpose: Option<ModelPurpose>,
@@ -179,7 +181,7 @@ impl RecordingGate {
 
 impl ModelBuildGate for RecordingGate {
     fn check(&self, request: &ModelBuildRequest) -> Result<()> {
-        self.requests.borrow_mut().push(request.clone());
+        self.requests.lock().unwrap().push(request.clone());
         if self.denied_role.as_deref() == Some(&request.role)
             || self
                 .denied_route
@@ -191,4 +193,37 @@ impl ModelBuildGate for RecordingGate {
         }
         Ok(())
     }
+}
+
+struct SendContractFactory;
+
+#[async_trait::async_trait]
+impl ModelFactory<()> for SendContractFactory {
+    async fn build(
+        &self,
+        _request: &ModelBuildRequest,
+    ) -> Result<(Arc<dyn ChatModel<()>>, ResolvedModelRoute)> {
+        Err(TinyAgentsError::Model("compile-time fixture".into()))
+    }
+}
+
+struct SendContractGate;
+
+impl ModelBuildGate for SendContractGate {
+    fn check(&self, _request: &ModelBuildRequest) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn turn_model_set_build_future_is_send() {
+    fn assert_send<T: Send>(_: &T) {}
+
+    let factory = SendContractFactory;
+    let gate = SendContractGate;
+    let future = TurnModelSet::<()>::builder(&factory, &gate, "chat")
+        .without_workload_tiers()
+        .build();
+
+    assert_send(&future);
 }

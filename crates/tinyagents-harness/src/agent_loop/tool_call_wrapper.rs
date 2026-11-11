@@ -42,7 +42,7 @@ const NAME_KEYS: &[&str] = &["name", "tool", "tool_name", "function"];
 const USE_SKILL: &str = crate::tool::USE_SKILL_TOOL;
 
 /// Whether `name` is one of the pseudo wrapper tool names.
-pub(super) fn is_wrapper_name(name: &str) -> bool {
+pub(crate) fn is_wrapper_name(name: &str) -> bool {
     let name = name.trim();
     WRAPPER_NAMES
         .iter()
@@ -52,7 +52,7 @@ pub(super) fn is_wrapper_name(name: &str) -> bool {
 /// The real call inside a wrapper's `arguments`: the target tool's name and
 /// its arguments. `None` when the payload does not identify a tool
 /// `is_callable` admits, so the caller keeps the original call.
-pub(super) fn unwrap_wrapped_call(
+pub(crate) fn unwrap_wrapped_call(
     arguments: &Value,
     is_callable: &dyn Fn(&str) -> bool,
 ) -> Option<(String, Value)> {

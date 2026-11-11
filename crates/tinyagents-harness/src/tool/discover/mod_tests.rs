@@ -575,3 +575,121 @@ async fn tool_search_without_a_chat_gives_the_ranker_an_empty_context() {
     let seen = recorder.0.lock().unwrap().clone().expect("ranker ran");
     assert_eq!(seen, tinytools::RankContext::empty());
 }
+
+#[test]
+fn discovery_defaults_keep_promotion_on_and_pretty_results() {
+    let policy = ToolDiscoveryPolicy::default();
+    assert!(policy.promote_found_tools);
+    assert!(!policy.compact_search_results);
+    assert!(!policy.collapse_search_results);
+    assert!(policy.repair_tool_call_wrapper);
+}
+
+#[test]
+fn policy_equality_includes_the_session_options() {
+    let base = ToolDiscoveryPolicy::default();
+    assert_ne!(base, base.clone().with_promote_found_tools(false));
+    assert_ne!(base, base.clone().with_compact_search_results(true));
+    assert_ne!(base, base.clone().with_collapse_search_results(true));
+    assert_ne!(base, base.clone().with_repair_tool_call_wrapper(false));
+}
+
+#[test]
+fn wrapper_repair_override_is_resolved_per_session_in_both_directions() {
+    let on = ToolDiscoveryPolicy::default();
+    let off = on.clone().with_repair_tool_call_wrapper(false);
+    let switch = |value| DiscoveryOverrides {
+        repair_tool_call_wrapper: Some(value),
+        ..DiscoveryOverrides::default()
+    };
+    assert!(!on.with_overrides(&switch(false)).repair_tool_call_wrapper);
+    assert!(off.with_overrides(&switch(true)).repair_tool_call_wrapper);
+    // Unset keeps the harness-wide value.
+    let unset = DiscoveryOverrides::default();
+    assert!(on.with_overrides(&unset).repair_tool_call_wrapper);
+    assert!(!off.with_overrides(&unset).repair_tool_call_wrapper);
+    assert!(!switch(false).is_empty());
+}
+
+#[test]
+fn collapse_override_is_resolved_per_session_in_both_directions() {
+    let off = ToolDiscoveryPolicy::default();
+    let on = off.clone().with_collapse_search_results(true);
+    let switch = |value| DiscoveryOverrides {
+        collapse_search_results: Some(value),
+        ..DiscoveryOverrides::default()
+    };
+    assert!(off.with_overrides(&switch(true)).collapse_search_results);
+    assert!(!on.with_overrides(&switch(false)).collapse_search_results);
+    // Unset keeps the harness-wide value.
+    assert!(
+        on.with_overrides(&DiscoveryOverrides::default())
+            .collapse_search_results
+    );
+    assert!(!DiscoveryOverrides::default().eq(&switch(true)));
+    assert!(!switch(true).is_empty());
+}
+
+#[test]
+fn overrides_replace_only_the_options_a_session_set() {
+    let policy = ToolDiscoveryPolicy::default().with_compact_search_results(true);
+    // Nothing set: the harness-wide policy applies unchanged.
+    assert_eq!(
+        policy.with_overrides(&DiscoveryOverrides::default()),
+        policy
+    );
+    let overrides = DiscoveryOverrides {
+        promote_found_tools: Some(false),
+        ..DiscoveryOverrides::default()
+    };
+    let effective = policy.with_overrides(&overrides);
+    assert!(!effective.promote_found_tools);
+    assert!(effective.compact_search_results);
+    // The reverse direction: a session can also switch an option on.
+    let on = DiscoveryOverrides {
+        compact_search_results: Some(false),
+        ..DiscoveryOverrides::default()
+    };
+    assert!(!policy.with_overrides(&on).compact_search_results);
+}
+
+/// Regression for compact rendering: it must change the bytes only, never the
+/// content. Every field of every hit survives and parses back to the same JSON
+/// the pretty rendering carries.
+#[tokio::test]
+async fn compact_search_results_keep_every_field_and_parse_back_to_the_same_json() {
+    let args = json!({"query": "read a pdf", "limit": 3});
+    let pretty = answer_tool_search(&catalog(), &ToolDiscoveryPolicy::default(), &args)
+        .await
+        .result
+        .text();
+    let compact_policy = ToolDiscoveryPolicy::default().with_compact_search_results(true);
+    let compact = answer_tool_search(&catalog(), &compact_policy, &args)
+        .await
+        .result
+        .text();
+
+    let split = |text: &str| {
+        let (head, body) = text.split_once('\n').expect("header then payload");
+        (
+            head.to_string(),
+            serde_json::from_str::<serde_json::Value>(body).expect("payload is JSON"),
+        )
+    };
+    let (pretty_head, pretty_json) = split(&pretty);
+    let (compact_head, compact_json) = split(&compact);
+    assert_eq!(pretty_head, compact_head);
+    assert_eq!(pretty_json, compact_json);
+    let hits = compact_json.as_array().unwrap();
+    assert!(!hits.is_empty());
+    for hit in hits {
+        let hit = hit.as_object().unwrap();
+        assert!(
+            ["name", "description", "parameters"]
+                .iter()
+                .all(|k| hit.contains_key(*k))
+        );
+    }
+    assert!(compact.len() < pretty.len());
+    assert_eq!(compact.lines().count(), 2, "payload is a single line");
+}

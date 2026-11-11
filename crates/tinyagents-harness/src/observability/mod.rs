@@ -18,6 +18,13 @@
 //!   (persist observations into a journal), and [`JsonlSink`] (append records
 //!   to a JSONL stream).
 //!
+//! Tool cost is visible without capturing content: a completed
+//! [`AgentEvent::ToolCompleted`] carries `input_bytes` (serialized arguments)
+//! and `output_bytes` (the result text the model is shown), and the host-facing
+//! [`turn_observer::TurnObservation::Tool`] repeats both on completion whatever
+//! the [`turn_observer::TraceContent`] consent. The Langfuse exporter writes the
+//! same two values to the tool span's metadata.
+//!
 //! Persisting sinks bridge the synchronous [`EventListener::on_event`] hook to
 //! the async journal/store APIs through a background [`worker::AppendWorker`]:
 //! `on_event` never blocks the run on I/O, persistence is best-effort (a full

@@ -129,7 +129,7 @@ fn finish(
         Err(error) if definition.fail_closed => {
             tracing::warn!("[hooks] {label} failed and is fail-closed; denying: {error}");
             HookRun {
-                output: HookOutput::deny(format!("hook '{label}' could not run: {error}")),
+                output: HookOutput::deny(format!("hook '{label}' could not run")),
                 label,
                 duration,
                 error: Some(error),

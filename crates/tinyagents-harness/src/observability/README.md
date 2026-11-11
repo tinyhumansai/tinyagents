@@ -74,7 +74,11 @@ surface and operational constraints.
 Persisting sinks (`JournalSink`, `JsonlSink`) bridge the synchronous
 `EventListener::on_event` hook to the async journal/store APIs through a
 background `AppendWorker`: `on_event` hands the observation to a **bounded**
-channel drained on a dedicated thread, so it never blocks the run on I/O.
+queue drained by a task on the one process-wide `tinyagents-drain` thread
+(started on first use, shared by every sink), so it never blocks the run on
+I/O and a new sink costs a task, not an OS thread and a runtime. Appends of
+different sinks interleave at their `.await`s; an append that blocks its
+thread without awaiting holds up every sink's drain while it runs.
 Persistence is **best-effort**: if the queue is full the observation is dropped
 (and counted in `AppendWorker::dropped`), backend errors are counted (in
 `AppendWorker::append_failures`) and reported through `tracing` rather than

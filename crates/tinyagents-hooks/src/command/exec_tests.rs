@@ -148,6 +148,9 @@ mod spawner {
         assert!(open.error.unwrap().contains("no isolation available"));
         let closed = run_with(refuse(), &hook(true)).await;
         assert!(closed.output.is_deny());
+        let reason = closed.output.agent_message.unwrap();
+        assert!(!reason.contains("no isolation available"), "{reason}");
+        assert!(closed.error.unwrap().contains("no isolation available"));
     }
 
     #[tokio::test]

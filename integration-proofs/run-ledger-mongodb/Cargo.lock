@@ -2387,7 +2387,7 @@ dependencies = [
 
 [[package]]
 name = "tinyagents-definition"
-version = "3.0.0"
+version = "3.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2400,7 +2400,7 @@ dependencies = [
 
 [[package]]
 name = "tinyagents-harness"
-version = "3.0.0"
+version = "3.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2411,6 +2411,7 @@ dependencies = [
  "libc",
  "regex",
  "rustix",
+ "schemars",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -2450,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "tinyagents-session"
-version = "3.0.0"
+version = "3.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2475,7 +2476,7 @@ dependencies = [
 
 [[package]]
 name = "tinyagents-storage-kit"
-version = "3.0.0"
+version = "3.1.4"
 dependencies = [
  "data-encoding",
  "serde",
@@ -2489,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "tinyagents-tasks"
-version = "3.0.0"
+version = "3.1.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -2540,6 +2541,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "thiserror",
  "tinyinference-core",
  "tinyinference-embeddings",

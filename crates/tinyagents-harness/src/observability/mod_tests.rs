@@ -148,6 +148,7 @@ fn agent_latency_metrics_include_model_tool_and_run_elapsed() {
                 input: None,
                 output: None,
                 duration_ms: None,
+                input_bytes: None,
                 output_bytes: None,
                 error: None,
                 metadata: None,
@@ -419,6 +420,35 @@ async fn append_worker_flush_persists_all_submissions_in_order() {
     // submission is durably recorded, in submit order.
     worker.flush();
     assert_eq!(*seen.lock().unwrap(), (0..8).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn append_workers_share_one_drain_thread() {
+    use std::sync::Mutex;
+
+    // A worker per run used to start its own OS thread and runtime; every
+    // worker now drains on the one process-wide `tinyagents-drain` thread.
+    let threads: Arc<Mutex<Vec<std::thread::Thread>>> = Arc::new(Mutex::new(Vec::new()));
+    let workers: Vec<_> = (0..50)
+        .map(|_| {
+            let threads = Arc::clone(&threads);
+            AppendWorker::spawn("test-shared", 8, move |_n: u64| {
+                let threads = Arc::clone(&threads);
+                async move {
+                    threads.lock().unwrap().push(std::thread::current());
+                    Ok(())
+                }
+            })
+        })
+        .collect();
+    for worker in &workers {
+        worker.submit(1);
+        worker.flush();
+    }
+    let threads = threads.lock().unwrap();
+    assert_eq!(threads.len(), 50);
+    assert!(threads.iter().all(|t| t.id() == threads[0].id()));
+    assert_eq!(threads[0].name(), Some("tinyagents-drain"));
 }
 
 #[tokio::test]

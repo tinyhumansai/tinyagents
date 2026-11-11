@@ -92,6 +92,18 @@ loop.
 
 ### Rendering
 - `render_message_for_summary(&Message) -> String`.
+- `render_message_for_summary_with(&Message, ToolRendering) -> Option<String>`
+  — the same, in a chosen mode; `None` when the mode omits the message.
+- `ToolRendering` — `Full` (default: tool calls with ids and arguments, tool
+  results elided) or `Markers` (conversation only: each tool call is one
+  `[used <name>: <arguments>]` line, arguments cut to 120 chars with an
+  ellipsis, no call ids; tool results omitted).
+
+### `ModelSummarizer`
+- `with_tool_rendering(ToolRendering)` — the transcript's rendering mode;
+  `Full` unless set.
+- `with_max_output_tokens(u32)` — sends `max_tokens` on the summary request.
+  Unset by default; the request sets no sampling parameters of its own.
 
 ## Files
 
@@ -100,7 +112,8 @@ loop.
 | `mod.rs` | `estimate_tokens`, `Summarizer for ConcatSummarizer`, `SummarizationPolicy` impls; wires the submodules together. |
 | `types.rs` | All public struct/enum/trait definitions. |
 | `pairing.rs` | Tool-call-pairing-safe cut-point repair. |
-| `render.rs` | `render_message_for_summary`. |
+| `render.rs` | `render_message_for_summary`, `render_message_for_summary_with`. |
+| `render_tests.rs` | Coverage for both rendering modes and marker truncation. |
 | `trim.rs` | `trim_messages`/`trim_messages_with`/`trim_messages_to_token_budget_with`. |
 | `compaction.rs` | `find_cut_point`, `summarize_with_split`, `OverflowClassifier`, `CompactionContext`/`CompactionDecision`. |
 | `response_overflow.rs` | `detect_response_overflow`, `ResponseOverflowDetection`: overflow read from a successful response (usage above the window, zero-output `length` stop, opt-in short `length` stop). |
@@ -142,6 +155,11 @@ loop.
   agent loop, and a model continues it with its next tool call. The request
   declares no tools, so that call arrives as plain-text markup (DeepSeek V4:
   `<｜DSML｜invoke …>`).
+- **`ToolRendering::Markers` drops tool output, never the conversation.**
+  User, assistant and system text render exactly as under `Full`; only tool
+  results are omitted and tool calls shortened to one marker line each, so a
+  small instruction-light summarization model sees what was said and done.
+  `Full` stays the default, byte-identical to `render_message_for_summary`.
 - **A tool call is never accepted as a summary.** A reply the tool-call
   grammars parse as a call is retried once, then returned as an error, so
   `FaultTolerantCachingSummarizer` falls back to its deterministic trim

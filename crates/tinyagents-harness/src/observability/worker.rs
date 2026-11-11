@@ -7,9 +7,13 @@
 //! path, and risked a deadlock on a current-thread runtime.
 //!
 //! [`AppendWorker`] moves persistence off the emitting thread entirely: each
-//! `submit` pushes the payload onto a **bounded** channel that a dedicated
-//! background thread drains, awaiting the append on its own single-thread
-//! runtime.
+//! `submit` pushes the payload onto a **bounded** queue that a drain task
+//! empties, awaiting each append. Every worker's drain task runs on one
+//! process-wide drain thread (`tinyagents-drain`, a current-thread runtime
+//! with a `LocalSet`), started on first use: a worker costs a task, not an OS
+//! thread and a runtime. The appends of different workers interleave at their
+//! `.await`s; an append that blocks its thread without awaiting holds up every
+//! worker's drain while it runs.
 //!
 //! # Backpressure & drop policy
 //! The channel is bounded (see [`DEFAULT_DRAIN_CAPACITY`]). `submit` never
@@ -52,18 +56,19 @@
 //! [`JsonlSink`](super::JsonlSink).
 //!
 //! # Ordering & durability boundary
-//! A single drain thread preserves submit order. [`AppendWorker::flush`] blocks
-//! until every payload queued so far has been persisted, and `Drop` flushes
-//! before tearing the thread down, so no buffered observation is lost on a
-//! graceful shutdown.
+//! Each worker has its own drain task, which preserves that worker's submit
+//! order. [`AppendWorker::flush`] blocks until every payload queued so far has
+//! been persisted, and `Drop` flushes before closing the queue, so no buffered
+//! observation is lost on a graceful shutdown.
 
 use std::fmt;
 use std::future::Future;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Sender, SyncSender, TrySendError, sync_channel};
-use std::thread::JoinHandle;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::error::Result;
 
@@ -103,20 +108,56 @@ enum Msg<T> {
     Flush(Sender<()>),
 }
 
+/// Starts one worker's drain task on the drain thread.
+type Start = Box<dyn FnOnce() + Send>;
+
+/// The process-wide drain thread, started on first use; `None` when it could
+/// not start.
+// ponytail: one thread for every worker; an append that blocks without
+// awaiting stalls the others. Move to a multi-thread runtime if appends need
+// it, which needs `Send` append futures.
+fn drain_thread() -> Option<&'static UnboundedSender<Start>> {
+    static DRAIN: OnceLock<Option<UnboundedSender<Start>>> = OnceLock::new();
+    DRAIN
+        .get_or_init(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            let (starts, mut started) = unbounded_channel::<Start>();
+            std::thread::Builder::new()
+                .name("tinyagents-drain".into())
+                .spawn(move || {
+                    let local = tokio::task::LocalSet::new();
+                    local.block_on(&runtime, async move {
+                        while let Some(start) = started.recv().await {
+                            start();
+                        }
+                    });
+                })
+                .ok()?;
+            Some(starts)
+        })
+        .as_ref()
+}
+
 /// A background worker that drains submitted payloads into an async append sink.
 ///
 /// See the module-level docs in this file for the backpressure, error, and durability
 /// semantics.
 pub struct AppendWorker<T: Send + 'static> {
-    /// Bounded submit channel. Wrapped in `Option` only so [`Drop`] can drop the
-    /// sender before joining the drain thread; it is always `Some` otherwise.
-    tx: Option<SyncSender<Msg<T>>>,
+    /// Submit channel; the bound is [`Self::capacity`], counted in `queued`.
+    /// Wrapped in `Option` only so [`Drop`] can close it; `None` too when the
+    /// drain thread could not start.
+    tx: Option<UnboundedSender<Msg<T>>>,
+    /// Payloads submitted and not yet taken by the drain task.
+    queued: Arc<AtomicUsize>,
+    /// The most payloads `queued` may hold before `submit` drops.
+    capacity: usize,
     /// Count of payloads dropped because the queue was full (or disconnected).
     dropped: Arc<AtomicU64>,
     /// Lifetime count of payloads whose durable append returned an error.
     append_failures: Arc<AtomicU64>,
-    /// Handle to the drain thread, joined on drop.
-    handle: Option<JoinHandle<()>>,
     /// Human-readable sink name used in error reports.
     name: &'static str,
 }
@@ -125,12 +166,12 @@ impl<T: Send + 'static> AppendWorker<T> {
     /// Spawns a drain worker.
     ///
     /// `append` is invoked once per submitted payload on the drain thread's
-    /// runtime; it returns the async append future. `name` labels the drain
-    /// thread and error reports.
+    /// runtime; it returns the async append future. `name` labels error
+    /// reports.
     pub fn spawn<F, Fut>(name: &'static str, capacity: usize, append: F) -> Self
     where
         F: Fn(T) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<()>>,
+        Fut: Future<Output = Result<()>> + 'static,
     {
         Self::spawn_with_cooldown(name, capacity, APPEND_REPORT_COOLDOWN, append)
     }
@@ -148,34 +189,28 @@ impl<T: Send + 'static> AppendWorker<T> {
     ) -> Self
     where
         F: Fn(T) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<()>>,
+        Fut: Future<Output = Result<()>> + 'static,
     {
-        let (tx, rx) = sync_channel::<Msg<T>>(capacity.max(1));
+        let (tx, mut rx) = unbounded_channel::<Msg<T>>();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let taken = Arc::clone(&queued);
         let append_failures = Arc::new(AtomicU64::new(0));
         let failures = Arc::clone(&append_failures);
-        let handle = std::thread::Builder::new()
-            .name(format!("tinyagents-{name}-drain"))
-            .spawn(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    // Without a runtime we cannot await appends; drain and drop.
-                    Err(_) => {
-                        while rx.recv().is_ok() {}
-                        return;
-                    }
-                };
-                rt.block_on(async move {
-                    // Failure-run state: how many appends have failed since the
-                    // last success, and when this run last reported. Local to
-                    // the drain thread — no shared state, no timer tasks.
-                    let mut failure_run: u64 = 0;
-                    let mut last_report: Option<Instant> = None;
-                    while let Ok(msg) = rx.recv() {
-                        match msg {
-                            Msg::Item(item) => match append(item).await {
+        // Only `append`, `rx` and the counters cross to the drain thread; the
+        // drain future, which holds `append`'s possibly non-`Send` futures, is
+        // built and spawned there.
+        let start = move || {
+            let drain = async move {
+                // Failure-run state: how many appends have failed since the
+                // last success, and when this run last reported. Local to
+                // the drain task — no shared state, no timer tasks.
+                let mut failure_run: u64 = 0;
+                let mut last_report: Option<Instant> = None;
+                while let Some(msg) = rx.recv().await {
+                    match msg {
+                        Msg::Item(item) => {
+                            taken.fetch_sub(1, Ordering::Relaxed);
+                            match append(item).await {
                                 Ok(()) => {
                                     if failure_run > 0 {
                                         tracing::warn!(
@@ -211,30 +246,35 @@ impl<T: Send + 'static> AppendWorker<T> {
                                         );
                                     }
                                 }
-                            },
-                            Msg::Flush(ack) => {
-                                let _ = ack.send(());
                             }
                         }
+                        Msg::Flush(ack) => {
+                            let _ = ack.send(());
+                        }
                     }
-                    // The channel closed mid-failure: report once on the way out
-                    // so a run that never recovered is not silently quiet.
-                    if failure_run > 0 {
-                        tracing::warn!(
-                            target: "tinyagents::observability",
-                            sink = name,
-                            lost = failure_run,
-                            "[observability] durable append failed; sink never recovered before shutdown, {failure_run} observation(s) lost"
-                        );
-                    }
-                });
-            })
-            .expect("spawn durable-drain thread");
+                }
+                // The channel closed mid-failure: report once on the way out
+                // so a run that never recovered is not silently quiet.
+                if failure_run > 0 {
+                    tracing::warn!(
+                        target: "tinyagents::observability",
+                        sink = name,
+                        lost = failure_run,
+                        "[observability] durable append failed; sink never recovered before shutdown, {failure_run} observation(s) lost"
+                    );
+                }
+            };
+            tokio::task::spawn_local(drain);
+        };
+        let started = drain_thread().is_some_and(|starts| starts.send(Box::new(start)).is_ok());
         Self {
-            tx: Some(tx),
+            // Without a drain thread nothing can be awaited: submissions are
+            // dropped and counted.
+            tx: started.then_some(tx),
+            queued,
+            capacity: capacity.max(1),
             dropped: Arc::new(AtomicU64::new(0)),
             append_failures,
-            handle: Some(handle),
             name,
         }
     }
@@ -245,13 +285,14 @@ impl<T: Send + 'static> AppendWorker<T> {
     /// [`Self::dropped`]).
     pub fn submit(&self, item: T) {
         let Some(tx) = self.tx.as_ref() else {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
             return;
         };
-        match tx.try_send(Msg::Item(item)) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-            }
+        if self.queued.fetch_add(1, Ordering::Relaxed) >= self.capacity
+            || tx.send(Msg::Item(item)).is_err()
+        {
+            self.queued.fetch_sub(1, Ordering::Relaxed);
+            self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -273,13 +314,14 @@ impl<T: Send + 'static> AppendWorker<T> {
     }
 
     /// Blocks until every payload submitted before this call has been persisted.
+    ///
+    /// The barrier is never dropped, whatever the queue holds. Calling this from
+    /// inside an append would wait on itself.
     pub fn flush(&self) {
         let Some(tx) = self.tx.as_ref() else {
             return;
         };
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
-        // Blocking send (not `try_send`) so a momentarily full queue does not
-        // drop the flush barrier; the drain thread is actively consuming.
         if tx.send(Msg::Flush(ack_tx)).is_ok() {
             let _ = ack_rx.recv();
         }
@@ -301,12 +343,9 @@ impl<T: Send + 'static> fmt::Debug for AppendWorker<T> {
 
 impl<T: Send + 'static> Drop for AppendWorker<T> {
     fn drop(&mut self) {
-        // Persist anything still queued, then drop the sender so the drain loop
-        // observes a closed channel and exits, then join the thread.
+        // Persist anything still queued, then close the queue so the drain
+        // task ends. There is no thread to join.
         self.flush();
         drop(self.tx.take());
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
     }
 }

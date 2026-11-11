@@ -96,6 +96,10 @@ pub enum HostedErrorKind {
     Policy,
     /// The model provider failed the call.
     Provider,
+    /// Host tool policy refused a call and stopped the run
+    /// ([`TinyAgentsError::ToolRefused`]). A refusal answered to the model
+    /// does not end the run and never surfaces here.
+    ToolRefused,
     /// Any other internal failure not covered by a more specific kind.
     Internal,
 }
@@ -167,6 +171,7 @@ fn classify_hosted_error(error: &TinyAgentsError) -> HostedErrorKind {
         | TinyAgentsError::PhysicalDispatchAdmission(_) => HostedErrorKind::LimitExceeded,
         TinyAgentsError::Validation(_) | TinyAgentsError::Steering(_) => HostedErrorKind::Policy,
         TinyAgentsError::Provider(_) | TinyAgentsError::Model(_) => HostedErrorKind::Provider,
+        TinyAgentsError::ToolRefused(_) => HostedErrorKind::ToolRefused,
         _ => HostedErrorKind::Internal,
     }
 }
@@ -191,7 +196,25 @@ fn hosted_error_message(kind: HostedErrorKind) -> &'static str {
         HostedErrorKind::LimitExceeded => "hosted agent invocation exceeded a configured limit",
         HostedErrorKind::Policy => "hosted agent invocation was rejected by policy",
         HostedErrorKind::Provider => "hosted agent invocation failed at the model provider",
-        HostedErrorKind::Internal => "hosted agent invocation failed",
+        HostedErrorKind::ToolRefused => {
+            "hosted agent invocation stopped: host policy refused a tool call"
+        }
+        HostedErrorKind::Internal => GENERIC_HOSTED_FAILURE,
+    }
+}
+
+const GENERIC_HOSTED_FAILURE: &str = "hosted agent invocation failed";
+
+/// The fixed message for a failed hosted stream, chosen from the run's typed
+/// terminal outcome because the stream carries only the raw error text.
+fn hosted_stream_failure_message(
+    outcome: Option<&crate::terminal::TerminalOutcome>,
+) -> &'static str {
+    match outcome.map(|outcome| outcome.reason) {
+        Some(crate::terminal::TerminalReason::ToolRefused) => {
+            hosted_error_message(HostedErrorKind::ToolRefused)
+        }
+        _ => GENERIC_HOSTED_FAILURE,
     }
 }
 
@@ -243,6 +266,7 @@ impl From<HostedError> for TinyAgentsError {
             HostedErrorKind::StreamIdleTimeout => TinyAgentsError::StreamIdleTimeout(error.message),
             HostedErrorKind::LimitExceeded => TinyAgentsError::LimitExceeded(error.message),
             HostedErrorKind::Policy => TinyAgentsError::Validation(error.message),
+            HostedErrorKind::ToolRefused => TinyAgentsError::ToolRefused(error.message),
             HostedErrorKind::Provider | HostedErrorKind::Internal => {
                 TinyAgentsError::Model(error.message)
             }
@@ -253,6 +277,10 @@ impl From<HostedError> for TinyAgentsError {
 #[cfg(test)]
 #[path = "agent_dispatch_refusal_tests.rs"]
 mod dispatch_refusal_tests;
+
+#[cfg(test)]
+#[path = "agent_tool_refusal_tests.rs"]
+mod tool_refusal_tests;
 
 /// A host-owned turn request.
 ///
@@ -454,7 +482,7 @@ impl<State: Send + Sync + 'static, Ctx: Send + Sync> Stream for AgentStream<'_, 
 fn sanitize_hosted_stream_item(mut item: AgentStreamItem) -> AgentStreamItem {
     match &mut item {
         AgentStreamItem::Failed { error, run } => {
-            *error = "hosted agent invocation failed".to_string();
+            *error = hosted_stream_failure_message(run.terminal.as_ref()).to_string();
             // The partial run carries its typed outcome; keep the
             // classification, drop the raw failure text.
             if let Some(outcome) = run.terminal.as_mut() {
@@ -497,7 +525,7 @@ fn sanitize_hosted_event(record: &mut EventRecord) {
             *error = "hosted middleware failed".to_string();
         }
         AgentEvent::RunFailed { error, outcome, .. } => {
-            *error = "hosted agent invocation failed".to_string();
+            *error = hosted_stream_failure_message(outcome.as_ref()).to_string();
             // The typed outcome mirrors the raw error text; keep its
             // classification (reason, class, phase) and drop the detail.
             if let Some(outcome) = outcome {

@@ -16,6 +16,28 @@ the model. `HookIdentity` lets a host provide session, agent, and working-path
 identity. `sanitize_tool_output` produces a content-free summary for learning
 records.
 
+A deny never runs the tool. By default it answers the model: the call gets a
+failed tool result (`TinyAgentsError::ToolFailed`, folded into
+`ToolResult::failed`) reading `tool hook '<hook>' denied <tool>: <reason>`, and
+the run continues so the model can pick another tool or answer without it. This
+covers a blank or invented tool name too, since hooks run before the
+unknown-tool policy. A deny that also sets `continue_: Some(false)` stops the
+run with `TinyAgentsError::ToolRefused`; the run ends with
+`TerminalReason::ToolRefused` and a hosted caller sees
+`HostedErrorKind::ToolRefused` instead of the generic internal failure. The
+refusal text names the hook, tool and reason, never the call's arguments.
+
+| Decision | Tool runs | Run |
+| --- | --- | --- |
+| `Deny` | no | continues; the model sees the reason |
+| `Deny` with `continue_: Some(false)` | no | stops with `ToolRefused` |
+| `Ask` | no | fails with `TinyAgentsError::Tool` |
+
+An answered deny releases its tool-call slot, like every other `before_tool`
+refusal, so a model that keeps calling a denied tool is bounded by the
+model-call cap (`RunLimits::max_model_calls`), not the tool-call cap. Hosts
+that relied on a deny ending the run must set `continue_: Some(false)`.
+
 The command engine is available at `tinyagents_hooks::command`. The runtime
 re-exports it from `tinyagents_runtime::command_hooks` for one release.
 

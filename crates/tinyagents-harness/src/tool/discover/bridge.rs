@@ -22,6 +22,12 @@ pub const TOOL_SEARCH_NAME: &str = "tool_search";
 /// model needs to call the tool; the prose only needs to confirm the match.
 const HIT_DESCRIPTION_CHARS: usize = 500;
 
+/// What follows the match count on the first line of a successful answer. The
+/// loop renders it, and [`parse_search_hits`] reads it back, so the two cannot
+/// drift apart.
+const FOUND_HEADER_TAIL: &str =
+    " match(es). Call one directly by its own name, using the parameters shown.";
+
 /// The bridge schemas for a run: just `tool_search`, the only intrinsic tool.
 /// A tool a search reveals is called by its own name, so there is no second
 /// schema to append.
@@ -144,13 +150,15 @@ pub async fn answer_tool_search(
         })
         .collect();
     let matched = payload.len();
-    let rendered = crate::canonical_json::to_string_pretty(&Value::Array(payload))
-        .unwrap_or_else(|_| "[]".to_string());
+    let payload = Value::Array(payload);
+    let rendered = if policy.compact_search_results {
+        crate::canonical_json::to_string(&payload)
+    } else {
+        crate::canonical_json::to_string_pretty(&payload)
+    }
+    .unwrap_or_else(|_| "[]".to_string());
     SearchAnswer {
-        result: ToolResult::success(format!(
-            "{matched} match(es). Call one directly by its own name, using the parameters \
-             shown.\n{rendered}"
-        )),
+        result: ToolResult::success(format!("{matched}{FOUND_HEADER_TAIL}\n{rendered}")),
         matched,
         matched_names: matches.iter().map(|schema| schema.name.clone()).collect(),
         ranking: Some(ranking),
@@ -163,13 +171,32 @@ pub async fn answer_tool_search(
 const QUERY_ALIASES: &[&str] = &["q", "text", "description", "name", "skill", "search"];
 
 /// The search text: `query`, else the first non-blank alias.
-fn search_query(arguments: &Value) -> &str {
+pub(super) fn search_query(arguments: &Value) -> &str {
     std::iter::once("query")
         .chain(QUERY_ALIASES.iter().copied())
         .filter_map(|key| arguments.get(key).and_then(Value::as_str))
         .map(str::trim)
         .find(|query| !query.is_empty())
         .unwrap_or_default()
+}
+
+/// The hits of a successful `tool_search` answer as [`answer_tool_search`]
+/// rendered it (pretty or compact), each a `{name, description, parameters}`
+/// object. `None` for anything else: a no-match line, an error, a result
+/// another tool or a middleware reshaped, or one already collapsed.
+pub(super) fn parse_search_hits(text: &str) -> Option<Vec<Value>> {
+    let (header, payload) = text.split_once('\n')?;
+    let count = header.strip_suffix(FOUND_HEADER_TAIL)?;
+    if count.is_empty() || !count.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hits: Vec<Value> = serde_json::from_str(payload).ok()?;
+    let well_formed = !hits.is_empty()
+        && hits.len().to_string() == count
+        && hits
+            .iter()
+            .all(|hit| hit.get("name").is_some_and(Value::is_string));
+    well_formed.then_some(hits)
 }
 
 fn clip(text: &str, max_chars: usize) -> String {

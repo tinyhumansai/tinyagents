@@ -72,6 +72,13 @@ fn should_retry(error: &HostedError) -> bool {
 }
 ```
 
+`HostedErrorKind::ToolRefused` means host tool policy refused a call and asked
+for the run to stop (`TinyAgentsError::ToolRefused`). Its message is
+`hosted agent invocation stopped: host policy refused a tool call`, and the
+hosted stream's `Failed` item and `RunFailed` event carry the same message when
+the run's `TerminalOutcome::reason` is `ToolRefused`. It is not retryable as-is;
+the host's policy decides whether the turn can run again.
+
 `TimeoutBound` is `#[non_exhaustive]`; treat an unknown bound like `Run`.
 `HostedError` gained the public `timeout_bound` field, so code that builds it
 with a struct literal must set it. Recursive hosted children convert back to

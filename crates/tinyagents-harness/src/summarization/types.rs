@@ -23,6 +23,28 @@ pub struct ModelSummarizer {
     pub(super) model_id: String,
     /// Threshold reported in summary provenance; the policy owns the trigger.
     pub(super) threshold_fraction: f64,
+    /// How tool calls and results are rendered into the transcript.
+    pub(super) tool_rendering: ToolRendering,
+    /// Output cap sent as the request's `max_tokens`; `None` leaves it unset.
+    pub(super) max_output_tokens: Option<u32>,
+}
+
+/// How a summary transcript renders tool activity.
+///
+/// See [`render_message_for_summary_with`](super::render_message_for_summary_with).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRendering {
+    /// Every tool call with its id and arguments, and every tool result, in
+    /// the tagged form of
+    /// [`render_message_for_summary`](super::render_message_for_summary).
+    #[default]
+    Full,
+    /// The conversation only: each tool call becomes one
+    /// `[used <name>: <arguments>]` line with its arguments cut short, and tool
+    /// results are left out. For small summarization models that should see
+    /// what was said and done, not the tools' output.
+    Markers,
 }
 
 impl std::fmt::Debug for ModelSummarizer {
@@ -30,6 +52,8 @@ impl std::fmt::Debug for ModelSummarizer {
         f.debug_struct("ModelSummarizer")
             .field("model_id", &self.model_id)
             .field("threshold_fraction", &self.threshold_fraction)
+            .field("tool_rendering", &self.tool_rendering)
+            .field("max_output_tokens", &self.max_output_tokens)
             .finish_non_exhaustive()
     }
 }
