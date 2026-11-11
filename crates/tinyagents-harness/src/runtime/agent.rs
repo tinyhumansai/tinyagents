@@ -158,10 +158,35 @@ impl std::fmt::Display for HostedError {
 
 impl std::error::Error for HostedError {}
 
+impl HostedError {
+    /// The provider failure class (auth, billing, rate limit, model not
+    /// found, ...) when the run failed at the model provider, read from the
+    /// run's typed terminal outcome. It is content-free, so a host can
+    /// classify the failure without the provider text `message` withholds.
+    ///
+    /// It does not follow `kind`: a context overflow or a missing model is
+    /// [`HostedErrorKind::Internal`] but still has a class. `None` for a
+    /// non-provider failure, for a local rate limiter's denial
+    /// ([`HostedErrorKind::RateLimited`]: the provider was never called), and
+    /// when the turn failed before the run started.
+    pub fn provider_failure(&self) -> Option<crate::retry::FailoverReason> {
+        if self.kind == HostedErrorKind::RateLimited {
+            return None;
+        }
+        match self.run.as_deref()?.terminal.as_ref()?.reason {
+            crate::terminal::TerminalReason::ProviderFailed(reason) => reason,
+            _ => None,
+        }
+    }
+}
+
 /// Classifies a raw loop error into the closed [`HostedErrorKind`] vocabulary
 /// a host is allowed to see.
 fn classify_hosted_error(error: &TinyAgentsError) -> HostedErrorKind {
     match error {
+        // A summarizer failure wraps the real error; classify that, as the
+        // run's terminal outcome does.
+        TinyAgentsError::SummarizationUsage { error, .. } => classify_hosted_error(error),
         TinyAgentsError::Cancelled => HostedErrorKind::Cancelled,
         TinyAgentsError::StreamIdleTimeout(_) => HostedErrorKind::StreamIdleTimeout,
         TinyAgentsError::RateLimited(_) => HostedErrorKind::RateLimited,
@@ -281,6 +306,10 @@ mod dispatch_refusal_tests;
 #[cfg(test)]
 #[path = "agent_tool_refusal_tests.rs"]
 mod tool_refusal_tests;
+
+#[cfg(test)]
+#[path = "agent_provider_failure_tests.rs"]
+mod provider_failure_tests;
 
 /// A host-owned turn request.
 ///
