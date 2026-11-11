@@ -184,6 +184,9 @@ impl HostedError {
 /// a host is allowed to see.
 fn classify_hosted_error(error: &TinyAgentsError) -> HostedErrorKind {
     match error {
+        // A summarizer failure wraps the real error; classify that, as the
+        // run's terminal outcome does.
+        TinyAgentsError::SummarizationUsage { error, .. } => classify_hosted_error(error),
         TinyAgentsError::Cancelled => HostedErrorKind::Cancelled,
         TinyAgentsError::StreamIdleTimeout(_) => HostedErrorKind::StreamIdleTimeout,
         TinyAgentsError::RateLimited(_) => HostedErrorKind::RateLimited,

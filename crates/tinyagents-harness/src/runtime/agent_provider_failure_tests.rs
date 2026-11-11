@@ -76,3 +76,20 @@ fn a_local_rate_limiter_denial_is_not_blamed_on_the_provider() {
         Some(FailoverReason::RateLimit)
     );
 }
+
+#[test]
+fn a_summarizer_wrapped_failure_is_classified_by_what_it_wraps() {
+    let wrap = |inner: TinyAgentsError| TinyAgentsError::SummarizationUsage {
+        error: Box::new(inner),
+        usage: tinyinference_llm::usage::Usage::default(),
+    };
+    let local = wrap(TinyAgentsError::RateLimited("token bucket empty".into()));
+    let hosted = hosted_error(&local, failed_run(&local));
+    assert_eq!(hosted.kind, HostedErrorKind::RateLimited);
+    assert_eq!(hosted.provider_failure(), None);
+
+    let upstream = wrap(provider(429, "too many requests"));
+    let hosted = hosted_error(&upstream, failed_run(&upstream));
+    assert_eq!(hosted.kind, HostedErrorKind::Provider);
+    assert_eq!(hosted.provider_failure(), Some(FailoverReason::RateLimit));
+}
