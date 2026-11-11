@@ -182,17 +182,11 @@ const PROMPT_CACHING_MODELS: &[&str] = &[
     "gemini-2.5-pro",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "deepseek-chat",
-    "deepseek-reasoner",
     "kimi-k2.6",
-    "kimi-k2.5",
-    "qwen3-max",
     "qwen-max",
     "qwen-plus",
     "qwen-flash",
     "minimax-m3",
-    "minimax-m2.7",
-    "minimax-m2.7-highspeed",
 ];
 
 /// Whether the published vision allowlist includes this decorated model id.

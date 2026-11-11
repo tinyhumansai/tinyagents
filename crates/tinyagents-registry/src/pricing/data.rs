@@ -7,8 +7,8 @@ use super::{LongContextTier, ModelPrice};
 ///
 /// Each provider block names the page its rows were checked against and the
 /// date ([`super::PRICING_AS_OF`]). Rates are standard (not batch) list prices;
-/// the cached rate is the cache-read price. A row marked "retired" was no longer
-/// priced by its provider on that date and keeps its last known values. Context
+/// the cached rate is the cache-read price. Models their provider retired are
+/// removed rather than kept at stale prices. Context
 /// windows are the published maximums. Rows with a long-context price step are
 /// the short-context rates; [`LONG_CONTEXT_TIERS`] holds the step.
 pub const KNOWN_MODEL_PRICING: &[ModelPrice] = &[
@@ -163,26 +163,7 @@ pub const KNOWN_MODEL_PRICING: &[ModelPrice] = &[
         output_per_mtok_usd: 0.40,
         context_window: 1_048_576,
     },
-    // ── DeepSeek: api-docs.deepseek.com/updates (2026-11-11). Both aliases are
-    // retired (discontinued 2026-07-24); values are the last known ones.
-    ModelPrice {
-        provider: "deepseek",
-        model_id: "deepseek-chat",
-        input_per_mtok_usd: 0.14,
-        cached_input_per_mtok_usd: 0.014,
-        output_per_mtok_usd: 0.28,
-        context_window: 128_000,
-    },
-    ModelPrice {
-        provider: "deepseek",
-        model_id: "deepseek-reasoner",
-        input_per_mtok_usd: 0.55,
-        cached_input_per_mtok_usd: 0.055,
-        output_per_mtok_usd: 2.19,
-        context_window: 128_000,
-    },
-    // ── Moonshot: platform.kimi.ai/docs/pricing/chat (2026-11-11). kimi-k2.5 is
-    // retired (listed as deprecated, unpriced).
+    // ── Moonshot: platform.kimi.ai/docs/pricing/chat (2026-11-11).
     ModelPrice {
         provider: "moonshot",
         model_id: "kimi-k2.6",
@@ -191,25 +172,9 @@ pub const KNOWN_MODEL_PRICING: &[ModelPrice] = &[
         output_per_mtok_usd: 4.00,
         context_window: 262_144,
     },
-    ModelPrice {
-        provider: "moonshot",
-        model_id: "kimi-k2.5",
-        input_per_mtok_usd: 0.60,
-        cached_input_per_mtok_usd: 0.10,
-        output_per_mtok_usd: 3.00,
-        context_window: 256_000,
-    },
     // ── Qwen: alibabacloud.com/help/en/model-studio/model-pricing, International
     // (2026-11-11). Cache read is the explicit-cache rate (0.1× input);
-    // qwen-max has implicit cache only (0.2×). qwen3-max is retired (unlisted).
-    ModelPrice {
-        provider: "qwen",
-        model_id: "qwen3-max",
-        input_per_mtok_usd: 1.20,
-        cached_input_per_mtok_usd: 0.12,
-        output_per_mtok_usd: 6.00,
-        context_window: 256_000,
-    },
+    // qwen-max has implicit cache only (0.2×).
     ModelPrice {
         provider: "qwen",
         model_id: "qwen-max",
@@ -234,17 +199,18 @@ pub const KNOWN_MODEL_PRICING: &[ModelPrice] = &[
         output_per_mtok_usd: 0.40,
         context_window: 1_000_000,
     },
-    // ── Mistral: docs.mistral.ai model cards (2026-11-11). Cache rates are
-    // estimates (no published cache price). mistral-large, mistral-medium,
-    // mistral-small and ministral-8b now name newer or retired models and are
-    // not re-priced here; codestral (25.08) is checked.
+    // ── Mistral: docs.mistral.ai model cards (2026-11-11). mistral-large is
+    // Large 4 (26.10, published cache price); mistral-small is Small 4 (26.03);
+    // ministral-8b is Ministral 3 8B (25.12); codestral is 25.08. Small, 8B and
+    // Codestral publish no cache price, so theirs is an estimate (0.1× input).
+    // mistral-medium (Medium 3.5) is deprecated and unpriced; last known values.
     ModelPrice {
         provider: "mistral",
         model_id: "mistral-large",
-        input_per_mtok_usd: 2.00,
-        cached_input_per_mtok_usd: 0.20,
-        output_per_mtok_usd: 6.00,
-        context_window: 128_000,
+        input_per_mtok_usd: 0.70,
+        cached_input_per_mtok_usd: 0.07,
+        output_per_mtok_usd: 2.10,
+        context_window: 1_000_000,
     },
     ModelPrice {
         provider: "mistral",
@@ -257,10 +223,10 @@ pub const KNOWN_MODEL_PRICING: &[ModelPrice] = &[
     ModelPrice {
         provider: "mistral",
         model_id: "mistral-small",
-        input_per_mtok_usd: 0.20,
-        cached_input_per_mtok_usd: 0.02,
+        input_per_mtok_usd: 0.15,
+        cached_input_per_mtok_usd: 0.015,
         output_per_mtok_usd: 0.60,
-        context_window: 128_000,
+        context_window: 256_000,
     },
     ModelPrice {
         provider: "mistral",
@@ -273,13 +239,13 @@ pub const KNOWN_MODEL_PRICING: &[ModelPrice] = &[
     ModelPrice {
         provider: "mistral",
         model_id: "ministral-8b",
-        input_per_mtok_usd: 0.10,
-        cached_input_per_mtok_usd: 0.01,
-        output_per_mtok_usd: 0.10,
-        context_window: 128_000,
+        input_per_mtok_usd: 0.15,
+        cached_input_per_mtok_usd: 0.015,
+        output_per_mtok_usd: 0.15,
+        context_window: 256_000,
     },
     // ── MiniMax: platform.minimax.io/docs/guides/pricing (2026-11-11). M3's row
-    // is the ≤512K rate. m2.7 and m2.7-highspeed are retired (2026-11-18).
+    // is the ≤512K rate.
     ModelPrice {
         provider: "minimax",
         model_id: "minimax-m3",
@@ -287,22 +253,6 @@ pub const KNOWN_MODEL_PRICING: &[ModelPrice] = &[
         cached_input_per_mtok_usd: 0.06,
         output_per_mtok_usd: 1.20,
         context_window: 1_000_000,
-    },
-    ModelPrice {
-        provider: "minimax",
-        model_id: "minimax-m2.7",
-        input_per_mtok_usd: 0.30,
-        cached_input_per_mtok_usd: 0.06,
-        output_per_mtok_usd: 1.20,
-        context_window: 204_800,
-    },
-    ModelPrice {
-        provider: "minimax",
-        model_id: "minimax-m2.7-highspeed",
-        input_per_mtok_usd: 0.60,
-        cached_input_per_mtok_usd: 0.06,
-        output_per_mtok_usd: 2.40,
-        context_window: 204_800,
     },
 ];
 

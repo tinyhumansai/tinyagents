@@ -21,11 +21,8 @@ fn lookup_strips_vendor_prefix_openrouter_style() {
         lookup("anthropic/claude-sonnet-4-6").unwrap().model_id,
         "claude-sonnet-4-6"
     );
-    assert_eq!(
-        lookup("deepseek/deepseek-chat").unwrap().model_id,
-        "deepseek-chat"
-    );
-    assert_eq!(lookup("qwen/qwen3-max").unwrap().model_id, "qwen3-max");
+    assert_eq!(lookup("moonshot/kimi-k2.6").unwrap().model_id, "kimi-k2.6");
+    assert_eq!(lookup("qwen/qwen-plus").unwrap().model_id, "qwen-plus");
 }
 
 #[test]
@@ -262,7 +259,7 @@ fn free_model_pricing_is_zero_and_does_not_change_reported_charges() {
 
 #[test]
 fn approximate_cached_rates_do_not_advertise_prompt_caching() {
-    let mistral = flat_catalog_entry(lookup("mistral-large").unwrap(), "consumer");
+    let mistral = flat_catalog_entry(lookup("mistral-small").unwrap(), "consumer");
     assert!(!mistral.capabilities.prompt_caching);
 }
 
@@ -281,4 +278,34 @@ fn gpt5_and_gemini_cache_reads_are_a_tenth_of_input() {
         let row = lookup(id).unwrap();
         approx(row.cached_input_per_mtok_usd, row.input_per_mtok_usd / 10.0);
     }
+}
+
+#[test]
+fn retired_models_are_gone_and_renamed_mistral_ids_carry_their_new_models() {
+    for id in [
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "kimi-k2.5",
+        "qwen3-max",
+        "minimax-m2.7",
+        "minimax-m2.7-highspeed",
+    ] {
+        assert!(lookup(id).is_none(), "{id} is retired");
+        approx(estimate_cost_usd(id, 1_000, 1_000, 0), 0.0);
+    }
+    for (id, input, cached, output, window) in [
+        ("mistral-large", 0.70, 0.07, 2.10, 1_000_000),
+        ("mistral-small", 0.15, 0.015, 0.60, 256_000),
+        ("ministral-8b", 0.15, 0.015, 0.15, 256_000),
+    ] {
+        let row = lookup(id).unwrap();
+        approx(row.input_per_mtok_usd, input);
+        approx(row.cached_input_per_mtok_usd, cached);
+        approx(row.output_per_mtok_usd, output);
+        assert_eq!(row.context_window, window, "{id}");
+    }
+    assert_eq!(
+        lookup("ministral-8b-2512").unwrap().model_id,
+        "ministral-8b"
+    );
 }
