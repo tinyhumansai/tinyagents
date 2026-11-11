@@ -289,6 +289,7 @@ fn retired_models_are_gone_and_renamed_mistral_ids_carry_their_new_models() {
         "qwen3-max",
         "minimax-m2.7",
         "minimax-m2.7-highspeed",
+        "mistral-medium",
     ] {
         assert!(lookup(id).is_none(), "{id} is retired");
         approx(estimate_cost_usd(id, 1_000, 1_000, 0), 0.0);

@@ -203,7 +203,6 @@ pub const KNOWN_MODEL_PRICING: &[ModelPrice] = &[
     // Large 4 (26.10, published cache price); mistral-small is Small 4 (26.03);
     // ministral-8b is Ministral 3 8B (25.12); codestral is 25.08. Small, 8B and
     // Codestral publish no cache price, so theirs is an estimate (0.1× input).
-    // mistral-medium (Medium 3.5) is deprecated and unpriced; last known values.
     ModelPrice {
         provider: "mistral",
         model_id: "mistral-large",
@@ -211,14 +210,6 @@ pub const KNOWN_MODEL_PRICING: &[ModelPrice] = &[
         cached_input_per_mtok_usd: 0.07,
         output_per_mtok_usd: 2.10,
         context_window: 1_000_000,
-    },
-    ModelPrice {
-        provider: "mistral",
-        model_id: "mistral-medium",
-        input_per_mtok_usd: 0.40,
-        cached_input_per_mtok_usd: 0.04,
-        output_per_mtok_usd: 2.00,
-        context_window: 128_000,
     },
     ModelPrice {
         provider: "mistral",
