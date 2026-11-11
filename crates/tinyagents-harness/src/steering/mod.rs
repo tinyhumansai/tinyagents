@@ -308,7 +308,8 @@ impl SteeringHandle {
     /// at `checkpoint`. Idempotent: an existing pause keeps its original reason
     /// and checkpoint, so a repeated `Pause` does not rewrite why the run
     /// stopped.
-    fn latch_pause(&self, checkpoint: usize, reason: Option<String>) -> PauseState {
+    pub(crate) fn latch_pause(&self, checkpoint: usize, reason: Option<String>) -> PauseState {
+        *self.lock_pause_requests() += 1;
         let mut paused = self.lock_paused();
         let state = paused.get_or_insert(PauseState {
             reason,
@@ -330,6 +331,7 @@ impl SteeringHandle {
     /// pause is in effect.
     pub fn resume(&self) -> Option<PauseState> {
         let cleared = self.lock_paused().take();
+        *self.lock_pause_requests() = 0;
         if cleared.is_some() {
             tracing::debug!(target: "tinyagents::steering", "[steering] pause cleared by resume");
         }
@@ -404,6 +406,18 @@ impl SteeringHandle {
     fn lock_model_override(&self) -> std::sync::MutexGuard<'_, Option<String>> {
         self.local
             .model_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// How many pause commands were applied since the last resume.
+    pub(crate) fn pause_requests(&self) -> usize {
+        *self.lock_pause_requests()
+    }
+
+    fn lock_pause_requests(&self) -> std::sync::MutexGuard<'_, usize> {
+        self.local
+            .pause_requests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }

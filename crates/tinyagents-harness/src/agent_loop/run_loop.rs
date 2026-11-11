@@ -351,41 +351,27 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // Safe steering checkpoint: drain any orchestrator/human steering
             // commands and apply the policy-permitted ones before the next
             // model call. Cancel terminates the run; Pause short-circuits it.
-            match crate::steering::apply_pending_steering(ctx, messages)? {
+            let steering = crate::steering::apply_pending_steering(ctx, messages)?;
+            // The deliver-first turn has run: end the run with the halt it
+            // deferred, whatever that turn asked for next.
+            if !matches!(steering, crate::steering::SteeringOutcome::Cancel)
+                && let Some(halt) = ctx.deferred_halt.take()
+            {
+                ctx.halted_by_guard = Some(halt.summary);
+                ctx.halted_by_guard_cause = halt.cause;
+                let pause = match ctx.steering.as_ref() {
+                    Some(handle) => {
+                        handle.latch_pause(halt.pause.paused_at_checkpoint, halt.pause.reason)
+                    }
+                    None => halt.pause,
+                };
+                return Ok(LoopExit::Paused(pause));
+            }
+            match steering {
                 crate::steering::SteeringOutcome::Cancel => {
                     return Err(TinyAgentsError::Cancelled);
                 }
                 crate::steering::SteeringOutcome::Pause => {
-                    // A repeat/no-progress guard halt (not a human/orchestrator pause)
-                    // gets one deliver-first turn before it ends the run: the model was
-                    // stopped mid-loop with its deliverable possibly unwritten. Nudge it
-                    // to write its final output, lift the guard's pause latch, and loop
-                    // once more. One-shot per run; a second guard halt ends it for real.
-                    if ctx.halted_by_guard.is_some()
-                        && !ctx.deliver_first_attempted
-                        && ctx.limits.remaining_model_calls() > 0
-                    {
-                        ctx.deliver_first_attempted = true;
-                        let _ = ctx.take_halted_by_guard();
-                        let _ = ctx.take_halted_by_guard_cause();
-                        if let Some(handle) = ctx.steering.as_ref() {
-                            handle.resume();
-                        }
-                        messages.push(Message::user(DELIVER_FIRST_NUDGE.to_string()));
-                        let record = ctx.emit(AgentEvent::ControlApplied {
-                            control: "deliver_first_nudge".to_string(),
-                            detail: "repeat/no-progress guard halt; granting a final turn \
-                                     to write the deliverable before ending"
-                                .to_string(),
-                        });
-                        status.set_last_event(record.id);
-                        tracing::info!(
-                            target: "tinyagents::agent_loop",
-                            run_id = %ctx.run_id(),
-                            "[agent_loop] guard halt: granting one deliver-first turn before ending"
-                        );
-                        continue;
-                    }
                     let pause = ctx
                         .steering
                         .as_ref()
@@ -394,7 +380,46 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                             reason: None,
                             paused_at_checkpoint: 0,
                         });
-                    return Ok(LoopExit::Paused(pause));
+                    // A repeat/no-progress guard halt may first grant one
+                    // deliver-first turn (`RunPolicy::deliver_first_on_guard_halt`):
+                    // the model was stopped mid-loop with its deliverable possibly
+                    // unwritten. Only the guard's own pause is lifted; a host pause
+                    // at the same checkpoint still ends the run. The halt is kept
+                    // and restored at the next checkpoint, after that one turn.
+                    let lone_guard_pause = ctx
+                        .steering
+                        .as_ref()
+                        .is_some_and(|handle| handle.pause_requests() == 1);
+                    if !(self.policy.deliver_first_on_guard_halt
+                        && lone_guard_pause
+                        && ctx.halted_by_guard.is_some()
+                        && !ctx.deliver_first_attempted
+                        && ctx.limits.remaining_model_calls() > 0)
+                    {
+                        return Ok(LoopExit::Paused(pause));
+                    }
+                    ctx.deliver_first_attempted = true;
+                    ctx.deferred_halt = Some(crate::context::DeferredHalt {
+                        summary: ctx.take_halted_by_guard().unwrap_or_default(),
+                        cause: ctx.take_halted_by_guard_cause(),
+                        pause,
+                    });
+                    if let Some(handle) = ctx.steering.as_ref() {
+                        handle.resume();
+                    }
+                    messages.push(Message::user(DELIVER_FIRST_NUDGE.to_string()));
+                    let record = ctx.emit(AgentEvent::ControlApplied {
+                        control: "deliver_first_nudge".to_string(),
+                        detail: "repeat/no-progress guard halt; granting a final turn \
+                                 to write the deliverable before ending"
+                            .to_string(),
+                    });
+                    status.set_last_event(record.id);
+                    tracing::info!(
+                        target: "tinyagents::agent_loop",
+                        run_id = %ctx.run_id(),
+                        "[agent_loop] guard halt: granting one deliver-first turn before ending"
+                    );
                 }
                 crate::steering::SteeringOutcome::Continue => {}
             }

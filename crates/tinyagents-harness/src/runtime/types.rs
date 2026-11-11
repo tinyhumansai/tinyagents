@@ -554,6 +554,12 @@ pub struct RunPolicy {
     /// [`crate::context::RunConfig::replay_reasoning`]. The stored transcript
     /// always keeps every reasoning block. See [`crate::reasoning_replay`].
     pub replay_reasoning: crate::reasoning_replay::ReasoningReplay,
+    /// Whether a repeat / no-progress guard halt first grants the model one
+    /// final turn, with a nudge to write its deliverable, before the run ends
+    /// halted. Off by default, so a guard halt ends the run at once unless the
+    /// host opts in. Not granted when a host pause arrived at the same
+    /// checkpoint or no model call is left.
+    pub deliver_first_on_guard_halt: bool,
 }
 
 /// See [`RunPolicy::structured_strategy_override`].
@@ -724,6 +730,7 @@ impl Default for RunPolicy {
             structured_strategy_override: None,
             queue_mode: QueueMode::default(),
             tool_result_durations: false,
+            deliver_first_on_guard_halt: false,
             result_expiry: crate::result_expiry::ToolResultExpiryPolicy::default(),
             replay_reasoning: crate::reasoning_replay::ReasoningReplay::default(),
         }
