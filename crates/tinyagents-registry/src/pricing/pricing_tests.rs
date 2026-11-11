@@ -310,3 +310,23 @@ fn retired_models_are_gone_and_renamed_mistral_ids_carry_their_new_models() {
         "ministral-8b"
     );
 }
+
+#[test]
+fn mistral_large_4_ids_price_like_mistral_large() {
+    let alias = lookup("mistral-large").unwrap();
+    for id in [
+        "mistral-large-4",
+        "mistral-large-4-0",
+        "mistral/mistral-large-4-0",
+    ] {
+        let row = lookup(id).unwrap_or_else(|| panic!("{id} has no row"));
+        approx(row.input_per_mtok_usd, alias.input_per_mtok_usd);
+        approx(
+            row.cached_input_per_mtok_usd,
+            alias.cached_input_per_mtok_usd,
+        );
+        approx(row.output_per_mtok_usd, alias.output_per_mtok_usd);
+        assert_eq!(row.context_window, alias.context_window, "{id}");
+        assert!(estimate_cost_usd(id, 1_000_000, 0, 0) > 0.0, "{id}");
+    }
+}

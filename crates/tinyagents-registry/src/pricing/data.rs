@@ -200,12 +200,30 @@ pub const KNOWN_MODEL_PRICING: &[ModelPrice] = &[
         context_window: 1_000_000,
     },
     // ── Mistral: docs.mistral.ai model cards (2026-11-11). mistral-large is
-    // Large 4 (26.10, published cache price); mistral-small is Small 4 (26.03);
+    // Large 4 (26.10, published cache price), also listed under its own ids
+    // mistral-large-4 and mistral-large-4-0 (a one-digit suffix is not a
+    // snapshot decoration, so lookup would not reach the alias row); mistral-small is Small 4 (26.03);
     // ministral-8b is Ministral 3 8B (25.12); codestral is 25.08. Small, 8B and
     // Codestral publish no cache price, so theirs is an estimate (0.1× input).
     ModelPrice {
         provider: "mistral",
         model_id: "mistral-large",
+        input_per_mtok_usd: 0.70,
+        cached_input_per_mtok_usd: 0.07,
+        output_per_mtok_usd: 2.10,
+        context_window: 1_000_000,
+    },
+    ModelPrice {
+        provider: "mistral",
+        model_id: "mistral-large-4",
+        input_per_mtok_usd: 0.70,
+        cached_input_per_mtok_usd: 0.07,
+        output_per_mtok_usd: 2.10,
+        context_window: 1_000_000,
+    },
+    ModelPrice {
+        provider: "mistral",
+        model_id: "mistral-large-4-0",
         input_per_mtok_usd: 0.70,
         cached_input_per_mtok_usd: 0.07,
         output_per_mtok_usd: 2.10,
