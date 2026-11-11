@@ -1,17 +1,25 @@
 //! Offline published model prices, context windows and decorated-id lookup.
 //!
-//! Values preserve the July 2026 consumer snapshot; estimates remain best effort.
+//! Values were checked against provider pages on 2026-11-11; estimates remain
+//! best effort.
 //! This module performs no I/O. Consumers own billing authority, runtime capability
 //! overlays and product configuration.
 
 /// Month the published values below were last verified. Bump when refreshing.
-pub const PRICING_AS_OF: &str = "2026-07";
+pub const PRICING_AS_OF: &str = "2026-11-11";
 
 mod data;
 mod types;
 
-pub use data::KNOWN_MODEL_PRICING;
-pub use types::ModelPrice;
+pub use data::{KNOWN_MODEL_PRICING, LONG_CONTEXT_TIERS};
+pub use types::{LongContextTier, ModelPrice};
+
+/// The long-context price step for a catalogued model id, if it has one.
+pub fn long_context_tier(model_id: &str) -> Option<&'static LongContextTier> {
+    LONG_CONTEXT_TIERS
+        .iter()
+        .find(|tier| tier.model_id == model_id)
+}
 
 /// Normalise a model string for matching: lower-case, trim, drop a trailing
 /// `:tag` / `@date` decoration and a `[...]` suffix.
@@ -109,15 +117,23 @@ pub fn estimate_cost_usd(
     };
     let cached = cached_input_tokens.min(input_tokens);
     let standard_input = input_tokens.saturating_sub(cached);
-    if p.model_id == "minimax-m3" && input_tokens <= 512_000 {
-        return (standard_input as f64) * 0.30 / 1_000_000.0
-            + (cached as f64) * 0.06 / 1_000_000.0
-            + (output_tokens as f64) * 1.20 / 1_000_000.0;
-    }
+    let (input_rate, cached_rate, output_rate) =
+        match long_context_tier(p.model_id).filter(|tier| input_tokens > tier.above_input_tokens) {
+            Some(tier) => (
+                tier.input_per_mtok_usd,
+                tier.cached_input_per_mtok_usd,
+                tier.output_per_mtok_usd,
+            ),
+            None => (
+                p.input_per_mtok_usd,
+                p.cached_input_per_mtok_usd,
+                p.output_per_mtok_usd,
+            ),
+        };
     let per_tok = |mtok_rate: f64| mtok_rate / 1_000_000.0;
-    (standard_input as f64) * per_tok(p.input_per_mtok_usd)
-        + (cached as f64) * per_tok(p.cached_input_per_mtok_usd)
-        + (output_tokens as f64) * per_tok(p.output_per_mtok_usd)
+    (standard_input as f64) * per_tok(input_rate)
+        + (cached as f64) * per_tok(cached_rate)
+        + (output_tokens as f64) * per_tok(output_rate)
 }
 
 /// Resolve a model's flat list-price projection, including explicit `:free`
@@ -184,17 +200,16 @@ pub fn model_accepts_image_input(model_id: &str) -> bool {
     lookup(model_id).is_some_and(|price| VISION_INPUT_MODELS.contains(&price.model_id))
 }
 
-/// Project one published catalog row as flat metadata (not a tier-aware estimate) into a TinyAgents model-catalog entry.
+/// Project one published catalog row into a TinyAgents model-catalog entry.
 ///
 /// This is intentionally a pricing/window projection only. Consumers still
 /// derives live runtime capability flags (tools, vision, streaming) from the
 /// provider adapter at construction time, because the static cost catalog does
 /// not yet encode those fields authoritatively for every provider/model.
 ///
-/// This preserves the migrated flat metadata projection. For MiniMax M3,
-/// `estimate_cost_usd` applies a lower rate through 512K input tokens, while
-/// this projection uses the row rates and intentionally contains no tiers.
-/// Consumers must not treat these two paths as equivalent call estimates.
+/// A model with a [`LongContextTier`] gets two price tiers (the row's rates up
+/// to the step, the step's above it), so a catalogue estimate and
+/// [`estimate_cost_usd`] agree on every call size.
 pub fn flat_catalog_entry(price: &ModelPrice, source: &str) -> crate::ModelCatalogEntry {
     crate::ModelCatalogEntry {
         provider: price.provider.to_string(),
@@ -212,8 +227,27 @@ pub fn flat_catalog_entry(price: &ModelPrice, source: &str) -> crate::ModelCatal
             cache_creation_input_per_token: None,
             input_audio_per_token: None,
             output_reasoning_per_token: None,
-            // The local price table is flat; context-size tiers are not modeled.
-            tiers: Vec::new(),
+            // The same long-context step `estimate_cost_usd` applies.
+            tiers: long_context_tier(price.model_id)
+                .map(|tier| {
+                    vec![
+                        tinyagents_harness::cost::PriceTier {
+                            up_to_tokens: Some(tier.above_input_tokens),
+                            input: per_token(price.input_per_mtok_usd),
+                            output: per_token(price.output_per_mtok_usd),
+                            cache_read: per_token(price.cached_input_per_mtok_usd),
+                            cache_write: None,
+                        },
+                        tinyagents_harness::cost::PriceTier {
+                            up_to_tokens: None,
+                            input: per_token(tier.input_per_mtok_usd),
+                            output: per_token(tier.output_per_mtok_usd),
+                            cache_read: per_token(tier.cached_input_per_mtok_usd),
+                            cache_write: None,
+                        },
+                    ]
+                })
+                .unwrap_or_default(),
         },
         capabilities: crate::ModelCapabilities {
             prompt_caching: PROMPT_CACHING_MODELS.contains(&price.model_id),
