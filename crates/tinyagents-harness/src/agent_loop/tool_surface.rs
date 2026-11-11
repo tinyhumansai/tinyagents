@@ -128,6 +128,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // `Hidden` or `Deferred` registration under that name must also
             // suppress the intrinsic schema, because admission's own collision
             // rule (`answer_discovery_bridge`) checks the same full registry.
+            // A toolset tool under that name suppresses it too.
             let mut bridge: Vec<_> =
                 crate::tool::discover::bridge_schemas(&deferred_catalog, &self.policy.discovery)
                     .into_iter()
@@ -143,7 +144,11 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                     .collect();
             }
             for schema in bridge {
-                if self.tools.dispatch(&schema.name).is_none() {
+                // The direct set also holds toolset-supplied tools, which
+                // the registry check alone misses.
+                if self.tools.dispatch(&schema.name).is_none()
+                    && !tool_schemas.iter().any(|direct| direct.name == schema.name)
+                {
                     tool_schemas.push(schema.clone());
                     bridge_schemas.push(schema);
                 }

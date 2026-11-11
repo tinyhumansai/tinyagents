@@ -11,7 +11,7 @@ use super::format::{CompletionFormatter, NeutralCompletionFormatter};
 use super::lifecycle::{ParentLifecycle, ParentLifecycleGuard, ParentLifecycleStatus};
 use super::store::{
     ClaimResolution, CompletionClaimMode, CompletionStore, ParentGateClaim, PendingClaimRequest,
-    ResolveClaimRequest, TaskClaimRequest,
+    RenewClaimRequest, ResolveClaimRequest, TaskClaimRequest,
 };
 use super::types::{CompletionReceipt, CompletionRecord, CompletionState, NotifyMode};
 
@@ -91,6 +91,7 @@ struct RouterState {
 pub struct CompletionRouter {
     formatter: Arc<dyn CompletionFormatter>,
     max_attempts: u32,
+    claim_visibility: Duration,
     state: Mutex<RouterState>,
     admission_store: Arc<Mutex<AdmissionStoreSlot>>,
     lifecycle: Mutex<Arc<ParentLifecycle>>,
@@ -245,6 +246,7 @@ impl CompletionRouter {
         Self {
             formatter: Arc::new(NeutralCompletionFormatter),
             max_attempts: DEFAULT_MAX_ATTEMPTS,
+            claim_visibility: CLAIM_VISIBILITY,
             state: Mutex::new(RouterState {
                 store,
                 lifecycle: Arc::clone(&lifecycle),
@@ -484,6 +486,18 @@ impl CompletionRouter {
         self
     }
 
+    /// Sets how long a delivery claim lasts before another consumer may take
+    /// the record (30 s by default). [`Self::renew_claims`] extends it.
+    pub fn with_claim_visibility(mut self, visibility: Duration) -> Self {
+        self.claim_visibility = visibility;
+        self
+    }
+
+    /// How long a delivery claim lasts.
+    pub fn claim_visibility(&self) -> Duration {
+        self.claim_visibility
+    }
+
     /// The formatter in use.
     pub fn formatter(&self) -> &Arc<dyn CompletionFormatter> {
         &self.formatter
@@ -720,7 +734,7 @@ impl CompletionRouter {
             }) {
                 Some((lane, queue)) => {
                     let token = uuid::Uuid::new_v4().to_string();
-                    let visible_after = SystemTime::now() + CLAIM_VISIBILITY;
+                    let visible_after = SystemTime::now() + self.claim_visibility;
                     let Some(claimed) = state.store.claim_task(TaskClaimRequest {
                         task_id: record.task_id.clone(),
                         parent_key: record.parent_key.clone(),
@@ -1194,7 +1208,7 @@ impl CompletionRouter {
             return Ok(Vec::new());
         };
         let token = uuid::Uuid::new_v4().to_string();
-        let visible_after = SystemTime::now() + CLAIM_VISIBILITY;
+        let visible_after = SystemTime::now() + self.claim_visibility;
         let mut candidates = state.store.claim_pending(PendingClaimRequest {
             parent_key: parent_key.to_owned(),
             parent_epoch,
@@ -1252,6 +1266,33 @@ impl CompletionRouter {
         }
         tracing::debug!(changed, "{LOG_PREFIX} delivered");
         Ok(changed)
+    }
+
+    /// Extends claimed records for another [`Self::claim_visibility`] while a
+    /// delivery is still running. Returns how many claims were still owned;
+    /// a reclaimed or settled record is left alone.
+    pub fn renew_claims(&self, receipts: &[CompletionReceipt]) -> Result<usize> {
+        let state = self.lock()?;
+        let visible_after = SystemTime::now() + self.claim_visibility;
+        let mut renewed = 0;
+        for receipt in receipts {
+            let gate = ParentGateGuard::acquire(
+                Arc::clone(&state.store),
+                Arc::clone(&state.lifecycle),
+                &receipt.parent_key,
+            )?;
+            if state.store.renew_claim(RenewClaimRequest {
+                task_id: receipt.task_id.clone(),
+                parent_key: receipt.parent_key.clone(),
+                parent_epoch: receipt.parent_epoch,
+                gate: gate.claim().clone(),
+                token: receipt.token.clone(),
+                visible_after,
+            })? {
+                renewed += 1;
+            }
+        }
+        Ok(renewed)
     }
 
     /// Reports a failed delivery. The lease is released so the record can be

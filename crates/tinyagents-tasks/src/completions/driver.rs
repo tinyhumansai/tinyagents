@@ -35,8 +35,8 @@ use tinyagents_storage_kit::{
 use tokio::sync::OnceCell;
 
 use super::store::{
-    ClaimResolution, CompletionStore, ParentGateClaim, PendingClaimRequest, ResolveClaimRequest,
-    TaskClaimRequest,
+    ClaimResolution, CompletionStore, ParentGateClaim, PendingClaimRequest, RenewClaimRequest,
+    ResolveClaimRequest, TaskClaimRequest,
 };
 use super::types::{CompletionRecord, CompletionState};
 use crate::storage::{
@@ -577,6 +577,52 @@ impl CompletionStore for DriverCompletionStore {
             {
                 Ok(_) => Ok(Some(record)),
                 Err(error) if error.kind() == ErrorKind::Conflict => Ok(None),
+                Err(error) => Err(map_error(error)),
+            }
+        })
+    }
+
+    fn renew_claim(&self, request: RenewClaimRequest) -> Result<bool> {
+        let this = self.clone();
+        let RenewClaimRequest {
+            task_id,
+            parent_key,
+            parent_epoch,
+            gate,
+            token,
+            visible_after,
+        } = request;
+        self.run(async move {
+            this.declare().await?;
+            let docs = this.fenced_docs(&parent_key, &gate).await?;
+            let id = task_id_key(&task_id).map_err(map_error)?;
+            let Some(row) = docs.get(COMPLETIONS, &id).await.map_err(map_error)? else {
+                return Ok(false);
+            };
+            let mut record = decode_strict(row.clone())?;
+            if record.parent_key != parent_key
+                || record.parent_epoch != parent_epoch
+                || record.state != CompletionState::Pending
+            {
+                return Ok(false);
+            }
+            let Some(claim) = record.claim.as_mut().filter(|claim| claim.token == token) else {
+                return Ok(false);
+            };
+            claim.visible_after = visible_after;
+            let body = serde_json::to_value(CompletionDoc::from_record(&record))?;
+            match docs
+                .put_with(
+                    COMPLETIONS,
+                    &id,
+                    body,
+                    Precondition::Version(row.version),
+                    WriteOptions::new().schema(SCHEMA_VERSION),
+                )
+                .await
+            {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == ErrorKind::Conflict => Ok(false),
                 Err(error) => Err(map_error(error)),
             }
         })

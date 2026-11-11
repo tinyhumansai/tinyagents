@@ -1205,3 +1205,45 @@ async fn completions_are_v2_documents_with_key_ids_and_metadata_update_times() {
         UNIX_EPOCH + Duration::from_millis(row.meta.updated_ms as u64)
     );
 }
+
+#[test]
+fn a_renewed_driver_claim_stays_owned_and_only_its_token_renews_it() {
+    use crate::completions::{CompletionClaimMode, PendingClaimRequest, RenewClaimRequest};
+
+    let storage = MemoryStorage::new();
+    let store =
+        DriverCompletionStore::new(Arc::new(storage), Scope::new("shared").unwrap()).unwrap();
+    put_record(&store, &record("renewed", "parent"));
+    let gate = parent_gate(&store, "parent");
+    let claim = |token: &str| {
+        store
+            .claim_pending(PendingClaimRequest {
+                parent_key: "parent".into(),
+                parent_epoch: 0,
+                gate: gate.clone(),
+                mode: CompletionClaimMode::Followup,
+                max: 1,
+                token: token.into(),
+                visible_after: SystemTime::now() - Duration::from_secs(1),
+            })
+            .unwrap()
+    };
+    let owner = claim("owner").pop().unwrap().claim.unwrap().token;
+    let renew = |token: &str| {
+        store
+            .renew_claim(RenewClaimRequest {
+                task_id: "renewed".into(),
+                parent_key: "parent".into(),
+                parent_epoch: 0,
+                gate: gate.clone(),
+                token: token.into(),
+                visible_after: SystemTime::now() + Duration::from_secs(60),
+            })
+            .unwrap()
+    };
+
+    assert!(!renew("someone-else:renewed"));
+    assert!(renew(&owner));
+    assert!(claim("thief").is_empty());
+    assert_eq!(store.get("renewed").unwrap().claim.unwrap().token, owner);
+}
