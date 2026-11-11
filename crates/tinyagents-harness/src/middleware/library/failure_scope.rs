@@ -211,7 +211,8 @@ pub trait FailureScopePolicy<Ctx: Send + Sync>: FailurePolicy {
     }
 
     /// Called when the run ends or errors so a host stop-latch adapter can
-    /// discard its run-specific evidence.
+    /// discard its run-specific evidence. On `after_agent`, the driver copies
+    /// any current classified cause into the run before calling this hook.
     fn finish_run(&self, _ctx: &RunContext<Ctx>) {}
 }
 
@@ -613,8 +614,15 @@ impl<Ctx: Send + Sync> Middleware<(), Ctx> for FailureScopeMiddleware<Ctx> {
         &self,
         ctx: &mut RunContext<Ctx>,
         _state: &(),
-        _run: &mut crate::middleware::AgentRun,
+        run: &mut crate::middleware::AgentRun,
     ) -> Result<()> {
+        // A host callback may have latched the cause after the loop last
+        // observed it. Capture it while the policy still owns that evidence;
+        // finish_run is allowed to clear the latch. Keep a cause already
+        // recorded by the loop or another middleware authoritative.
+        if run.failure_cause.is_none() {
+            run.failure_cause = self.policy.current_halt_cause(ctx);
+        }
         self.policy.finish_run(ctx);
         self.clear_run(ctx.instance_id());
         Ok(())
@@ -634,3 +642,7 @@ impl<Ctx: Send + Sync> Middleware<(), Ctx> for FailureScopeMiddleware<Ctx> {
 #[cfg(test)]
 #[path = "failure_scope_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "failure_scope_finish_tests.rs"]
+mod finish_tests;
