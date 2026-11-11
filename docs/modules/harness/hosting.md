@@ -79,6 +79,13 @@ hosted stream's `Failed` item and `RunFailed` event carry the same message when
 the run's `TerminalOutcome::reason` is `ToolRefused`. It is not retryable as-is;
 the host's policy decides whether the turn can run again.
 
+`HostedErrorKind::Provider` keeps the provider's text out of `message`, but not
+its class. `HostedError::provider_failure()` returns the run's
+`retry::FailoverReason` (`Auth`, `Billing`, `RateLimit`, `ModelNotFound`, and so
+on), read from `run.terminal`, so a host can tell a revoked key or a missing
+model from an outage without parsing text. Read it before converting the error
+into a `TinyAgentsError`, which keeps only the fixed message.
+
 `TimeoutBound` is `#[non_exhaustive]`; treat an unknown bound like `Run`.
 `HostedError` gained the public `timeout_bound` field, so code that builds it
 with a struct literal must set it. Recursive hosted children convert back to

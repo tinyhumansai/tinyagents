@@ -158,6 +158,20 @@ impl std::fmt::Display for HostedError {
 
 impl std::error::Error for HostedError {}
 
+impl HostedError {
+    /// The provider failure class (auth, billing, rate limit, model not
+    /// found, ...) when the run failed at the model provider, read from the
+    /// run's typed terminal outcome. It is content-free, so a host can
+    /// classify the failure without the provider text `message` withholds.
+    /// `None` for any other failure, or when no run was kept.
+    pub fn provider_failure(&self) -> Option<crate::retry::FailoverReason> {
+        match self.run.as_deref()?.terminal.as_ref()?.reason {
+            crate::terminal::TerminalReason::ProviderFailed(reason) => reason,
+            _ => None,
+        }
+    }
+}
+
 /// Classifies a raw loop error into the closed [`HostedErrorKind`] vocabulary
 /// a host is allowed to see.
 fn classify_hosted_error(error: &TinyAgentsError) -> HostedErrorKind {
@@ -281,6 +295,10 @@ mod dispatch_refusal_tests;
 #[cfg(test)]
 #[path = "agent_tool_refusal_tests.rs"]
 mod tool_refusal_tests;
+
+#[cfg(test)]
+#[path = "agent_provider_failure_tests.rs"]
+mod provider_failure_tests;
 
 /// A host-owned turn request.
 ///
