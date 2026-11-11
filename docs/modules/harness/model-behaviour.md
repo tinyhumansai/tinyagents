@@ -59,8 +59,11 @@ http }` lets a host hook the OpenAI and Anthropic adapters' Chat
 Completions/Messages transport without the harness knowing about the hook:
 `on_payload: Option<Arc<dyn Fn(&mut Value) + Send + Sync>>` mutates the wire
 body immediately before it is sent, `on_response: Option<Arc<dyn Fn(&Value) +
-Send + Sync>>` observes the raw response JSON after a successful call, and
-`http: Option<reqwest::Client>` overrides the adapter's own client. Set it at
+Send + Sync>>` observes the raw response JSON after a successful call (an
+OpenAI `invoke` fulfilled by streaming, as `local-openai` models do, passes a
+Chat Completions body assembled from the stream instead, which parses back to
+the same answer), and `http: Option<reqwest::Client>` overrides the adapter's
+own client. Set it at
 construction with `AnthropicModel::with_request_options` /
 `OpenAiModel::with_request_options`. On the OpenAI adapter it currently covers
 the Chat Completions path only (not the Responses/Codex path).
