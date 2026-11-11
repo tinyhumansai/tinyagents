@@ -23,6 +23,7 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         messages: &mut Vec<Message>,
         turn_recovery: &mut TurnRecovery,
         promoted_names: &mut std::collections::BTreeSet<String>,
+        output_retry_attempts: &mut u8,
         mixed: MixedStructuredTurn<'_>,
     ) -> Result<TurnFlow> {
         let MixedStructuredTurn {
@@ -48,28 +49,44 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         });
         status.set_last_event(record.id);
 
-        if matches!(self.policy.end_strategy, EndStrategy::Early) {
+        // Early and Graceful take this turn's answer, so it is extracted and
+        // validated like a plain final answer. A rejected answer is not
+        // recorded: the turn takes the Exhaustive path with the repair prompt,
+        // bounded by `RunPolicy::output_retry` like the plain path.
+        let takes_answer = match self.policy.end_strategy {
+            EndStrategy::Early => true,
+            EndStrategy::Graceful => !turn_had_truncated_calls,
+            EndStrategy::Exhaustive => false,
+        };
+        let mut repair = None;
+        if takes_answer
+            && let Some(error) = self
+                .accept_structured(state, ctx, run, structured_plan, &response)
+                .await?
+        {
+            if *output_retry_attempts >= self.policy.output_retry.max_attempts {
+                return Err(TinyAgentsError::StructuredOutput(error));
+            }
+            *output_retry_attempts += 1;
+            let record = ctx.emit(AgentEvent::OutputRetry {
+                attempt: *output_retry_attempts,
+                error: error.clone(),
+            });
+            status.set_last_event(record.id);
+            repair = Some(
+                self.policy
+                    .output_retry
+                    .message_template
+                    .replace("{error}", &error),
+            );
+        }
+
+        if repair.is_none() && matches!(self.policy.end_strategy, EndStrategy::Early) {
             // Finish immediately: the structured answer wins outright,
             // and the accompanying tool calls never run. Every
             // requested `tool_call_id` — structured hits and the
             // skipped real calls alike — still needs an answer or the
             // transcript is malformed for a future replay.
-            if let Some((strategy, name, schema)) = &structured_plan {
-                let extractor = self.build_structured_extractor(strategy, name, schema);
-                match extractor.extract(&response) {
-                    Ok(output) => {
-                        run.structured = Some(output.value);
-                        run.structured_variant = output.variant;
-                    }
-                    Err(error) => tracing::debug!(
-                        target: "tinyagents::agent_loop",
-                        run_id = %ctx.run_id(),
-                        %error,
-                        "[agent_loop] structured extraction failed on a mixed turn \
-                         under EndStrategy::Early"
-                    ),
-                }
-            }
             for call in &structured_hits {
                 messages.push(Message::tool(
                     call.id.clone(),
@@ -94,27 +111,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // `Exhaustive` path below (answer not recorded, tools run,
         // another turn) whatever the strategy; `Early` still wins
         // outright because it discards the real calls by contract.
-        if matches!(self.policy.end_strategy, EndStrategy::Graceful) && !turn_had_truncated_calls {
+        if repair.is_none()
+            && matches!(self.policy.end_strategy, EndStrategy::Graceful)
+            && takes_answer
+        {
             // Record the answer now (it will not be asked for again),
             // but let the requested tools actually run before ending
             // the run — their side effects and results are not
             // silently dropped, unlike `Early`.
-            if let Some((strategy, name, schema)) = &structured_plan {
-                let extractor = self.build_structured_extractor(strategy, name, schema);
-                match extractor.extract(&response) {
-                    Ok(output) => {
-                        run.structured = Some(output.value);
-                        run.structured_variant = output.variant;
-                    }
-                    Err(error) => tracing::debug!(
-                        target: "tinyagents::agent_loop",
-                        run_id = %ctx.run_id(),
-                        %error,
-                        "[agent_loop] structured extraction failed on a mixed turn \
-                         under EndStrategy::Graceful"
-                    ),
-                }
-            }
             for call in &structured_hits {
                 messages.push(Message::tool(
                     call.id.clone(),
@@ -158,9 +162,13 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // It only finishes once a later turn's output-tool call has
         // no accompanying function-tool calls.
         debug_assert!(
-            matches!(self.policy.end_strategy, EndStrategy::Exhaustive) || turn_had_truncated_calls
+            repair.is_some()
+                || matches!(self.policy.end_strategy, EndStrategy::Exhaustive)
+                || turn_had_truncated_calls
         );
-        let not_final_note = if matches!(self.policy.end_strategy, EndStrategy::Exhaustive) {
+        let not_final_note = if let Some(repair) = &repair {
+            repair.as_str()
+        } else if matches!(self.policy.end_strategy, EndStrategy::Exhaustive) {
             "Structured output noted but not final yet; finish the remaining tool \
                      calls first (EndStrategy::Exhaustive)."
         } else {
@@ -217,5 +225,37 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             ControlEffect::Exit(exit) => return Ok(TurnFlow::Exit(exit)),
         }
         Ok(TurnFlow::NextTurn)
+    }
+
+    /// Extracts and validates a mixed turn's structured answer as the plain
+    /// final path does. `Ok(None)` recorded it (or there was no plan);
+    /// `Ok(Some(error))` rejected it and asks for a repair.
+    async fn accept_structured(
+        &self,
+        state: &State,
+        ctx: &mut RunContext<Ctx>,
+        run: &mut AgentRun,
+        structured_plan: Option<&(StructuredStrategy, String, Value)>,
+        response: &ModelResponse,
+    ) -> Result<Option<String>> {
+        let Some((strategy, name, schema)) = structured_plan else {
+            return Ok(None);
+        };
+        let outcome = self
+            .build_structured_extractor(strategy, name, schema)
+            .extract_outcome(response);
+        let Some(value) = outcome.value else {
+            return Ok(outcome.error);
+        };
+        if let Some(validator) = &self.output_validator {
+            match validator.validate(ctx, state, &value).await {
+                Ok(()) => {}
+                Err(TinyAgentsError::ModelRetry(message)) => return Ok(Some(message)),
+                Err(other) => return Err(other),
+            }
+        }
+        run.structured = Some(value);
+        run.structured_variant = outcome.variant;
+        Ok(None)
     }
 }
