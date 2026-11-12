@@ -8,6 +8,7 @@
 //! good, with every deadline inside the turn frozen with it.
 
 use super::*;
+use crate::progress::AgentProgress;
 
 /// Sends one progress event, yields, then signals that it was polled again.
 struct SignalsAfterProgress {
@@ -50,7 +51,7 @@ impl TurnHost for SignalsAfterProgress {
     ) -> Result<TurnResult, String> {
         progress
             .send(TurnSignal::Progress(Box::new(
-                crate::progress::AgentProgress::TurnStarted,
+                AgentProgress::TurnStarted,
             )))
             .await
             .map_err(|_| "progress channel closed".to_owned())?;
@@ -77,7 +78,7 @@ struct WaitsForTheTurn {
 
 #[async_trait::async_trait]
 impl EventSink for WaitsForTheTurn {
-    async fn progress(&self, _request: &TurnRequest, _event: crate::progress::AgentProgress) {
+    async fn progress(&self, _request: &TurnRequest, _event: AgentProgress) {
         self.polled_again.notified().await;
     }
 
