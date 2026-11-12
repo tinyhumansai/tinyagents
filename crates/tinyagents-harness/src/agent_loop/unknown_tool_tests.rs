@@ -106,3 +106,69 @@ fn message_echoes_the_attempted_arguments() {
     assert!(message.starts_with("unknown tool `missing`"), "{message}");
     assert!(message.contains("\"path\":\"/tmp/a\""), "{message}");
 }
+
+#[test]
+fn a_json_tool_call_in_the_name_gets_a_format_corrective() {
+    // Seen live: an OpenAI-compatible gateway parsed the model's
+    // `<tool_call>{json}</tool_call>` text in its own template and handed back
+    // a structured call whose *name* was the whole JSON body, arguments `{}`.
+    // Echoing that back as "no tool with that name" sent the model reasoning
+    // about key order for the rest of the run.
+    let body = r#"{"arguments": {"command": "cd /srv/teeny/state/workbench/brain && git status --short --branch && cat brain/cron.toml"}, "name": "shell"}"#;
+    let message = unknown_tool_message(
+        body,
+        &serde_json::json!({}),
+        &names(&["shell", "file_read", "file_write"]),
+        false,
+    );
+    assert!(message.starts_with("unknown tool `"), "{message}");
+    assert!(message.contains("is not a tool name"), "{message}");
+    assert!(
+        message.contains("a whole tool call (`shell` with its arguments)"),
+        "names the tool it carried: {message}"
+    );
+    assert!(
+        message.contains("`shell`, `file_read`, `file_write`"),
+        "lists the callable names: {message}"
+    );
+    assert!(
+        !message.contains("cron.toml"),
+        "does not echo the whole body: {message}"
+    );
+    assert!(message.len() < 600, "corrective must stay small: {message}");
+}
+
+#[test]
+fn a_name_with_spaces_or_markup_is_not_treated_as_a_typo() {
+    for bad in ["shell ls -la", "<tool_call>shell", "\"shell\"", ""] {
+        let message = unknown_tool_message(bad, &serde_json::json!({}), &names(&["shell"]), false);
+        assert!(message.contains("is not a tool name"), "{bad:?}: {message}");
+    }
+}
+
+#[test]
+fn ordinary_identifiers_keep_the_plain_corrective() {
+    for name in [
+        "web_search_tool",
+        "GITHUB_LIST_ISSUES",
+        "mcp.server-tool",
+        "ns:tool/x",
+    ] {
+        let message = unknown_tool_message(name, &serde_json::json!({}), &names(&["shell"]), false);
+        assert!(!message.contains("is not a tool name"), "{name}: {message}");
+    }
+}
+
+#[test]
+fn a_bad_name_with_a_large_catalog_points_to_tool_search() {
+    let available: Vec<String> = (0..50).map(|i| format!("tool_{i}")).collect();
+    let message = unknown_tool_message(
+        r#"{"name":"tool_3","arguments":{}}"#,
+        &serde_json::json!({}),
+        &available,
+        true,
+    );
+    assert!(message.contains("is not a tool name"), "{message}");
+    assert!(message.contains("`tool_search`"), "{message}");
+    assert!(!message.contains("tool_49"), "{message}");
+}

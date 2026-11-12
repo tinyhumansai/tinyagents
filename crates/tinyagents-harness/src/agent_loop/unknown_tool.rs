@@ -34,6 +34,9 @@ pub(super) fn unknown_tool_message(
     available: &[String],
     tool_search_available: bool,
 ) -> String {
+    if !is_tool_identifier(requested) {
+        return malformed_name_message(requested, available, tool_search_available);
+    }
     let args_repr = serde_json::to_string(arguments).unwrap_or_else(|_| "<unserializable>".into());
     let mut message = format!(
         "unknown tool `{requested}` (arguments: {args_repr}): no tool with that name is available to you, and calling it \
@@ -57,6 +60,101 @@ pub(super) fn unknown_tool_message(
         message.push_str(" Use only the tools in your tool list.");
     }
     message
+}
+
+/// Longest catalog the format corrective lists by name. Past this the model is
+/// sent to `tool_search`, or to its tool list, as the ordinary corrective does.
+const MAX_LISTED_NAMES: usize = 12;
+
+/// Longest slice of a malformed name echoed back. The whole value can be a
+/// multi-kilobyte JSON call; the model only needs to recognise it.
+const MALFORMED_ECHO_CHARS: usize = 60;
+
+/// Whether `name` could be a tool's name at all: non-empty, bounded, and free
+/// of whitespace, quotes, brackets and markup.
+///
+/// Deliberately a *negative* test. Real catalogs carry `snake_case`,
+/// `SCREAMING_CASE` connector actions, and MCP names with `.`, `-`, `:` or `/`;
+/// none of those carry the characters that only show up when something other
+/// than a name landed in the name field: a whole `{"name":…,"arguments":…}`
+/// object, a command line, or leftover `<tool_call>` markup.
+pub(super) fn is_tool_identifier(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 256
+        && !name.chars().any(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || matches!(
+                    c,
+                    '{' | '}' | '[' | ']' | '(' | ')' | '<' | '>' | '"' | '\'' | '`' | ','
+                )
+        })
+}
+
+/// The corrective for a call whose name is not a tool name at all.
+///
+/// A gateway that parses `<tool_call>` text with its own template can hand
+/// back the model's whole JSON call as the *name*, with `{}` arguments. Told
+/// only that no such tool exists, the model has no way to see what went wrong
+/// and keeps retrying the same shape. This says it plainly, names the tool the
+/// value seems to carry, and lists what may be called. The
+/// ``unknown tool `…` `` prefix is kept: hosts classify the result by it.
+fn malformed_name_message(
+    requested: &str,
+    available: &[String],
+    tool_search_available: bool,
+) -> String {
+    let echo: String = requested.chars().take(MALFORMED_ECHO_CHARS).collect();
+    let echo = echo.replace('`', "'");
+    let ellipsis = if requested.chars().count() > MALFORMED_ECHO_CHARS {
+        "…"
+    } else {
+        ""
+    };
+    let mut message =
+        format!("unknown tool `{echo}{ellipsis}`: that is not a tool name, so no tool ran.");
+    if let Some(carried) = carried_tool_name(requested) {
+        message.push_str(&format!(
+            " It looks like a whole tool call (`{carried}` with its arguments) was put where \
+             only the name belongs."
+        ));
+    }
+    message.push_str(
+        " Call the tool again with the bare tool name as the name and the arguments as a \
+         JSON object.",
+    );
+    if !available.is_empty() && available.len() <= MAX_LISTED_NAMES {
+        let names = available
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        message.push_str(&format!(" Tools you can call: {names}."));
+    } else if tool_search_available {
+        message.push_str(&format!(
+            " To find the right tool, call `{TOOL_SEARCH_NAME}` with what you want to do in plain \
+             words."
+        ));
+    } else {
+        message.push_str(" Use only the tools in your tool list.");
+    }
+    message
+}
+
+/// The tool name inside a JSON call object, when `value` is one
+/// (`{"name": "shell", "arguments": …}`, in any key order).
+fn carried_tool_name(value: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(value.trim()).ok()?;
+    let name = parsed
+        .get("name")
+        .or_else(|| {
+            parsed
+                .get("function")
+                .and_then(|function| function.get("name"))
+        })?
+        .as_str()?
+        .trim();
+    is_tool_identifier(name).then(|| name.to_string())
 }
 
 /// Lower-case name tokens, split on anything that is not alphanumeric.
