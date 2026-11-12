@@ -926,3 +926,24 @@ fn a_new_run_on_a_reused_handle_does_not_inherit_the_previous_runs_switch() {
     let second: RunContext = RunContext::new(RunConfig::new("second"), ()).with_steering(handle);
     assert_eq!(override_of(&second), None);
 }
+
+#[test]
+fn a_resume_clears_guard_pause_ownership_before_a_later_host_pause() {
+    // A guard pause, then a host resume and a host pause at one checkpoint:
+    // the pause left latched is the host's, so none of it is the guard's.
+    let handle = SteeringHandle::allow_all();
+    handle.note_guard_pause();
+    handle.send(SteeringCommand::Pause);
+    handle.send(SteeringCommand::Resume);
+    handle.send(SteeringCommand::PauseWith {
+        reason: "host review".into(),
+    });
+    let mut ctx: RunContext =
+        RunContext::new(RunConfig::new("r"), ()).with_steering(handle.clone());
+
+    let outcome = apply_pending_steering(&mut ctx, &mut Vec::new()).unwrap();
+
+    assert_eq!(outcome, SteeringOutcome::Pause);
+    assert_eq!(handle.pause_requests(), 1);
+    assert_eq!(handle.guard_pauses(), 0);
+}

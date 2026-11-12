@@ -10,6 +10,15 @@ use super::model_call::ModelCallBase;
 use super::types::{MixedStructuredTurn, ResponseTurn, TruncationOutcome, TurnFlow, TurnRecovery};
 use super::*;
 
+/// Final-turn nudge when a repeat/no-progress guard halts the run: the model
+/// was stopped mid-loop, possibly with its deliverable unwritten, so it is
+/// given one last turn to produce its output before the run ends.
+const DELIVER_FIRST_NUDGE: &str = "You were stopped because you kept repeating the same \
+steps without making progress. This is your last turn before the run ends. If you have \
+enough to finish, write your final output now to the exact file or location the task \
+requires, then stop. Do not re-issue calls you already have results for -- act on what \
+you already have, or state plainly what is blocking you.";
+
 impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
     /// Whether this run collapses the `tool_search` results it wrote when it
     /// ends: discovery is on and the session's overrides resolve
@@ -129,6 +138,14 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
         // One typed answer to "how did the loop end", derived once here so the
         // event, `run.terminal` and the legacy fields cannot disagree.
         let mut terminal = TerminalOutcome::from_loop_exit(&exit, ctx.provider_started());
+        // A pause that ends the deliver-first turn (a host pause at its natural
+        // finish, say) still reports the guard halt that turn deferred.
+        if matches!(exit, LoopExit::Paused(_))
+            && let Some(halt) = ctx.deferred_halt.take()
+        {
+            ctx.halted_by_guard = Some(halt.summary);
+            ctx.halted_by_guard_cause = halt.cause;
+        }
         // A repeat / no-progress guard halts by pausing; its marker says so.
         if matches!(exit, LoopExit::Paused(_))
             && let Some(summary) = ctx.halted_by_guard.take()
@@ -342,7 +359,23 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
             // Safe steering checkpoint: drain any orchestrator/human steering
             // commands and apply the policy-permitted ones before the next
             // model call. Cancel terminates the run; Pause short-circuits it.
-            match crate::steering::apply_pending_steering(ctx, messages)? {
+            let steering = crate::steering::apply_pending_steering(ctx, messages)?;
+            // The deliver-first turn has run: end the run with the halt it
+            // deferred, whatever that turn asked for next.
+            if !matches!(steering, crate::steering::SteeringOutcome::Cancel)
+                && let Some(halt) = ctx.deferred_halt.take()
+            {
+                ctx.halted_by_guard = Some(halt.summary);
+                ctx.halted_by_guard_cause = halt.cause;
+                let pause = match ctx.steering.as_ref() {
+                    Some(handle) => {
+                        handle.latch_pause(halt.pause.paused_at_checkpoint, halt.pause.reason)
+                    }
+                    None => halt.pause,
+                };
+                return Ok(LoopExit::Paused(pause));
+            }
+            match steering {
                 crate::steering::SteeringOutcome::Cancel => {
                     return Err(TinyAgentsError::Cancelled);
                 }
@@ -355,7 +388,46 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                             reason: None,
                             paused_at_checkpoint: 0,
                         });
-                    return Ok(LoopExit::Paused(pause));
+                    // A repeat/no-progress guard halt may first grant one
+                    // deliver-first turn (`RunPolicy::deliver_first_on_guard_halt`):
+                    // the model was stopped mid-loop with its deliverable possibly
+                    // unwritten. Only guard pauses are lifted; a host pause at the
+                    // same checkpoint still ends the run. The halt is kept and
+                    // restored at the next checkpoint, after that one turn.
+                    let only_guard_pauses = ctx
+                        .steering
+                        .as_ref()
+                        .is_some_and(|handle| handle.pause_requests() == handle.guard_pauses());
+                    if !(self.policy.deliver_first_on_guard_halt
+                        && only_guard_pauses
+                        && ctx.halted_by_guard.is_some()
+                        && !ctx.deliver_first_attempted
+                        && ctx.limits.remaining_model_calls() > 0)
+                    {
+                        return Ok(LoopExit::Paused(pause));
+                    }
+                    ctx.deliver_first_attempted = true;
+                    ctx.deferred_halt = Some(crate::context::DeferredHalt {
+                        summary: ctx.take_halted_by_guard().unwrap_or_default(),
+                        cause: ctx.take_halted_by_guard_cause(),
+                        pause,
+                    });
+                    if let Some(handle) = ctx.steering.as_ref() {
+                        handle.resume();
+                    }
+                    messages.push(Message::user(DELIVER_FIRST_NUDGE.to_string()));
+                    let record = ctx.emit(AgentEvent::ControlApplied {
+                        control: "deliver_first_nudge".to_string(),
+                        detail: "repeat/no-progress guard halt; granting a final turn \
+                                 to write the deliverable before ending"
+                            .to_string(),
+                    });
+                    status.set_last_event(record.id);
+                    tracing::info!(
+                        target: "tinyagents::agent_loop",
+                        run_id = %ctx.run_id(),
+                        "[agent_loop] guard halt: granting one deliver-first turn before ending"
+                    );
                 }
                 crate::steering::SteeringOutcome::Continue => {}
             }

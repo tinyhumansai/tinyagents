@@ -339,6 +339,13 @@ pub(crate) struct SteeringLocal {
     /// How many steering checkpoints this handle has processed. Recorded into
     /// [`PauseState::paused_at_checkpoint`].
     pub(crate) checkpoints: Mutex<usize>,
+    /// Pause commands applied since the last resume, so the loop can tell a
+    /// guard's lone pause from one a host sent at the same checkpoint.
+    pub(crate) pause_requests: Mutex<usize>,
+    /// Pauses a repeat / no-progress guard sent since the last resume. A
+    /// resume clears them with `pause_requests`, so a host pause applied after
+    /// it is never counted as a guard's.
+    pub(crate) guard_pauses: Mutex<usize>,
     /// The model a [`SteeringCommand::SwitchModel`] selected for *this* run,
     /// sticky until replaced or rejected by the model call. Per run like the
     /// pause latch, so it never crosses a [`SteeringHandle::for_child`]
