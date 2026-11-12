@@ -157,6 +157,17 @@ pub trait CompletionStore: Send + Sync {
         ))
     }
 
+    /// Extends a delivery claim to `visible_after` while its token still owns
+    /// the pending record, so a long delivery is not reclaimed mid-turn.
+    /// `false` means the claim was reclaimed or the record settled.
+    fn renew_claim(&self, request: RenewClaimRequest) -> Result<bool> {
+        let _ = request;
+        Err(store_err(
+            "renew claim",
+            "store does not support claim renewal",
+        ))
+    }
+
     /// Latest records, for one parent or (`None`) for all. Unordered.
     fn list(&self, parent_key: Option<&str>) -> Vec<CompletionRecord>;
 
@@ -230,6 +241,17 @@ pub struct ResolveClaimRequest {
     pub gate: ParentGateClaim,
     pub token: String,
     pub resolution: ClaimResolution,
+}
+
+/// Inputs for extending one owned delivery claim.
+#[derive(Debug, Clone)]
+pub struct RenewClaimRequest {
+    pub task_id: String,
+    pub parent_key: String,
+    pub parent_epoch: u64,
+    pub gate: ParentGateClaim,
+    pub token: String,
+    pub visible_after: SystemTime,
 }
 
 impl CompletionClaimMode {
@@ -609,6 +631,29 @@ impl CompletionStore for InMemoryCompletionStore {
                 ClaimResolution::Failed { .. } | ClaimResolution::Release => {}
             }
             Ok(Some(record.clone()))
+        })
+    }
+
+    fn renew_claim(&self, request: RenewClaimRequest) -> Result<bool> {
+        self.with_current_gate(&request.parent_key, &request.gate, |records| {
+            let Some(record) = records.get_mut(&request.task_id) else {
+                return Ok(false);
+            };
+            if record.parent_key != request.parent_key
+                || record.parent_epoch != request.parent_epoch
+                || record.state != CompletionState::Pending
+            {
+                return Ok(false);
+            }
+            let Some(claim) = record
+                .claim
+                .as_mut()
+                .filter(|claim| claim.token == request.token)
+            else {
+                return Ok(false);
+            };
+            claim.visible_after = request.visible_after;
+            Ok(true)
         })
     }
 

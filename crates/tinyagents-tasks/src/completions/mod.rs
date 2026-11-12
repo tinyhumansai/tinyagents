@@ -53,7 +53,7 @@ pub use router::{
 };
 pub use store::{
     ClaimResolution, CompletionClaimMode, CompletionStore, InMemoryCompletionStore,
-    ParentGateClaim, PendingClaimRequest, ResolveClaimRequest, TaskClaimRequest,
+    ParentGateClaim, PendingClaimRequest, RenewClaimRequest, ResolveClaimRequest, TaskClaimRequest,
 };
 pub use types::{
     CompletionArtifact, CompletionClaim, CompletionReceipt, CompletionRecord, CompletionResult,

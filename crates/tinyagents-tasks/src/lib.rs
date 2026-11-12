@@ -25,7 +25,7 @@ pub use completions::{
     CompletionState, CompletionStatus, CompletionStore, CompletionStoreReplaceOutcome,
     DEFAULT_MAX_ATTEMPTS, DriverCompletionStore, InMemoryCompletionStore,
     NeutralCompletionFormatter, NotifyMode, ParentGateClaim, ParentLifecycle, PendingClaimRequest,
-    RecordOutcome, ResolveClaimRequest, TaskClaimRequest, TombstoneOutcome,
+    RecordOutcome, RenewClaimRequest, ResolveClaimRequest, TaskClaimRequest, TombstoneOutcome,
 };
 pub use completions::{
     CompletionDelivery, CompletionDeliveryConfig, CompletionRouterPool, CompletionRouterPoolError,

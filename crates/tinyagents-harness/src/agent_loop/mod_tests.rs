@@ -9765,3 +9765,143 @@ async fn a_dead_call_retry_preserves_configured_reasoning_effort() {
         recorder.kinds()
     );
 }
+
+/// Asks for a fresh model call from the first tool result it sees.
+struct JumpToModelOnce(std::sync::atomic::AtomicBool);
+
+#[async_trait]
+impl Middleware<(), ()> for JumpToModelOnce {
+    fn name(&self) -> &str {
+        "jump-to-model-once"
+    }
+
+    async fn after_tool(
+        &self,
+        ctx: &mut RunContext<()>,
+        _state: &(),
+        _invocation: &ToolInvocationIdentity,
+        _result: &mut ToolResult,
+    ) -> Result<()> {
+        if !self.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            ctx.request_control(crate::context::MiddlewareControl::JumpTo(
+                crate::context::LoopTarget::Model,
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn graceful_mixed_turn_honours_a_jump_back_to_the_model() {
+    // A control point asked for another model call after the mixed turn's
+    // tools ran; Graceful must take it rather than finish on the first answer.
+    let tool = Arc::new(FakeTool::new("lookup", "found"));
+    let mut response = multi_tool_call_response(vec![("s1", "answer"), ("c1", "lookup")]);
+    response.message.tool_calls[0].arguments = json!({"value": "first"});
+    let model = ScriptedStructuredModel::new(vec![
+        response,
+        tool_call_response("s2", "answer", json!({"value": "second"})),
+    ]);
+    let mut harness = structured_mixed_harness(
+        model,
+        Arc::clone(&tool),
+        crate::runtime::EndStrategy::Graceful,
+    );
+    harness.push_middleware(Arc::new(JumpToModelOnce(
+        std::sync::atomic::AtomicBool::new(false),
+    )));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("answer")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(run.model_calls, 2, "the jump back to the model was taken");
+    assert_eq!(
+        run.structured.expect("structured output present")["value"],
+        "second"
+    );
+    assert_eq!(*tool.calls.lock().unwrap(), 1);
+}
+
+/// Rejects an answer whose `value` is `"first"`.
+struct RejectFirst;
+
+#[async_trait]
+impl crate::structured::OutputValidator<()> for RejectFirst {
+    async fn validate(
+        &self,
+        _ctx: &mut RunContext<()>,
+        _state: &(),
+        output: &serde_json::Value,
+    ) -> Result<()> {
+        if output["value"] == "first" {
+            return Err(TinyAgentsError::ModelRetry(
+                "value must not be first".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn graceful_mixed_turn_validates_its_answer_and_asks_for_a_repair() {
+    // The mixed turn's answer fails the output validator, so it is not kept:
+    // the tools still run and the model is asked to repair the answer, as a
+    // plain final turn would be.
+    let tool = Arc::new(FakeTool::new("lookup", "found"));
+    let mut response = multi_tool_call_response(vec![("s1", "answer"), ("c1", "lookup")]);
+    response.message.tool_calls[0].arguments = json!({"value": "first"});
+    let model = ScriptedStructuredModel::new(vec![
+        response,
+        tool_call_response("s2", "answer", json!({"value": "second"})),
+    ]);
+    let mut harness = structured_mixed_harness(
+        model,
+        Arc::clone(&tool),
+        crate::runtime::EndStrategy::Graceful,
+    );
+    harness.with_output_validator(Arc::new(RejectFirst));
+
+    let run = harness
+        .invoke_default(&(), vec![Message::user("answer")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(run.model_calls, 2, "the rejected answer was repaired");
+    assert_eq!(
+        run.structured.expect("structured output present")["value"],
+        "second"
+    );
+    assert_eq!(*tool.calls.lock().unwrap(), 1);
+    assert!(
+        run.messages
+            .iter()
+            .any(|m| m.text().contains("value must not be first")),
+        "the repair prompt names the validator's error"
+    );
+}
+
+#[tokio::test]
+async fn early_mixed_turn_with_a_rejected_answer_fails_once_retries_run_out() {
+    let tool = Arc::new(FakeTool::new("lookup", "found"));
+    let mut response = multi_tool_call_response(vec![("s1", "answer"), ("c1", "lookup")]);
+    response.message.tool_calls[0].arguments = json!({"value": "first"});
+    let model = ScriptedStructuredModel::new(vec![response]);
+    let mut harness =
+        structured_mixed_harness(model, Arc::clone(&tool), crate::runtime::EndStrategy::Early);
+    harness.with_output_validator(Arc::new(RejectFirst));
+    let mut policy = harness.policy().clone();
+    policy.output_retry.max_attempts = 0;
+    harness.with_policy(policy);
+
+    let error = harness
+        .invoke_default(&(), vec![Message::user("answer")])
+        .await
+        .expect_err("a rejected answer with no retries left fails the run");
+
+    assert!(
+        matches!(&error, TinyAgentsError::StructuredOutput(m) if m.contains("value must not be first")),
+        "{error:?}"
+    );
+}

@@ -675,3 +675,89 @@ async fn a_rule_can_withhold_tool_search_itself() {
     assert!(answer.contains("rule 'no-discovery'"), "{answer}");
     assert!(!answer.contains("deferred_open"), "{answer}");
 }
+
+#[tokio::test]
+async fn a_toolset_tool_search_suppresses_the_intrinsic_bridge() {
+    let model = Arc::new(ScriptedModel::new(vec![ModelResponse::assistant("done")]));
+    let mut harness = harness_with(model.clone(), ToolRulePolicy::default());
+    harness.register_tool(RuleTool::deferred("helper"));
+    let mut extra: crate::tool::ToolRegistry<(), ()> = crate::tool::ToolRegistry::new();
+    extra.register(RuleTool::new("tool_search"));
+    harness.with_toolset(Arc::new(extra));
+
+    run(&harness, "toolset-search").await;
+
+    let names = tool_names(&model.requests()[0]);
+    assert_eq!(
+        names.iter().filter(|name| *name == "tool_search").count(),
+        1,
+        "{names:?}"
+    );
+}
+
+/// A tool with one optional property, so the strict sanitizer has something
+/// to rewrite (a bare `{"type": "object"}` passes through unchanged).
+struct PropTool(&'static str, ToolExposure);
+
+#[async_trait]
+impl Tool for PropTool {
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn description(&self) -> &str {
+        "deferred lookup"
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({"type": "object", "properties": {"q": {"type": "string"}}})
+    }
+    fn exposure(&self) -> ToolExposure {
+        self.1
+    }
+    async fn execute(&self, _arguments: Value) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::success(self.0))
+    }
+}
+
+#[tokio::test]
+async fn a_promoted_tool_reaches_the_wire_prepared_like_a_direct_one() {
+    // Promotion serves the catalogue's schema, which takes the run's provider
+    // preparation, so a found tool is never sent raw.
+    let model = Arc::new(ScriptedModel::new(vec![
+        calls(vec![(
+            "search",
+            "tool_search",
+            json!({"query": "deferred"}),
+        )]),
+        ModelResponse::assistant("done"),
+    ]));
+    let mut harness: AgentHarness<()> = AgentHarness::new();
+    harness.with_model_resolver(Arc::new(crate::host::FixedModelResolver::new(
+        model.clone() as _,
+    )));
+    harness.with_policy(RunPolicy {
+        tool_schemas: Some(crate::tool::SchemaPreparation {
+            strict: true,
+            ..crate::tool::SchemaPreparation::default()
+        }),
+        ..RunPolicy::default()
+    });
+    harness.register_tool(Arc::new(PropTool("open", ToolExposure::Direct)));
+    harness.register_tool(Arc::new(PropTool("deferred_open", ToolExposure::Deferred)));
+
+    run(&harness, "promoted-prepared").await;
+
+    let requests = model.requests();
+    let direct = requests[0]
+        .tools
+        .iter()
+        .find(|tool| tool.name == "open")
+        .expect("direct tool advertised");
+    let promoted = requests[1]
+        .tools
+        .iter()
+        .find(|tool| tool.name == "deferred_open")
+        .expect("the found tool is promoted");
+    assert_eq!(direct.parameters["additionalProperties"], json!(false));
+    assert_eq!(direct.parameters["required"], json!(["q"]));
+    assert_eq!(promoted.parameters, direct.parameters);
+}
