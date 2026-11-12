@@ -50,9 +50,7 @@ impl TurnHost for SignalsAfterProgress {
         progress: tokio::sync::mpsc::Sender<TurnSignal>,
     ) -> Result<TurnResult, String> {
         progress
-            .send(TurnSignal::Progress(Box::new(
-                AgentProgress::TurnStarted,
-            )))
+            .send(TurnSignal::Progress(Box::new(AgentProgress::TurnStarted)))
             .await
             .map_err(|_| "progress channel closed".to_owned())?;
         // Hand control back so the runner sees the event before the turn
