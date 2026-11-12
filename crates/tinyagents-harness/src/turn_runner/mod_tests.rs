@@ -2712,3 +2712,6 @@ async fn cancelled_run_unwinds_within_the_cancel_grace() {
 async fn cancelled_run_is_dropped_at_once_without_a_cancel_grace() {
     assert!(!cancel_unwinding_turn(std::time::Duration::ZERO).await);
 }
+
+#[path = "progress_delivery_tests.rs"]
+mod progress_delivery;
