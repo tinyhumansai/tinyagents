@@ -1290,6 +1290,14 @@ where
         let mut work_in_flight = 0usize;
         let mut progress_open = true;
         tokio::pin!(run);
+        // The progress event being handed to the sink. It is a branch of the
+        // loop below, never awaited inline, so the turn keeps being polled
+        // while it is delivered: a delivery can need the turn to move (directly,
+        // or through a lock permit already handed to a waiter inside it), and
+        // awaiting it inline would freeze both, every deadline inside the turn
+        // included. No further progress is received until it lands, which keeps
+        // the bounded channel's backpressure on the host.
+        let mut delivering: Option<futures::future::BoxFuture<'_, ()>> = None;
         loop {
             if deadline
                 .at
@@ -1328,47 +1336,42 @@ where
                 result = &mut run => {
                     // A host can emit progress and finish in the same poll. Close
                     // the channel before draining so retained child senders
-                    // cannot extend completion indefinitely, then deliver every
-                    // event already accepted by the bounded queue.
+                    // cannot extend completion indefinitely, then finish the
+                    // event in flight and deliver every event already accepted
+                    // by the bounded queue, in order.
                     progress_rx.close();
+                    if let Some(delivery) = delivering.take()
+                        && let Some(stopped) = self
+                            .deliver_within_turn(request, delivery, &cancellation, &task_cancellation, &deadline)
+                            .await
+                    {
+                        return stopped;
+                    }
                     while let Ok(signal) = progress_rx.try_recv() {
-                        if let TurnSignal::Progress(event) = signal {
-                            tokio::select! {
-                                biased;
-                                _ = cancellation.cancelled() => {
-                                    task_cancellation.cancel();
-                                    self.host.cancel_children(request).await;
-                                    return Err("turn cancelled".into());
-                                }
-                                _ = async { if let Some(deadline) = deadline.at { tokio::time::sleep_until(deadline).await } else { std::future::pending().await } }, if deadline.at.is_some() => {
-                                    task_cancellation.cancel();
-                                    self.host.cancel_children(request).await;
-                                    return self.close_or_timeout(request, "wall-clock deadline", &cancellation).await;
-                                }
-                                _ = self.events.progress(request, *event) => {}
-                            }
+                        if let TurnSignal::Progress(event) = signal
+                            && let Some(stopped) = self
+                                .deliver_within_turn(
+                                    request,
+                                    self.events.progress(request, *event),
+                                    &cancellation,
+                                    &task_cancellation,
+                                    &deadline,
+                                )
+                                .await
+                        {
+                            return stopped;
                         }
                     }
                     return result;
                 }
-                signal = progress_rx.recv(), if progress_open => match signal {
+                () = async { if let Some(delivery) = delivering.as_mut() { delivery.await } }, if delivering.is_some() => {
+                    delivering = None;
+                }
+                signal = progress_rx.recv(), if progress_open && delivering.is_none() => match signal {
                     Some(signal) => match signal {
                         TurnSignal::Progress(event) => {
                             last_progress = Instant::now();
-                            tokio::select! {
-                                biased;
-                                _ = cancellation.cancelled() => {
-                                    task_cancellation.cancel();
-                                    self.host.cancel_children(request).await;
-                                    return Err("turn cancelled".into());
-                                }
-                                _ = async { if let Some(deadline) = deadline.at { tokio::time::sleep_until(deadline).await } else { std::future::pending().await } }, if deadline.at.is_some() => {
-                                    task_cancellation.cancel();
-                                    self.host.cancel_children(request).await;
-                                    return self.close_or_timeout(request, "wall-clock deadline", &cancellation).await;
-                                }
-                                _ = self.events.progress(request, *event) => {}
-                            }
+                            delivering = Some(self.events.progress(request, *event));
                         }
                         TurnSignal::WorkStarted => work_in_flight = work_in_flight.saturating_add(1),
                         TurnSignal::WorkFinished => {
@@ -1380,12 +1383,39 @@ where
                     },
                     None => progress_open = false,
                 },
-                _ = tokio::time::sleep(idle_left), if work_in_flight == 0 => {
+                _ = tokio::time::sleep(idle_left), if work_in_flight == 0 && delivering.is_none() => {
                     task_cancellation.cancel();
                     self.host.cancel_children(request).await;
                     return self.close_or_timeout(request, "idle timeout", &cancellation).await;
                 }
             }
+        }
+    }
+
+    /// Delivers one progress event after the turn finished, still honouring
+    /// cancellation and the wall-clock deadline. `Some` is the turn's outcome
+    /// when either stops it first.
+    async fn deliver_within_turn(
+        &self,
+        request: &TurnRequest<P>,
+        delivery: futures::future::BoxFuture<'_, ()>,
+        cancellation: &crate::CancellationToken,
+        task_cancellation: &crate::CancellationToken,
+        deadline: &TurnDeadline,
+    ) -> Option<Result<TurnResult, String>> {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                task_cancellation.cancel();
+                self.host.cancel_children(request).await;
+                Some(Err("turn cancelled".into()))
+            }
+            _ = async { if let Some(deadline) = deadline.at { tokio::time::sleep_until(deadline).await } else { std::future::pending().await } }, if deadline.at.is_some() => {
+                task_cancellation.cancel();
+                self.host.cancel_children(request).await;
+                Some(self.close_or_timeout(request, "wall-clock deadline", cancellation).await)
+            }
+            () = delivery => None,
         }
     }
 
