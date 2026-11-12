@@ -124,7 +124,7 @@ fn a_json_tool_call_in_the_name_gets_a_format_corrective() {
     assert!(message.starts_with("unknown tool `"), "{message}");
     assert!(message.contains("is not a tool name"), "{message}");
     assert!(
-        message.contains("`shell`"),
+        message.contains("a whole tool call (`shell` with its arguments)"),
         "names the tool it carried: {message}"
     );
     assert!(
