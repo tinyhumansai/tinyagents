@@ -49,6 +49,14 @@ KV-cache/prompt-cache keeps hitting.
   exported `EXECUTION_DISCIPLINE` block by model family, falling back from an
   unknown or blank model alias to its provider while explicitly excluding
   Claude and Gemini families.
+- Workspace prompt files (`workspace_files`): `sync_workspace_file` seeds a
+  host's default file into a workspace and refreshes it when the default
+  changes unless the user edited it, tracked by a SHA-256 sidecar named by
+  `builtin_hash_sidecar_name` (`.{filename}.builtin-hash`, contents
+  `builtin_hash`). `inject_inline_content` and `inject_workspace_file_capped`
+  render content under a `### {label}` heading, capped at a character budget
+  with a truncation marker naming the host's read-file tool. The host passes
+  the default contents, the cap, and the read-tool name.
 - System-segment helpers: `SYSTEM_SEGMENT_ID`, `system_segment_id`, and
   `is_system_segment_id` define the canonical `system`, `system.1`, ... IDs
   used for one cacheable segment per leading system-message tier.
@@ -58,6 +66,8 @@ KV-cache/prompt-cache keeps hitting.
 | File | Role |
 | --- | --- |
 | `types.rs` | Every public type: templates, `PromptBuilder` (and its private `BuiltSegment`), section assembly, and tiered dynamic prompt composition. |
+| `workspace_files.rs` | Workspace prompt-file seeding (`sync_workspace_file`, SHA-256 builtin-hash sidecar) and capped `###`-heading injection. |
+| `workspace_files_tests.rs` | Unit tests for the sidecar format, upgrade/edit/legacy-sidecar cases, and byte-exact injection and truncation. |
 | `model_guidance.rs` | Model-family matching and the optional execution-discipline prompt block. |
 | `mod.rs` | Behavioral code: the `{name}` template renderer, `PromptBuilder` methods (segment pushes, `build`, `fingerprint`), and the section-assembly free functions. |
 | `mod_tests.rs` | Unit tests for placeholder substitution/escaping, error cases, per-role rendering, `MessagesTemplate` ordering, and `PromptBuilder` segment cacheability/fingerprinting. |

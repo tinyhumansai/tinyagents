@@ -33,12 +33,17 @@
 
 mod model_guidance;
 mod types;
+pub mod workspace_files;
 
 pub use model_guidance::{
     EXECUTION_DISCIPLINE, NEEDS_EXECUTION_DISCIPLINE, execution_discipline_for,
     execution_discipline_for_profile, needs_execution_discipline,
 };
 pub use types::*;
+pub use workspace_files::{
+    builtin_hash, builtin_hash_sidecar_name, inject_inline_content, inject_workspace_file_capped,
+    sync_workspace_file,
+};
 
 /// Marker that changes a dynamic prompt body's following text to the context tier.
 pub const PROMPT_TIER_CONTEXT_MARKER: &str = "<!--prompt-tier:context-->";
