@@ -31,5 +31,8 @@ async fn lifecycle_entrypoints_are_noops_without_registered_hooks() {
             .await,
         None
     );
+    engine
+        .agent_thought(identity.clone(), "thinking", Some(1))
+        .await;
     engine.session_ended(identity, "completed", Some(1)).await;
 }

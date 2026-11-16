@@ -20,6 +20,17 @@ so that teardown can finish, then drops the future. A spawner that refuses
 returns `Err`, which is a hook failure like any other (fail-open, or a denial
 when the definition sets `fail_closed`).
 
+## Lifecycle entry points
+
+Events with no tool-call seam are fired through `HookEngine` methods in
+`ops.rs`: `session_started`, `session_ended`, `prompt_submitted` (returning a
+`PromptVerdict`), `pre_compact`, `subagent_starting`, `subagent_stopped`, and
+`agent_thought`. Each returns immediately when no hook is configured for its
+event. `agent_thought` fires the observational `afterAgentThought` event with a
+`TextPayload` (the reasoning text and its optional `duration_ms`); its hooks
+run in the background, matchers select on the thought text, and their output
+is ignored.
+
 ## Configuration and trust
 
 Configuration is read from system, user, workspace, and project layers. Lists

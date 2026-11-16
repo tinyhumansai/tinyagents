@@ -189,6 +189,31 @@ impl HookEngine {
             .output
             .followup_message
     }
+
+    /// Fire the observational `afterAgentThought` event for a reasoning block.
+    ///
+    /// The hooks run on a background task, so this returns as soon as they are
+    /// scheduled and nothing they print can change the turn. Matchers select on
+    /// the thought text.
+    pub async fn agent_thought(
+        &self,
+        identity: TurnIdentity,
+        text: &str,
+        duration_ms: Option<u64>,
+    ) {
+        if !self.has_hooks(HookEvent::AfterAgentThought).await {
+            return;
+        }
+        let input = build_input(
+            HookEvent::AfterAgentThought,
+            identity,
+            HookPayload::Text(TextPayload {
+                text: text.to_owned(),
+                duration_ms,
+            }),
+        );
+        self.dispatch(HookEvent::AfterAgentThought, input).await;
+    }
 }
 
 #[cfg(test)]
