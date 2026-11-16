@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased: workspace prompt-file sync and inject helpers (tinyagents#92)
+
+New `tinyagents_harness::prompt::workspace_files` module, re-exported from
+`prompt`. `sync_workspace_file(workspace_dir, filename, default_content)`
+seeds a host's default prompt file into a workspace and ships later defaults
+only to files the user has not edited, tracked by a `.{filename}.builtin-hash`
+sidecar holding the lowercase hex SHA-256 of the default (`builtin_hash`,
+`builtin_hash_sidecar_name`). Legacy `DefaultHasher` sidecars never authorize
+an overwrite and are migrated to SHA-256. `inject_inline_content` and
+`inject_workspace_file_capped` render content under a `### {label}` heading,
+capped at a caller-supplied character budget with a truncation marker naming
+the caller's read-file tool. Moved from OpenHuman's
+`prompts/workspace_files.rs`; the on-disk format and rendered bytes are
+unchanged. See `docs/modules/harness/prompt.md`.
+
 ## 3.1.4
 
 - Releases are cut from `main`: the version bump merges through a pull request
