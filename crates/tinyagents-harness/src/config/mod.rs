@@ -23,7 +23,7 @@
 //! and are separable so a caller can override one turn's limits without
 //! rebuilding the session.
 //!
-//! The types are inert — `serde` + `std` only, see `types`; `required_output`
+//! The types are inert — `serde` + `schemars` + `std` only, see `types`; `required_output`
 //! adds pure validate/repair functions over [`RequiredOutput`]. Capabilities
 //! (memory, security, budget, progress) are trait objects supplied separately;
 //! nothing in this module is a behaviour seam.

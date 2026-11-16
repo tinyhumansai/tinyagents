@@ -16,6 +16,7 @@ plain prompt-guided chat model, not an agent driver.
 | `mod.rs` | `ClaudeAgentSdkConfig`, `ClaudeAgentSdkProvider` (`ChatModel<()>` impl), CLI argument/stdin building, the subprocess spawn/read/timeout loop, and system-prompt/transcript rendering. |
 | `protocol.rs` | `SdkMessage`/`SdkError`: the `serde` shapes for the `--output-format stream-json` NDJSON lines the CLI writes to stdout. |
 | `mod_tests.rs` | Unit tests for construction, invocation building, transcript rendering, and response assembly. |
+| `mod_serde_tests.rs` | `ClaudeAgentSdkConfig` TOML/JSON and JSON-schema parity with OpenHuman's former mirror type. |
 
 ## Request shaping
 
@@ -58,6 +59,13 @@ Not registered automatically; construct a `ClaudeAgentSdkProvider` directly
 model) and pass it to the harness like any other `ChatModel`.
 `ClaudeAgentSdkConfig::enabled` is a plain data field for the embedding
 application's own gating — this crate does not read it.
+
+`ClaudeAgentSdkConfig` derives `Serialize`, `Deserialize` and
+`schemars::JsonSchema`, so a host can embed it directly as a config section
+(OpenHuman's `[claude_agent_sdk]`). Every field is optional on input and takes
+the `Default` value (`enabled = false`, `binary = "claude"`,
+`default_model = "claude-sonnet-4-6"`, no budget); all four fields are
+serialized, with a `None` budget written as JSON `null` and left out of TOML.
 
 Doctor may construct `ClaudeAgentSdkProvider::for_inspection` only with an
 explicit API key or bearer token captured by its host. A gateway bearer is

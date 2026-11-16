@@ -1,6 +1,8 @@
 //! Inert configuration value types for the harness.
 //!
-//! **Dependency rule:** this module is `serde` + `std` only. No engine types,
+//! **Dependency rule:** this module is `serde` + `schemars` + `std` only (the
+//! `schemars` derives let a host embed these types in its own config schema).
+//! No engine types,
 //! no tokio, no host types. A host must be able to depend on these structs to
 //! build a mapper without pulling in the rest of the crate's machinery — the
 //! same carve-out that keeps a gated domain's type module always-compiled.
@@ -91,13 +93,22 @@ pub enum ToolDispatcher {
 /// Satisfied when the reply contains a JSON object carrying `block_key` — plus
 /// every entry in `required_keys` — with a non-null value. A blank `block_key`
 /// makes the contract **inert** (enforcement skipped), so it is a safe default.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+///
+/// Every field is optional on the wire (`#[serde(default)]` on the container):
+/// a missing `block_key` deserializes to the inert blank key and a missing
+/// `required_keys` to an empty list. Both fields are always serialized.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
+#[serde(default)]
 pub struct RequiredOutput {
-    /// The JSON key identifying the required block, e.g. `"thoughts"`.
+    /// The JSON key that identifies the required block (e.g. `"thoughts"`). The
+    /// contract is satisfied when the reply contains a JSON object carrying this
+    /// key — plus every key in [`required_keys`](Self::required_keys) — with a
+    /// non-null value. A blank `block_key` makes the contract inert (enforcement
+    /// is skipped), so it is a safe no-op default.
     pub block_key: String,
-    /// Sibling keys that must also be present and non-null in the same block.
-    /// `block_key` is always required and need not be repeated here.
-    #[serde(default)]
+    /// Additional sibling keys that must also be present and non-null in the
+    /// same block (e.g. `["next_action"]`). The `block_key` is always required
+    /// and need not be repeated here.
     pub required_keys: Vec<String>,
 }
 
@@ -337,3 +348,7 @@ impl SessionConfig {
         depth < self.max_depth
     }
 }
+
+#[cfg(test)]
+#[path = "types_serde_tests.rs"]
+mod serde_tests;

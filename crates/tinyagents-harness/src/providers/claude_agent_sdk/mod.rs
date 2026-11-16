@@ -26,24 +26,47 @@ use tokio::time::{Duration, timeout};
 use protocol::SdkMessage;
 
 /// Configuration for the Claude CLI subprocess adapter.
-#[derive(Debug, Clone)]
+///
+/// Deserializes from a host config section such as `[claude_agent_sdk]`: every
+/// field is optional, and a missing field takes the same value as
+/// [`ClaudeAgentSdkConfig::default`]. Serialization always writes all four
+/// fields (`max_budget_usd = None` becomes JSON `null` and is omitted by
+/// TOML), so a host can embed this type directly in its own config schema.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ClaudeAgentSdkConfig {
-    /// Whether the embedding host enables this provider.
+    /// Whether the Claude Agent SDK provider is enabled.
+    #[serde(default)]
     pub enabled: bool,
-    /// Claude CLI binary or path.
+
+    /// Path to the `claude` CLI binary. Defaults to `"claude"` (PATH lookup).
+    #[serde(default = "default_claude_binary")]
     pub binary: String,
-    /// Model used when a request does not override it.
+
+    /// Default model passed via `--model` when the provider string is just
+    /// `"claude_agent_sdk"` with no model suffix.
+    #[serde(default = "default_claude_model")]
     pub default_model: String,
-    /// Optional maximum request budget in US dollars.
+
+    /// Maximum spend in USD before aborting a request (`--max-turns` controls
+    /// loop depth; `--budget` controls cost). `None` means no cap.
+    #[serde(default)]
     pub max_budget_usd: Option<f64>,
+}
+
+fn default_claude_binary() -> String {
+    "claude".to_string()
+}
+
+fn default_claude_model() -> String {
+    "claude-sonnet-4-6".to_string()
 }
 
 impl Default for ClaudeAgentSdkConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            binary: "claude".to_string(),
-            default_model: "claude-sonnet-4-6".to_string(),
+            binary: default_claude_binary(),
+            default_model: default_claude_model(),
             max_budget_usd: None,
         }
     }
@@ -592,3 +615,7 @@ fn coalesce_system_prompt(messages: &[Message]) -> Option<String> {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mod_serde_tests.rs"]
+mod serde_tests;

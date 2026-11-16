@@ -40,13 +40,17 @@ question by existing.
   the boundary, not a silent fallthrough in the turn loop.
 - [`RequiredOutput`] — a structured-output contract asserting the model's
   reply carries a particular JSON block; a blank `block_key` makes the
-  contract inert by design, so it is a safe zero-value default.
+  contract inert by design, so it is a safe zero-value default. It derives
+  `Serialize`/`Deserialize`/`JsonSchema` with `#[serde(default)]` on the
+  container, so a host can read it straight from a config section (for example
+  `[agent.required_output]`) where both fields are optional.
 
 ## Files
 
 | File       | Role                                                                |
 | ---------- | ---------------------------------------------------------------------- |
 | `mod.rs`   | Module overview and re-exports.                                      |
+| `types_serde_tests.rs` | `RequiredOutput` TOML/JSON and JSON-schema parity with OpenHuman's former mirror type. |
 | `required_output.rs` | Pure primitives over `RequiredOutput`: `output_satisfies_contract`, `find_required_block`, `synthesize_block`, `repair_instruction`. |
 | `types.rs` | All types: `SessionConfig`, `TurnConfig`, `ToolConfig`, `MemoryLimits`, `ToolDispatcher`, `RequiredOutput`, and their serde defaults. |
 | `mod_tests.rs`  | Unit tests: defaulting, fallback rules, inert-contract behaviour, serde round-tripping. |
