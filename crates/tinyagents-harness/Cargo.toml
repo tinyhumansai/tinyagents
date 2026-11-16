@@ -19,6 +19,9 @@ dirs = { version = "6", optional = true }
 tar = { version = "0.4", default-features = false, optional = true }
 zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"], optional = true }
 flate2 = { version = "1", optional = true }
+# `[ATTACHMENT:…]` marker bodies; the same crate `url::form_urlencoded`
+# re-exports, so hosts encoding with either produce identical markers.
+form_urlencoded = { version = "1.2", optional = true }
 oxipng = { version = "9", default-features = false, optional = true }
 futures = { workspace = true }
 libc = "0.2"
@@ -65,7 +68,7 @@ sqlite = []
 # ports, so a host's chosen backend (SQLite, MongoDB, memory) holds harness
 # data.
 storage-drivers = []
-multimodal = ["dep:flate2", "dep:reqwest", "dep:tar", "dep:zip"]
+multimodal = ["dep:flate2", "dep:form_urlencoded", "dep:reqwest", "dep:tar", "dep:zip"]
 # Lossless PNG re-compression (`multimodal::optimize_png_lossless`) through
 # `oxipng`. Off by default: without it the helper returns `None` and callers
 # keep the original bytes, and `oxipng`/`libdeflater` (a C build) are not linked.

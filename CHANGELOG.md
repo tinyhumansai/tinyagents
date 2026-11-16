@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased: `[ATTACHMENT:]` marker codec beside `[IMAGE:]`/`[FILE:]` (tinyagents#90)
+
+- `multimodal::markers` gains the compact `[ATTACHMENT:<form-urlencoded
+  JSON>]` reference codec upstreamed from OpenHuman: `AttachmentRef` (with
+  `marker`, `description`, `from_description`), `AttachmentSegment`,
+  `attachment_segments`, `parse_attachment_markers`, `is_safe_relative_path`,
+  `sanitize_attachment_filename`, `enrich_user_message`,
+  `image_markers_from_message` and `should_forward_parent_images`, all
+  re-exported from `multimodal`. Encoding, decoding and path rejection are
+  byte-identical to OpenHuman's; path authorization and the upload layout
+  stay with the host.
+- The `multimodal` feature now pulls in `form_urlencoded` (already in the
+  graph through `url`).
+
 ## 3.1.4
 
 - Releases are cut from `main`: the version bump merges through a pull request

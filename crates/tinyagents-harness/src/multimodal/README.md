@@ -27,7 +27,11 @@ format contributes a header naming it plus a content hash.
 - [`markers`] — the marker vocabulary (`IMAGE_MARKER_PREFIX`,
   `FILE_MARKER_PREFIX`, placeholder tokens) and pure string transforms:
   `parse_image_markers`/`parse_file_markers`, placeholder
-  render/detect/extract/rehydrate functions, `extract_ollama_image_payload`.
+  render/detect/extract/rehydrate functions, `extract_ollama_image_payload`,
+  and the `[ATTACHMENT:…]` reference codec (`AttachmentRef`,
+  `attachment_segments`/`parse_attachment_markers`, `is_safe_relative_path`,
+  `sanitize_attachment_filename`, and the delegation helpers
+  `enrich_user_message`/`image_markers_from_message`/`should_forward_parent_images`).
 - [`mime`] — MIME detection (header → extension → magic bytes, in an order
   that differs deliberately between images and files) and the extension/magic
   lookup tables.

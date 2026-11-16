@@ -2004,6 +2004,7 @@ dependencies = [
  "chrono",
  "dirs",
  "flate2",
+ "form_urlencoded",
  "futures",
  "libc",
  "oxipng",

@@ -97,10 +97,12 @@ pub use blob_stash::{BlobAttachmentStash, StashedAttachment};
 pub use config::{ALLOWED_IMAGE_MIME_TYPES, FileLimits, ImageLimits};
 pub use error::{MultimodalError, Result};
 pub use markers::{
-    FILE_MARKER_PREFIX, IMAGE_MARKER_PREFIX, IMAGE_PLACEHOLDER_PREFIX, IMAGE_STASH_REF,
-    extract_image_placeholders_in_text, extract_ollama_image_payload, image_placeholder,
+    ATTACHMENT_MARKER_PREFIX, AttachmentRef, AttachmentSegment, FILE_MARKER_PREFIX,
+    IMAGE_MARKER_PREFIX, IMAGE_PLACEHOLDER_PREFIX, IMAGE_STASH_REF, attachment_segments,
+    enrich_user_message, extract_image_placeholders_in_text, extract_ollama_image_payload,
+    image_markers_from_message, image_placeholder, is_safe_relative_path, parse_attachment_markers,
     parse_file_markers, parse_image_markers, rehydrate_placeholders_in_text,
-    text_has_image_placeholders,
+    sanitize_attachment_filename, should_forward_parent_images, text_has_image_placeholders,
 };
 pub use payload::{FilePayload, compose_multimodal_message, sha256_prefix, truncate_chars};
 pub use request::{
