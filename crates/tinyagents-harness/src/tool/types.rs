@@ -34,6 +34,9 @@ use crate::store::namespaced::NamespacedStore;
 ///     .and_then(tinytools::ToolRunContext::host_extension)
 ///     .and_then(|any| any.downcast_ref::<ToolExecutionContext>());
 /// ```
+///
+/// [`Self::of`] performs exactly that downcast, and [`Self::call_id_of`]
+/// reads the call id through it.
 #[derive(Clone)]
 pub struct ToolExecutionContext {
     /// Run that invoked the tool.
@@ -95,6 +98,31 @@ impl ToolExecutionContext {
             progress: super::progress::ToolProgressGate::current_sink_for(&call_id),
             nested: super::nested::current_for(&call_id),
         }
+    }
+
+    /// The harness context behind a canonical tool's erased run context.
+    ///
+    /// This is the one downcast documented above: it reads
+    /// [`tinytools::ToolRunContext::host_extension`] and returns the
+    /// `ToolExecutionContext` the agent loop installed there. `None` when there
+    /// is no context, or when the context is not harness-driven (a test double
+    /// or another host's `ToolRunContext`).
+    #[must_use]
+    pub fn of(context: Option<&dyn tinytools::ToolRunContext>) -> Option<&Self> {
+        context
+            .and_then(tinytools::ToolRunContext::host_extension)
+            .and_then(|extension| extension.downcast_ref::<Self>())
+    }
+
+    /// The provider-assigned id of the tool call a canonical tool is running
+    /// as, read from its erased run context.
+    ///
+    /// The portable [`tinytools::ToolRunContext`] surface deliberately does not
+    /// carry the call id; it is harness-owned. This reads [`Self::call_id`] off
+    /// the context [`Self::of`] recovers, so it is `None` exactly when that is.
+    #[must_use]
+    pub fn call_id_of(context: Option<&dyn tinytools::ToolRunContext>) -> Option<String> {
+        Self::of(context).map(|harness| harness.call_id.as_str().to_string())
     }
 
     /// Attaches an isolated workspace descriptor the tool may operate in.

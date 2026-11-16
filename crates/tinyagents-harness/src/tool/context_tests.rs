@@ -108,3 +108,39 @@ fn a_child_context_inherits_the_store_and_state_view() {
         Some(&AppState { user: "bob" })
     );
 }
+
+#[test]
+fn of_recovers_the_harness_context_from_the_erased_run_context() {
+    let ctx: RunContext = RunContext::new(RunConfig::new("run-1"), ());
+    let tool_ctx = ToolExecutionContext::from_run_context(&ctx, CallId::new("call-7"));
+    let erased: &dyn tinytools::ToolRunContext = &tool_ctx;
+    let recovered = ToolExecutionContext::of(Some(erased)).expect("harness context");
+    assert!(std::ptr::eq(recovered, &tool_ctx));
+}
+
+#[test]
+fn of_is_none_without_a_context_or_for_a_foreign_context() {
+    struct Foreign;
+    impl tinytools::ToolRunContext for Foreign {}
+
+    assert!(ToolExecutionContext::of(None).is_none());
+    let foreign: &dyn tinytools::ToolRunContext = &Foreign;
+    assert!(ToolExecutionContext::of(Some(foreign)).is_none());
+}
+
+#[test]
+fn call_id_of_reads_the_harness_execution_context() {
+    let run_ctx: RunContext = RunContext::new(RunConfig::new("test-run"), ());
+    let exec_ctx = ToolExecutionContext::from_run_context(&run_ctx, CallId::new("call-42"));
+
+    let erased: &dyn tinytools::ToolRunContext = &exec_ctx;
+    assert_eq!(
+        ToolExecutionContext::call_id_of(Some(erased)),
+        Some("call-42".to_string())
+    );
+}
+
+#[test]
+fn call_id_of_is_none_without_a_context() {
+    assert_eq!(ToolExecutionContext::call_id_of(None), None);
+}
