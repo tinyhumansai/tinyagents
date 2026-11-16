@@ -2,10 +2,10 @@
 //!
 //! **Dependency rule:** this module is `serde` + `schemars` + `std` only (the
 //! `schemars` derives let a host embed these types in its own config schema).
-//! No engine types,
-//! no tokio, no host types. A host must be able to depend on these structs to
-//! build a mapper without pulling in the rest of the crate's machinery — the
-//! same carve-out that keeps a gated domain's type module always-compiled.
+//! No engine types, no tokio, no host types. A host must be able to depend on
+//! these structs to build a mapper without pulling in the rest of the crate's
+//! machinery — the same carve-out that keeps a gated domain's type module
+//! always-compiled.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
