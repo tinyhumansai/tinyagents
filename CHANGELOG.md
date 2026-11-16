@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- `tinyagents-harness`: `providers::claude_agent_sdk::ClaudeAgentSdkConfig`
+  now derives `Serialize`, `Deserialize` and `schemars::JsonSchema`, with
+  per-field defaults matching `Default`, so a host can embed it as a config
+  section instead of mirroring it. `config::RequiredOutput` gains
+  `schemars::JsonSchema` and container-level `#[serde(default)]`.
+  **Behaviour change:** a `RequiredOutput` with no `block_key` now
+  deserializes to the inert blank key instead of failing to parse.
+
 ## 3.1.4
 
 - Releases are cut from `main`: the version bump merges through a pull request
