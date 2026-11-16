@@ -25,12 +25,7 @@ pub type ToolCallIdExtractor =
     Arc<dyn for<'a> Fn(Option<&'a dyn ToolRunContext>) -> Option<String> + Send + Sync>;
 
 fn canonical_tool_call_id(context: Option<&dyn ToolRunContext>) -> Option<String> {
-    context
-        .and_then(ToolRunContext::host_extension)
-        .and_then(|extension| {
-            extension.downcast_ref::<tinyagents_harness::tool::ToolExecutionContext>()
-        })
-        .map(|context| context.call_id.to_string())
+    tinyagents_harness::tool::ToolExecutionContext::call_id_of(context)
 }
 
 fn progress_label(kind: &MediaArtifactKind) -> &'static str {

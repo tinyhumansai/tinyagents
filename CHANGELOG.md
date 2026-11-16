@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- `tinyagents-harness`: `ToolExecutionContext::of(context)` recovers the
+  harness context from a canonical tool's erased
+  `Option<&dyn ToolRunContext>`, and `ToolExecutionContext::call_id_of(context)`
+  returns the provider-assigned call id through it (`None` without a
+  harness-driven context). Hosts no longer need their own `host_extension`
+  downcast to read the call id.
+- `tinyagents-harness-tools`: `PackRegistryHandle::of(tool)` recovers the
+  shared registry handle from an erased registered `use_skill` tool. The free
+  function `skills::pack_registry_handle` remains and delegates to it.
+
 ## 3.1.4
 
 - Releases are cut from `main`: the version bump merges through a pull request

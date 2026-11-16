@@ -276,11 +276,26 @@ impl UseSkillTool {
 /// The handle lets a host bind durable and synthesized registries and render
 /// their filtered pack listings. Calls still pass through the generic
 /// [`ToolCallBinding`] so admission and execution use the same pinned target.
+///
+/// Equivalent to [`PackRegistryHandle::of`].
 pub fn pack_registry_handle(tool: &dyn Tool) -> Option<PackRegistryHandle> {
-    tool.host_extension()
-        .and_then(|extension| extension.downcast_ref::<ToolCallBinding>())
-        .and_then(|binding| binding.metadata::<PackRegistryHandle>())
-        .cloned()
+    PackRegistryHandle::of(tool)
+}
+
+impl PackRegistryHandle {
+    /// The shared registry handle of an erased registered `use_skill` tool.
+    ///
+    /// [`UseSkillTool::new`] attaches the handle as metadata on the tool's
+    /// [`ToolCallBinding`], which the tool exposes as its host extension; this
+    /// reads it back from there. `None` for any tool whose binding carries no
+    /// `PackRegistryHandle` (every tool other than `use_skill`).
+    #[must_use]
+    pub fn of(tool: &dyn Tool) -> Option<Self> {
+        tool.host_extension()
+            .and_then(|extension| extension.downcast_ref::<ToolCallBinding>())
+            .and_then(|binding| binding.metadata::<Self>())
+            .cloned()
+    }
 }
 
 #[async_trait]

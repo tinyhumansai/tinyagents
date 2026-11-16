@@ -39,7 +39,9 @@ scrub) lives in `tinytools-agent`, reached through
   (`RunContext::with_namespaced_store`), and an optional typed state view
   (`RunContext::with_state_view`, read with `state::<S>()`). `custom(payload)`
   emits `AgentEvent::Custom` correlated to the call. A `tinytools::Tool`
-  reaches all of this by downcasting `ToolRunContext::host_extension()`;
+  reaches all of this by downcasting `ToolRunContext::host_extension()`
+  — `ToolExecutionContext::of(ctx)` does that downcast and
+  `ToolExecutionContext::call_id_of(ctx)` reads the call id through it;
   the portable methods still cover only workspace/thread/output cap. A tool
   that needs a real child `RunContext` goes through the explicit dispatch
   seam instead (B1; see `docs/modules/harness/tool-context.md`).

@@ -300,6 +300,30 @@ fn unrelated_tool_has_no_pack_registry_handle() {
     assert!(pack_registry_handle(&tool).is_none());
 }
 
+#[test]
+fn of_returns_the_handle_use_skill_was_built_with() {
+    let handle = PackRegistryHandle::default();
+    let tool: Arc<dyn Tool> = Arc::new(UseSkillTool::new(handle.clone(), CATALOG));
+    let recovered = PackRegistryHandle::of(tool.as_ref()).expect("registered use_skill handle");
+
+    // Same shared registry: binding through the recovered handle is visible
+    // through the original one.
+    let registry = Arc::new(vec![Box::new(FakeTool::plain("a_one")) as Box<dyn Tool>]);
+    recovered.bind(Arc::downgrade(&registry));
+    assert!(handle.resolve(&CATALOG, "alpha", "a_one").is_some());
+}
+
+#[test]
+fn of_is_none_for_a_tool_without_a_pack_registry_handle() {
+    let tool = FakeTool::plain("anything_else");
+    assert!(PackRegistryHandle::of(&tool).is_none());
+
+    let binding = ToolCallBinding::new(|_, _| unreachable!("metadata lookup does not bind"))
+        .with_metadata(String::from("unrelated metadata"));
+    let tool = FakeTool::plain("another_tool").with_binding(binding);
+    assert!(PackRegistryHandle::of(&tool).is_none());
+}
+
 #[tokio::test]
 async fn catalogs_with_the_same_start_pointer_but_different_lengths_conflict() {
     let handle = PackRegistryHandle::default();

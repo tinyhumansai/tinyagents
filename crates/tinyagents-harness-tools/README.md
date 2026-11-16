@@ -33,7 +33,8 @@ default set.
 - `skills` provides `UseSkillTool`, `PackCatalog`, `PackRegistryHandle`, and
   `UseSkillDispatch` for binding a selected tool from a named pack.
   Hosts can recover the shared registry from an erased registered tool with
-  `skills::pack_registry_handle`; the generic `ToolCallBinding` still pins each
+  `PackRegistryHandle::of` (or the equivalent free function
+  `skills::pack_registry_handle`); the generic `ToolCallBinding` still pins each
   call's admission and execution target.
 - `subagents` provides `DriverSubAgentTool`, `SubAgentJobsTool`, and
   `SubAgentMessageTool` over the registry owned by
