@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased: `HookEngine::agent_thought` (tinyagents#91)
+
+Added `HookEngine::agent_thought(identity, text, duration_ms)` to
+`tinyagents_hooks::command`. It fires the observational `afterAgentThought`
+event with a `TextPayload`, returns without building an envelope when no hook
+is configured, and schedules matching hooks in the background so the turn never
+waits on them. Matchers select on the thought text. This completes the
+lifecycle entry points hosts previously re-implemented.
+
 ## 3.1.4
 
 - Releases are cut from `main`: the version bump merges through a pull request

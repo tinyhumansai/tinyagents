@@ -409,6 +409,72 @@ async fn lifecycle_entrypoints_dispatch_configured_hooks_and_apply_decisions() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn agent_thought_fires_matching_hooks_in_the_background() {
+    use super::context::TurnIdentity;
+
+    let engine = HookEngine::default();
+    // A matcher with regex syntax searches the thought text; a bare word would
+    // have to equal the whole text.
+    let dir = scratch(
+        r#"{"version":1,"hooks":{
+          "afterAgentThought":[{"command":"./thought.sh","matcher":"secret.*"}]
+        }}"#,
+        Some((
+            "thought.sh",
+            // Sleep first so a caller that waited on the hook would be caught,
+            // and print a denial to show an observer's verdict is ignored.
+            "#!/bin/sh\nsleep 1\ncat >> thoughts.log\necho >> thoughts.log\n\
+             echo '{\"permission\":\"deny\"}'\n",
+        )),
+    );
+    engine
+        .install(config::load(&host(), None, Some(dir.path())))
+        .await;
+    assert!(engine.has_hooks(HookEvent::AfterAgentThought).await);
+    let identity = TurnIdentity {
+        session_id: Some("session-thought".into()),
+        conversation_id: Some("thread-1".into()),
+        ..Default::default()
+    };
+
+    let started = std::time::Instant::now();
+    engine
+        .agent_thought(identity.clone(), "nothing to see", Some(5))
+        .await;
+    engine
+        .agent_thought(identity, "a secret plan", Some(42))
+        .await;
+    assert!(
+        started.elapsed() < Duration::from_millis(900),
+        "an observational event must not wait for its hooks"
+    );
+
+    let log = dir.path().join("thoughts.log");
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let body = loop {
+        if let Ok(body) = std::fs::read_to_string(&log)
+            && body.ends_with('\n')
+        {
+            break body;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the matching hook never ran"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let lines: Vec<&str> = body.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(lines.len(), 1, "only the matching thought fires: {body}");
+    let event: serde_json::Value = serde_json::from_str(lines[0]).expect("event json");
+    assert_eq!(event["hook_event_name"], "afterAgentThought");
+    assert_eq!(event["session_id"], "session-thought");
+    assert_eq!(event["conversation_id"], "thread-1");
+    assert_eq!(event["text"], "a secret plan");
+    assert_eq!(event["duration_ms"], 42);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn a_denial_short_circuits_the_remaining_hooks() {
     let engine = HookEngine::default();
     let dir = scratch(
