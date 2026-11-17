@@ -17,7 +17,7 @@ base64 = "0.22"
 chrono = { workspace = true }
 dirs = { version = "6", optional = true }
 tar = { version = "0.4", default-features = false, optional = true }
-zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"], optional = true }
+zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
 flate2 = { version = "1", optional = true }
 oxipng = { version = "9", default-features = false, optional = true }
 futures = { workspace = true }

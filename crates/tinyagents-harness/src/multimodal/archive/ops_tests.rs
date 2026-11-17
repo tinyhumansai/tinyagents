@@ -235,7 +235,9 @@ fn corrupt_zip_payloads_and_gzip_trailers_are_errors() {
         .unwrap()
         .by_index(0)
         .unwrap()
-        .data_start() as usize;
+        .data_start()
+        .expect("an entry read from the archive knows where its data starts")
+        as usize;
     bytes[start] ^= 0xff;
     assert!(inspect_archive(&bytes, ArchiveFormat::Zip, &ArchiveLimits::default()).is_err());
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -456,7 +458,9 @@ fn zip_metadata_index_cannot_fall_back_to_a_footer_inside_member_data() {
 #[test]
 fn footer_signature_in_valid_zip_comment_is_conservatively_rejected() {
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    writer.set_comment("valid comment with PK\u{5}\u{6} signature");
+    writer
+        .set_comment("valid comment with PK\u{5}\u{6} signature")
+        .expect("a short comment fits");
     writer
         .start_file("file.txt", zip::write::SimpleFileOptions::default())
         .unwrap();
