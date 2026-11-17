@@ -93,7 +93,12 @@ fn inspect_zip(bytes: &[u8], limits: &ArchiveLimits) -> Result<ArchiveListing, A
         if !add_entry(
             &mut list,
             ArchiveEntry {
-                name: file.name().to_string(),
+                // zip 9 reports a name it cannot decode instead of guessing; an
+                // entry whose name cannot be read refuses the archive.
+                name: file
+                    .name()
+                    .map_err(|e| ArchiveError::Invalid(e.to_string()))?
+                    .into_owned(),
                 kind,
                 declared_size: size,
             },
