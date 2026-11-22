@@ -176,6 +176,14 @@ threshold applies independently of the one-call setting. These controls can
 combine with constant-cap retries to avoid spending a larger budget on the
 same reasoning-only failure.
 
+Some provider endpoints cannot run without reasoning and refuse a request
+that turns it off (OpenRouter relays `HTTP 400: Reasoning is mandatory for
+this endpoint and cannot be disabled.`). Any request sent with
+`ReasoningEffort::None` that is refused this way, whether these controls or
+the caller turned reasoning off, goes out once more with no reasoning setting,
+so the provider's own default applies. The resend is not a retry: it is not
+counted against `RunPolicy::retry` and emits no `RetryScheduled`.
+
 A hosted reasoning model on a high effort setting can deliberate past the
 boosted budget too. Once the retries are spent the loop does not finish on the
 blank reply: up to `RunPolicy::truncated_empty_nudges` times (default `1`) it

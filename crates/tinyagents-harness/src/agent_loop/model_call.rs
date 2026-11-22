@@ -857,6 +857,23 @@ impl<State: Send + Sync, Ctx: Send + Sync> AgentHarness<State, Ctx> {
                 match attempt_result {
                     Ok(response) => break Ok(response),
                     Err(error) => {
+                        // A provider that cannot run without reasoning
+                        // refuses a request that turns it off. No retry of
+                        // the same request can pass and no fallback is owed:
+                        // the request goes out once more with the provider's
+                        // own reasoning default, which is the only way that
+                        // endpoint answers. The attempt is not counted
+                        // against the retry policy, and it cannot repeat,
+                        // since the request no longer turns reasoning off.
+                        if reasoning_off_refused(&attempt_request, &error) {
+                            tracing::warn!(
+                                call_id = %call_id.as_str(),
+                                model = %current_name,
+                                "[agent_loop] provider refused reasoning off; resending with its default"
+                            );
+                            attempt_request.reasoning = None;
+                            continue;
+                        }
                         // Provider and run-budget refusals are terminal: a
                         // retry or another model cannot make the exhausted
                         // budget available again.
@@ -2218,6 +2235,35 @@ fn retarget_request_model(request: &mut ModelRequest, name: &str) {
     }
 }
 
+/// Whether `error` is a provider refusing `request` because the request
+/// turns reasoning off and that provider's endpoint cannot run without it
+/// (OpenRouter relays this as HTTP 400, "Reasoning is mandatory for this
+/// endpoint and cannot be disabled."). Read from the message, as
+/// `classify_provider_failure` reads the others: no provider gives the
+/// refusal a code of its own. A request that leaves reasoning alone, or asks
+/// for some, is never one of these whatever the message says.
+fn reasoning_off_refused(request: &ModelRequest, error: &TinyAgentsError) -> bool {
+    let turned_off = request.reasoning.as_ref().is_some_and(|reasoning| {
+        reasoning.effort == Some(tinyinference_llm::model::ReasoningEffort::None)
+    });
+    if !turned_off {
+        return false;
+    }
+    let message = match error {
+        TinyAgentsError::Provider(error) => error.message.to_ascii_lowercase(),
+        TinyAgentsError::Model(message) => message.to_ascii_lowercase(),
+        _ => return false,
+    };
+    message.contains("reasoning")
+        && ["mandatory", "cannot be disabled", "can't be disabled"]
+            .iter()
+            .any(|refusal| message.contains(refusal))
+}
+
 #[cfg(test)]
 #[path = "model_call_reasoning_policy_tests.rs"]
 mod reasoning_policy_tests;
+
+#[cfg(test)]
+#[path = "model_call_reasoning_refused_tests.rs"]
+mod reasoning_refused_tests;

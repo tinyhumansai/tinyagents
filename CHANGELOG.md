@@ -22,6 +22,16 @@ during the 2.x migration are no longer part of the TinyAgents workspace.
 The unreleased entries below describe the changes accumulated before this
 major release.
 
+## Unreleased: a refused reasoning-off call is sent again
+
+A provider endpoint that cannot run without reasoning refuses a request sent
+with `ReasoningEffort::None` (`HTTP 400: Reasoning is mandatory for this
+endpoint and cannot be disabled.`). That refusal used to end the run. The
+request now goes out once more with no reasoning setting, so the provider's
+default applies. It mattered most with `RunPolicy::truncated_empty_reasoning_off`,
+which turns reasoning off for the call after a dead one on whichever endpoint a
+router picks next.
+
 ## Unreleased: tool hook denials answer the model
 
 **Breaking (behaviour).** A `tinyagents-hooks` tool-hook `Deny` no longer
